@@ -5303,7 +5303,7 @@ def test_cross_entry_value_names_each_value_another_grant_of_the_call_states():
 
     [finding] = lint_cross_entry_value(stage4)
 
-    assert finding["lint"] == "cross_entry_value" and finding["severity"] == "WARN"
+    assert finding["lint"] == "cross_entry_value" and finding["severity"] == "INFO"
     message = finding["message"]
     assert message.startswith("entry 592 (M2B): ")
     for named in ("start_date='1997-07-01' (in 603's text)", "end_date='1999-06-30' (in 603's text)",

@@ -481,7 +481,7 @@ Lints, ranked by the severity of the failure class they catch:
                           a person's name) that its own entry's text lacks
                           and another entry of the same stage-4 call states
                           (#1575; YUYVIG UVZNIC 592 held 603's dates, amount,
-                          effort and role, 559 held 573's mentee). WARN, one
+                          effort and role, 559 held 573's mentee). INFO, one
                           per entry. Reads stage 4; stage 3b for the order
                           stage 4 cut its batches in
 
@@ -1149,11 +1149,11 @@ LINT_PREVALENCE = {
     # measured 2026-10-12. Same mixed-corpus caveat as above; the old farm
     # runs carry far more text breaks than current ones.
     "stage2_text_break": 0.354,
-    # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 19 of 400
-    # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-14.
+    # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 22 of 400
+    # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15.
     # Most predate #1609, which now removes a borrowed date, amount, percent or
     # grant number in stage 4 itself, so current runs should hit it less.
-    "cross_entry_value": 0.048,
+    "cross_entry_value": 0.055,
 }
 
 

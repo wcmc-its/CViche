@@ -4834,7 +4834,8 @@ def lint_cross_entry_value(stage4: dict, stage3b: dict | None = None) -> list[di
     """A stage-4 value -- a date's year, an amount, an effort, a grant
     number, the owner's grant role or a person's name -- that its own entry's
     text lacks and another entry of the same stage-4 call states (#1575).
-    WARN, one finding per entry, naming each value and the entry it is from.
+    INFO, one finding per entry, naming each value and the entry it is from:
+    46% hand-checked precision (CEV-1) is under the 50% a WARN needs.
     Stage 3b, when present, gives the order stage 4 cut its batches in."""
     owner_words = _owner_person_words(stage4)
     findings = []
@@ -4847,7 +4848,7 @@ def lint_cross_entry_value(stage4: dict, stage3b: dict | None = None) -> list[di
             named = "; ".join(f"{item.field}={item.value!r} (in {item.source_idx}'s text)"
                               for item in borrowed)
             findings.append(_finding(
-                "cross_entry_value", "WARN",
+                "cross_entry_value", "INFO",
                 f"entry {entry.element_idx} ({entry.code}): {named} -- its own text does not "
                 f"state it; another entry stage 4 extracted in the same call does",
                 [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))

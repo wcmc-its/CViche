@@ -33,8 +33,8 @@ severity, that the clean run does not. Cells are `COVERAGE.md`'s matrix cells.
 | `drop_appointment_entry` | missing / entry | stage_3b | stage 3b loses one appointment entry stage 2 found | missed |
 | `shift_publication_year` | wrong value / field | stage_4 | an article's year is one later than the CV's | missed |
 | `shift_grant_end_year` | wrong value / field | stage_4 | a grant's end year is two later than the CV's | `year_not_in_source` (WARN) |
-| `swap_pi_and_coi` | wrong value / field | stage_4 | the PI grant and the co-I grant swap roles | `cross_entry_value` (WARN) |
-| `copy_grant_values_across` | wrong value / field | stage_4 | #1575: one grant's dates and role on another grant | `cross_entry_value` (WARN), `year_not_in_source` (WARN) |
+| `swap_pi_and_coi` | wrong value / field | stage_4 | the PI grant and the co-I grant swap roles | `cross_entry_value` (INFO) |
+| `copy_grant_values_across` | wrong value / field | stage_4 | #1575: one grant's dates and role on another grant | `cross_entry_value` (INFO), `year_not_in_source` (WARN) |
 | `award_as_appointment` | wrong place / entry | stage_3b | a prize filed as an appointment | missed |
 | `truncate_authors_keeping_owner` | missing / field | stage_4 | four authors cut to the first two, owner kept | missed |
 | `truncate_authors_dropping_owner` | missing / field | stage_4 | four authors cut to the first, owner lost | `owner_missing_from_citation` (WARN) |

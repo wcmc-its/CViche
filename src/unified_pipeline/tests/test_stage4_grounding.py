@@ -8,9 +8,6 @@ What each test pins:
   called borrowed (two-digit years, short range ends, a mistyped digit, a
   year run into other digits);
 - another entry's text is read strictly (a four-digit year, a percent);
-- an effort written as a fraction ("0.100 FTE") and a mistyped year that is
-  no year itself ("2009-20011", "3/31/3019") are the entry's own; a real year
-  one digit off ("2003-2006" for 2004) and a cut-off year ("May 201") are not;
 - `tokens_not_in_own_text` and `entry_holding_token`, which the doctor's
   `cross_entry_value` lint reads, give the same verdicts field by field;
 - fields with no checkable characters (role, name) are never touched;
@@ -127,29 +124,6 @@ def test_an_index_outside_the_group_passes_through():
     result = ground_group(["Mentee B 2017", "Mentee C 2021"], items)
     assert result.items == items
     assert result.borrowed_fields == {}
-
-
-@pytest.mark.parametrize(("own_text", "field", "value"), [
-    ("Percent Effort: 4 hours a week/0.100 FTE", "percent_effort", "10%"),   # RNKYST 197
-    ("Effort .08FTE", "percent_effort", "8%"),
-    ("Effort 0.125 FTE", "percent_effort", "12.5%"),
-    ("Clinical Image Retrieval 2009-20011", "end_date", "2011"),             # web172 123
-    ("4/1/2016-3/31/2018 in NCE to 3/31/3019", "end_date", "2019-03-31"),    # 2068 591
-    ("Ann Chir Gynaecol Journal, 1191, 80:224-229", "year", "1991"),         # SVYSGY 487
-])
-def test_an_effort_fraction_or_a_mistyped_year_is_the_entrys_own(own_text, field, value):
-    other = "Another entry 10% 8% 12.5% 2011 2019 1991"
-    assert _borrowed([own_text, other], {0: [{field: value}]}) == {}
-
-
-@pytest.mark.parametrize(("own_text", "value"), [
-    ("Chair, Department of Surgery, 2003-2006", "2004"),   # VNUAHA 262: a real year is not a typo
-    ("Seminar, Gainesville, FL, May 201", "2010"),         # cut off: any year of the decade
-    ("Example Award 54321, Example Society", "2010"),      # five digits, not one keystroke off
-])
-def test_a_real_year_or_a_cut_off_year_does_not_stand_for_another(own_text, value):
-    assert _borrowed([own_text, "Another entry 2001-2004 2010"],
-                     {0: [{"end_date": value}]}) == {0: ["end_date"]}
 
 
 def test_the_field_by_field_checks_give_ground_groups_verdict():

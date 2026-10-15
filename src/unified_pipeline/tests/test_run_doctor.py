@@ -8448,4 +8448,4 @@ def test_run_doctor_cuts_cross_entry_value_calls_in_stage_3b_order(tmp_path):
     findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "cross_entry_value"]
 
     assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
-        ("WARN", "entry table_1 (M2B)")]
+        ("INFO", "entry table_1 (M2B)")]
