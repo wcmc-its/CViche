@@ -91,21 +91,33 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Queue of responses; an Exception instance in the queue is raised."""
+    """Queue of responses; an Exception instance in the queue is raised.
+    Crossref requests take theirs from `crossref`, and find nothing once it
+    is empty, so a test of a PubMed miss need not queue Crossref's answer."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, crossref=()):
         self.responses = list(responses)
+        self.crossref = list(crossref)
         self.calls = []  # (url, params) per get()
 
     def get(self, url, params=None, timeout=None):
         self.calls.append((url, dict(params or {})))
-        result = self.responses.pop(0)
+        if url == stage5.CROSSREF_WORKS_URL:
+            queue = self.crossref or [_crossref_items()]
+        else:
+            queue = self.responses
+        result = queue.pop(0)
         if isinstance(result, Exception):
             raise result
         return result
 
 
-def _make(monkeypatch, responses, api_key='', email=''):
+def _crossref_items(*items):
+    return FakeResponse(200, json_data={'message': {'items': list(items)}},
+                        url=stage5.CROSSREF_WORKS_URL)
+
+
+def _make(monkeypatch, responses, api_key='', email='', crossref=()):
     """Enricher with mocked session + recorded (never real) sleeps.
 
     Module-level env lookups are monkeypatched to controlled dummy values so
@@ -116,7 +128,7 @@ def _make(monkeypatch, responses, api_key='', email=''):
     sleeps = []
     monkeypatch.setattr(stage5.time, 'sleep', lambda s: sleeps.append(s))
     enricher = PubMedEnricher(verbose=True)
-    session = FakeSession(responses)
+    session = FakeSession(responses, crossref)
     enricher.session = session
     return enricher, session, sleeps
 
@@ -758,9 +770,10 @@ def test_every_id_path_refuses_the_contradicted_record(source):
     assert entry['enrichment_rejected']['year_and_volume_differ'] is True
 
 
-def test_title_search_is_left_to_its_own_guards():
+@pytest.mark.parametrize('source', sorted(stage5.TITLE_SEARCH_SOURCES))
+def test_title_search_is_left_to_its_own_guards(source):
     accepted, _ = _accepts({'title': LONG_CV_TITLE, 'year': '2021', 'volume': '20'},
-                           _record(), stage5.TITLE_SEARCH_SOURCE)
+                           _record(), source)
     assert accepted
 
 
@@ -2502,4 +2515,105 @@ def test_title_search_survives_an_efetch_error(tmp_path, monkeypatch):
     [result], session, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10)],
                                         [_hits(PAPER_PMID), FakeResponse(404)])
     assert result['enrichment_status'] == 'no_identifier'
+    assert len([url for url, _ in session.calls if url != stage5.CROSSREF_WORKS_URL]) == 2
+
+
+# ------------------------------- #1872: Crossref finds the DOI of a PubMed title miss
+
+CROSSREF_DOI = '10.1000/heron.2025.1'
+
+
+def _crossref_hit(title=SHARED_TITLE, kind='journal-article', doi=CROSSREF_DOI):
+    return {'DOI': doi, 'type': kind, 'title': [title]}
+
+
+def _run_crossref(tmp_path, monkeypatch, crossref, responses):
+    """One S1 entry whose PubMed title search finds nothing; `responses`
+    answer what follows Crossref."""
+    enricher, session, _ = _make(monkeypatch, [_hits(), *responses], crossref=crossref)
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_article_entry(10)]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    return result, session, enricher
+
+
+def test_pubmed_title_miss_takes_the_pubmed_record_of_crossrefs_doi(tmp_path, monkeypatch):
+    result, session, enricher = _run_crossref(
+        tmp_path, monkeypatch, [_crossref_items(_crossref_hit())],
+        [_hits(PAPER_PMID), _article_set(_article(PAPER_PMID, SHARED_TITLE))])
+    assert session.calls[1] == (stage5.CROSSREF_WORKS_URL, {
+        'query.bibliographic': SHARED_TITLE, 'rows': 3, 'select': 'DOI,type,title,subtitle'})
+    assert session.calls[2][1]['term'] == f'"{CROSSREF_DOI}"[doi]'
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'crossref_title_search')
+    assert result['extracted_fields']['pmid'] == PAPER_PMID
+    assert enricher.stats['crossref_searches'] == 1
+
+
+def test_crossref_hit_that_is_not_a_journal_article_is_not_looked_up(tmp_path, monkeypatch):
+    # FVQANK: a JCEM article's title also names a book chapter.
+    result, session, _ = _run_crossref(
+        tmp_path, monkeypatch, [_crossref_items(_crossref_hit(kind='book-chapter'))], [])
     assert len(session.calls) == 2
+    assert result['enrichment_status'] == 'no_identifier'
+
+
+def test_crossref_hit_with_another_title_is_not_looked_up(tmp_path, monkeypatch):
+    _, session, _ = _run_crossref(
+        tmp_path, monkeypatch, [_crossref_items(_crossref_hit(title=OTHER_PAPER_TITLE))], [])
+    assert len(session.calls) == 2
+
+
+def test_pubmed_record_of_crossrefs_doi_keeps_the_author_guard(tmp_path, monkeypatch):
+    stranger = _article(PAPER_PMID, SHARED_TITLE, authors=('Okonkwo A',))
+    result, _, _ = _run_crossref(tmp_path, monkeypatch, [_crossref_items(_crossref_hit())],
+                                 [_hits(PAPER_PMID), _article_set(stranger)])
+    assert result['enrichment_status'] == 'no_identifier'
+    assert 'enrichment_data' not in result
+
+
+def test_crossref_429_is_retried_and_a_reply_does_not_mark_ncbi_answering(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [_hits()], crossref=[
+        FakeResponse(429, url=stage5.CROSSREF_WORKS_URL), _crossref_items()])
+    entry = _article_entry(10)
+    enricher._enrich_by_crossref_doi(entry, SHARED_TITLE)
+    assert [url for url, _ in session.calls] == [stage5.CROSSREF_WORKS_URL] * 2
+    assert enricher._ncbi_answered is False
+    assert enricher.stats['api_errors'] == 0
+
+
+def test_crossref_failure_leaves_the_entry_unenriched(tmp_path, monkeypatch):
+    result, _, enricher = _run_crossref(
+        tmp_path, monkeypatch, [FakeResponse(400, url=stage5.CROSSREF_WORKS_URL)], [])
+    assert result['enrichment_status'] == 'no_identifier'
+    assert enricher.stats['api_errors'] == 1
+
+
+def test_pubmed_record_of_crossrefs_doi_is_not_taken_when_it_is_an_erratum(tmp_path, monkeypatch):
+    erratum = _article(PAPER_PMID, SHARED_TITLE, pubtypes=('Published Erratum',))
+    result, _, _ = _run_crossref(tmp_path, monkeypatch, [_crossref_items(_crossref_hit())],
+                                 [_hits(PAPER_PMID), _article_set(erratum)])
+    assert 'enrichment_data' not in result
+
+
+@pytest.mark.parametrize('source, cv_identifier', [
+    ('pmid', True), ('title_search', False), ('crossref_title_search', False)])
+def test_a_title_found_record_ranks_below_an_identifier_the_cv_gave(source, cv_identifier):
+    entry = _article_entry(10)
+    accepted = stage5._Acceptance(entry, entry, PAPER_PMID, SHARED_TITLE, 2025, source, 1.0)
+    assert stage5._match_strength(accepted)[-1] is cv_identifier
+
+
+def test_crossref_is_skipped_once_the_runs_budget_is_spent(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [])
+    enricher._crossref_seconds = stage5.CROSSREF_BUDGET_SECONDS
+    enricher._enrich_by_crossref_doi(_article_entry(10), SHARED_TITLE)
+    assert session.calls == []
+    assert enricher.stats['crossref_skipped'] == 1
+
+
+def test_crossref_lookups_count_against_the_budget(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [])
+    clock = iter([100.0, 102.5])
+    monkeypatch.setattr(stage5.time, 'monotonic', lambda: next(clock))
+    enricher._enrich_by_crossref_doi(_article_entry(10), SHARED_TITLE)
+    assert enricher._crossref_seconds == 2.5
