@@ -160,11 +160,14 @@ def _own_skip_reason(
 
 
 def _merge_sides(entries: list[dict[str, Any]], parent_idx: int) -> set[str]:
-    """The directions fragments that pass `_own_skip_reason` join `parent_idx` from."""
+    """The directions fragments that pass `_own_skip_reason` join `parent_idx`
+    from. One already merged (T-validation's mentee-row fold, #1702) has
+    settled its side, so it never blocks the other."""
     sides = set()
     for idx, entry in enumerate(entries):
         if (
             entry.get("is_fragment")
+            and not entry.get(MERGED_FLAG)
             and resolve_parent(entries, idx) == parent_idx
             and _own_skip_reason(entries, idx, parent_idx) is None
         ):

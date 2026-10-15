@@ -189,6 +189,20 @@ def test_a_parent_claimed_from_both_sides_takes_neither():
     assert stats["fragments_not_merged"] == {SKIP_BOTH_SIDES: 2}
 
 
+def test_a_fragment_already_merged_does_not_block_the_other_side():
+    """#1702: T-validation folds a mentee row's rest into the row before
+    `reconnect_fragments` tags the line above it; the merged rest has
+    settled its side, so the line above still joins the row."""
+    entries = [
+        _fragment("Example Mentoring Program", 1, "T"),
+        _entry("30.Jane Example, MD Example Scholar Award", "N3A"),
+        _fragment("Example Scholar Award", 1, "N3B") | {MERGED_FLAG: True},
+    ]
+    _, stats = merge_fragment_text(entries)
+    assert entries[1]["text"] == "Example Mentoring Program 30.Jane Example, MD Example Scholar Award"
+    assert stats["fragments_not_merged"] == {}
+
+
 def test_a_skipped_label_on_one_side_does_not_block_the_other():
     """JIJRSN: a page stamp after the record leaves the drug name before it free."""
     entries = [

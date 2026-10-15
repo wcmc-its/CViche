@@ -439,7 +439,7 @@ def _recode_rest(monkeypatch, new_code="N3B", reasoning=_FRAGMENT_REASONING):
 
 
 def _validate(entries):
-    return classify.validate_t_classifications(entries, _taxonomy(("H", "T", "N3A", "N3B", "N4")))
+    return classify.validate_t_classifications(entries, _taxonomy(("H", "T", "N3", "N3A", "N3B", "N4")))
 
 
 def test_mentee_row_rest_called_a_fragment_joins_its_numbered_row(monkeypatch):
@@ -501,6 +501,27 @@ def test_each_row_number_shape_takes_the_rest(monkeypatch, row_text):
 
     assert updated[1].get("is_fragment") is True
     assert updated[0]["text"].endswith(_ROW_REST)
+
+
+@pytest.mark.parametrize("row_code, new_code", [("N3A", "N3A"), ("N3B", "N3B"), ("N3", "N3"), ("N3B", "N3A")])
+def test_every_mentee_code_pairing_folds(monkeypatch, row_code, new_code):
+    _recode_rest(monkeypatch, new_code=new_code)
+
+    updated, _ = _validate(_mentee_list(row_code=row_code))
+
+    assert updated[1].get("is_fragment") is True
+    assert updated[0]["text"].endswith(_ROW_REST)
+
+
+def test_a_rest_under_another_sub_list_stays_its_own_entry(monkeypatch):
+    _recode_rest(monkeypatch)
+    entries = _mentee_list(row_hierarchy=("Mentees", "Postdoctoral fellows"))
+    entries[1]["hierarchy"] = ["Mentees", "Graduate students"]
+
+    updated, _ = _validate(entries)
+
+    assert "is_fragment" not in updated[1]
+    assert updated[0]["text"] == _MENTEE_ROW
 
 
 @pytest.mark.parametrize("case", [
