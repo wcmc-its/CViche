@@ -456,6 +456,39 @@ def test_mentee_whose_name_also_stands_alone_still_renders():
     assert not any(w['check'] == AWARD_TITLE_MENTEE_CHECK for w in gen._section_failures)
 
 
+@pytest.mark.parametrize('noun', ['Award', 'Fellowship', 'Prize', 'Lecture', 'Medal'])
+def test_a_current_mentee_named_only_inside_an_award_title_is_refused(noun):
+    """N3A takes the same refusal as N3B, for every award noun: no Current
+    Mentees table, the entry goes to the Appendix."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entry = _mentee('N3A', 'Dorran Pethwick')
+    entry['text'] = f"Brindlemoor Dorran Pethwick {noun}"
+
+    gen._fill_mentoring({'N3A': [entry]})
+
+    assert gen.doc.tables == []
+    assert len(gen._declined_grant_entries) == 1
+
+
+def test_a_mentee_the_text_never_names_still_renders():
+    """Stage 4 may reorder a name ("Pethwick, Dorran"); a name the text never
+    spells out is not refused."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entry = _mentee('N3B', 'Dorran Pethwick', start_date='2015', end_date='2019')
+    entry['text'] = "Pethwick, Dorran, PhD 2015-2019"
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Dorran Pethwick')]
+    assert gen._declined_grant_entries == []
+
+
 # --- N4: a scrambled outcome row renders from its fields (#1434) ---------------
 
 # A wrapped four-column outcome row (date | award | project | mentee) the way
