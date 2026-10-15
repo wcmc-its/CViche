@@ -379,8 +379,13 @@ Lints, ranked by the severity of the failure class they catch:
                           with no pending grant, funding with no grant,
                           mentoring with no mentoring, or a funder (NIH, NSF,
                           DoD, ...) no entry or source line names. WARN, one
-                          per kind; no score cap. Reads stage 4.5 and 4, and
-                          the source when present
+                          per kind. And at INFO, one per kind, a sentence
+                          its named grant's own record contradicts (#1554,
+                          YUYVIG/NECRGC): a status against the grant's end
+                          date or heading, a declined award counted, a
+                          funder the grant's line does not name, a lead
+                          role it does not give. No score cap. Reads stage
+                          4.5 and 4, and the source when present
 14ah. owner_attribution   other people's content rendered as the CV owner's
                           (#1573, YUYVIG): mentee entries (N3, N3A, N3B)
                           under a heading or lead line naming reviewers or
@@ -1088,13 +1093,14 @@ LINT_PREVALENCE = {
     # stage-4 artifacts carries it, measured 2026-10-07. The zero-observed
     # floor, as for research_summary_call_failed above.
     "stage4_unplaced_items": 0.001,
-    # summary_unsupported_claim (#1554, OIE-SUM in doctor/PRECISION.md): 3 of
-    # the 107 stored stage-4.5 summaries of the EBYSBC/s7ab/pilot (63),
-    # NDMRSO (29), EOAHMI (9) and X6 (6) farms, and 9 of the 14 OIEPQD runs
-    # (dev-258, after #1542's pending-application prompt line), measured
-    # 2026-10-07. The farm rate is the one before #1542; same mixed-corpus
-    # caveat as above.
-    "summary_unsupported_claim": 0.028,
+    # summary_unsupported_claim (#1554, S1554-PC in doctor/PRECISION.md): 34
+    # of 224 distinct stored stage-4.5 summaries (the main checkout's
+    # analysis/, the eb, ndm, x6, eo and wave1 farms and
+    # src/unified_pipeline/outputs) at any severity once the per-claim INFO
+    # checks were added, measured 2026-10-14; 20 of 224 before them (WARN
+    # only). Most of those summaries predate #1558's prompt; same
+    # mixed-corpus caveat as above.
+    "summary_unsupported_claim": 0.152,
     # owner_attribution (#1573, YUY-OA in doctor/PRECISION.md): 36 of the 145
     # runs of the YUYVIG (37), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI (9)
     # and X6 (6) farms at any severity, 3 at WARN, over fresh renders of
