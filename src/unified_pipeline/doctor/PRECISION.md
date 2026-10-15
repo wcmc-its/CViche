@@ -382,6 +382,10 @@ S2-TB adds `stage2_text_break`, the #1226 forensics' G4: a stage-2 `break` entry
 
 Recall, stage 2 alone on the 83 runs: of the 58 breaks of six or more words that hold a record, it reports 47 (81%), on all 11 runs that have one; the 11 it misses are under the gate (a licence line, two continuation lines, two lines of one job history, six short talk lines). With the render it reports none of the six on the 57 runs with a current render: every one renders, in the Appendix or, for the two board lines, the licensure table. What is left is the three false hits (a running footer with its field codes, a sub-heading, a column header), so the lint is INFO: 0 of 3 is under the 50% a WARN needs. Stage 2 alone it would be right more often (69% of breaks on the 83 runs, 85% to 100% on the older farm), but the web doctor always reads the render, and the older runs come from older stage-2 code. The 26 S3 runs have no stored docx, so whether their 41 record breaks render is not measured. On the 40 NECRGC runs every other lint's findings are identical in both arms; `stage2_unaccounted` changes only its message, which now says a break counts as accounted.
 
+| S1251 | 2026-10-15 | `fix/1251-owner-attribution-student-heading` on origin/dev `75d4fc6b`, `lint_owner_attribution` alone (this shape reads stage 4 only) | 392 distinct runs: every stored stage-4 `*_fields.json` under the main checkout and `~/worktrees` (4,349 files, every copy judged) | every hit hand-read against its stage-4 entry | #1251 |
+
+S1251 adds `owner_attribution`'s third shape, `owner_code_under_mentee_heading` (WARN): entries coded H, I or D1-D3, or K1-K5 under a heading that also names accomplishments, awards or achievements, beneath a heading naming students, mentees, trainees, advisees or fellows mentored. The heading must name them in the plural, or hold a mentoring-coded entry (N3, N3A, N3B, N4) of its own. One finding per heading path, with the count per code. 4 findings on 3 runs, 21 entries, all true by reading: JFBPNC 569-582 (the issue's 7 H, 1 K4, 1 K5, on the stored pre-#1545 output), 2082_Dr_Scot 617-633 (an undergraduate honors students' awards and graduate-school places, 5 D1 and 2 H), and two on 2068_Yount_Cv (975, a doctoral student's paper award, and 988-992, the masters-student table's award legend lines, all coded H). Without the plural-or-mentee-line guard, a fifth fires falsely: web210 148-162, the owner's own awards under 'Student/Trainee Awards'. The guard was written after seeing it, so the precision is in-sample. Not reached: KDAZOM 608, a resident's award under 'Medical Residency Research' (no heading names students; #1545's 3b pin recodes it), and ULHCAP-01.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -412,6 +416,7 @@ Recall, stage 2 alone on the 83 runs: of the 58 breaks of six or more words that
 | `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
 | `owner_attribution`: `mentee_under_non_mentee_heading` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (0%) | 0 | YUY-OA |
 | `owner_attribution`: `citation_without_owner` | 54 | 1 | none | 13 / 54 hand-checked (24%): WARN 1 / 1, INFO 12 / 53 | 4 / 37 on labelled runs (11%) | 4 | YUY-OA |
+| `owner_attribution`: `owner_code_under_mentee_heading` | 4 | 4 | none | 4 / 4 hand-checked (100%) | not matched | 0 | S1251 |
 | `citation_grounding` | 123 | 0 | none | 62 / 123 hand-checked (50%): 41 partial, 20 false; held out 42 / 91 (46%) | 1 / 20 on labelled runs (5%) | 1 | YUY-CG |
 | `shattered_prose` | 15 | 15 | none | 15 / 15 hand-checked (100%), before and after the stage-6 fold | 0 / 12 on labelled runs (no label carries an entry index) | 0 by index, 2 by hand | YUY-SP |
 | `appointment_title_overlong` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (no label carries these entries) | 0 by index | YUY-AT |
@@ -595,6 +600,7 @@ Any lint not listed here has no verdicts and is a comment.
 | `orphaned_fragments` | 39 / 41 (95%) | none | same | — | comment |
 | `owner_attribution`: `mentee_under_non_mentee_heading` | 3 / 3 (100%) | none | same | — | comment |
 | `owner_attribution`: `citation_without_owner` | 13 / 54 (24%) | none | same | — | review note |
+| `owner_attribution`: `owner_code_under_mentee_heading` | 4 / 4 (100%) | none | same | — | comment |
 | `citation_grounding` | 62 / 123 (50%) | none | same | — | comment |
 | `shattered_prose` | 15 / 15 (100%) | none | same | — | comment |
 | `appointment_title_overlong` | 3 / 3 (100%) | none | same | — | comment |

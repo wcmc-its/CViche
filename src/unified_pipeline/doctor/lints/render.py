@@ -2295,8 +2295,11 @@ def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
 # line, rendered as the owner's publications (ECXGAT 2156-2204), and the
 # applicants of a grant-review panel and a laboratory's technical staff,
 # rendered as the owner's past mentees (ECXGAT 1293-1299, IZIXVF 284-298).
-# Two shapes, both read off stage 4; the first also needs the bibliography
+# Three shapes, all read off stage 4; the first also needs the bibliography
 # line each publication rendered as, so it judges only what rendered there.
+# The third (#1251, pilot JFBPNC 569-582): a student's awards and program
+# places, under a students heading, coded H, K5 and K4 and rendered as the
+# owner's honors and teaching.
 
 OWNER_ATTRIBUTION_SHAPE_UNCREDITED = "citation_without_owner"
 OWNER_ATTRIBUTION_SHAPE_NOT_MENTEES = "mentee_under_non_mentee_heading"
@@ -2336,6 +2339,31 @@ _NON_MENTEE_CONTEXT_RE = re.compile(
 _MENTEE_CONTEXT_RE = re.compile(
     r"student|fellow|trainee|mentee|post-?doc|resident|scholar|advisee|thes[ie]s"
     r"|dissertation|supervis", re.IGNORECASE)
+
+OWNER_ATTRIBUTION_SHAPE_MENTEE_OUTPUT = "owner_code_under_mentee_heading"
+
+#: Codes that state something of the CV owner's own: an honour (H), a
+#: membership (I), a position (D1-D3). Under a heading naming students or
+#: mentees they are the mentee's (#1251: JFBPNC 569-582, a student's awards
+#: coded H and rendered in the owner's honors table).
+OWNER_ONLY_CODES = frozenset({"H", "I", "D1", "D2", "D3"})
+#: Teaching codes, judged only under a heading that also names
+#: accomplishments: there they are a student's program places (JFBPNC 574
+#: and 575, coded K5 and K4), elsewhere the owner's own teaching of students.
+ACCOMPLISHMENT_CODES = frozenset({"K1", "K2", "K3", "K4", "K5"})
+#: The codes that put an entry on the mentoring side: the mentee codes and
+#: N4, mentee outputs.
+MENTORING_CODES = MENTEE_CODES | {"N4"}
+
+#: A heading naming the people the owner trains (#1251's regex).
+_MENTEE_HEADING_RE = re.compile(
+    r"\b(?:students?|mentees?|trainees?|advisees?|fellows\s+mentored)\b", re.IGNORECASE)
+#: The same people in the plural: a heading listing them, not one saying
+#: what the owner won as a student ('Student/Trainee Awards', web210 148-162).
+_MENTEE_PLURAL_HEADING_RE = re.compile(
+    r"\b(?:students|mentees|trainees|advisees|fellows\s+mentored)\b", re.IGNORECASE)
+_ACCOMPLISHMENT_HEADING_RE = re.compile(r"\b(?:accomplishments?|awards?|achievements?)\b",
+                                        re.IGNORECASE)
 
 #: Entries a finding names in its evidence, and characters of each quoted.
 OWNER_ATTRIBUTION_EVIDENCE_LIMIT = 3
@@ -2463,15 +2491,57 @@ def _non_mentee_findings(entries: list[_AttributionEntry],
         for context, members in groups.items()]
 
 
+def _mentee_heading(heading: tuple[str, ...]) -> str | None:
+    """The deepest heading on the path naming students or mentees, or None."""
+    return next((h for h in reversed(heading) if _MENTEE_HEADING_RE.search(h)), None)
+
+
+def _coded_as_owners(entry: _AttributionEntry) -> bool:
+    """An honour, membership or position, or a teaching code under a heading
+    naming accomplishments: content the owner's own sections render."""
+    return entry.code in OWNER_ONLY_CODES or (
+        entry.code in ACCOMPLISHMENT_CODES
+        and any(_ACCOMPLISHMENT_HEADING_RE.search(h) for h in entry.heading))
+
+
+def _lists_mentees(heading: tuple[str, ...], mentored: set[tuple[str, ...]]) -> bool:
+    """A path naming mentees in the plural, or one with a mentoring-coded
+    entry of its own (JFBPNC's singular 'STUDENT ACCOMPLISHMENTS' holds the
+    N3B lines naming each student)."""
+    return heading in mentored or any(_MENTEE_PLURAL_HEADING_RE.search(h) for h in heading)
+
+
+def _mentee_output_findings(entries: list[_AttributionEntry]) -> list[tuple[str, str, list[str]]]:
+    """(severity, message, evidence): one WARN per heading path naming
+    students or mentees that has entries coded as the owner's under it
+    (#1251), with the count per code."""
+    mentored = {entry.heading for entry in entries if entry.code in MENTORING_CODES}
+    groups: dict[tuple[str, ...], list[_AttributionEntry]] = defaultdict(list)
+    for entry in entries:
+        if (_mentee_heading(entry.heading) is not None and _coded_as_owners(entry)
+                and _lists_mentees(entry.heading, mentored)):
+            groups[entry.heading].append(entry)
+    return [(
+        "WARN",
+        f"{OWNER_ATTRIBUTION_SHAPE_MENTEE_OUTPUT}: {len(members)} entr"
+        f"{'y' if len(members) == 1 else 'ies'} coded "
+        f"{', '.join(f'{n} {code}' for code, n in sorted(Counter(e.code for e in members).items()))} "
+        f"as the CV owner's under '{_mentee_heading(heading)}', which names students or mentees",
+        _evidence_lines([(e.element_idx, e.code, e.text) for e in members]))
+        for heading, members in groups.items()]
+
+
 def lint_owner_attribution(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     """Other people's content rendered as the CV owner's (#1573): a run of
-    bibliography publications that never credit the owner, and mentee
-    entries under a heading naming reviewers or staff. A trainee's award
-    under a publications heading (ULHCAP-01) and a host's title read as the
+    bibliography publications that never credit the owner, mentee entries
+    under a heading naming reviewers or staff, and a mentee's awards or
+    positions coded as the owner's under a heading naming students or
+    mentees (#1251). A trainee's award under a publications or residency
+    research heading (ULHCAP-01, KDAZOM 608) and a host's title read as the
     owner's role (DYLJXC-03) are not reached yet."""
     entries = _attribution_entries(stage4)
     contexts = _attribution_contexts(entries)
-    shown = _non_mentee_findings(entries, contexts)
+    shown = _non_mentee_findings(entries, contexts) + _mentee_output_findings(entries)
     owner = _owner_surname_words(stage4)
     if owner:
         shown += [_uncredited_finding(run, contexts)

@@ -3261,6 +3261,113 @@ def test_owner_attribution_a_lead_line_stays_under_its_own_heading():
     assert _attribution(stage4) == []
 
 
+# owner_code_under_mentee_heading (#1251): a mentee's awards and places,
+# under a heading naming students or mentees, coded as the owner's own.
+_STUDENT_ACCOMPLISHMENTS = ["STUDENT ACCOMPLISHMENTS"]
+
+
+def _mentee_outputs(*entries):
+    return lint_owner_attribution(_cite_run(*entries), [])
+
+
+def test_owner_attribution_warns_on_a_students_awards_coded_as_the_owners():
+    # JFBPNC 567-575: the student line is N3B; the awards and program places
+    # under it were coded H, K5 and K4 and rendered as the owner's.
+    path = _STUDENT_ACCOMPLISHMENTS
+    findings = _mentee_outputs(
+        _mentee(567, "Ada Example (Dissertation Committee Member):", hierarchy=path),
+        _line_entry(569, "Awarded the Example Community Engagement Microgrant in May 2023",
+                    code="H", hierarchy=path),
+        _line_entry(571, "Rising Stars in Health Sciences Symposium Fellow", code="H", hierarchy=path),
+        _line_entry(574, "2024 Example Lead Participant", code="K5", hierarchy=path),
+        _line_entry(575, "Modelers and Storytellers Training Program", code="K4", hierarchy=path))
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "WARN", "owner_code_under_mentee_heading: 4 entries coded 2 H, 1 K4, 1 K5 as the CV "
+        "owner's under 'STUDENT ACCOMPLISHMENTS', which names students or mentees")]
+    assert findings[0]["evidence"] == [
+        "entry 569 (H): Awarded the Example Community Engagement Microgrant in May 2023",
+        "entry 571 (H): Rising Stars in Health Sciences Symposium Fellow",
+        "entry 574 (K5): 2024 Example Lead Participant"]
+
+
+@pytest.mark.parametrize("code", ["H", "I", "D1", "D2", "D3"])
+def test_owner_attribution_a_plural_students_heading_needs_no_mentee_line(code):
+    # 2082_Dr_Scot 617-633: each line names its student, so no N3 line heads them.
+    path = ["Teaching", "Undergraduate Honor Students’ Achievements"]
+    findings = _mentee_outputs(_line_entry(624, "Ada Example. 2020. Attending law school.",
+                                           code=code, hierarchy=path))
+    assert [f["message"] for f in findings] == [
+        f"owner_code_under_mentee_heading: 1 entry coded 1 {code} as the CV owner's under "
+        "'Undergraduate Honor Students’ Achievements', which names students or mentees"]
+
+
+@pytest.mark.parametrize("heading", [
+    "Mentees", "Former trainees", "Graduate advisees", "Postdoctoral fellows mentored"])
+def test_owner_attribution_each_plural_mentee_word_names_a_mentee_heading(heading):
+    path = [heading]
+    assert len(_mentee_outputs(_line_entry(5, "Example Fellowship, 2020", code="H",
+                                           hierarchy=path))) == 1
+
+
+@pytest.mark.parametrize("heading", ["Student Awards", "Student Achievements"])
+def test_owner_attribution_a_k_entry_under_awards_or_achievements(heading):
+    path = [heading]
+    assert len(_mentee_outputs(_mentee(4, "Ada Example (Advisor):", hierarchy=path),
+                               _line_entry(5, "Example Training Program, 2020", code="K4",
+                                           hierarchy=path))) == 1
+
+
+def test_owner_attribution_an_n4_line_also_heads_a_singular_students_heading():
+    # After the #1545 pin a mentee's own line can be coded N4 (EHGXAL); an H
+    # left beside it is still the mentee's.
+    path = _STUDENT_ACCOMPLISHMENTS
+    assert len(_mentee_outputs(_line_entry(4, "Ada Example: PhD candidate", code="N4", hierarchy=path),
+                               _line_entry(5, "Example Fellowship, 2020", code="H",
+                                           hierarchy=path))) == 1
+
+
+def test_owner_attribution_names_the_deepest_heading_naming_mentees():
+    # 2068_Yount_Cv 975: the leaf names a student, under a parent naming trainees.
+    path = ["DOCTORAL TRAINEES (current and completed)", "Doctoral Student Paper Awards"]
+    findings = _mentee_outputs(_line_entry(975, "Example, A. (2011). A paper.", code="H",
+                                           hierarchy=path))
+    assert "under 'Doctoral Student Paper Awards'," in findings[0]["message"]
+
+
+def test_owner_attribution_names_a_mentee_heading_above_the_leaf():
+    path = ["Graduate students", "Fellowships"]
+    findings = _mentee_outputs(_line_entry(5, "Example Fellowship, 2020", code="H", hierarchy=path))
+    assert "under 'Graduate students'," in findings[0]["message"]
+
+
+def test_owner_attribution_quiet_on_the_owners_own_student_awards():
+    # web210 148-162: a singular 'Student' heading over the owner's own
+    # awards as a student, with no mentee line under it.
+    path = ["Student/Trainee Awards"]
+    assert _mentee_outputs(_line_entry(150, "Doctoral Fellowship, 1996-1998", code="H",
+                                       hierarchy=path)) == []
+
+
+def test_owner_attribution_a_mentee_line_licenses_only_its_own_heading():
+    assert _mentee_outputs(
+        _mentee(5, "Ada Example, PhD 2019", hierarchy=["Mentoring"]),
+        _line_entry(150, "Doctoral Fellowship, 1996-1998", code="H",
+                    hierarchy=["Student Awards"])) == []
+
+
+@pytest.mark.parametrize("code, heading", [
+    ("K1", "Students taught"),            # the owner's teaching: no accomplishments
+    ("S1", "Student Accomplishments"),    # not a code the owner's sections claim
+    ("N4", "Student Accomplishments"),    # already the mentee's
+    ("H", "Honors and Awards"),           # no students or mentees named
+])
+def test_owner_attribution_quiet_outside_the_mentee_output_shape(code, heading):
+    path = [heading]
+    assert _mentee_outputs(
+        _mentee(4, "Ada Example (Committee Member):", hierarchy=path),
+        _line_entry(5, "An award or a course, 2020", code=code, hierarchy=path)) == []
+
+
 # ------------- lint 14ab: a field that identifies a citation, left out of its line
 
 _BULLETIN = "Synthetic Pharmacy Bulletin"
