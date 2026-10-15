@@ -177,6 +177,9 @@ _NOT_A_LEADING_NAME = _NOT_A_NAME | frozenset({
     "Position", "Current", "Past", "Former", "Present", "State", "Hospital",
     "Doctoral", "Master", "Masters", "Committees", "Advising", "Supervision",
     "Scholar", "Scholars", "Visiting", "Research", "Staff", "Not", "None", "The", "At",
+    # Role nouns: "Thesis Advisor, 2015-2018" names the owner's role, not a trainee.
+    "Thesis", "Advisor", "Adviser", "Mentor", "Primary", "Supervisor", "Facilitator",
+    "Journal", "Club", "Director", "Chair", "Member", "Committee", "Program", "Course",
 })
 
 # An open range in the entry's own text: a year, a dash or "to", then nothing,

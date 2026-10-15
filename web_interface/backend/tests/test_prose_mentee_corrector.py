@@ -240,6 +240,9 @@ def test_lines_that_name_nobody_keep_n3():
         "2014 – 2016",
         "Supervision of honors thesis projects, 1995-2004.",
         "I have mentored the following residents on research projects:",
+        "Thesis Advisor, 2015-2018",
+        "Primary Mentor: weekly meetings",
+        "Journal Club Facilitator, 2019-present",
     ):
         codes, _ = _resolve([_entry(text, code="N3"), _entry("Sara Tull (2001-2003)", code="N3B")])
         assert codes[0] == "N3", text
