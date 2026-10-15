@@ -2857,3 +2857,70 @@ def test_1426_a_membership_row_gets_the_every_code_rows_but_not_the_ambiguous_on
     assert _denied("SSN: 123-45-6789", MEMBERSHIP)
     assert not _denied("Health: Example Society Annual Report", MEMBERSHIP)
     assert not _denied("Children: Example Society Section", MEMBERSHIP)
+
+
+# --------------------------------------------------------------------------
+# #1859: a protected label after a leading year or date span
+# --------------------------------------------------------------------------
+
+#: (text, the protected value that must not render). Synthetic values,
+#: distinctive enough to search the rendered XML for.
+_1859_DATED = [
+    ("2005 Spouse: Zyxwq Quorvath", "Quorvath"),
+    ("2015 Salary: $987,654", "987,654"),
+    ("2015 Passport No. Q9876543", "Q9876543"),
+    ("2005-2010 Spouse: Zyxwq Quorvath", "Quorvath"),
+    ("June 2005 Visa Status: ZORBLAX-7", "ZORBLAX-7"),
+]
+
+
+@pytest.mark.parametrize("code", [A, APPENDIX, MEMBERSHIP, "O"])
+@pytest.mark.parametrize("text,value", _1859_DATED)
+def test_1859_a_dated_label_is_cut_with_its_date(text, value, code):
+    """The pass cuts the whole dated fragment, date included, in every
+    destination the issue names: Personal Data, the Appendix, and fieldless
+    I and O entries."""
+    entry = {"text": f"{text}\nDISTINCTIVE_KEPT_LINE", "taxonomy_code": code,
+             "extracted_fields": {}}
+    _run({code: [entry]})
+    assert value not in entry["text"]
+    assert text.split()[0] not in entry["text"], "the date was left behind"
+    assert "DISTINCTIVE_KEPT_LINE" in entry["text"]
+
+
+@pytest.mark.parametrize("text", [
+    "2015 Salary Committee, member",
+    "Passport number required for travel",
+    "Smith J. 2015 Salary: a study of pay equity",
+])
+def test_1859_negative_controls_still_render(text):
+    for code in (A, APPENDIX, MEMBERSHIP, "O"):
+        assert not _denied(text, code), (text, code)
+
+
+def test_1859_a_dated_label_never_reaches_the_rendered_document(tmp_path):
+    """Render proof, not matcher proof: the real `generate()` over fieldless
+    T, I and O entries, every XML part of the docx searched for each value."""
+    import json
+    import zipfile
+
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    entries = [{"text": "Name: Jane Q. Public, MD", "taxonomy_code": "A",
+                "extracted_fields": {}, "element_idx_start": 0}]
+    for i, (text, _value) in enumerate(_1859_DATED):
+        for j, code in enumerate(("T", "I", "O")):
+            entries.append({"text": f"{text}\nDISTINCTIVE_KEPT_{code}", "taxonomy_code": code,
+                            "extracted_fields": {}, "element_idx_start": 1 + 3 * i + j})
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    input_path, output_path = tmp_path / "in.json", tmp_path / "out.docx"
+    input_path.write_text(json.dumps({"document_uid": "TST859", "entries": entries}))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    with zipfile.ZipFile(output_path) as zf:
+        xml = "\n".join(zf.read(n).decode("utf-8", "replace")
+                        for n in zf.namelist() if n.endswith(".xml"))
+    assert "DISTINCTIVE_KEPT_T" in xml, "the render did not include the entries at all"
+    for _text, value in _1859_DATED:
+        assert value not in xml, f"{value!r} reached the rendered document"
