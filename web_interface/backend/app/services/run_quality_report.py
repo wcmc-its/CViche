@@ -531,6 +531,12 @@ LINT_COPY = {
         "text but is in another entry of the same kind that was read with it, so it may be "
         "that entry's value.",
         "Check the flagged values against this entry in the source CV and correct them."),
+    "journal_name_joined": LintCopy(
+        "Several journals in one row",
+        "A journal row's name holds more than one journal, joined by commas, semicolons or a "
+        "tab, or holds a role such as Editorial Board or Ad hoc along with the journal, so "
+        "the row reads as one journal.",
+        "Split the row into one row per journal, and move any role out of the journal name."),
     "record_boundary": LintCopy(
         "A line of one entry opens the next",
         "A labelled line that belongs to one entry, such as a trainee's current position, "

@@ -547,7 +547,7 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
       | birthday
       | year \s* of \s* birth
       | d\.?o\.?b\.? \s* / \s* p\.?o\.?b\.?
-      | d\.?o\.?b\.?
+      | d\.?o\.?b\.?""" + _DOB_LABEL_PARENTHETICAL + r"""
       | born \s+ (?: on | in )
       | fecha \s* de \s* nacimiento
       | date \s* de \s* naissance
@@ -1077,6 +1077,7 @@ _EXPLICIT_DOB_LABEL_RE = re.compile(r"""
       | birth \s*-? \s* date \s+ and \s+ birth \s*-? \s* place
       | birthdate (?: \s+ and \s+ birthplace )?
       | d\.?o\.?b\.? (?: \s* / \s* p\.?o\.?b\.? )?
+      | d\.?o\.?b\.?""" + _DOB_LABEL_PARENTHETICAL + r"""
     ) \s* :""", re.X | re.I)
 _WHOLE_DATE_AFTER_LABEL_RE = re.compile(r"[ \t\xa0]*(?:" + _WHOLE_DATE_VALUE + r")", re.I)
 
