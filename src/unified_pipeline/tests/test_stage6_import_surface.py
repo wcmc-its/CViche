@@ -208,7 +208,7 @@ HOME_ONLY_IMPORTS = {
                                       "_verbatim_contained",
                                       "_YEAR_RE", "_is_subsequence", "_is_word_run", "_ordered_words",
                                       "_rank_qualifiers",
-                                      "_PART_NUMBER_RE", "_TRIAL_PHASE_RE", "_trial_phases",
+                                      "_PART_NUMBER_RE", "_TRIAL_PHASE_RE", "_trial_phases", "_standalone_numerals",
                                       "SPLIT_SIBLING_METRIC", "_drop_split_siblings",
                                       "_citation_identity_text",
                                       "_field_dates_text", "_split_record_family",

@@ -189,6 +189,35 @@ def _part_numbers(text: str) -> set[str]:
             for n in re.findall(_PART_NUMERAL, group, re.IGNORECASE)}
 
 
+# A Roman numeral standing on its own tells two records of one series apart
+# ("Example Seminar II" beside "Example Seminar III", "Sample Course I"
+# beside "Sample Course II") where no "Part" or "Phase" word precedes it, so
+# `_part_numbers` and `_trial_phases` cannot read it, and token containment
+# cannot either ("i" is a stop word): EBYSBC OIYKZE-01, and OIEPQD YYVITM 425,
+# a "Compounding I" section-lead row dropped beside its "Compounding II" row.
+# Upper case only, and V and X never alone: a citation's author initials are
+# single capitals. A lone "I" counts only where a title segment ends after it
+# or a date follows it ("Compounding I November 2017"), never before a
+# lower-case word ("I taught"). A numeral after "Part" or "Phase" is left to
+# those readers, which also read a listing ("Parts I and II") as a whole.
+# Shared with the doctor's `dedup_drops` lint, which reads a drop the same way.
+_NUMERAL_DATE_FOLLOWS = (
+    r'\s+(?:(?:19|20)\d{2}\b|\d{1,2}/|(?:'
+    + '|'.join(sorted((month.capitalize() for month in _MONTH_NAME_TO_NUM),
+                      key=len, reverse=True))
+    + r')\b)')
+_STANDALONE_NUMERAL_RE = re.compile(
+    r'\b(?:II|III|IV|VI|VII|VIII|IX)\b'
+    rf'|\bI(?=\s*(?:$|[\t,.;:)"”’])|{_NUMERAL_DATE_FOLLOWS})')
+
+
+def _standalone_numerals(text: str) -> set[str]:
+    """Every Roman numeral `text` names on its own (`_STANDALONE_NUMERAL_RE`),
+    outside a part or phase listing."""
+    bare = _TRIAL_PHASE_RE.sub(' ', _PART_NUMBER_RE.sub(' ', text))
+    return set(_STANDALONE_NUMERAL_RE.findall(bare))
+
+
 # #666 (EBYSBC): a date stated to the month, or the day, tells two records
 # apart where the year cannot: DPEHSZ lost five dated instances of a resident
 # lecture given again in another month of the same year, and KDAZOM a
@@ -1022,7 +1051,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
 
     #666 (EBYSBC): verbatim containment starts and ends on word boundaries
     (`_verbatim_contained`), the date test reads months and days, a differing
-    part number refuses like a trial phase, and in a teaching or talk list a
+    part number or standalone Roman numeral (`_standalone_numerals`) refuses
+    like a trial phase, and in a teaching or talk list a
     group line between the two entries refuses (`_group_header_between`)."""
     dropped_text = dropped_entry.get('text') or ''
     kept_text = kept_entry.get('text') or ''
@@ -1056,6 +1086,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #1106: a different trial phase is a different trial
     if not _part_numbers(dropped_text) <= _part_numbers(kept_text):
         return False  # #666: a different part is a different record
+    if not _standalone_numerals(dropped_text) <= _standalone_numerals(kept_text):
+        return False  # #666: a different series numeral is a different record
     if not _counts(dropped_text) <= _counts(kept_text):
         return False  # #666: a different hours or student count is another occasion
     dropped_sig = _entry_signature_words(dropped_entry)
