@@ -811,6 +811,38 @@ def test_rows_before_the_mentee_line_are_left_alone():
 
 
 @pytest.mark.parametrize("code,heading", [
+    # 2082_Dr_Scot: each row names its own student; no mentee line above.
+    ("H", ("Teaching", "Undergraduate Honor Students’ Achievements")),
+    ("D1", ("Teaching", "Undergraduate Honor Students’ Achievements")),
+    # 2068_Yount_Cv: a doctoral student's paper award.
+    ("H", ("TEACHING", "TEACHING AND MENTORING", "MASTERS STUDENT TRAINEES")),
+    # 2068_Yount_Cv 975: a singular leaf under a plural parent.
+    ("H", ("TEACHING", "TEACHING AND MENTORING", "DOCTORAL TRAINEES (current and completed)",
+           "Doctoral Student Paper Awards")),
+    ("H", ("Mentees",)),
+    ("H", ("Advisees",)),
+    ("H", ("Fellows mentored",)),
+])
+def test_a_plural_mentee_heading_pins_without_a_mentee_line(code, heading):
+    entry = _row(code, "Example Student, 2031. Winner of the Example Thesis Prize.", hierarchy=heading)
+    assert mentee_pin_code(entry, after_mentee=False)[0] == "N4"
+
+
+@pytest.mark.parametrize("code,heading", [
+    ("H", ("Student/Trainee Awards",)),                  # singular: the owner's own (web210)
+    ("D1", ("MENTORING", "Trainees")),                   # a position needs an accomplishments word
+    ("K1", ("Teaching", "Medical Students")),            # the owner's teaching of students
+    ("S1", ("Doctoral Students",)),                      # a publication stays a publication
+    # The owner's teaching award: the plural names the people taught.
+    ("H", ("TEACHING", "Report of Local Teaching and Training", "Teaching of Students in Courses")),
+    # A plural above the row's parent is a section title, not the row's owner.
+    ("H", ("Trainees", "Program Leadership", "Awards")),
+])
+def test_a_plural_mentee_heading_keeps_the_other_guards(code, heading):
+    assert mentee_pin_code(_row(code, "Example row, 2031", hierarchy=heading), after_mentee=False) is None
+
+
+@pytest.mark.parametrize("code,heading", [
     ("K5", ("ADVISING", "Undergraduate Research Students")),   # teaching, no accomplishments word
     ("D1", ("MENTORING", "Trainees")),
     ("S1", STUDENT_HEADING),                                     # a publication stays a publication
