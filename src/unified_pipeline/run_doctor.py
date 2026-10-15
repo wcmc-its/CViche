@@ -392,7 +392,12 @@ Lints, ranked by the severity of the failure class they catch:
                           heading or lead line (ECXGAT 2156-2204) and INFO
                           elsewhere, where most hits are the owner's own
                           group-authored papers or the owner under another
-                          surname. Reads stage 4 and the docx
+                          surname; and H, I or D entries, or K under an
+                          accomplishments heading, beneath a heading naming
+                          students or mentees in the plural or holding a
+                          mentoring-coded entry (#1251, JFBPNC 569-582),
+                          WARN, with the count per code. Reads stage 4 and
+                          the docx
 14ai. citation_grounding  a citation stage 5d wrote that names an author,
                           an initial or an ordinal its source line lacks
                           (#1570, YUYVIG): a bare initials token joined to
