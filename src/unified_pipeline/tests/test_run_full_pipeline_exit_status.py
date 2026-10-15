@@ -1043,10 +1043,6 @@ _CALL_LLM_MODULE_STAGE = {
     'stage_5d_citation_formatter.py': '5d',
     'stage_6_word_template.py': '6',
 }
-# Import call_llm but no driver runs them (only standalone scripts reach them).
-_CALL_LLM_UNWIRED_MODULES = frozenset({
-    'core/personal_info_extractor.py',
-})
 
 
 def _modules_importing_call_llm():
@@ -1065,7 +1061,7 @@ def _modules_importing_call_llm():
 
 def test_every_stage_module_that_calls_the_llm_is_in_the_cli_cost_list():
     modules = _modules_importing_call_llm()
-    unmapped = modules - set(_CALL_LLM_MODULE_STAGE) - _CALL_LLM_UNWIRED_MODULES
+    unmapped = modules - set(_CALL_LLM_MODULE_STAGE)
     assert not unmapped, (
         f"{sorted(unmapped)} import call_llm: map each to its stage in "
         "_CALL_LLM_MODULE_STAGE so its cost is reported (#1177)")

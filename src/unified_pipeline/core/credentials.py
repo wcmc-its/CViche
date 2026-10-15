@@ -1,6 +1,6 @@
 """Degree and credential post-nominals, as a CV writes them after a name:
-the list from the faculty affairs system that `personal_info_extractor`
-looks for on a CV's name line, and stage 5 refuses as a co-author (#1661)."""
+the list from the faculty affairs system that stage 5 refuses as a
+co-author (#1661)."""
 
 from typing import Final
 

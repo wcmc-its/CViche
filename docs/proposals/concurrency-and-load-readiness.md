@@ -29,7 +29,7 @@ Consequences:
 
 - **No queue, no concurrency cap.** Every `start` immediately spawns another full pipeline inside the web process. N users who hit "start" together = N pipelines running at once in the same pod, all competing for CPU, RAM, DB connections, and LLM bandwidth. There is no semaphore anywhere gating this, and no "system busy" response — runs just contend silently.
 - **Work is tied to the web process lifecycle.** A pod restart (deploy, OOM, eviction) kills every in-flight run. This is exactly the failure the `reconcile_stale_runs` guard cleans up (`app/services/run_service.py`), and concurrency makes it more likely.
-- **Stages run sequentially within a run.** The orchestrator iterates `STEP_REGISTRY` in order (`app/pipeline/orchestrator.py:348`) and imports the stage functions directly (`orchestrator.py:45-51`). There is **no intra-run parallelism**: the only `ThreadPoolExecutor` in the codebase lives in `core/legacy_extractor_orchestrator.py`, which is the **CLI** path (`core/cv_pipeline.py`), not the web path. So a single run is a steady drip of one-at-a-time LLM calls, not a burst.
+- **Stages run sequentially within a run.** The orchestrator iterates `STEP_REGISTRY` in order (`app/pipeline/orchestrator.py:348`) and imports the stage functions directly (`orchestrator.py:45-51`). There is **no intra-run parallelism**: the only `ThreadPoolExecutor` in the codebase lived in `core/legacy_extractor_orchestrator.py`, a CLI-only path since deleted. So a single run is a steady drip of one-at-a-time LLM calls, not a burst.
 
 ## Bottleneck chain (what breaks first)
 

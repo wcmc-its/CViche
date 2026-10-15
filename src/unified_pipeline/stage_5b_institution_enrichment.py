@@ -222,8 +222,8 @@ def _build_institution_enrichment_stats(
         'institutions_unresolved': institutions_unresolved,
         'cost': total_cost,
         'model': observed_model,
-        # Naive on purpose: every sibling stats dict (stage_5c, stage_5d,
-        # calibration_logger) writes naive datetime.now().isoformat() and
+        # Naive on purpose: every sibling stats dict (stage_5c, stage_5d)
+        # writes naive datetime.now().isoformat() and
         # nothing reads it back -- stay consistent across stage JSON.
         'timestamp': datetime.now().isoformat()
     }
