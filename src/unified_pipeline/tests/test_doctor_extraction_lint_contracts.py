@@ -78,6 +78,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
+    lint_cross_entry_value,
     lint_dedup_drops,
     lint_footer_in_record,
     lint_grant_boundary,
@@ -106,7 +107,11 @@ from unified_pipeline.doctor.shared import (  # noqa: E402
 )
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 from unified_pipeline.stage3b.io import GROUP_YEAR_KEY  # noqa: E402
-from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
+from unified_pipeline.stage4.owner_name import (  # noqa: E402
+    OWNER_CONTACT_SOURCE_HEADER_FOOTER,
+    OWNER_CONTACT_SOURCE_KEY,
+)
+from unified_pipeline.stage4.schemas import STAGE4_BATCH_SIZE, STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     ANNUAL_COSTS_LABEL,
     AWARD_SOURCE_LABEL,
@@ -2453,6 +2458,28 @@ def test_implausible_year_silent(entry):
 ])
 def test_implausible_year_reads_nested_and_integer_values(value):
     assert len(_implausible(_fields_entry("B1", {"dates_attended": value}, text="'05"))) == 1
+
+
+# #1585 (NECRGC YIXQFB 2642): stage 4 read "3-16" as 1916-03, but stage 6
+# prints the duration "03/16-07/21", so the wrong century never reaches the
+# page; 2743 printed "1909-1908" and is true.
+_WRONG_CENTURY_GRANT = _fields_entry("M2B", {"start_date": "1916-03-01"},
+                                     text="Example grant 3-16 to 7-21", idx=2642)
+
+
+def test_implausible_year_silent_when_the_render_never_prints_the_year():
+    blocks = [("table", "Project title:\nExample grant\nDuration of support:\n03/16-07/21")]
+    assert lint_implausible_year({"entries": [_WRONG_CENTURY_GRANT]}, None, blocks) == []
+
+
+def test_implausible_year_fires_when_the_render_prints_the_year():
+    blocks = [("table", "Project title:\nExample grant\nDuration of support:\n1916-2021")]
+    findings = lint_implausible_year({"entries": [_WRONG_CENTURY_GRANT]}, None, blocks)
+    assert len(findings) == 1 and "start_date=1916" in findings[0]["message"]
+
+
+def test_implausible_year_without_a_render_judges_stage_4_alone():
+    assert len(lint_implausible_year({"entries": [_WRONG_CENTURY_GRANT]})) == 1
 
 
 def _degree(year, text=None, code="B1"):
@@ -5251,3 +5278,192 @@ def test_footer_in_record_reads_abbreviated_and_capitalised_months(footer):
 
 def test_footer_in_record_is_silent_on_entries_without_text():
     assert lint_footer_in_record({"entries": [{"taxonomy_code": "L3"}] * 6}) == []
+
+
+
+# ==========================================================================
+# lint_cross_entry_value (#1575): a stage-4 value its own entry's text lacks
+# that another entry of the same stage-4 call states. Cases, each its test:
+# - fires on UVZNIC 592's shape (dates, amount, effort, role from one grant
+#   onto another), naming each value and the entry it is from: WARN;
+# - fires on 559's shape: a second record that is another entry's mentee;
+# - silent on a value its own text states in another form (two-digit years,
+#   "Principal Investigator" for PI, "Co - PI", "P.I.", a plural label);
+# - silent across call groups: another taxonomy code, or another batch;
+# - stage 3b's order, not stage 4's element order, cuts the batches; a stage
+#   3b missing an extracted entry falls back to stage 4's order;
+# - too-short entries and the header/footer contact entry are no batch's;
+# - silent on a year for an entry that states none, a role for a grant that
+#   labels none, the entry's group year, and a person the entry names in part;
+# - the owner's own name words are never judged a borrowed person.
+
+def _cev_entry(idx, text, fields, code="M2B", **extra):
+    return {"element_idx_start": idx, "element_idx_end": idx, "taxonomy_code": code,
+            "text": text, "extracted_fields": fields, **extra}
+
+
+_CEV_592 = ("NCI/ 5R01CA000001-01A1 (MPI: Owner, Other, Effort: 20%) \u201cExample Imaging\u201d "
+            "Direct Costs: $326,020/year\tDates of Award: 04/21/17-03/31/23")
+_CEV_594 = ("Example Rhythms (PI: Owner) \u201cExample Platform\u201d\tDirect Costs: $300,000\t"
+            "Dates of Award: 04/01/2022-2023")
+_CEV_603 = ("Example Young Investigator Award (PI: Owner, Effort: 30%) \u201cExample Trial\u201d "
+            "Direct Costs: $30,000/year\tDate of Award: 07/01/1997-06/30/1999")
+
+
+def _cev_run(*entries, owner="Cynthia Example Owner"):
+    return {"cv_owner": {"full_name": owner, "last_name": owner.split()[-1]},
+            "entries": list(entries)}
+
+
+def test_cross_entry_value_names_each_value_another_grant_of_the_call_states():
+    borrowed = {"start_date": "1997-07-01", "end_date": "1999-06-30",
+                "total_funding": "$30,000/year", "percent_effort": "30%", "pi_role": "PI",
+                "grant_number": "5R01CA000001-01A1", "title": "Example Imaging"}
+    stage4 = _cev_run(_cev_entry(592, _CEV_592, borrowed),
+                      _cev_entry(594, _CEV_594, {"start_date": "2022-04-01", "pi_role": "PI"}),
+                      _cev_entry(603, _CEV_603, {"start_date": "1997-07-01", "pi_role": "PI"}))
+
+    [finding] = lint_cross_entry_value(stage4)
+
+    assert finding["lint"] == "cross_entry_value" and finding["severity"] == "INFO"
+    message = finding["message"]
+    assert message.startswith("entry 592 (M2B): ")
+    for named in ("start_date='1997-07-01' (in 603's text)", "end_date='1999-06-30' (in 603's text)",
+                  "total_funding='$30,000/year' (in 603's text)",
+                  "percent_effort='30%' (in 603's text)", "pi_role='PI' (in 594's text)"):
+        assert named in message
+    assert "grant_number" not in message and "title" not in message
+    assert finding["evidence"] == [_CEV_592[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def test_cross_entry_value_reads_a_second_record_that_is_another_entrys_mentee():
+    own = {"mentee_name": "Esha Example", "start_date": "2017", "end_date": "2018"}
+    foreign = {"mentee_name": "Laura Sample, MSW, PhD", "start_date": "2021", "end_date": "2022"}
+    stage4 = _cev_run(
+        _cev_entry(559, "Esha Example, Medical Student Research, 2017-18",
+                   {**foreign, STAGE4_RECORDS_KEY: [own, foreign]}, code="N3B"),
+        _cev_entry(573, "Laura Sample, MSW, PhD, Postdoctoral Fellow (T32, 2021-2022)",
+                   {"mentee_name": "Laura Sample", "start_date": "2021"}, code="N3B"))
+
+    [finding] = lint_cross_entry_value(stage4)
+
+    assert finding["message"].startswith("entry 559 (N3B): ")
+    assert "mentee_name='Laura Sample, MSW, PhD' (in 573's text)" in finding["message"]
+    assert "start_date='2021' (in 573's text)" in finding["message"]
+    assert "Esha" not in finding["message"]
+
+
+@pytest.mark.parametrize(("own_text", "fields"), [
+    (_CEV_592, {"start_date": "2017-04-21", "end_date": "2023-03-31", "pi_role": "MPI",
+                "total_funding": "$326,020/year", "percent_effort": "20%"}),
+    ("Example Award, Principal Investigator 1998-1999", {"pi_role": "PI"}),
+    ("Example Grant 1985-1990 (Co - PI Program VI)", {"pi_role": "Co-PI"}),
+    ("Example Grant 1987-1990. P.I. Owner", {"pi_role": "PI"}),
+    ("Example Grant 1987-1990 (PI: Other) Role: co- investigator", {"pi_role": "co-investigator"}),
+    ("Example Grant 1991-2018 Investigators - Owner, Other", {"pi_role": "Investigator"}),
+])
+def test_cross_entry_value_is_silent_on_a_value_its_own_text_states(own_text, fields):
+    other = ("Other Grant (PI: Owner; Co-PI: Other; co-investigator: Owner; Investigator: Owner) "
+             "$30,000/year 30% 1997-1999 2017-2023 MPI")
+    assert lint_cross_entry_value(_cev_run(_cev_entry(1, own_text, fields),
+                                           _cev_entry(2, other, {}))) == []
+
+
+def test_cross_entry_value_only_compares_entries_of_one_call():
+    borrowed = {"start_date": "1997-07-01"}
+    other_code = _cev_run(_cev_entry(592, _CEV_592, borrowed),
+                          _cev_entry(603, _CEV_603, {}, code="M2A"))
+    assert lint_cross_entry_value(other_code) == []
+
+    fillers = [_cev_entry(600 + i, f"Example committee {i}, 2001", {}, code="Q2")
+               for i in range(STAGE4_BATCH_SIZE - 2)]
+    same_batch = _cev_run(_cev_entry(592, _CEV_592, borrowed), *fillers,
+                          _cev_entry(700, _CEV_603, {}))
+    next_batch = _cev_run(_cev_entry(592, _CEV_592, borrowed), *fillers,
+                          _cev_entry(650, "Example committee, 2001", {}, code="Q2"),
+                          _cev_entry(700, _CEV_603, {}))
+    assert len(lint_cross_entry_value(same_batch)) == 1
+    assert lint_cross_entry_value(next_batch) == []
+
+
+def test_cross_entry_value_cuts_batches_in_stage_3b_order():
+    """Stage 4 sorts a table's string index after every number; its batches
+    were cut in stage 3b's order, where the table comes first (BCTOGR)."""
+    table = _cev_entry("table_1", _CEV_592, {"start_date": "1997-07-01"})
+    grant = _cev_entry(1, _CEV_603, {})
+    fillers = [_cev_entry(i, f"Example committee {i}, 2001", {}, code="Q2")
+               for i in range(2, STAGE4_BATCH_SIZE + 1)]
+    stage4 = _cev_run(grant, *fillers, table)
+    stage3b = {"entries": [table, grant, *fillers]}
+
+    assert lint_cross_entry_value(stage4) == []
+    assert len(lint_cross_entry_value(stage4, stage3b)) == 1
+    # Fragments and duplicates stage 4 never received do not shift a batch.
+    skipped = {"entries": [table, {"text": "Example fragment", "is_fragment": True},
+                           {"text": "Example duplicate", "is_duplicate": True}, grant, *fillers]}
+    assert len(lint_cross_entry_value(stage4, skipped)) == 1
+    # A stage 3b that lacks an extracted entry is another run's: stage 4's order.
+    assert lint_cross_entry_value(stage4, {"entries": [table, grant]}) == []
+
+
+def test_cross_entry_value_leaves_out_entries_stage_4_never_batched():
+    borrowed = _cev_entry(592, _CEV_592, {"start_date": "1997-07-01"})
+    fillers = [_cev_entry(600 + i, f"Example committee {i}, 2001", {}, code="Q2")
+               for i in range(STAGE4_BATCH_SIZE - 2)]
+    unbatched = [_cev_entry(640, "x", {}, code="Q2", extraction_skipped=True),
+                 _cev_entry(999999, "Tel 555-0100", {}, code="A",
+                            **{OWNER_CONTACT_SOURCE_KEY: OWNER_CONTACT_SOURCE_HEADER_FOOTER})]
+    stage4 = _cev_run(borrowed, *fillers, *unbatched, _cev_entry(700, _CEV_603, {}))
+    assert len(lint_cross_entry_value(stage4)) == 1
+
+
+@pytest.mark.parametrize(("own_text", "fields", "extra"), [
+    ("Example talk, Grand Rounds, April 29", {"date": "1997-04-29"}, {}),       # states no year
+    ("Example Grant 2005-2007. Owner MB. Example title", {"pi_role": "PI"}, {}),  # labels no role
+    ("Example talk, Grand Rounds, 2001", {"date": "1997"}, {GROUP_YEAR_KEY: "1997"}),
+    ("Example Grant 1999-2001 P.I. (Fouad, M)", {"pi_name": "Mona Fouad"}, {}),  # named in part
+    ("Sample Grant 1999-2001 (MPI)", {"pi_name": "Cynthia Example Owner"}, {}),  # the owner
+    ("Sample Grant 1999-2001 (MPI)", {"pi_name": "Li Wu"}, {}),          # too short to judge
+    ("Sample Grant 1999-2001 (MPI)", {"pi_name": "FACS"}, {}),           # not a Title-case word
+    ("Sample Grant 1999-2001 (PI: Owner)", {"pi_role": "Principal Investigator"}, {}),  # initials
+    ("Sample Grant 1999-2001 (Co-I: Owner)", {"pi_role": "Principal Investigator"}, {}),
+])
+def test_cross_entry_value_is_silent_where_the_value_is_not_anothers(own_text, fields, extra):
+    """The last row: another entry's "PI" is not read as "Principal
+    Investigator" by its initials; only the entry's own text is."""
+    other = ("Other Grant (PI: Mona Fouad, Cynthia Example Owner, Li Wu, FACS) 1997-04-29 1997 "
+             "Principal Investigator: Owner") if "Co-I" not in own_text else "Other Grant (PI: Owner) 1997"
+    assert lint_cross_entry_value(_cev_run(_cev_entry(1, own_text, fields, **extra),
+                                           _cev_entry(2, other, {}))) == []
+
+
+def test_cross_entry_value_needs_every_judged_name_word_in_the_other_entry():
+    own = "Example mentee award 2001-2003, Peter Example"
+    one_word = _cev_run(_cev_entry(1, own, {"mentee_name": "Laura Sample"}, code="N3B"),
+                        _cev_entry(2, "Laura Other, 2004-2006", {}, code="N3B"))
+    both = _cev_run(_cev_entry(1, own, {"mentee_name": "Laura Sample"}, code="N3B"),
+                    _cev_entry(2, "Laura Sample, 2004-2006", {}, code="N3B"))
+    assert lint_cross_entry_value(one_word) == []
+    assert len(lint_cross_entry_value(both)) == 1
+
+
+
+def test_cross_entry_value_reads_a_borrowed_record_that_only_stage4_records_holds():
+    """Stage 4 keeps the last record as the entry's scalar fields; a borrowed
+    record before it is read from `stage4_records`."""
+    own = {"mentee_name": "Esha Example", "start_date": "2017", "end_date": "2018"}
+    foreign = {"mentee_name": "Laura Sample", "start_date": "2021", "end_date": "2022"}
+    stage4 = _cev_run(
+        _cev_entry(559, "Esha Example, Medical Student Research, 2017-18",
+                   {**own, STAGE4_RECORDS_KEY: [foreign, own]}, code="N3B"),
+        _cev_entry(573, "Laura Sample, Postdoctoral Fellow (T32, 2021-2022)", {}, code="N3B"))
+    [finding] = lint_cross_entry_value(stage4)
+    assert "mentee_name='Laura Sample' (in 573's text)" in finding["message"]
+
+
+def test_cross_entry_value_reads_a_list_of_names_as_its_text():
+    stage4 = _cev_run(
+        _cev_entry(1, "Example Grant 1999-2001 (MPI: Owner)", {"co_investigators": ["Laura Sample"]}),
+        _cev_entry(2, "Other Grant 2003-2005 (PI: Owner; Co-I: Laura Sample)", {}))
+    [finding] = lint_cross_entry_value(stage4)
+    assert "co_investigators=\"['Laura Sample']\" (in 2's text)" in finding["message"]

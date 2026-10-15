@@ -881,3 +881,71 @@ def split_appointment_title(title: str) -> tuple[str, str]:
     if len(role) < APPOINTMENT_ROLE_MIN_CHARS or not duties:
         return title, ''
     return role, duties
+
+
+# An entry that opens, after an optional year or year range, with a verb or
+# noun of attendance: the owner was in the audience (#1691, NECRGC LFFKVV
+# 608-618: "Participated in ...", "Attended the ..." rendered as CE taught).
+# "Participant/Presenter" pairs it with a role, so it is not attendance alone.
+ATTENDANCE_OPENING_RE = re.compile(
+    rf'^\W*(?:{YEAR_OR_SPAN}\W*)?'
+    r'(?:attended|attendee|attendance|participated|participant|participation|completed|completion)\b'
+    r'(?!\s*(?:/|&|and\b))',
+    re.IGNORECASE)
+# A word that names the owner teaching, leading or presenting the activity
+# (#1691). "Directors Course" and "Speakers Series" name the event, not the
+# owner's role, so only the singular forms count. "Talk" names a talk the
+# owner gave ("Invited talk, ..."); an attended talk opens as attendance,
+# which outranks it. Plural "Talks" names a series in entry text, so it
+# counts in a heading only.
+TEACHING_ROLE_RE = re.compile(
+    r'\b(?:lectur(?:e|er|es|ed|ing)|speaker|keynote|faculty|instructor|tutor|trainer|taught'
+    r'|talk'
+    r'|teach(?:er|es|ing)?|(?:co-?)?director|course\s+chair'
+    r'|present(?:er|ed|ing|ation)|organi[sz](?:er|ed|ing)|moderat(?:or|ed|ing)'
+    r'|facilitat(?:or|ed|ing)|precept(?:or|ed|ing)|panelist)\b',
+    re.IGNORECASE)
+# Words that name a role only in a HEADING ("Invited Lectures", "Grand
+# Rounds"): in entry text, a bare grand-rounds event in a CE or development
+# list is usually one the owner attended (PR #1829 review). "Invited to
+# participate / attend" is an invitation to the audience, never a role.
+_HEADING_ONLY_ROLE_RE = re.compile(
+    r'\b(?:grand\s+rounds|talks|invited(?!\s+to\s+(?:participate|attend)))\b',
+    re.IGNORECASE)
+# A heading that names attendance ("CME Lectures Attended", "Grand Rounds
+# Attended") lists what the owner attended, whatever role word it also has
+# (PR #1829 review).
+ATTENDANCE_HEADING_WORD_RE = re.compile(
+    r'\b(?:attended|attendance|participated|participation|completed)\b', re.IGNORECASE)
+# The owner's own talk or abstract: a double-quoted title, or an author list
+# ("Smith JA, Doe B.", "Smith, J., Doe, B.", "et al", or an APA "(2020). Title"
+# or "(2021, January). Title").
+# One surname and initials alone is not a list: "Chicago, IL" reads as one.
+_QUOTED_TITLE_RE = re.compile(r'["“][^"“”]{6,}["”]')
+_AUTHOR_NAME_RE = re.compile(r"\b[A-Z][a-z'’\-]+,?\s(?:[A-Z]\.?){1,3}(?=\s*[,;.&]|\s+and\b)")
+_AUTHOR_LIST_MIN_NAMES = 2
+_CITATION_MARKER_RE = re.compile(r"\bet al\b|\((?:19|20)\d{2}[a-z]?(?:,[^)]*)?\)\.\s+[A-Z]")
+
+
+def heading_names_teaching_role(heading: str) -> bool:
+    """Whether a heading names a teaching or presenting role ("CME Lectures
+    Given", "Continuing Medical Education - Teaching", "Grand Rounds") and
+    no attendance ("CME Lectures Attended"): its bare entries are what the
+    owner taught or presented, not what he attended. One carve-out for the
+    stage-6 B2->K4 refusal and the doctor's `attended_as_teacher` lint
+    (#1691)."""
+    if ATTENDANCE_HEADING_WORD_RE.search(heading):
+        return False
+    return bool(TEACHING_ROLE_RE.search(heading) or _HEADING_ONLY_ROLE_RE.search(heading))
+
+
+def names_teaching_or_authorship_role(text: str) -> bool:
+    """Whether an entry's text gives the owner a teaching, presenting or
+    authoring part (a role word, a quoted talk title, an author list) and
+    does not open as attendance (`ATTENDANCE_OPENING_RE`). A bare course,
+    program or meeting name has none: the owner attended it (#1691)."""
+    if ATTENDANCE_OPENING_RE.search(text):
+        return False
+    return bool(TEACHING_ROLE_RE.search(text) or _QUOTED_TITLE_RE.search(text)
+                or _CITATION_MARKER_RE.search(text)
+                or len(_AUTHOR_NAME_RE.findall(text)) >= _AUTHOR_LIST_MIN_NAMES)

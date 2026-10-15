@@ -121,6 +121,11 @@ FIELD_SCHEMA_CONFIG_PATH = Path(__file__).parent.parent / "config" / "field_sche
 # 6 hands it this name because nothing under `stage6/` may import `stage4`.
 STAGE4_RECORDS_KEY = "stage4_records"
 
+# How many entries stage 4 extracts per batch; each batch's entries of one
+# taxonomy code go to the model in one call. The doctor's `cross_entry_value`
+# rebuilds those calls from it (#1575).
+STAGE4_BATCH_SIZE = 10
+
 # The entry-level count of items the reply held for the entry, written only
 # when it is 2 or more, so the multi-record shape stays visible downstream.
 STAGE4_RECORDS_RETURNED_KEY = "stage4_records_returned"

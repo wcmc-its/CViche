@@ -11,12 +11,13 @@ runs, and the finding is about the cut, not the page. Two exceptions:
 blocks, when present, only to confirm that the text they name renders
 nowhere.
 
-Four lints read stage 2's own record of the cut (NECRGC autopsy, #1226
-forensics): elements it assigned to no entry, header or break
+Five lints read stage 2's own record of the cut (NECRGC autopsy, #1226
+forensics, #1433): elements it assigned to no entry, header or break
 (`lint_stage2_unaccounted`, #1693), a list grouped one record off
 (`lint_record_date_shift`, #1226), a heading line that also holds a record
-(`lint_header_consumed_record`, #1254), and a break that holds text no entry
-claimed (`lint_stage2_text_break`, #1226).
+(`lint_header_consumed_record`, #1254), a break that holds text no entry
+claimed (`lint_stage2_text_break`, #1226), and two entries that hold the
+same lines (`lint_stage2_span_overlap`, #1433).
 
 `lint_segmentation_collapse` (EBYSBC E17) reads stage 1b as well: the cut
 can lose every heading while every line is still covered, which none of the
@@ -30,6 +31,7 @@ name it exported before.
 """
 
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import NamedTuple
 
@@ -824,4 +826,98 @@ def lint_stage2_text_break(stage2: dict, stage1a: dict | None = None,
             f"classified{'; it renders nowhere' if blocks is not None else ''} (#1226)",
             [f"entry {entry.get('element_idx_start')}: {text[:STAGE2_EVIDENCE_TEXT_CHARS]}"
              for entry, text in hits[:TEXT_BREAK_EVIDENCE_LINES]]))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# Two entries that share source lines (#1433).
+#
+# Each record entry should hold its own lines. When two hold the same ones,
+# the shared lines can render twice, often once under the wrong section
+# (ATUVAL 867-869 under HONORS and under a committee heading; web228 1695
+# under Books and under Non-refereed Publications), and the dates can pair
+# with the wrong records (ATUVAL 598/600/602, sliding windows over a
+# flattened table). Stage 2 merges overlapping paragraph windows inside one
+# section since #1798; this reads what is left: spans across two sections,
+# and table-row spans (web172 112.1-112.13 and 112.3-112.33).
+
+#: The fewest source elements two record entries must share to be reported.
+#: One shared element is not judged: on the 278 local stage-2 runs measured
+#: for #1433, 6,886 pairs share exactly one element, nearly all one
+#: single-element entry emitted twice, which older stage-2 runs wrote on 42
+#: runs. Two or more: 344 entries on 19 runs, 12 of 12 sampled pairs a
+#: record held twice.
+SPAN_OVERLAP_MIN_ELEMENTS = 2
+#: Overlapping pairs a `stage2_span_overlap` finding quotes, per section pair.
+SPAN_OVERLAP_EVIDENCE_PAIRS = 3
+
+
+def _row_span(entry: dict) -> frozenset[str]:
+    """The table-row keys ("112.3") a table-row entry covers, from its start
+    row to its end row; empty when the two are not rows of one table. Such a
+    span is one row at most (`row_range_entry` shrinks it to its start), and
+    one row is under SPAN_OVERLAP_MIN_ELEMENTS."""
+    start, end = entry.get("element_idx_start"), entry.get("element_idx_end")
+    if not (isinstance(start, str) and isinstance(end, str)):
+        return frozenset()
+    parent, _, first = start.partition(".")
+    end_parent, _, last = end.partition(".")
+    if parent != end_parent or not (first.isdigit() and last.isdigit()):
+        return frozenset()
+    return frozenset(f"{parent}.{row}" for row in range(int(first), int(last) + 1))
+
+
+def _span_keys(entry: dict) -> frozenset[int | str]:
+    """The source elements a record entry covers: paragraph indices, or
+    table-row keys when its bounds are row keys. The two never compare
+    equal, so a whole-table entry is not matched against its own rows."""
+    return frozenset(_element_span(entry)) or _row_span(entry)
+
+
+def _overlapping_pairs(stage2: dict) -> list[tuple[dict, dict, int]]:
+    """(earlier entry, later entry, elements shared) for each record entry
+    that shares SPAN_OVERLAP_MIN_ELEMENTS or more source elements with an
+    entry before it; the first such entry is named."""
+    entries = [entry for entry in stage2.get("entries") or []
+               if isinstance(entry, dict) and entry.get("element_type") in STAGE2_RECORD_TYPES]
+    owners: dict[int | str, list[int]] = {}
+    pairs = []
+    for later, entry in enumerate(entries):
+        span = _span_keys(entry)
+        shared = Counter(earlier for key in span for earlier in owners.get(key, ()))
+        earlier = min((i for i, count in shared.items() if count >= SPAN_OVERLAP_MIN_ELEMENTS),
+                      default=None)
+        if earlier is not None:
+            pairs.append((entries[earlier], entry, shared[earlier]))
+        for key in span:
+            owners.setdefault(key, []).append(later)
+    return pairs
+
+
+def _section_title(entry: dict) -> str:
+    return " > ".join(str(level) for level in entry.get("hierarchy") or [])
+
+
+def lint_stage2_span_overlap(stage2: dict) -> list[dict]:
+    """Record entries that share two or more source elements with an entry
+    before them (#1433): the shared lines can render twice, once under the
+    wrong section when the two sit in different ones. WARN, one per pair of
+    sections, led by the first such entry. Reads stage 2 only."""
+    by_sections: dict[tuple[str, str], list[tuple[dict, dict, int]]] = {}
+    for earlier, later, shared in _overlapping_pairs(stage2):
+        by_sections.setdefault((_section_title(earlier), _section_title(later)), []).append(
+            (earlier, later, shared))
+    findings = []
+    for (earlier_title, later_title), pairs in by_sections.items():
+        where = (f"section '{later_title}'" if earlier_title == later_title
+                 else f"sections '{earlier_title}' and '{later_title}'")
+        findings.append(_finding(
+            "stage2_span_overlap", "WARN",
+            f"entry {pairs[0][1].get('element_idx_start')}: {where}: {len(pairs)} stage-2 "
+            f"entr{'y shares' if len(pairs) == 1 else 'ies share'} source lines with an earlier "
+            f"entry, so those lines can render twice (#1433)",
+            [f"entry {later.get('element_idx_start')}-{later.get('element_idx_end')} shares "
+             f"{shared} element(s) with entry {earlier.get('element_idx_start')}-"
+             f"{earlier.get('element_idx_end')}: {str(later.get('text') or '')[:STAGE2_EVIDENCE_TEXT_CHARS]}"
+             for earlier, later, shared in pairs[:SPAN_OVERLAP_EVIDENCE_PAIRS]]))
     return findings

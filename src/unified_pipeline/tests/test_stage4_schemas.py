@@ -244,6 +244,21 @@ def test_q2_committee_name_guide_takes_a_session_panel_or_workshop_title():
     assert "For a session, panel, symposium or workshop entry, its title" in guide
 
 
+def test_q3_asks_the_llm_for_every_field_the_grant_reviewing_table_renders():
+    """#470: Q3 `panel_name` was `extract: false` in field_schemas_v1.1.json, so
+    the prompt's "Fields to Extract" line omitted it and the study section
+    reached stage 4 only because the Q3 field guide still named it. The Grant
+    Reviewing writer appends it to the Organization column (#466), so a guide
+    tidy-up or model swap would have dropped it with no test failing. Read off
+    the ACTIVE (config-merged) schema, the list the prompt is built from, and
+    checked against the fields stage 6 renders for Q3."""
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    fields = schemas_mod.get_field_schema("Q3")["fields"]
+    assert "panel_name" in fields
+    assert _RENDERED_FIELDS["Q3"] <= set(fields)
+
+
 def test_b2_guide_covers_every_extracted_field_and_asks_for_the_whole_line():
     """#1092: a code listed in FIELD_DESCRIPTIONS shows the model only those
     fields, so the B2 guide must name all of them; and program_name fills the

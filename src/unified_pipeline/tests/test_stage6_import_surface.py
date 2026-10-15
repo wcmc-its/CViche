@@ -71,6 +71,7 @@ STAGE6_IMPORT_SURFACE = (
     "REROUTE_REFUSED_FIELDS_LOST",
     "REROUTE_REFUSED_HEADING",
     "REROUTE_REFUSED_MENTEE",
+    "REROUTE_REFUSED_NO_TEACHING_ROLE",
     "RETIRED_TAXONOMY_CODES",
     "TAXONOMY_TO_SECTION",
     "TEMPLATE_PATH",
@@ -164,6 +165,7 @@ RELOCATED_BY_398_RESIDUE = {
         "RENDER_PIECE_WINDOW",
         "RENDER_TOKEN_MIN_COUNT",
         "RENDER_TOKEN_OVERLAP",
+        "T_RECORD_OVERLAP",
         "RETIRED_TAXONOMY_CODES",
         "UNRENDERED_MIN_RECORD_LINES",
         "_COLUMN_HEADER_WORDS",
@@ -183,8 +185,10 @@ RELOCATED_BY_398_RESIDUE = {
         "m1_record_rendered",
         "normalize_retired_code",
         "segment_already_rendered",
+        "segment_held_by_fields",
         "segments_cover_source",
         "t_recovery_lines",
+        "tab_aware_record_lines",
         "token_pairs",
     ),
 }
@@ -248,7 +252,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 36, (
+    assert len(_RELOCATED_CASES) == 39, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
@@ -315,7 +319,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 48, (
+    assert len(STAGE6_IMPORT_SURFACE) == 49, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
