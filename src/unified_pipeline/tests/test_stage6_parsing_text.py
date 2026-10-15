@@ -87,6 +87,8 @@ import pytest  # noqa: E402
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     APPOINTMENT_DUTY_VERBS,
     APPOINTMENT_ROLE_MIN_CHARS,
+    ATTENDANCE_OPENING_RE,
+    TEACHING_ROLE_RE,
     ParsedActivityLine,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
@@ -99,7 +101,9 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _parse_multi_membership_entry,
     _refold_shattered,
     _strip_appended_initials,
+    heading_names_teaching_role,
     is_membership_date_part,
+    names_teaching_or_authorship_role,
     split_appointment_title,
 )
 
@@ -753,3 +757,104 @@ def test_split_needs_a_role_of_minimum_length_in_front():
 @pytest.mark.parametrize("title", ["", None, "   "])
 def test_split_of_an_empty_title(title):
     assert split_appointment_title(title) == ("", "")
+
+
+# --- #1691: an attended course is not a course taught -----------------------
+# Shapes from the NECRGC autopsy (HVSKET, YMDTEE, XUTTKJ, LFFKVV, MQLKPQ);
+# invented names and places.
+
+@pytest.mark.parametrize("text", [
+    "2017 Bold Leadership Strategies and Tools Conference",
+    "2019 Example Society Annual Meeting – Chicago, IL",
+    "National Association of Example Physicians Medical Directors Course 2008",
+    "Attended the Example Speaker Series “Time, Trauma, and Health” (2021)",
+    "Participated in the Department of Medicine Summer Series on Inclusion",
+    "2020-2021 Completed the online module “Unconscious Bias”",
+    "Example Healthy Pets Certification  August 2017",
+    # One surname-and-initials pair is a place, not an author list.
+    "2019 Example Society Annual Meeting, Chicago, IL.",
+])
+def test_attended_activity_names_no_teaching_role(text):
+    assert not names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Course Director, Annual Example CME Course, 2019",
+    "Lecturer, Example CME Lecture Series, 2020",
+    "Grand Rounds presentation, Department of Medicine, 2018",
+    "Faculty, Example Board Review Course",
+    "“Managing Sepsis in the Emergency Department”, Example CME Day, 2019",
+    "Doe JA, Roe B. Outcomes of X. Example Society Annual Meeting, 2019",
+    "Moderator, Example Society Annual Meeting, 2019",
+    "2015-present National Trainer, Example Psychotherapy Program",
+    "Quill, Ann. (2021, January). Outcomes of things. Example Society Meeting.",
+])
+def test_taught_or_authored_activity_names_a_role(text):
+    assert names_teaching_or_authorship_role(text)
+
+
+def test_attendance_opening_outranks_a_role_word_later_in_the_text():
+    # "Speaker" names the series, not the owner (LFFKVV 610's shape).
+    assert TEACHING_ROLE_RE.search("Attended the Example Speaker Series")
+    assert ATTENDANCE_OPENING_RE.search("2019 Attended the Example Speaker Series")
+    assert not names_teaching_or_authorship_role("2019 Attended the Example Speaker Series")
+
+
+@pytest.mark.parametrize("text", [
+    "Invited talk, Example Society Annual Meeting, 2019",
+    "Talk: Example Society Annual Meeting, 2019",
+])
+def test_talk_names_a_role(text):
+    assert names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("text", [
+    # PR #1829 review: a bare grand-rounds event in a CE or development list
+    # is usually attended; "grand rounds" names a role in a heading only.
+    "Medicine Grand Rounds, Example Hospital, 2018",
+    "Department of Medicine Grand Rounds, Example Hospital, 2018",
+    # "Invited" alone names a role in a heading only; "invited to
+    # participate / attend" never does.
+    "Invited to participate, Example Leadership Program, 2018",
+    "Invited to attend the Example Summit, 2019",
+    "Invited, Example Visiting Professor Program, 2020",
+    # "Talks" in entry text names an attended series (PR #1829 review).
+    "Example Lunchtime Talks, 2019",
+    "Ethics Talks Series, Example Hospital, 2019",
+])
+def test_grand_rounds_and_invited_name_no_role_in_entry_text(text):
+    assert not names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Attended the Example Talk Series, 2019",
+    "2018 Attended Department of Medicine Grand Rounds",
+    "Participated in an invited workshop on example methods",
+])
+def test_attendance_opening_outranks_talk_invited_and_grand_rounds(text):
+    assert not names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("heading, names_role", [
+    ("CME Lectures Given", True),
+    ("Continuing Medical Education - Teaching", True),
+    ("Invited Talks", True),
+    ("Talks Given", True),
+    ("Grand Rounds", True),
+    ("Invited Visiting Professorships", True),
+    # A heading that names attendance lists what the owner attended (PR
+    # #1829 review), whatever role word it also has.
+    ("CME Lectures Attended", False),
+    ("Grand Rounds Attended", False),
+    ("Conferences and Talks Attended", False),
+    ("Teaching Workshops - Participation", False),
+    ("Teaching Conferences - Attendance", False),
+    ("Lecture Series Participated In", False),
+    ("Teaching Courses Completed", False),
+    ("Invited to Participate", False),
+    ("Professional Development", False),
+    ("Certifications / Continuing Education", False),
+    ("Career Development > ", False),
+])
+def test_heading_names_teaching_role(heading, names_role):
+    assert heading_names_teaching_role(heading) is names_role
