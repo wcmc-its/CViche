@@ -402,15 +402,17 @@ def _pubmed_positions(pubmed_authors: list[str], cv_names: list[str]) -> list[in
 
 # A word no listed credential names but shaped like one: a capital after a
 # lowercase letter ("MBChB", "MSc(Med)", "PhDr") unless it opens like a
-# two-part surname ("McDonald", "deLuca", "'tHooft", "McDonald-Smith"), a
-# word opening a parenthesis ("(Hons)"),
+# two-part surname ("McDonald", "deLuca", "'tHooft"), a word opening a
+# parenthesis ("(Hons)"),
 # or four or more capitals ("BCPS", "FRCPC").
 _DEGREE_SHAPED_WORD = re.compile(r"\(.*|[A-Z]{4,}|(?!\S?[a-z]+[A-Z][a-z]{2,})\S*[a-z]\S*[A-Z]\S*")
 
 
 def _is_not_a_name_word(word: str) -> bool:
-    """Whether `word` ends a name rather than names an author."""
-    return word in _NOT_A_NAME_WORDS or bool(_DEGREE_SHAPED_WORD.fullmatch(word))
+    """Whether `word` ends a name rather than names an author. A hyphenated
+    word is degree-shaped only when every part is ("Curran-Everett" and
+    "O'Neil-Ray" are surnames, as is each part)."""
+    return all(part in _NOT_A_NAME_WORDS or _DEGREE_SHAPED_WORD.fullmatch(part) for part in word.split('-'))
 
 
 def _restorable(cv_name: str, cv_text: str | None) -> bool:
