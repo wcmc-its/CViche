@@ -261,6 +261,12 @@ _MENTEE_HEADING = re.compile(
 _MENTEE_PLURAL_HEADING = re.compile(
     r"\b(?:students|mentees|trainees|advisees|fellows\s+mentored)\b", re.I
 )
+# Only the level holding the row, or its parent, can say the row is a mentee's:
+# a plural further up is a section title over the owner's own records.
+_MENTEE_PLURAL_LEVELS = 2
+# A level about the owner's teaching names students as the people taught, not as
+# the owners of its rows ("Teaching of Students in Courses", a Harvard-format CV).
+_TEACHING_LEVEL = re.compile(r"\b(?:teach\w*|courses?|class(?:es)?|lectures?|curricul\w*)\b", re.I)
 # K and D rows are recoded only when the heading also says these are accomplishments.
 _ACCOMPLISHMENT_HEADING = re.compile(r"\b(?:accomplishments?|achievements?|awards?)\b", re.I)
 _HONOR_CODE = "H"
@@ -536,16 +542,22 @@ def _is_named_trainee_work(code: str, heading: str, text: str) -> bool:
     )
 
 
+def _level_lists_mentees(entry: dict) -> bool:
+    """The row's own heading level, or its parent, names mentees in the plural and is not about teaching."""
+    levels = [str(level) for level in (entry.get("hierarchy") or [])[-_MENTEE_PLURAL_LEVELS:]]
+    return any(_MENTEE_PLURAL_HEADING.search(level) and not _TEACHING_LEVEL.search(level) for level in levels)
+
+
 def mentee_pin_code(entry: dict, after_mentee: bool) -> tuple[str, str] | None:
     """(N4, why) when the row is a mentee's accomplishment, not the owner's, else None.
 
     `after_mentee` says a named-mentee line (N3A/N3B) came earlier in the same
-    hierarchy group; without one, only a heading naming mentees in the plural
-    pins (#1251).
+    hierarchy group; without one, only the row's own heading level or its parent
+    naming mentees in the plural pins (#1251).
     """
     code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
     heading = _heading_text(entry)
-    lists_mentees = after_mentee or bool(_MENTEE_PLURAL_HEADING.search(heading))
+    lists_mentees = after_mentee or _level_lists_mentees(entry)
     if lists_mentees and _is_mentee_accomplishment(code, heading):
         return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
     if _is_named_trainee_work(code, heading, text):
