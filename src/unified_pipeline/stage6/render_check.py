@@ -393,13 +393,19 @@ def t_recovery_lines(text: str | None) -> list[str]:
     return kept
 
 
-def _line_carried(line: str, carried: set[str]) -> bool:
-    """Whether `RECLASSIFY_MIN_TOKEN_COVERAGE` of a line's letter and number
-    tokens are in `carried`. A line too short to verify counts as carried."""
-    if len(set(_RENDER_TOKEN_RE.findall(_norm(line)))) < RENDER_TOKEN_MIN_COUNT:
-        return True
-    tokens = _record_tokens(line)
-    return len(tokens & carried) / len(tokens) >= RECLASSIFY_MIN_TOKEN_COVERAGE
+def _line_carried(tokens: set[str], pooled: set[str], has_sibling: bool) -> bool:
+    """Whether a source line's `_record_tokens` survive the reply's segments.
+
+    A line with a near-duplicate sibling needs EVERY token in the pooled
+    segment tokens: the sibling's segment carries nearly all of them, so the
+    pooled share forgives a dropped row that differs from its sibling in one
+    name, amount or year (#1230). The row may be split across segments (the
+    prompt asks for one segment per responsibility); only a lost token fails.
+    Any other line needs `RECLASSIFY_MIN_TOKEN_COVERAGE` of its tokens.
+    """
+    if has_sibling:
+        return tokens <= pooled
+    return len(tokens & pooled) / len(tokens) >= RECLASSIFY_MIN_TOKEN_COVERAGE
 
 
 def segments_cover_source(segments: list[str], source_text: str) -> bool:
@@ -408,16 +414,17 @@ def segments_cover_source(segments: list[str], source_text: str) -> bool:
     `segments` is a list of segment strings. Two checks, both must pass:
     pooled distinct-token coverage (`_RENDER_TOKEN_RE` tokens of the source
     found in some segment) of at least `RECLASSIFY_MIN_TOKEN_COVERAGE`, and
-    every source line that occurs ONCE carried at that same share by the
-    segments' pooled letter and number tokens. The pooled check catches a reply
-    that stands a one-line summary in for a list ("[all 54 entries follow
-    ...]"); the per-line check catches a reply that keeps most lines and
-    summarises a few, which pooled coverage forgives (#209, #1230). A line that
-    repeats in the source is skipped: a page-break header the reply rightly
-    drops repeats, and a repeated record that matters is carried by its first
-    copy. A rejected reply is safe: the caller keeps the entry whole. A source
-    with fewer than `RENDER_TOKEN_MIN_COUNT` tokens cannot be verified either
-    way and is accepted.
+    every source line that occurs ONCE carried by the segments' letter and
+    number tokens (`_line_carried`). The pooled check catches a reply that
+    stands a one-line summary in for a list ("[all 54 entries follow ...]");
+    the per-line check catches a reply that keeps most lines and summarises a
+    few, which pooled coverage forgives (#209, #1230). A line that repeats in
+    the source is skipped: a page-break header the reply rightly drops repeats,
+    and a repeated record that matters is carried by its first copy. A line
+    that is too short to verify counts as carried. A rejected reply is safe:
+    the caller keeps the entry whole. A source with fewer than
+    `RENDER_TOKEN_MIN_COUNT` tokens cannot be verified either way and is
+    accepted.
     """
     source_tokens = set(_RENDER_TOKEN_RE.findall(_norm(source_text)))
     if len(source_tokens) < RENDER_TOKEN_MIN_COUNT:
@@ -430,7 +437,20 @@ def segments_cover_source(segments: list[str], source_text: str) -> bool:
     pooled = set().union(*(_record_tokens(segment) for segment in segments))
     lines = [line.strip() for line in str(source_text or "").split("\n") if line.strip()]
     counts = Counter(lines)
-    return all(_line_carried(line, pooled) for line in lines if counts[line] == 1)
+    all_line_tokens = [_record_tokens(line) for line in counts]
+    return all(
+        _line_carried(tokens, pooled, _has_sibling(tokens, all_line_tokens))
+        for line, tokens in zip(counts, all_line_tokens, strict=True)
+        if counts[line] == 1
+        and len(set(_RENDER_TOKEN_RE.findall(_norm(line)))) >= RENDER_TOKEN_MIN_COUNT)
+
+
+def _has_sibling(tokens: set[str], all_line_tokens: list[set[str]]) -> bool:
+    """Whether another source line holds `RECLASSIFY_MIN_TOKEN_COVERAGE` of
+    `tokens` while differing from them: a sibling row (#1230)."""
+    return any(other != tokens
+               and len(tokens & other) / len(tokens) >= RECLASSIFY_MIN_TOKEN_COVERAGE
+               for other in all_line_tokens)
 
 
 def _entry_pieces(text) -> list[str]:

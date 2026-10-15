@@ -1590,6 +1590,68 @@ def test_segments_cover_source_ignores_a_repeated_page_header_the_reply_drops():
     assert segments_cover_source(lines[:-1], source) is False
 
 
+def test_segments_cover_source_rejects_a_reply_that_drops_a_near_duplicate_sibling():
+    """Six committee rows told apart by one word: a reply that keeps five of
+    them carries 92% of the sixth row's tokens, so the pooled per-line share
+    forgave the loss. A row with a sibling needs every one of its tokens in
+    the reply (#1230)."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Member | {n} Committee | Example Department of Synthetic Geology | "
+            f"Example College of Sciences | Example University | 1987-1992" for n in names]
+    source = "\n".join(rows)
+    assert segments_cover_source(rows, source) is True
+    assert segments_cover_source(rows[:-1], source) is False
+    assert segments_cover_source(rows[1:], source) is False
+    # Two sibling rows merged into one segment still carry both whole.
+    assert segments_cover_source(["; ".join(rows[:2])] + rows[2:], source) is True
+
+
+def test_segments_cover_source_accepts_a_sibling_row_split_across_segments():
+    """The prompt asks for one segment per responsibility, so a reply that
+    keeps every token of a sibling row but splits it at its separators is a
+    faithful reply and must not be rejected (#1230). Only a lost token fails."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Director, {n} Laboratory, Example Hospital, 2004-2010; supervised residents; "
+            f"chaired the quality committee" for n in names]
+    source = "\n".join(rows)
+    split = [part for row in rows for part in row.split("; ")]
+    assert segments_cover_source(split, source) is True
+    # A split reply that loses the one word telling a sibling apart is rejected.
+    lost = [part.replace("Hyacinth", "") for part in split]
+    assert segments_cover_source(lost, source) is False
+
+
+def test_segments_cover_source_short_line_counts_as_carried():
+    """A line too short to verify (under RENDER_TOKEN_MIN_COUNT tokens) cannot
+    be held against the reply, though the long lines are all kept (#1230)."""
+    pairs = (("zeolite", "geyser"), ("marigold", "estuary"), ("quartzite", "lagoon"),
+             ("nasturtium", "tundra"), ("basalt", "savanna"), ("obsidian", "fjord"))
+    lines = [f"Doe J. Synthetic {a} and {b} outcomes {i}." for i, (a, b) in enumerate(pairs)]
+    source = "\n".join(lines + ["Page 2"])
+    assert segments_cover_source(lines, source) is True
+
+
+def test_segments_cover_source_pools_tokens_for_a_line_without_a_sibling():
+    """The all-tokens rule is for sibling rows only: a line with no near
+    duplicate keeps the pooled share, so a reply that splits it across two
+    segments, or loses one of its five tokens (0.8 carried), is still
+    believed (#1230)."""
+    triples = (("zeolite", "geyser", "basalt"), ("marigold", "estuary", "savanna"),
+               ("quartzite", "lagoon", "granite"), ("nasturtium", "tundra", "prairie"),
+               ("obsidian", "fjord", "meadow"), ("hyacinth", "glacier", "plateau"))
+    lines = [f"Synthetic {a} {b} {c} outcomes." for a, b, c in triples]
+    source = "\n".join(lines)
+    halves = [half for line in lines for half in line.split(" ", 2)]
+    assert segments_cover_source(halves, source) is True
+    # One token of a non-sibling line lost: 4 of 5 still carried, accepted.
+    # A strict all-tokens rule on every line would reject this reply.
+    lossy = [line.replace("geyser ", "") for line in lines]
+    assert segments_cover_source(lossy, source) is True
+    # Two tokens lost from the same line: 3 of 5, rejected.
+    assert segments_cover_source([line.replace("geyser ", "").replace("basalt ", "")
+                                  for line in lines[:1]] + lines[1:], source) is False
+
+
 def test_t_sibling_rows_differing_only_in_one_name_are_all_recovered():
     """Committee rows with the same years and place, told apart by one word:
     the complete row on the page must not vouch for its siblings (#1230)."""

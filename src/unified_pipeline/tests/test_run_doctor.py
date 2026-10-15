@@ -1688,15 +1688,108 @@ def test_unrendered_records_reads_a_sub_point_as_delivered():
     assert one[0]["evidence"] == [_ROW_FOXGLOVE[:100]]
 
 
-def test_unrendered_records_skips_single_record_and_appendix_entries():
+def test_unrendered_records_skips_single_record_and_short_appendix_entries():
     blocks = [("p", "D. GRANTS"), ("table", _ROW_HARBORVIEW)]
     # One record line: not a fused candidate, even though it never rendered.
     single = _entry(_ROW_SILVERLAKE + "\nNarrative description of the award.",
                     start=7, taxonomy_code="M2C")
-    # 'T' catch-all is skipped whatever its shape.
-    fused_t = _entry(_ROW_SILVERLAKE + "\n" + _ROW_FOXGLOVE,
+    # A 'T' entry under the Appendix cap is rendered whole: nothing to verify.
+    short_t = _entry("Foxglove Grant | 2025\nSilverlake Award | 2024",
                      start=9, taxonomy_code="T")
-    assert lint_unrendered_records({"entries": [single, fused_t]}, blocks) == []
+    assert lint_unrendered_records({"entries": [single, short_t]}, blocks) == []
+
+
+_T_ROWS = (_ROW_SILVERLAKE, _ROW_FOXGLOVE, _ROW_BLUERIDGE)
+
+
+def test_unrendered_records_flags_a_long_t_entry_whose_records_are_absent():
+    # #1230: the doctor skipped every T entry, so a fused T entry whose records
+    # reached no page raised no finding.
+    stage4 = {"entries": [_entry("\n".join(_T_ROWS), start=9, taxonomy_code="T")]}
+    blocks = [("p", "APPENDIX"), ("table", _ROW_HARBORVIEW)]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert len(findings) == 1
+    assert "entry 9 (T): 3 of 3 records absent" in findings[0]["message"]
+    assert findings[0]["evidence"] == [row[:100] for row in _T_ROWS]
+
+
+def test_unrendered_records_quiet_when_a_long_t_entry_renders_in_the_appendix():
+    stage4 = {"entries": [_entry("\n".join(_T_ROWS), start=9, taxonomy_code="T")]}
+    blocks = [("p", "APPENDIX")] + [("p", row) for row in _T_ROWS]
+    assert lint_unrendered_records(stage4, blocks) == []
+
+
+def test_unrendered_records_t_sibling_rows_are_judged_whole():
+    # Rows told apart by one word: the row on the page does not vouch for its
+    # siblings, and a row a non-T entry renders is not lost (#1230).
+    rows = [f"Member | {name} Committee | Example Department of Synthetic Geology | "
+            f"Example College of Sciences | Example University | 1987-1992"
+            for name in ("Zeolite", "Marigold", "Quartzite")]
+    stage4 = {"entries": [_entry("\n".join(rows), start=9, taxonomy_code="T")]}
+    findings = lint_unrendered_records(stage4, [("p", rows[0])])
+    assert "2 of 3 records absent" in findings[0]["message"]
+    own_entry = _entry(rows[1], start=3, taxonomy_code="P")
+    findings = lint_unrendered_records({"entries": [stage4["entries"][0], own_entry]},
+                                       [("p", rows[0]), ("p", rows[1])])
+    assert "1 of 3 records absent" in findings[0]["message"]
+    assert findings[0]["evidence"] == [rows[2][:100]]
+
+
+def test_unrendered_records_t_entry_with_one_candidate_line_stays_quiet():
+    # #1230: stage 6's recovery also recovers a single-record long T entry, but
+    # the doctor reports a T entry only at UNRENDERED_MIN_RECORD_LINES or more.
+    prose = ("Served as the principal organizer of the annual synthetic geology "
+             "symposium and mentored junior colleagues through the faculty "
+             "development program over many years of sustained service")
+    stage4 = {"entries": [_entry(prose + "\n" + _ROW_SILVERLAKE, start=9, taxonomy_code="T")]}
+    assert lint_unrendered_records(stage4, [("p", "APPENDIX")]) == []
+
+
+def test_unrendered_records_t_row_a_non_t_entry_carries_is_not_lost():
+    # #1230: a T row that is a line of a non-T entry has its own entry, so the
+    # page lacking it as a verbatim line (the entry reformats it) is not a T
+    # loss. Nothing on the page vouches for the row except that entry.
+    own = _entry(_ROW_FOXGLOVE + " Renewal pending.", start=3, taxonomy_code="P")
+    t_entry = _entry("\n".join(_T_ROWS), start=9, taxonomy_code="T")
+    blocks = [("p", "APPENDIX")]
+    alone = lint_unrendered_records({"entries": [t_entry]}, blocks)
+    assert "3 of 3 records absent" in alone[0]["message"]
+    both = lint_unrendered_records({"entries": [t_entry, own]}, blocks)
+    assert "2 of 3 records absent" in both[0]["message"]
+    assert _ROW_FOXGLOVE[:100] not in both[0]["evidence"]
+
+
+def test_unrendered_records_reads_a_sub_point_as_delivered_for_a_t_entry():
+    # #1205 + #1230: a T record offered as a tracked-deleted sub-point is
+    # delivered for review, not absent.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    stage4 = {"entries": [_entry("\n".join(_T_ROWS), start=9, taxonomy_code="T")]}
+    blocks = [("p", "APPENDIX")]
+    assert lint_unrendered_records(stage4, blocks, subpoint_text(list(_T_ROWS))) == []
+    one = lint_unrendered_records(stage4, blocks, subpoint_text([_ROW_SILVERLAKE, _ROW_FOXGLOVE]))
+    assert "1 of 3 records absent" in one[0]["message"]
+    assert one[0]["evidence"] == [_ROW_BLUERIDGE[:100]]
+
+
+def test_unrendered_records_reads_a_t_entry_as_stage_6_renders_it_after_the_pii_pass():
+    # A referee's email is cut from an Appendix-bound entry, so the page holds
+    # the residual of each line, not the line: not a loss (#1230).
+    refs = [f"Email: {user}@example-clinic.org\tDr. {name} Fairweather, Chair of the Department of Synthetic Geology, Example Clinic of Sciences"
+            for user, name in (("a.hargreave", "Ada"), ("b.lindqvist", "Bram"), ("c.okonkwo", "Cleo"))]
+    stage4 = {"entries": [_entry("\n".join(refs), start=9, taxonomy_code="T")]}
+    residual = [("p", f"Dr. {name} Fairweather, Chair of the Department of Synthetic Geology, Example Clinic of Sciences") for name in ("Ada", "Bram", "Cleo")]
+    assert lint_unrendered_records(stage4, residual) == []
+
+
+def test_unrendered_records_ignores_header_rows_of_a_t_entry():
+    # A header row stage 3b confirmed is what the Appendix deliberately omits,
+    # so it is not a record to look for (#1230).
+    header_rows = ["Years Inclusive | Grant Number and Title | Source | Annual Direct Costs",
+                   "Years Inclusive | Years Inclusive | Grant Number and Title | Source"] * 4
+    entry = _entry("\n".join(header_rows), start=9, taxonomy_code="T",
+                   classification_reasoning="[T-validation confirmed] Column header row - structural artifact")
+    assert lint_unrendered_records({"entries": [entry]}, [("p", "APPENDIX")]) == []
 
 
 # A record whose tokens split across the cells of ONE structured table row:

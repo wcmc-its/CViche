@@ -11,6 +11,7 @@ module, so they move together and stop being module-global.
 
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
+import copy
 import functools
 import json
 import re
@@ -41,15 +42,28 @@ from unified_pipeline.stage6.parsing import (
     _mid_sentence_joins,
     _refold_shattered,
 )
+from unified_pipeline.stage6.pii_pass import run_pii_pass
 from unified_pipeline.stage6.render_check import (
+    _record_tokens,
+    _whole_record_rendered,
     segment_already_rendered,
     segment_held_by_fields,
+)
+from unified_pipeline.stage6.sections.appendix import (
+    _TRUNCATION_MARKER,
+    other_entry_line_tokens,
+    recovery_candidates,
+    t_line_is_scaffolding,
 )
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
     _license_record,
     _normalize_licensure_entry,
+)
+from unified_pipeline.stage_6_word_template import (
+    RENDER_ROUTED_CODES,
+    TAXONOMY_TO_SECTION,
 )
 
 from ..shared import (
@@ -601,13 +615,67 @@ def _record_rendered(line: str, haystack: str,
     return rendered
 
 
+class _TVouching(NamedTuple):
+    """What vouches for a T-coded record line in the rendered output (#1230),
+    built once per document, as `_recover_unrendered_records` builds it."""
+    line_tokens: list[set[str]]  # `_record_tokens` of each whole output line
+    cut_tokens: list[set[str]]   # of lines the Appendix cap cut, plus the lines of non-T entries
+
+
+def _as_rendered(entries: list[dict]) -> list[dict]:
+    """Copies of stage-4 entries with the protected-data pass applied, as
+    stage 6 sees them: a referee's email or phone is cut from a T entry before
+    it renders, so a line carrying one is not lost when the page lacks it.
+    The pass sees the stage-4 code, not the one `generate()` routes to after
+    its reroutes (`normalize_retired_code` and the like), so a rerouted
+    entry's protected-data scope can differ from stage 6's."""
+    seen = copy.deepcopy(entries)
+    by_code: dict[str, list[dict]] = defaultdict(list)
+    for entry in seen:
+        by_code[entry.get("taxonomy_code") or "?"].append(entry)
+    run_pii_pass(by_code, routed_codes=RENDER_ROUTED_CODES, section_names=TAXONOMY_TO_SECTION)
+    return seen
+
+
+def _t_vouching(entries: list[dict], blocks: list[tuple[str, str]]) -> _TVouching:
+    """A line the Appendix cap cut may have lost the tail of its record, so it
+    vouches only for a line it carries in full; so does a line of a non-T
+    entry, which is a record with its own entry."""
+    lines = [line for _, text in blocks for line in str(text).split("\n")
+             if line.strip()]
+    by_code: dict[str, list[dict]] = defaultdict(list)
+    for entry in entries:
+        by_code[entry.get("taxonomy_code") or "?"].append(entry)
+    return _TVouching(
+        [_record_tokens(line) for line in lines if not line.endswith(_TRUNCATION_MARKER)],
+        [_record_tokens(line) for line in lines if line.endswith(_TRUNCATION_MARKER)]
+        + other_entry_line_tokens(by_code))
+
+
+def _t_absent_records(entry: dict, haystack: str,
+                      vouching: _TVouching) -> tuple[list[str], list[str]]:
+    """(records, absent) of a long T-coded entry: the lines stage 6's own
+    recovery pass looks for (`recovery_candidates`), minus what the Appendix
+    deliberately omits, and those that fail `_whole_record_rendered`."""
+    records = [line for line in recovery_candidates("T", entry)
+               if not t_line_is_scaffolding(line, entry)]
+    absent = [line for line in records
+              if _whole_record_rendered(line, haystack, vouching.line_tokens,
+                                        vouching.cut_tokens) is False]
+    return records, absent
+
+
 def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
                             subpoints: SubpointText | None = None) -> list[dict]:
     """Per-record render check over fused multi-record stage-4 entries: the
     structured-fields-only render paths keep the extracted record and drop
     the unextracted remainder lines with no bullet fallback (#221). No
-    element_type filter — the KFGXBW loss was on a 'break' entry; 'T' is
-    skipped (appendix catch-all).
+    element_type filter -- the KFGXBW loss was on a 'break' entry.
+
+    A T entry is checked too when it holds `UNRENDERED_MIN_RECORD_LINES` or
+    more record lines (`_t_absent_records`): the Appendix renders its body
+    whole, but an overflow re-split or dedup can still drop a record, and
+    stage 6's own recovery looks for the same lines (#1230).
 
     `subpoints` (optional: the rendered docx's sub-points): a record line a
     tracked-deleted sub-point offers (#1205) is delivered for review, not
@@ -618,24 +686,30 @@ def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
     # scattered across unrelated sections can't vouch for a dropped record.
     h = _haystacks(blocks)
     output = _rendered_lines(blocks)
+    entries = stage4.get("entries", [])
+    as_rendered = _as_rendered(entries)
+    vouching = _t_vouching(as_rendered, blocks)
     findings = []
-    for e in stage4.get("entries", []):
+    for e, seen in zip(entries, as_rendered, strict=True):
         code = e.get("taxonomy_code")
         if code == "T":
-            continue
-        # Records stage 4 kept under `stage4_records` render as rows of their
-        # own, not as the entry's tab parts.
-        fields = e.get("extracted_fields") or {}
-        split_by_stage4 = STAGE4_RECORDS_KEY in fields
-        read_lines = _record_lines if split_by_stage4 else _tab_aware_record_lines
-        records = read_lines(e.get("text"))
-        tab_parts = set() if split_by_stage4 else _tab_parts(e.get("text"))
-        if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
-            continue
-        absent = [r for r in records
-                  if _record_rendered(r, h.text, output) is False
-                  and not offered_as_subpoint(r, subpoints)
-                  and not (r in tab_parts and _held_by_extraction(r, fields))]
+            records, absent = _t_absent_records(seen, h.text, vouching)
+            if len(records) < UNRENDERED_MIN_RECORD_LINES:
+                continue
+        else:
+            # Records stage 4 kept under `stage4_records` render as rows of their
+            # own, not as the entry's tab parts.
+            fields = e.get("extracted_fields") or {}
+            split_by_stage4 = STAGE4_RECORDS_KEY in fields
+            read_lines = _record_lines if split_by_stage4 else _tab_aware_record_lines
+            records = read_lines(e.get("text"))
+            tab_parts = set() if split_by_stage4 else _tab_parts(e.get("text"))
+            if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
+                continue
+            absent = [r for r in records
+                      if _record_rendered(r, h.text, output) is False
+                      and not (r in tab_parts and _held_by_extraction(r, fields))]
+        absent = [r for r in absent if not offered_as_subpoint(r, subpoints)]
         if not absent:
             continue
         findings.append(_finding(
