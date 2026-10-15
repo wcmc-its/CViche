@@ -116,10 +116,12 @@ _OWNER_MENTORED_RE = re.compile(
 #: Advising and supervising students is mentoring the CV records: HNQBOI
 #: (YUYVIG) lists faculty-advisor supervision of five student projects, and
 #: the lint called its mentoring sentence unsupported (#1554). Not a bare
-#: "Supervisor:", which names the owner's own supervisor (held-out web206).
+#: "Supervisor:", which names the owner's own supervisor (held-out web206),
+#: nor a "thesis", "research" or "academic" advisor, which usually does too.
+#: Not "Faculty Advisory Group", a committee (FVQANK).
 _MENTORING_SUPPORT_RE = re.compile(
     r"\b(?:mentor\w*|mentee\w*|trainee\w*|precept\w*|advisee\w*"
-    r"|(?:faculty|thesis|research|academic)\s+advis[eo]r\w*|student\s+projects?"
+    r"|faculty\s+advis[eo]rs?\b|student\s+projects?"
     r"|supervis(?:ed|ing|ion\s+of)\s+(?:\w+\s+){0,3}"
     r"(?:students?|residents?|fellows?|trainees?|theses|thesis|projects?)\b)", re.IGNORECASE)
 
@@ -319,6 +321,11 @@ _TITLE_STOPWORDS = frozenset((
 _MIN_SHARED_TITLE_WORDS = 3
 _MIN_TITLE_SHARE = 0.5
 _MAX_WORD_GAP = 4
+#: A one-word title, or a one-word agency, names no grant: a single word
+#: recurs in any research sentence.
+_MIN_NAMING_WORDS = 2
+#: An acronym of one letter matches any capital.
+_MIN_ACRONYM_LETTERS = 2
 #: How far, in characters, a status word reaches to the grant it describes:
 #: one before it ("completed studies of <title words>") further than one after
 #: it ("<title words>, completed in 2020"). And how far a lead-role claim
@@ -342,6 +349,8 @@ _CLAUSE_BREAK_RE = re.compile(
 #: such year is how recent the CV is.
 _CV_DATE_FIELDS = ("year", "start_date", "date")
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+#: A CV that reaches only an earlier year is current to that year's last day.
+_YEAR_END_MONTH, _YEAR_END_DAY = 12, 31
 #: A count over awards ("three consecutive awards", "two fellowships"), with no
 #: comma or semicolon between it and the end of the words searched.
 _COUNT_RE = re.compile(
@@ -469,7 +478,7 @@ def _cv_date(stage_4: Mapping, written: date | None) -> date | None:
              for y in _YEAR_RE.findall(_field(entry.fields, name)) if int(y) <= written.year]
     if not years or max(years) >= written.year:
         return written
-    return date(max(years), 12, 31)
+    return date(max(years), _YEAR_END_MONTH, _YEAR_END_DAY)
 
 
 def _grant_ended(fields: Mapping, as_of: date | None) -> bool | None:
@@ -513,7 +522,7 @@ def _title_mention(grant: _Grant, words: Sequence[re.Match]) -> _Mention | None:
     """Where the sentence names the grant's title, else None: the run of its
     words holding the most title words, as `words`, and as the span, that run
     cut back to the fewest words that still name the title."""
-    if len(grant.title_stems) < 2:
+    if len(grant.title_stems) < _MIN_NAMING_WORDS:
         return None
     needed = max(min(_MIN_SHARED_TITLE_WORDS, len(grant.title_stems)),
                  _MIN_TITLE_SHARE * len(grant.title_stems))
@@ -581,7 +590,7 @@ def _agency_groups(sentence: str, grants: Sequence[_Grant]) -> list[_MentionGrou
     lowered = sentence.lower()
     for grant in grants:
         agency = grant.agency.strip(" .").lower()
-        if len(_title_stems(agency)) < 2:
+        if len(_title_stems(agency)) < _MIN_NAMING_WORDS:
             continue
         at = lowered.find(agency)
         if at >= 0 and _GRANT_CUE_RE.search(sentence, max(at - _CUE_REACH, 0), at + len(agency) + _CUE_REACH):
@@ -676,7 +685,7 @@ def _names_funder(funder: str, record_text: str) -> bool:
     if stems and stems <= _title_stems(record_text):
         return True
     acronym = funder if not stems else "".join(w[0] for w in funder.split() if w[:1].isupper())
-    return len(acronym) >= 2 and re.search(rf"\b{re.escape(acronym)}\b", record_text) is not None
+    return len(acronym) >= _MIN_ACRONYM_LETTERS and re.search(rf"\b{re.escape(acronym)}\b", record_text) is not None
 
 
 class _FunderPhrase(NamedTuple):

@@ -299,6 +299,10 @@ def test_an_old_cv_is_judged_as_of_its_own_date_for_current_and_now_for_complete
     for sentence in (f"I currently serve as PI on {_TITLE}.", f"I completed {_TITLE}."):
         stage4 = _stage4(grant, _cv_year(2018))
         assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), stage4)) == {}, sentence
+    sentence = f"I currently serve as PI on {_TITLE}."
+    ended_that_year = _stage4(_grant(start_date="2015-01", end_date="2018-06", role="PI"), _cv_year(2018))
+    assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), ended_that_year)) == {
+        CLAIM_GRANT_STATUS: [sentence]}
 
 
 def test_status_is_not_judged_without_a_summary_date():
@@ -408,7 +412,8 @@ def test_funder_matches_by_initials_punctuation_or_a_known_spelling():
     for sentence, agency in ((f"I hold a National Widget Institute-funded award on {_TITLE}.", "NWI"),
                              (f"I hold an N.I.H./NHLBI-funded award on {_TITLE}.", "N.I.H/NHLBI"),
                              (f"I hold a PCORI-funded award on {_TITLE}.",
-                              "Patient Centered Outcomes Research Institute")):
+                              "Patient Centered Outcomes Research Institute"),
+                             (f"I hold a Widget Foundation-funded award on {_TITLE}.", "WF")):
         stage4 = _stage4(_grant(agency=agency))
         assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), stage4)) == {}, agency
 
@@ -459,11 +464,15 @@ def test_owner_mentoring_in_research_activities_or_advising_supports_a_mentoring
     for entry in (_entry("M1", "2010-present Widget study. Faculty mentored analysis of folding data."),
                   _entry("M1", "2009-present Gadget study, a project with dental students C. and D."),
                   _entry("K1", "Faculty advisor for five student projects on gadgets."),
+                  _entry("K1", "Faculty Advisor and Investigator, undergraduate widget research."),
                   _entry("K1", "Supervised three medical students' theses.")):
         assert lint_summary_unsupported_claim(_summary(_MENTORING_SENTENCE), _stage4(entry)) == [], entry
-    supervisor = _entry("D3", "Research assistant, Widget Lab. Supervisor: C. D., Ph.D.")
-    (finding,) = lint_summary_unsupported_claim(_summary(_MENTORING_SENTENCE), _stage4(supervisor))
-    assert _claims([finding]) == [f"claim={CLAIM_MENTORING}"]
+    for own in (_entry("D3", "Research assistant, Widget Lab. Supervisor: C. D., Ph.D."),
+                _entry("A1", "PhD, Widget Science, 2010. Thesis advisor: Prof. E. F."),
+                _entry("A1", "MS, Gadget Studies, 2006. Research advisor: G. H."),
+                _entry("P", "Member, Dean's Faculty Advisory Group, 2019-present.")):
+        (finding,) = lint_summary_unsupported_claim(_summary(_MENTORING_SENTENCE), _stage4(own))
+        assert _claims([finding]) == [f"claim={CLAIM_MENTORING}"], own
 
 
 def test_presence_findings_stay_warn_and_per_claim_findings_info():
