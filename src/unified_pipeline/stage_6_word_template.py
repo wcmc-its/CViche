@@ -4029,8 +4029,10 @@ Now analyze the text above:"""
                             continue
                         if line in tab_parts and segment_held_by_fields(line, fields):
                             continue  # a tab part of the record stage 4 extracted (#1243)
-                        if line in tab_parts and _tab_part_recovered(line, part_token_sets):
-                            continue  # the same part, recovered from an earlier entry
+                        if _tab_part_recovered(line, part_token_sets):
+                            # The same record, recovered earlier as a tab part
+                            # (this line may be a tab part or a plain line).
+                            continue
                         if segment_already_rendered(line, fields):
                             # The record that DID render from extracted fields: a
                             # grant table splits its tokens across label/value

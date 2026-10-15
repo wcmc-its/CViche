@@ -273,6 +273,25 @@ def test_a_tab_part_recovered_from_one_entry_vouches_for_its_duplicate_in_anothe
     assert gen.stats["unrendered_records_recovered"] == 2
 
 
+@pytest.mark.parametrize("tab_first", [True, False])
+def test_a_record_recovered_as_a_tab_part_is_not_rewritten_from_a_newline_entry(tab_first):
+    # #1243: the same records, fused by tabs in one entry and one per line in
+    # another; each is written once whichever entry the pass reads first.
+    gen = _generator()
+    parts = ("2015-2017 Chair, Program Committee of the Quokka Society",
+             "2012-2014 Treasurer of the Wombat Panel")
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+    newline_entry = {"taxonomy_code": "Q1", "text": "\n".join(parts), "extracted_fields": {}}
+    entries = [_quokka_entry(*parts), newline_entry]
+
+    gen._recover_unrendered_records({"Q1": entries if tab_first else entries[::-1]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    for part in parts:
+        assert sum(part in t for t in bullets) == 1
+    assert gen.stats["unrendered_records_recovered"] == 2
+
+
 def test_a_recovered_tab_part_does_not_vouch_for_a_later_entry_that_differs_in_its_years():
     # #1243: two entries of one society share their vocabulary; the second
     # one's part carries other years, so it is its own record.
