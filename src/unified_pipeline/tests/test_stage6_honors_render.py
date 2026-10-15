@@ -525,6 +525,59 @@ def test_an_entry_with_no_extracted_award_is_never_read_as_one_award():
     assert rows[1][2] == "2015"
 
 
+def _award_over_program_line(second_line, **fields):
+    record = {"award_name": "Made-up Award for Pretend Outreach",
+              "granting_body": "Fictional Agency", "date": "2005", **fields}
+    return _render_honors([_h_entry(
+        "Fictional Agency Made-up Award for Pretend Outreach (2005)\n" + second_line,
+        **record)])
+
+
+def test_the_dated_program_line_of_an_award_joins_its_name():
+    """#1245 (X6 KJJVVO 286): the award's own line is dated, so the entry
+    read as a list, and the program the award went to rendered as a second
+    award row with an empty organization."""
+    assert _award_over_program_line("Imaginary Outreach Program — 02/07/2005") == [
+        ["Made-up Award for Pretend Outreach - Imaginary Outreach Program",
+         "Fictional Agency", "2005"]]
+
+
+def test_a_second_line_naming_an_award_noun_stays_its_own_award():
+    # The list reading keeps a line's own text, date included, as before.
+    rows = _award_over_program_line("Imaginary Service Medal — 02/07/2005")
+    assert [row[0] for row in rows] == [
+        "Made-up Award for Pretend Outreach", "Imaginary Service Medal — 02/07/2005"]
+
+
+def test_an_undated_second_line_stays_its_own_row():
+    rows = _award_over_program_line("Imaginary Outreach Program")
+    assert [row[0] for row in rows] == [
+        "Made-up Award for Pretend Outreach", "Imaginary Outreach Program"]
+
+
+def test_a_second_line_dated_another_year_stays_its_own_row():
+    rows = _award_over_program_line("Imaginary Outreach Program — 02/07/2009")
+    assert [row[0] for row in rows] == [
+        "Made-up Award for Pretend Outreach", "Imaginary Outreach Program — 02/07/2009"]
+
+
+def test_only_two_lines_one_naming_the_award_with_no_date_cell_join():
+    for second_line in ("Imaginary Outreach Program — 02/07/2005\n"
+                        "Pretend Clinic Initiative — 03/09/2005",
+                        "Imaginary Outreach Program\t2005"):
+        rows = _award_over_program_line(second_line)
+        assert len(rows) == len(second_line.split("\n")) + 1, second_line
+    # Both lines name stage 4's award: one award won twice, two rows.
+    rows = _award_over_program_line("Made-up Award for Pretend Outreach — 02/07/2005")
+    assert [row[0] for row in rows] == ["Made-up Award for Pretend Outreach"] * 2
+
+
+def test_a_dated_granting_body_line_is_not_a_program():
+    rows = _award_over_program_line("Fictional Agency — 02/07/2005")
+    assert all(not row[0].endswith("-") for row in rows)
+    assert rows[0] == ["Made-up Award for Pretend Outreach", "Fictional Agency", "2005"]
+
+
 def test_a_fanned_out_child_is_one_row_with_its_own_dates():
     """ZCTARO-04: fan-out gives the first record the built line "Award | Org |
     YYYY-MM | YYYY-MM", which the '|' parser split into four rows, and the

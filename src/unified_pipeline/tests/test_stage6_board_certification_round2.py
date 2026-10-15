@@ -39,6 +39,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _split_multi,
     _with_recertification,
 )
+from unified_pipeline.stage6.fan_out import LAST_STAGE4_RECORD  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -1453,6 +1454,58 @@ class TestRecertificationIsNeverTheRangeEnd:
         gen = _generator()
         gen._fill_board_certification([_certification("Example Board of Testing", "2005", "2015")])
         assert _rows_after_board(gen) == [("Example Board of Testing", "A12345", "2005 (recertified 2015)")]
+
+
+class TestEveryRecertificationYearOnTheLine:
+    """#1245 (X6 UXBHHF 123): `recertification_date` holds one value, so a
+    line naming two recertifications kept the last and lost the other.
+    Invented values."""
+
+    _LINE = "Example Board 2012-current\tBoard certified 2012\tRecertification 2015\tRecertification 2018"
+
+    def _dates(self, recertified, text, own_line=True):
+        fields = {"year_certified": "2012", "recertification_date": recertified}
+        return _format_certification_date_str(fields, text, own_line=own_line)
+
+    def test_each_recertification_the_line_names_is_listed(self):
+        assert self._dates("2018", self._LINE) == "2012 (recertified 2015, 2018)"
+
+    def test_a_listed_run_after_one_recertification_word_is_read(self):
+        assert self._dates("2016", "Example Board 2012 (recertified 2014 and 2016)") \
+            == "2012 (recertified 2014, 2016)"
+
+    def test_the_years_are_listed_oldest_first(self):
+        assert self._dates("2015", "Example Board 2012; Recertified 2018; Recertified 2015") \
+            == "2012 (recertified 2015, 2018)"
+
+    def test_a_year_after_another_word_is_not_a_recertification(self):
+        assert self._dates("2017", "Example Board 2012\tRecertification: 2017 (Expires 2027)") \
+            == "2012 (recertified 2017)"
+
+    def test_a_line_that_does_not_name_stage_4s_year_is_not_read(self):
+        assert self._dates("2019", self._LINE) == "2012 (recertified 2019)"
+
+    def test_a_line_that_is_not_the_records_own_is_not_read(self):
+        assert self._dates("2018", self._LINE, own_line=False) == "2012 (recertified 2018)"
+
+    def test_the_rendered_row_lists_both_recertifications(self):
+        gen = _generator()
+        entry = _certification("Example Board of Testing", "2012", "2018")
+        entry["text"] = self._LINE
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2012 (recertified 2015, 2018)")]
+
+    def test_a_fanned_record_does_not_take_its_siblings_years(self):
+        # XAYKXA 124: the last of stage 4's records carries the parent's
+        # whole line, whose other year is the sibling record's.
+        gen = _generator()
+        entry = _certification("Example Board of Testing", "2012", "2018")
+        entry["text"] = self._LINE
+        entry[LAST_STAGE4_RECORD] = {}
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2012 (recertified 2018)")]
 
 
 class TestYearLedFusedRowRendersItsStructuredFields:

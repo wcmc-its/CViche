@@ -375,6 +375,13 @@ def test_a_talk_without_further_dates_keeps_its_own_cell():
     assert _rendered_date(date="2018") == "2018"
 
 
+def test_a_list_of_dates_under_date_renders_each_year_not_the_iso_string():
+    """#1245 (OIEPQD GOWQKA 531/533): stage 4 wrote "1999-09-30; 1999-10-14;
+    1999-10-26" into `date`, and the yyyy column showed that string."""
+    assert _rendered_date(date="1999-09-30; 1999-10-14; 1999-10-26") == "1999"
+    assert _rendered_date(date="1997-10-15; 1998-10-22") == "1997, 1998"
+
+
 
 # #1436: an event-status note on the source line has no R field, so stage 4
 # drops it and a postponed talk rendered as delivered (NDMRSO TVZDVF 451/494).

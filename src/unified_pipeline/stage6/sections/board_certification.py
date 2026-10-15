@@ -55,6 +55,7 @@ from typing import Literal
 
 from unified_pipeline.core.render_check import entry_lines
 
+from ..fan_out import is_split_record
 from ..formatting import _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
 
@@ -201,7 +202,8 @@ def _board_cell_text(fields: dict) -> str:
     return board
 
 
-def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
+def _format_certification_date_str(fields: dict, source_text: str = '',
+                                   own_line: bool = False) -> str:
     """Build the F2 "yyyy-yyyy" (or "yyyy-Present") date string for one
     entry's structured fields.
 
@@ -215,7 +217,11 @@ def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
 
     `recertification_date` is never the end of the range (EBYSBC E33, #1245)
     unless the entry's `source_text` writes the two years as one range: see
-    `_with_recertification`.
+    `_with_recertification`. `own_line` says `source_text` is this one
+    certification's line, so the further recertification years it names are
+    this record's (`_every_recertification_year`); a fused line or a fanned
+    record's parent line names other records' years, so the callers for
+    those leave it False.
     """
     start_date = fields.get('start_date') or fields.get('year_certified') or ''
     end_date = fields.get('end_date') or ''
@@ -232,7 +238,8 @@ def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
         return start_fmt
     if start_fmt and recertification_date:
         recert_fmt = format_date_for_section(recertification_date, 'F2')
-        return _with_recertification(start_fmt, recert_fmt, source_text)
+        return _with_recertification(start_fmt, recert_fmt, source_text,
+                                     own_line=own_line)
     if start_fmt:
         return start_fmt
     if end_fmt:
@@ -258,8 +265,40 @@ def _cv_states_the_range(start_fmt: str, recert_fmt: str, source_text: str) -> b
     return re.search(pattern, str(source_text)) is not None
 
 
+# The years the source line names straight after a recertification word:
+# "Recertification 2015", "recertified 1999, 2006 and 2016",
+# "Recertification: 2017 (Expires 2027)" (2017 only).
+_YEAR = r'(?:19|20)\d{2}'
+_RECERTIFICATION_YEARS_RE = re.compile(
+    rf'\brecertif\w*[\s:]*(?:in\s+)?({_YEAR}(?:\s*(?:,|;|&|\band\b)\s*{_YEAR})*)\b',
+    re.IGNORECASE)
+_LISTED_YEAR_RE = re.compile(_YEAR)
+# How the Dates cell joins several recertification years.
+_RECERTIFICATION_YEAR_JOIN = ', '
+
+
+def _every_recertification_year(recert_fmt: str, source_text: str) -> str:
+    """Every recertification year the source line names, oldest first,
+    when stage 4 kept only one of them.
+
+    `recertification_date` holds one value, so a line "Board certified 2012
+    / Recertification 2015 / Recertification 2018" kept 2018 and lost 2015
+    (X6 UXBHHF 123, #1245). The other years are read only when stage 4's
+    year is one of them, so a year from another clause is never added;
+    anything else returns `recert_fmt` unchanged.
+    """
+    years = list(dict.fromkeys(
+        year
+        for match in _RECERTIFICATION_YEARS_RE.finditer(str(source_text))
+        for year in _LISTED_YEAR_RE.findall(match.group(1))))
+    if recert_fmt not in years:
+        return recert_fmt
+    return _RECERTIFICATION_YEAR_JOIN.join(sorted(years))
+
+
 def _with_recertification(
     start_fmt: str, recert_fmt: str, source_text: str = '', current_year: int | None = None,
+    own_line: bool = False,
 ) -> str:
     """The Dates cell for a certification with a recertification value and
     no stated end.
@@ -289,6 +328,8 @@ def _with_recertification(
         return f"{start_fmt}-{recert_fmt}"
     if _cv_states_the_range(start_fmt, recert_fmt, source_text):
         return f"{start_fmt}-{recert_fmt}"
+    if own_line:
+        recert_fmt = _every_recertification_year(recert_fmt, source_text)
     if recert_fmt[0].isdigit():
         return f"{start_fmt} (recertified {recert_fmt})"
     return f"{start_fmt} (recertification: {recert_fmt})"
@@ -719,7 +760,8 @@ class BoardCertificationSection:
                     self._parse_and_add_multiple_certifications(table, original_text, entry)
                 else:
                     # Single certification - format dates as yyyy-yyyy per WCM template
-                    date_str = _format_certification_date_str(fields, original_text)
+                    date_str = _format_certification_date_str(
+                        fields, original_text, own_line=not is_split_record(entry))
                     self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
             else:
                 # No structured fields - try to parse from text

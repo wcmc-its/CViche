@@ -552,6 +552,26 @@ def extra_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]
     return extras
 
 
+def format_date_list(value: object, taxonomy_code: str) -> str:
+    """A schema date field that holds a list of dates ("1999-09-30;
+    1999-10-14"), each item formatted for the section, joined with
+    `DATE_SPAN_SEPARATOR` with repeats dropped; '' for a value that is not
+    such a list (a single date, or any item not a date or a range).
+
+    `format_date_for_section` returns an unparseable string as-is, so a list
+    of ISO dates under R's `date` rendered verbatim in a yyyy column (OIEPQD
+    GOWQKA 531/533, #1245)."""
+    spans = _date_only_spans(value)
+    if len(spans) < 2:
+        return ''
+    shown: list[str] = []
+    for span in spans:
+        text = _format_span(span, taxonomy_code)
+        if text and text not in shown:
+            shown.append(text)
+    return DATE_SPAN_SEPARATOR.join(shown)
+
+
 def further_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
     """Every further span of the record (`_extra_spans`), formatted, in
     stage 4's order less repeats. For a renderer whose own date is a single
