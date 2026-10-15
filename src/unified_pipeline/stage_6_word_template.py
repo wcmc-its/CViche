@@ -636,6 +636,13 @@ OVERFLOW_KL_MAX_COVERAGE_PCT = 50
 OVERFLOW_KL_MIN_CHARS = 300
 OVERFLOW_OTHER_MAX_COVERAGE_PCT = 15
 OVERFLOW_OTHER_MIN_CHARS = 1000
+# M1 (Research Activities) never takes the overflow either. The research summary
+# or `_m1_appendix_entries` decides where an M1 entry goes, so its text belongs in
+# the summary or whole in the Appendix. The reconsider pass would split it and
+# route its sentences as bullets under unrelated headings (#1572 WWRSAL-03: entry
+# 64 under Academic Appointments, Current Funding, Leadership and Clinical
+# Innovations, with its Appendix line cut mid-word).
+_NO_OVERFLOW_CODE = 'M1'
 
 
 def _has_formatted_text(entry: Mapping[str, Any]) -> bool:
@@ -650,14 +657,14 @@ def is_overflow_candidate(entry: Mapping[str, Any]) -> bool:
     before the check that its paragraphs already show most of its text.
 
     K and S entries never qualify (free-form teaching text; bibliography uses
-    enrichment), nor does one stage 5c formatted. A coverage of 0 or None reads
+    enrichment), nor does M1 (`_NO_OVERFLOW_CODE`), nor one stage 5c formatted. A coverage of 0 or None reads
     as unknown and does not qualify. The Appendix also reads this: an entry
     that qualifies is re-split by the reconsider pass, so its Appendix line
     stays a capped pointer; every other Appendix line renders whole (#1230,
     #1555).
     """
     code = str(entry.get('taxonomy_code') or '')
-    if code.startswith(('K', 'S')) or _has_formatted_text(entry):
+    if code.startswith(('K', 'S')) or code == _NO_OVERFLOW_CODE or _has_formatted_text(entry):
         return False
     coverage = rendered_extraction_coverage(entry) or {}
     pct = coverage.get('extraction_coverage_percent', 100)
