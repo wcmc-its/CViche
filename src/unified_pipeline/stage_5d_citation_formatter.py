@@ -39,6 +39,7 @@ from unified_pipeline.core.batch_pool import (
 from unified_pipeline.core.text_norm import is_placeholder_title
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.log_redaction import redacted_error_label
 
 logger = logging.getLogger(__name__)
 
@@ -686,8 +687,9 @@ def call_llm_formatter(raw_content: str) -> tuple:
     except Exception as e:
         # call_llm_formatter can run on a pool thread (#881 step 6), so this
         # log call is the only trace a swallowed batch (#810) leaves in the
-        # run log.
-        logger.exception("LLM formatting failed: %s: %s", type(e).__name__, e)
+        # run log. The traceback ends in str(e), so it goes to DEBUG (§4.7).
+        logger.error("LLM formatting failed: %s", redacted_error_label(e))
+        logger.debug("LLM formatting failed", exc_info=True)
         return None, None
 
 

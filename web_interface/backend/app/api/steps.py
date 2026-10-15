@@ -215,7 +215,8 @@ def download_input_file(
     except FileNotFoundError:
         raise not_found("Original upload is not available for this run")
     except Exception as e:
-        logger.warning("Original-input download failed for run %s: %s", run_id, e)
+        logger.warning("Original-input download failed for run %s: %s", run_id, type(e).__name__)
+        logger.debug("Original-input download failed for run %s: %s", run_id, e)
         raise internal_error("Could not retrieve the original upload")
 
     return Response(

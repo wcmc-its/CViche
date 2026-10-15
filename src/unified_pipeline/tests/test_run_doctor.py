@@ -85,6 +85,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_section_lost,
     lint_segmentation,
     lint_segmentation_collapse,
+    lint_session_title_missing,
     lint_shattered_prose,
     lint_split_child_unsourced,
     lint_stage2_span_overlap,
@@ -5631,14 +5632,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (76), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (77), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 74
+    assert len(payload["findings"]) == 75
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -8943,3 +8944,114 @@ def test_run_doctor_cuts_cross_entry_value_calls_in_stage_3b_order(tmp_path):
 
     assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
         ("INFO", "entry table_1 (M2B)")]
+
+
+# --- session_title_missing (#1346) ------------------------------------------
+
+def _q2_session(text: str, **fields) -> dict:
+    return {"element_idx_start": 450, "taxonomy_code": "Q2", "text": text,
+            "extracted_fields": {"committee_name": None, "role": "session chair",
+                                 "organization": "Example Society", **fields}}
+
+
+_Q2_QUOTED = "5/6/11, Springfield, IL, Example Society, session chair, \u201cTesting widgets: a necessity?\u201d"
+
+
+def test_session_title_missing_flags_a_q2_quoted_title_no_field_holds():
+    [finding] = lint_session_title_missing({"entries": [_q2_session(_Q2_QUOTED)]})
+    assert finding["lint"] == "session_title_missing"
+    assert finding["severity"] == "INFO"
+    assert finding["message"].startswith("entry 450 (Q2): committee_name is empty")
+    assert finding["evidence"] == ["shape: q2_quoted_title_unheld", "Testing widgets: a necessity?"]
+
+
+def test_session_title_missing_flags_a_split_q2_record_without_a_committee():
+    entry = _q2_session(_Q2_QUOTED, stage4_records=[
+        {"committee_name": "Example Board", "role": "Member"},
+        {"committee_name": None, "role": "session chair"}])
+    assert len(lint_session_title_missing({"entries": [entry]})) == 1
+
+
+@pytest.mark.parametrize("entry", [
+    # The title is in committee_name.
+    _q2_session(_Q2_QUOTED, committee_name="Testing widgets: a necessity?"),
+    # Another field holds it.
+    _q2_session(_Q2_QUOTED, topic="Testing Widgets: a necessity?"),
+    # A one-word quote is a label, not a title.
+    _q2_session('2011 Example Society "Roundtable", session chair'),
+    # Nothing quoted.
+    _q2_session("2011 Example Society, session chair, Testing widgets"),
+    # Not Q2.
+    {**_q2_session(_Q2_QUOTED), "taxonomy_code": "Q1"},
+])
+def test_session_title_missing_is_silent_on_a_held_or_absent_q2_title(entry):
+    assert lint_session_title_missing({"entries": [entry]}) == []
+
+
+def test_session_title_missing_skips_a_q2_title_the_document_shows():
+    blocks = [("p", "Example Society 2011 session chair \u201cTesting widgets: a necessity?\u201d")]
+    stage4 = {"entries": [_q2_session(_Q2_QUOTED)]}
+    assert lint_session_title_missing(stage4, None, blocks) == []
+    assert len(lint_session_title_missing(stage4, None, [("p", "Example Society")])) == 1
+
+
+_TALK_HEADER = ["Title", "Institution/Location", "Dates (yyyy)"]
+_TALK_LINE = "2019 Example Annual Meeting, Springfield, IL. Invited talk on widgets"
+
+
+def _talk(text: str = _TALK_LINE, **fields) -> dict:
+    return {"element_idx_start": 259, "taxonomy_code": "R", "text": text,
+            "extracted_fields": {"title": None, "event_name": "Example Annual Meeting",
+                                 "location": "Springfield, IL", "year": "2019", **fields}}
+
+
+def _talk_rows(*titles: str, header: list[str] = _TALK_HEADER) -> list[list[list[str]]]:
+    return [[header, *[[title, "Springfield, IL", "2019"] for title in titles]]]
+
+
+def test_session_title_missing_flags_an_r_title_cell_that_is_the_source_line():
+    [finding] = lint_session_title_missing({"entries": [_talk()]}, _talk_rows(_TALK_LINE))
+    assert finding["message"].startswith("entry 259 (R): stage 4 found no talk title")
+    assert "whole source line" in finding["message"]
+    assert finding["evidence"] == ["shape: r_raw_line_title", _TALK_LINE]
+
+
+def test_session_title_missing_flags_an_r_title_cell_opening_with_a_year():
+    cell = "2019 Example Annual Meeting. Invited talk on widgets"
+    [finding] = lint_session_title_missing({"entries": [_talk()]}, _talk_rows(cell))
+    assert finding["message"].startswith("entry 259 (R)")
+    assert "opens with a year" in finding["message"]
+
+
+@pytest.mark.parametrize("stage4, rows", [
+    # A stage-4 title that opens with a year is the title.
+    ({"entries": [_talk(title="2019 update on widgets")]}, _talk_rows("2019 update on widgets")),
+    # A raw line with no year restates no Dates cell.
+    ({"entries": [_talk("Example Department Grand Rounds")]},
+     _talk_rows("Example Department Grand Rounds")),
+    # A title cell built from role and event.
+    ({"entries": [_talk()]}, _talk_rows("Invited Speaker, Example Annual Meeting")),
+    # Not an R table.
+    ({"entries": [_talk()]}, _talk_rows(_TALK_LINE, header=["Title", "Institution, city and state",
+                                                             "Dates (mm/yy - mm/yy)"])),
+])
+def test_session_title_missing_is_silent_on_a_titled_r_row(stage4, rows):
+    assert lint_session_title_missing(stage4, rows) == []
+
+
+def test_session_title_missing_needs_the_docx_for_the_r_shape():
+    assert lint_session_title_missing({"entries": [_talk()]}) == []
+
+
+def test_run_doctor_runs_session_title_missing_on_stage_4_alone(tmp_path):
+    """Registered with stage 4 as its one gating input: no docx, the Q2 shape
+    still runs."""
+    root = tmp_path / "outputs"
+    _write_stage(root, "stage_4_field_extraction", f"{_UID}_cv_fields.json",
+                 {"document_uid": _UID, "cv_owner": _OWNER, "entries": [_q2_session(_Q2_QUOTED)]})
+
+    findings = [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "session_title_missing"]
+
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
+        ("INFO", "entry 450 (Q2)")]

@@ -194,6 +194,8 @@ REVIEW_FLAGS = {
                             "twice, once in the wrong section: keep the copy that belongs here."),
     "cross_entry_value": ("A date, amount, effort, role or name here may come from a different "
                           "entry of your CV: check this entry against the CV."),
+    "session_title_missing": ("The title of this talk or session is missing, or the whole line "
+                              "from your CV is shown in its place: add the title from your CV."),
     "group_credit_dropped": ("Your CV credits a group or study team in these authors (such as "
                              "\"... Study Group\") that is missing here: add it back from your CV."),
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "

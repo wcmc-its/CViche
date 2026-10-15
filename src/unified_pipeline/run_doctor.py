@@ -506,7 +506,15 @@ Lints, ranked by the severity of the failure class they catch:
                           effort and role, 559 held 573's mentee). INFO, one
                           per entry. Reads stage 4; stage 3b for the order
                           stage 4 cut its batches in
-14av. group_credit_dropped a publication whose source byline credits a
+14av. session_title_missing a talk or session stage 4 found no title for
+                          (#1346): a Q2 entry whose committee_name is empty
+                          while its source line quotes a title no field
+                          holds and the docx does not show (EBYSBC KYOPUV
+                          450/451), and an R Title cell that holds a year
+                          and is the entry's whole source line or opens with
+                          the year (RNKYST 259). INFO, one per entry or
+                          cell. Reads stage 4; the docx when present
+14aw. group_credit_dropped a publication whose source byline credits a
                           group, consortium or study team ("...; HVTN 505
                           Protocol Team.") and whose rendered bibliography
                           line holds no such credit, or garbles it into
@@ -700,6 +708,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_pipe_leaks,
     lint_python_repr_in_output,
     lint_section_lost,
+    lint_session_title_missing,
     lint_shattered_prose,
     lint_split_child_unsourced,
     lint_stage6_warnings,
@@ -770,6 +779,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     subpoint_text,
 )
 from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.quality_score import (
     prompt_log_fallback_served,
     stage3b_fallback_ratios,
@@ -898,6 +908,7 @@ KNOWN_LINTS = (
     "stage2_text_break",
     "stage2_span_overlap",
     "cross_entry_value",
+    "session_title_missing",
     "group_credit_dropped",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -1195,6 +1206,12 @@ LINT_PREVALENCE = {
     # Most predate #1609, which now removes a borrowed date, amount, percent or
     # grant number in stage 4 itself, so current runs should hit it less.
     "cross_entry_value": 0.055,
+    # session_title_missing (#1346; STM-1 in doctor/PRECISION.md): 8 of the
+    # 63 EBYSBC/s7ab/pilot farm runs (dev-242 stage 4), 2 of the 40
+    # NECRGC/JAFPFP runs (dev-264/267) and 3 of the 37 YUYVIG runs (dev-259),
+    # each rendered on origin/dev 7e41cd29, so 13 of 140, measured
+    # 2026-10-15. Same mixed-corpus caveat as above.
+    "session_title_missing": 0.093,
     # group_credit_dropped (#1661; GCD-1 in doctor/PRECISION.md): 42 of 303
     # stored runs with a stage-4 JSON and a rendered docx, one per uid,
     # measured 2026-10-15. Same mixed-corpus caveat as above.
@@ -1581,7 +1598,8 @@ def _load_stage_errors(path: Path, on_unreadable: Callable[[str, str], None]) ->
     try:
         return read_stage_errors(path)
     except (OSError, ValueError) as e:
-        logger.warning("run_doctor could not read %s (%s): %s", path, type(e).__name__, e)
+        logger.warning("run_doctor could not read %s (%s)", path, redacted_error_label(e))
+        logger.debug("run_doctor could not read %s: %s", path, e)
         on_unreadable("stage_errors", f"{type(e).__name__}: {e}")
         return None
 
@@ -1808,6 +1826,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("stage2_span_overlap", lint_stage2_span_overlap, ("stage_2",)),
     LintSpec("cross_entry_value", lint_cross_entry_value, ("stage_4",),
              optional=("stage_3b",)),
+    # `table_rows` and `blocks` read the same docx; neither gates the row.
+    LintSpec("session_title_missing", lint_session_title_missing, ("stage_4",),
+             optional=("table_rows", "blocks")),
     LintSpec("group_credit_dropped", lint_group_credit_dropped, ("stage_4", "blocks")),
 )
 

@@ -37,6 +37,7 @@ from app.services.upload_validation import _validate_docx_magic
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.timeutil import utc_now
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.stage3b.io import load_taxonomy
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,8 @@ def _get_populated_wcm_sections(run_id: str) -> list[dict]:
                         "count": count,
                     })
         except Exception as e:
-            logger.warning("Error reading template metadata %s: %s", metadata_file.name, e)
+            logger.warning("Error reading template metadata %s: %s", metadata_file.name, redacted_error_label(e))
+            logger.debug("Error reading template metadata %s: %s", metadata_file.name, e)
 
     # Also check enriched files for section-level detail
     enriched_dir = outputs_dir / "stage_2d_enriched"
@@ -306,7 +308,8 @@ async def submit_feedback(
             None, notify_feedback_submitted, feedback, run, submitter
         )
     except Exception as e:  # noqa: BLE001 -- best-effort, must never raise
-        logger.warning("Feedback notification failed for run %s: %s", run_id, e)
+        logger.warning("Feedback notification failed for run %s: %s", run_id, redacted_error_label(e))
+        logger.debug("Feedback notification failed for run %s: %s", run_id, e)
 
     return FeedbackResponse(
         id=feedback.id,

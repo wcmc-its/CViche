@@ -532,7 +532,7 @@ def test_legacy_table_pseudo_row_dict_row_and_string_row_all_recovered(monkeypat
     assert all(e["recovered_row"] is True for e in by_idx.values())
 
 
-def test_batch_exception_is_swallowed_and_later_batch_still_succeeds(monkeypatch):
+def test_batch_exception_is_swallowed_and_later_batch_still_succeeds(monkeypatch, caplog):
     # 51 elements force a second 50-element-cap batch (BATCH_SIZE=50). The
     # first batch's call_llm raises; the loop must not abort the section --
     # it logs and continues, and the second batch's entry still lands.
@@ -546,10 +546,16 @@ def test_batch_exception_is_swallowed_and_later_batch_still_succeeds(monkeypatch
         return _llm_result({"delimiters": [{"element_idx_start": 150, "element_idx_end": 150, "element_type": "paragraph", "confidence": 0.6}]})
 
     monkeypatch.setattr(stage2, "call_llm", flaky)
-    entries, cost_info = stage2.detect_entries_for_section(
-        ["Big"], elements, 100, 150, element_index_map=_idx_map(elements)
-    )
+    with caplog.at_level(logging.WARNING, logger=stage2.__name__):
+        entries, cost_info = stage2.detect_entries_for_section(
+            ["Secret Header"], elements, 100, 150, element_index_map=_idx_map(elements)
+        )
     assert state["n"] == 2
+    # #639: the WARNING names the batch and the exception class only -- not
+    # str(e), and not the section's CV header text.
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(m.strip() == "⚠ Error in batch 1: RuntimeError" for m in warnings), warnings
+    assert not any("simulated LLM outage" in m or "Secret Header" in m for m in warnings), warnings
     assert entries == [{
         "element_idx_start": 150, "element_idx_end": 150, "element_type": "paragraph",
         "confidence": 0.6, "text": "Line 50",

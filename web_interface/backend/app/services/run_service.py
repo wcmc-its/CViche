@@ -136,7 +136,8 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
     except FileNotFoundError as e:
         # The run genuinely has no durable copy (e.g. a legacy run predating the
         # S3 archive). Expected; the caller keeps its own missing-file handling.
-        logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
+        logger.info("No durable input copy for run %s (%s); using local only", run_id, type(e).__name__)
+        logger.debug("No durable input copy for run %s (%s); using local only", run_id, e)
         return
     except Exception as e:  # noqa: BLE001 -- see below
         # Anything other than a missing object (S3 AccessDenied, KMS, network)
@@ -156,7 +157,8 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         dest.write_bytes(data)
         logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
     except OSError as e:
-        logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
+        logger.warning("Failed to write re-materialized input for run %s: %s", run_id, type(e).__name__)
+        logger.debug("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 
 RESTART_INTERRUPT_MESSAGE = (
@@ -484,14 +486,16 @@ def _delete_run_storage(
     except Exception as e:
         if not best_effort:
             raise
-        logger.warning("Failed to delete storage for run %s: %s", run_id, e)
+        logger.warning("Failed to delete storage for run %s: %s", run_id, type(e).__name__)
+        logger.debug("Failed to delete storage for run %s: %s", run_id, e)
     if email is not None:
         try:
             deleted += storage.delete_global_prefix(f"by-submitter/{email}/{run_id}/")
         except Exception as e:
             if not best_effort:
                 raise
-            logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, e)
+            logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, type(e).__name__)
+            logger.debug("Failed to delete by-submitter index for run %s: %s", run_id, e)
     return deleted
 
 
@@ -588,7 +592,8 @@ def reap_orphaned_created_runs(
             _delete_run_rows(db, run_id)
         except Exception as e:
             db.rollback()
-            logger.warning("Failed to reap orphan run %s from DB: %s", run_id, e)
+            logger.warning("Failed to reap orphan run %s from DB: %s", run_id, type(e).__name__)
+            logger.debug("Failed to reap orphan run %s from DB: %s", run_id, e)
             continue
         result["reaped"] += 1
         result["objects_deleted"] += _delete_run_storage(storage, run_id, email)
