@@ -72,6 +72,7 @@ from .normalization.pii import (  # noqa: F401
     _pii_field_key_category,
     _pii_matches,
 )
+from .parsing.text import DATE_LED_SOURCE_TEXT
 
 #: The taxonomy code of the Personal Data block -- the one routed code that
 #: still gets the full policy.
@@ -740,6 +741,10 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             entry["_pii_fragments"] = [raw_text[m.start:s.end]
                                        for m, s in zip(matches, spans)]
             entry[PII_WITHHELD_KEY] = True
+            # #983 review: stage 6's copy of stage 2's text, kept for the
+            # unrendered-record pass, is the uncut text; reading it would put
+            # the withheld line back. Without it the pass reads `text`.
+            entry.pop(DATE_LED_SOURCE_TEXT, None)
             # #848: the entry's position, so the residual's rendered location
             # (known only post-render) can be joined back to its WithheldItems.
             entry["_pii_entry_index"] = index

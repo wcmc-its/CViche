@@ -34,7 +34,7 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.stage6.fan_out import LAST_STAGE4_RECORD  # noqa: E402
+from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM, LAST_STAGE4_RECORD  # noqa: E402
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.parsing.text import DATE_LED_SOURCE_TEXT  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
@@ -2217,6 +2217,17 @@ def test_records_stage4_separated_keep_their_tabs():
     assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
 
 
+@pytest.mark.parametrize("marker", [FANNED_OUT_FROM, LAST_STAGE4_RECORD])
+def test_a_record_fan_out_made_keeps_its_tabs(marker):
+    # PR #1850 review: no test held the fan-out exclusion. A record fan-out
+    # made is one of stage 4's records; dedup reads its marker, not its lines.
+    entry = _society_entry()
+    entry[marker] = {"key": "records", "index": 0, "count": 2}
+    entry = _grouped_text(entry)
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+    assert DATE_LED_SOURCE_TEXT not in entry
+
+
 # The web181 Q1 shape: a long lead-in, then dated offices, most of them
 # single years. #1243's tab-part rules read it as one record (fewer than half
 # its parts give a date range); its date-led lines would read as two.
@@ -2266,3 +2277,27 @@ def test_a_date_led_part_the_fields_hold_is_not_recovered_after_the_split():
     gen._recover_unrendered_records(grouped)
 
     assert len(gen.doc.paragraphs) == before
+
+
+@pytest.mark.parametrize("code", ["Q1", "D1"])
+@pytest.mark.parametrize("pii", ["SSN: 123-45-6789", "Date of Birth: 01/02/1960"])
+def test_a_withheld_fragment_in_a_date_led_record_is_not_recovered(tmp_path, monkeypatch,
+                                                                   code, pii):
+    # PR #1850 review: the PII pass cut `text`, but the recovery pass read the
+    # pre-split stage-2 text and put the withheld line back verbatim.
+    monkeypatch.setattr(
+        "unified_pipeline.stage_6_word_template.call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    entry = _society_entry(code=code)
+    entry["text"] = "\t".join([_SOCIETY_RECORDS[0], f"{_SOCIETY_RECORDS[1]} {pii}",
+                               _SOCIETY_RECORDS[2]])
+    payload = {"document_uid": "TESTUID983P", "entries": [entry],
+               "cv_owner": {"full_name": "Quenby Marblegate"}}
+    input_path = tmp_path / "TESTUID983P_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    texts = _all_paragraph_texts(run_stage6(str(input_path), str(tmp_path / "out.docx"),
+                                            verbose=False))
+
+    value = pii.split(": ", 1)[1]
+    assert not [t for t in texts if value in t]
