@@ -1046,7 +1046,6 @@ _CALL_LLM_MODULE_STAGE = {
 # Import call_llm but no driver runs them (only standalone scripts reach them).
 _CALL_LLM_UNWIRED_MODULES = frozenset({
     'core/personal_info_extractor.py',
-    'core/candidate_surfacer.py',
 })
 
 
