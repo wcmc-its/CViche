@@ -360,7 +360,7 @@ def test_rule_10_needs_a_trial_or_funding_signal_for_m2_1694_1701():
     as a strong M2 signal."""
     rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
     for signal in ("NCT-XXXX", 'trial phase ("Phase II")', "sponsor, funder or agency", "grant or award number",
-                   '"trial", "funded", "grant" or "sponsored"'):
+                   '"trial", "grant" or "sponsored"'):
         assert signal in rule, signal
     assert "none of these signals is M1" in rule
     assert "(IRB study # 1234567890)' → M1" in rule
@@ -370,6 +370,34 @@ def test_rule_10_needs_a_trial_or_funding_signal_for_m2_1694_1701():
     assert "An end date in the past → M2B" in rule
     period = _rule_block("     * Funding period:", "     * Dollar amounts")
     assert "Dates alone do not make a study a grant (rule 10)" in period
+    role = _rule_block("     * Role indicators:", "     * Funding period:")
+    assert "A role alone does not make a study a grant\n       (rule 10)" in role
+
+
+def test_rule_10_trial_design_company_heading_and_unfunded_1694_1701():
+    """Decisions on the #1694/#1701 signal list. XWNZWW's unsponsored
+    Sub-Investigator pharma studies ("Multi-Center, Double-Blind,
+    Placebo-Controlled") stay M2, as do WJUPAJ's rows that name a company or
+    device (BD Intelliport, MarrowStim) and VYNARH's rows under "Clinical
+    Trial Participation". SIYORB's IRB protocols marked "Unfunded" are M1:
+    the substring "funded" is not a signal, and rule 7's "Not Funded" -> M2C
+    is for grant applications only."""
+    rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
+    assert '"multicenter", "randomized", "double-blind"\n        or "placebo-controlled"' in rule
+    assert '"randomized" or a study title is not funding' not in rule
+    assert '("BD Intelliport", "MarrowStim PAD Kit")' in rule
+    assert 'A generic\n        drug or cell name alone ("metformin") is not a sponsor' in rule
+    assert '"Clinical Trial Participation"), grants, funding or research' in rule
+    assert '"funded" as a word\n        of its own ("Industry Funded"). "Unfunded" is not a signal.' in rule
+    assert 'A study or protocol marked "Unfunded" or "Not funded" is M1' in rule
+    assert "Unfunded' → M1" in rule
+    assert "Rule 7's \"Not Funded\" → M2C is for grant applications only." in rule
+    hierarchy = _rule_block('       - Section labeled "Pending"', "     * M2C (Pending)")
+    assert "grant applications only; an unfunded study or protocol is M1" in hierarchy
+    m1 = _taxonomy_code("M1")
+    assert any("multicenter, randomized, double-blind, placebo-controlled" in rule
+               and "company or branded product" in rule and "marked Unfunded" in rule
+               for rule in m1["key_rules"])
 
 
 def test_taxonomy_m1_m2_agree_with_rule_10_1694_1701():
