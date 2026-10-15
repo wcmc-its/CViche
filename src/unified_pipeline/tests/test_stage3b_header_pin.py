@@ -594,12 +594,14 @@ def test_content_pins_leave_other_rows(code, text, hierarchy):
     ("F1", "Basic Life Support provider card, 2031-2033", NO_PIN_CTX),
     ("S2", "Wrote an invited example article (see publication #12).", NO_PIN_CTX),
     ("S1", "2. Quorlenby et al. (2031) Example Membrane Letters JIF: 9.9 cited 3 times", NO_PIN_CTX),
+    ("K1", '"I learned so much in this course; the lectures were clear."', NO_PIN_CTX),
 ])
 def test_no_new_pin_is_flipped_back_by_the_reasoning_check(code, text, ctx):
     from unified_pipeline.core.validators.reasoning_consistency_checker import (
         apply_reasoning_corrections,
     )
-    (out,), n = apply_header_pin([_row(code, text, hierarchy=("SECTION", "Example grant review"))], ctx)
+    hierarchy = ("SECTION", "Example grant review", "Student Evaluations")
+    (out,), n = apply_header_pin([_row(code, text, hierarchy=hierarchy)], ctx)
     assert n == 1
     (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
     assert corrected["taxonomy_code"] == out["taxonomy_code"]
@@ -680,6 +682,97 @@ def test_metrics_pin_leaves_other_rows(code, text):
 def test_metrics_pin_reads_no_code_as_no_answer():
     entry = _row(None, f"Quorlenby et al. (2031) {_VENUE} JIF: 9.9")
     assert content_pin_code(entry) is None
+
+
+# --- #1695 part 2: a student evaluation of the owner's teaching is T ----------------
+
+STUDENT_EVALUATIONS = ("Appendix III Student Evaluations",)
+
+
+def test_quoted_student_comments_under_student_evaluations_become_t():
+    group = [_row("K1", text, hierarchy=STUDENT_EVALUATIONS) for text in (
+        '"Dr. Example made the material clear. Best instructor I have had."',
+        '"I learned so much in this course."',
+        '"Great teaching! I would have liked to be challenged slightly more."',
+    )]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 3 and all(e["taxonomy_code"] == "T" and e["pre_pin_code"] == "K1" for e in out)
+
+
+@pytest.mark.parametrize("code,text,hierarchy", [
+    ("K1", "The course was effectively organized 9", (*STUDENT_EVALUATIONS, "Student Self-Evaluation")),
+    ("K4", "N802 Example Grant Writing", STUDENT_EVALUATIONS),
+    ("K1", "EX305 Example Statistics STUDENT SATISFACTION EVALUATIONS - Fall 2031 24 .36 4.38",
+     ("Course Evaluations",)),
+    ("K1", "Teaching evaluations from 2031-present: overall instructor rating 4.56/5.00.",
+     ("Teaching Awards and Evaluations",)),
+    ("K1", "Student evaluations for Example Course averaged 4.7/5.", ("Courses Taught and Student Evaluations",)),
+    ("K1", "Example Course, 2031: mean 4.7", ("Appendix B: Teaching Evaluations",)),
+    ("K1", "Example Course, 2031: mean 4.7", ("Student Course Evaluations",)),
+    ("K2", "Resident rating of bedside teaching, 2031: 4.8/5", ("Students' Evaluations of Teaching",)),
+    ("K1", "Example Course, 2031: mean 4.7", ("TEACHING", "Evaluations of my teaching")),
+])
+def test_teaching_code_under_an_evaluations_heading_becomes_t(code, text, hierarchy):
+    (out,), n = apply_header_pin([_row(code, text, confidence=0.75, hierarchy=hierarchy)], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "T" and out["pre_pin_code"] == code
+
+
+@pytest.mark.parametrize("code,text,hierarchy", [
+    # An evaluations committee or policy is service; a singular "evaluation" heading
+    # names an activity the owner may lead, not a survey of students.
+    ("K3", "Chair, 2031-present", ("Teaching Evaluations Committee",)),
+    ("K3", "Member, 2031", ("Course Evaluations Policy",)),
+    ("K3", "Teaching evaluations redesign working group, chair, 2031", ("Teaching Evaluations Committee",)),
+    ("K3", "Led redesign of the example clerkship assessment, 2031", ("Curriculum and Course Evaluation",)),
+    ("K1", "Example Course, Lecturer, 2031", ("Teaching",)),
+    ("K1", "Example Course, Lecturer, 2031", ("Teaching", "Self-Evaluation")),
+    # Only a teaching code moves: an award under the same heading stays the model's.
+    ("H", "Example Teaching Award, 2031", ("Teaching Awards and Evaluations",)),
+    ("P", "Member, Teaching Evaluations Committee, 2031", ("Service",)),
+    ("T", '"A great course."', STUDENT_EVALUATIONS),
+])
+def test_evaluations_pin_leaves_other_rows(code, text, hierarchy):
+    entry = _row(code, text, hierarchy=hierarchy)
+    assert content_pin_code(entry) is None
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("heading", [
+    "Courses Taught and Student Evaluations",
+    "Teaching Activities and Evaluations",
+    "Teaching and Evaluations",
+    "Teaching Awards and Evaluations",
+    "Student Evaluations and Courses Taught",
+])
+@pytest.mark.parametrize("code,text", [
+    ("K1", "Example Pharmacology 101, Course Director, 2031-2033"),
+    ("K1", "EX305 Example Statistics, Lecturer, Fall 2031 (evaluations 4.6/5)"),
+    ("K2", "Example Clerkship, attending preceptor for third-year students, 2031"),
+])
+def test_course_rows_under_a_combined_evaluations_heading_stay_teaching(heading, code, text):
+    # A combined heading lists the courses as well as their evaluations: a course
+    # with its role and year, even one quoting its score, is still a course taught.
+    entry = _row(code, text, confidence=0.75, hierarchy=(heading,))
+    assert content_pin_code(entry) is None
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+def test_evaluations_pin_applies_under_a_pinned_teaching_header():
+    # A K1-pinned "TEACHING" header does not override K, so the header pin passes
+    # and the content pin still decides: the evaluation moves, the course stays.
+    teaching_ctx = _ctx(meta=_node("TEACHING", "K1", 1.0), section=_node("Courses and Student Evaluations", "K1", 1.0))
+    assert pinned_header_code(teaching_ctx) == "K1"
+    hierarchy = ("TEACHING", "Courses and Student Evaluations")
+    course = _row("K1", "Example Pharmacology 101, Lecturer, 2031", confidence=0.75, hierarchy=hierarchy)
+    summary = _row("K1", "Student evaluations for 2031 averaged 4.6/5.", confidence=0.75, hierarchy=hierarchy)
+    appendix = _row("K1", '"Best instructor I have had."', confidence=0.75,
+                    hierarchy=("TEACHING", "Appendix III Student Evaluations"))
+    out, n = apply_header_pin([course, summary, appendix], teaching_ctx)
+    assert n == 2
+    assert [e["taxonomy_code"] for e in out] == ["K1", "T", "T"]
+    assert out[0] == course and out[1]["pre_pin_code"] == "K1" and out[2]["pre_pin_code"] == "K1"
 
 
 # --- #1251: a mentee's accomplishments are N4 ----------------------------------
