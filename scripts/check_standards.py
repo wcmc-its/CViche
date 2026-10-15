@@ -134,14 +134,16 @@ def _split_waived(hits, rule_label):
 
 # §9's hand-narrated table cites the `origin/dev` sha it was last measured
 # against in its own prose (one definition, per §1.5, not a second field
-# that could disagree with it). Past this many commits behind HEAD it's
-# worth a human re-read (warn); past this many, treat it as failed rather
-# than trust a table that's almost certainly stale (§5.10's recourse
-# ladder). 144 commits was enough to drift the last time this was measured
-# by hand -- these thresholds are a guess at "notice early" and "stop
-# trusting it," not a measured bound; tighten if either proves wrong.
-STALE_WARN_COMMITS = 50
-STALE_FAIL_COMMITS = 200
+# that could disagree with it). Past this many first-parent commits behind
+# HEAD it's worth a human re-read (warn); past this many, treat it as failed
+# rather than trust a table that's almost certainly stale (§5.10's recourse
+# ladder). First-parent counts merges to dev, one per PR, not every commit
+# inside a PR. Measured 2026-10-15 (#762): dev took 178 first-parent merges
+# in the last week against 565 raw commits, so these are ~2 and ~4 weeks at
+# that pace -- the old raw-commit FAIL of 200 would have tripped in under
+# 3 days. Revisit if the pace moves a lot either way.
+STALE_WARN_COMMITS = 360
+STALE_FAIL_COMMITS = 720
 
 
 def iter_py_files(root, include_tests=False):
@@ -392,15 +394,15 @@ def _table_verified_sha():
     return m.group(1) if m else None
 
 
-def _commits_behind(sha):
-    """How many commits HEAD is ahead of `sha`. None if git can't answer
-    (shallow checkout, sha not reachable, no .git at all) -- the caller
-    skips the staleness check rather than guess at a number that isn't
-    grounded in anything."""
+def _commits_behind(sha, cwd=ROOT):
+    """How many first-parent commits HEAD is ahead of `sha` -- on dev, one
+    per merged PR. None if git can't answer (shallow checkout, sha not
+    reachable, no .git at all); the caller decides whether that skips the
+    staleness check (a local run) or fails it (CI, see main())."""
     try:
         r = subprocess.run(
-            ["git", "rev-list", "--count", f"{sha}..HEAD"],
-            capture_output=True, text=True, cwd=ROOT, check=True,
+            ["git", "rev-list", "--count", "--first-parent", f"{sha}..HEAD"],
+            capture_output=True, text=True, cwd=cwd, check=True,
         )
         return int(r.stdout.strip())
     except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
@@ -720,9 +722,18 @@ def main():
     sha = _table_verified_sha()
     if sha:
         behind = _commits_behind(sha)
+        # A local run without history (local_ci.sh's .git-less copy) can't
+        # count and skips. In CI that same None means the checkout is too
+        # shallow to see the stamp, and skipping there is exactly how the
+        # table fell 3,506 commits behind unnoticed (#762) -- fail closed.
+        if behind is None and os.environ.get("CI"):
+            print(f"FAIL: can't count commits from §9's stamp {sha} to HEAD -- the checkout "
+                  f"is shallow or the sha isn't reachable. The CI job that runs this needs "
+                  f"`fetch-depth: 0` on its actions/checkout step.", file=sys.stderr)
+            return 1
         if behind is not None and behind > STALE_WARN_COMMITS:
             print(f"WARN: §9's hand-narrated table was last measured at {sha}, now {behind} "
-                  f"commits behind HEAD -- unlike the auto table above, it can't re-verify "
+                  f"first-parent commits behind HEAD -- unlike the auto table above, it can't re-verify "
                   f"itself by regenerating. Worth a re-read.", file=sys.stderr)
             if behind > STALE_FAIL_COMMITS:
                 print(f"FAIL: {behind} commits behind is past the hard limit ({STALE_FAIL_COMMITS}).", file=sys.stderr)

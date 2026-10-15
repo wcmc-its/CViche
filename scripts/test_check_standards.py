@@ -184,11 +184,23 @@ def build_tree(tree):
 
 
 
-def run(tree, *args, env=None):
+def run(tree, *args, env=None, ci=False):
+    # CI is scrubbed unless asked for: under it a stamp the fixture's
+    # git-less tree can't count back to fails closed (#762), and GitHub
+    # Actions sets CI=true for this very self-test.
+    env = dict(os.environ if env is None else env)
+    env.pop("CI", None)
+    if ci:
+        env["CI"] = "true"
     return subprocess.run(
         [sys.executable, os.path.join(tree, "scripts", "check_standards.py"), *args],
         capture_output=True, text=True, cwd=tree, env=env,
     )
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t",
+                    "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
 
 
 def main():
@@ -531,6 +543,17 @@ def main():
         assert r.returncode == 1 and "stale" in r.stderr, "fixing a non-ratcheted violation without --update must show as doc drift"
         print("fixed non-ratcheted violation shows as doc drift  exit=1  ok")
 
+        # a §9 stamp the tree can't count back to (no .git here): skipped
+        # locally, a failure under CI that names the missing fetch-depth
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), "a", encoding="utf-8") as fh:
+            fh.write("\nmeasured against `origin/dev` @ `0000000` (2026-01-01)\n")
+        assert run(tree, "--update").returncode == 0
+        r = run(tree)
+        assert r.returncode == 0, r.stderr
+        r = run(tree, ci=True)
+        assert r.returncode == 1 and "fetch-depth" in r.stderr, "an uncountable stamp must fail closed under CI"
+        print("uncountable stamp skips locally, fails under CI  exit=1  ok")
+
     # Staleness helpers run against the real repo, not the fixture -- a
     # plain tempdir has no git history to fake a commit-distance from.
     sys.path.insert(0, HERE)
@@ -546,6 +569,23 @@ def main():
     behind_self = check_standards._commits_behind("HEAD")
     assert behind_self is None or behind_self == 0
     print("staleness helpers parse the doc's sha and count real commits   ok")
+
+    # The count is first-parent: a merged PR is one step on dev no matter
+    # how many commits it carried. base -> merge(f1, f2) -> c is 2, not 4.
+    with tempfile.TemporaryDirectory() as repo:
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+        base = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        _git(repo, "checkout", "-q", "-b", "feature")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "f1")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "f2")
+        _git(repo, "checkout", "-q", "main")
+        _git(repo, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "c")
+        assert check_standards._commits_behind(base, cwd=repo) == 2
+        assert check_standards._commits_behind("0000000", cwd=repo) is None
+    print("staleness count is first-parent (2 merges, not 4 commits)       ok")
 
     # WAIVER_RE must anchor to an actual comment, not just the substring
     # appearing anywhere on the line -- a nearby line that merely mentions
