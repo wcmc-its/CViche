@@ -85,6 +85,12 @@ DECIDED_821 = "https://github.com/wcmc-its/CViche/issues/821#issuecomment-567162
 #: "Religion:" line; the label alone missed it in the membership rows (ATUVAL
 #: 844) and in the Appendix (HVSKET 148-150).
 DECIDED_1426_RELIGION = "https://github.com/wcmc-its/CViche/issues/1426"
+#: Its scope stops at the membership rows and the Personal Data/Appendix
+#: scopes. Paul's #1864 decision (2026-10-15): a congregation membership or
+#: role stated inside another body record (an honor, appointment, education or
+#: leadership row) is not protected, and neither is a congregation named as
+#: the venue of a talk or teaching session (K4/K5/R). Both render, as Q1/Q2
+#: community service does under #1426.
 #: Paul's decision (2026-10-05, NDMRSO batch autopsy class ND1): an
 #: institutional, employee or student ID number and a tax ID are withheld like
 #: the other personal data. Before it, both reached the Appendix verbatim

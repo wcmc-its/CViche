@@ -156,6 +156,13 @@ COMMENT_PUBTYPE = 'Comment'
 # years later; the one at 4 years was a different paper by the same group
 # with a near-identical title.
 IN_PRESS_YEAR_WINDOW = range(-1, 3)
+# An in-press entry PubMed did not match, dated at least this many years before
+# the run, is stale and gets a Word comment asking for the final citation. A
+# partner reviewer (Houston Methodist) found CV
+# entries listed as in press that never were; over the 199-CV stage-5 farm
+# (2026-10-15) all 42 matches were "in press" / "accepted" / "Epub ahead of
+# print" from 2023 or earlier with no final citation (#1871).
+STALE_IN_PRESS_YEARS = 2
 
 # "accepted" counts only in a status shape: followed by punctuation, a date,
 # "for publication" or "author manuscript". Every corpus "accepted" in an S
@@ -486,6 +493,20 @@ def plausible_publication_year(cv_year: str | int | None, pubmed_year: int | Non
     return pubmed_year - int(match.group(1)) in IN_PRESS_YEAR_WINDOW
 
 
+def stale_in_press_note(phrase: str, cv_year: str | int | None, run_year: int) -> str | None:
+    """The Word comment for an in-press entry PubMed did not match, when the
+    CV's year is STALE_IN_PRESS_YEARS or more before `run_year`; None for a
+    recent or undated one, whose paper may simply not be indexed yet. Worded
+    as "could not match", never "not published": some of these quote a PMID
+    the title check refused (WBZIDP, BMAMWE)."""
+    match = re.fullmatch(r'\s*((?:19|20)\d\d)\s*', str(cv_year))
+    if not match or run_year - int(match.group(1)) < STALE_IN_PRESS_YEARS:
+        return None
+    return (f"The CV lists this as {phrase} ({match.group(1)}), but CViche could not "
+            f"match it to a PubMed record. If it was published, replace it with the "
+            f"final citation (journal, volume, issue, pages); if not, remove it.")
+
+
 def _same_title(a: str, b: str) -> bool:
     """Overlap against the longer title, so one title nested in the other
     does not count as the same paper."""
@@ -699,6 +720,7 @@ class PubMedEnricher:
             'in_press_resolved': 0,
             'in_press_duplicates': 0,
             'in_press_promoted': 0,
+            'in_press_stale': 0,
             'second_pass_recovered': 0,
             'second_pass_failed': 0,
         }
@@ -1138,6 +1160,10 @@ class PubMedEnricher:
                 self._enrich_by_title(entry, title)
             if entry.get('enrichment_status') != 'enriched':
                 self._promote_unmatched_in_press(entry)
+                note = stale_in_press_note(phrase, fields.get('year'), datetime.now().year)
+                if note:
+                    entry['in_press_note'] = note
+                    self.stats['in_press_stale'] += 1
                 continue
             if self._lists_as_published(entry, pub_entries):
                 self._record_in_press_duplicate(entry, phrase)
