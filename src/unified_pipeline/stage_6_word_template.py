@@ -63,6 +63,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+from unified_pipeline.core.text_norm import tab_record_segments
 from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
     code_matches_expected,
     get_expected_codes_from_hierarchy,
@@ -187,6 +188,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     RETIRED_TAXONOMY_CODES,
+    T_RECORD_OVERLAP,
     UNRENDERED_MIN_RECORD_LINES,
     _entry_pieces,
     _is_column_header_row,
@@ -200,8 +202,10 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     m1_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
+    segment_held_by_fields,
     segments_cover_source,
     t_recovery_lines,
+    tab_aware_record_lines,
     token_pairs,
 )
 from unified_pipeline.stage6.resolution import (  # noqa: F401
@@ -725,6 +729,41 @@ def _t_line_is_scaffolding(line: str, entry: dict) -> bool:
         entry.get('classification_reasoning')) is not None
 
 
+def _vouch_for_lines(lines: list[str], haystack: str,
+                     t_line_token_sets: list[set], line_token_sets: list[set]) -> str:
+    """Count recovered `lines` as rendered, so a near-identical variant in
+    another pre-dedup entry (trailing period, 'Sep' vs 'Sept') is verified
+    rendered instead of inserted a second time. Returns the new haystack."""
+    for line in lines:
+        haystack += "\x00" + _squash(line)
+        t_line_token_sets.append(_record_tokens(line))
+        line_token_sets.append(set(_RENDER_TOKEN_RE.findall(_norm(line))))
+    return haystack
+
+
+def _vouch_for_tab_parts(parts: list[str], t_line_token_sets: list[set],
+                         part_token_sets: list[set]) -> None:
+    """Count recovered tab `parts` as rendered, DATE-AWARE (#1243): a part
+    vouches for a later line only when that line's letter tokens AND number
+    runs all sit in it (`T_RECORD_OVERLAP`), so an identical part in a
+    duplicate entry is still verified rendered but a sibling that shares the
+    vocabulary and differs in its years is not. Unlike `_vouch_for_lines` the
+    part stays out of the haystack: `_record_rendered` looks up the dateless
+    head of a line there verbatim, which would let a sibling through."""
+    for part in parts:
+        tokens = _record_tokens(part)
+        t_line_token_sets.append(tokens)
+        part_token_sets.append(tokens)
+
+
+def _tab_part_recovered(line: str, part_token_sets: list[set]) -> bool:
+    """Whether every token (letters and number runs) of a tab `line` sits in
+    one tab part recovered earlier (#1243)."""
+    tokens = _record_tokens(line)
+    return bool(tokens) and any(
+        len(tokens & held) / len(tokens) >= T_RECORD_OVERLAP for held in part_token_sets)
+
+
 def _recovery_candidates(code: str, entry: dict) -> list[str]:
     """Lines of an entry the unrendered-record pass should look for.
 
@@ -741,7 +780,10 @@ def _recovery_candidates(code: str, entry: dict) -> list[str]:
         if len(text) <= APPENDIX_MAX_CHARS:
             return []
         return t_recovery_lines(text)
-    records = _record_lines(text)
+    # An entry stage 4 split into records renders them from their own children;
+    # their tab parts are not lost, only reformatted (#1243).
+    read_lines = _record_lines if LAST_STAGE4_RECORD in entry else tab_aware_record_lines
+    records = read_lines(text)
     return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
 
 
@@ -3958,6 +4000,8 @@ Now analyze the text above:"""
             # own that render (#1230): a line such a row carries in full is not
             # lost, however the render reformatted it.
             t_cut_token_sets += _other_entry_line_tokens(entries_by_code)
+            # Tokens (letters and number runs) of the tab parts recovered so far.
+            part_token_sets: list[set] = []
 
             for code, entries in entries_by_code.items():
                 for entry in entries:
@@ -3967,6 +4011,9 @@ Now analyze the text above:"""
                     fields = entry.get('extracted_fields') or {}
                     coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
+                    tab_parts = {part for text_line in str(entry.get('text') or '').split('\n')
+                                 for part in tab_record_segments(text_line)}
+                    deferred: list[str] = []
                     for line in records:
                         if code == 'T' and _t_line_is_scaffolding(line, entry):
                             continue
@@ -3979,6 +4026,12 @@ Now analyze the text above:"""
                         if rendered is not False:
                             # Rendered (possibly reformatted), or too short to
                             # verify either way — never re-insert.
+                            continue
+                        if line in tab_parts and segment_held_by_fields(line, fields):
+                            continue  # a tab part of the record stage 4 extracted (#1243)
+                        if _tab_part_recovered(line, part_token_sets):
+                            # The same record, recovered earlier as a tab part
+                            # (this line may be a tab part or a plain line).
                             continue
                         if segment_already_rendered(line, fields):
                             # The record that DID render from extracted fields: a
@@ -4013,12 +4066,17 @@ Now analyze the text above:"""
                         # instead of inserted a second time — dedup drops entries
                         # precisely because they near-duplicate a kept one, so
                         # exact-squash matching is not enough.
-                        haystack += "\x00" + _squash(line)
-                        t_line_token_sets.append(_record_tokens(line))
-                        line_token_sets.append(
-                            set(_RENDER_TOKEN_RE.findall(_norm(line))))
+                        # Tab siblings share their vocabulary and differ in the
+                        # dates: one recovered part must not vouch for the next
+                        # (#1243), so they vouch once the entry is done.
+                        if line in tab_parts:
+                            deferred.append(line)
+                        else:
+                            haystack = _vouch_for_lines(
+                                [line], haystack, t_line_token_sets, line_token_sets)
                         self.stats['unrendered_records_recovered'] += 1
                         n_recovered += 1
+                    _vouch_for_tab_parts(deferred, t_line_token_sets, part_token_sets)
 
             # Unconsumed A-coded orphans (#316) are part of the SAME record-
             # recovery safety net the flag above governs -- gated with it,

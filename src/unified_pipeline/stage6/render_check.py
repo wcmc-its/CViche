@@ -30,6 +30,7 @@ from collections import Counter
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
+from unified_pipeline.core.text_norm import tab_record_segments
 
 from .normalization import _squash
 
@@ -298,6 +299,46 @@ def _record_lines(text) -> list[str]:
             if _looks_like_record(line)
             or (len(line.strip()) >= RECORD_DATE_LINE_MIN_CHARS
                 and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
+
+
+def tab_aware_record_lines(text: object) -> list[str]:
+    """`_record_lines`, with a line whose tab parts state two or more dated
+    records read as those parts, one record each (`tab_record_segments`).
+    Stage 2 fuses the paragraphs of one entry with tabs, and `_record_lines`
+    counts the fused line once, so such an entry never reached the recovery
+    pass (#1243). Only the recovery pass reads this: dedup weighs an entry by
+    `_record_lines`, and splitting there made it drop a fused entry whose
+    row the recovery bullets then replaced."""
+    lines = []
+    for line in str(text or "").split("\n"):
+        lines.extend(tab_record_segments(line) or _record_lines(line))
+    return lines
+
+
+def _field_strings(value: object) -> list[str]:
+    """Every string inside a field value, objects flattened. A list is left out:
+    the list fields of an entry (`additional_roles`) are the ones a section may
+    not render (fan-out declined, or a field the renderer does not name), so
+    their words prove nothing was written (#1243)."""
+    if isinstance(value, dict):
+        return [s for item in value.values() for s in _field_strings(item)]
+    return [value] if isinstance(value, str) else []
+
+
+def segment_held_by_fields(segment: str, extracted_fields: dict) -> bool:
+    """True when every distinctive word of `segment` sits in a scalar field value.
+
+    A tab part of a one-record entry (a mentee's name and level, then his
+    fellowship, then his papers, each part dated) is the record the structured
+    row renders cell by cell, so no output line carries its words together and
+    the per-line check reads it as missing (#1243: the recovery pass wrote the
+    mentee line a second time). A part whose words stage 4 holds in a scalar
+    field is the extracted record, never a lost one; a part with a word no
+    scalar field holds is still checked, and so is a part held only by a list
+    field (`additional_roles` items that stage 6 does not print)."""
+    words = set(_RENDER_TOKEN_RE.findall(_norm(segment)))
+    held = set(_RENDER_TOKEN_RE.findall(_norm(" ".join(_field_strings(extracted_fields)))))
+    return bool(words) and words <= held
 
 
 def _record_tokens(text: str | None) -> set[str]:
