@@ -260,3 +260,53 @@ def test_a_bare_label_whose_next_entry_is_t_governs_nothing():
     entries = [_e("Alpha Journal", "T"), _e("A long list item, with a comma", "T"), _e("child")]
     assert set(_stamps(entries)) == {None}
     assert _stamps([_e("Alpha Journal", "T")]) == [None]
+
+
+# --- a sub-heading stage 1b put in the hierarchy (#985: web07, pilot JFBPNC) ---
+
+_TEACHING = "TEACHING EXPERIENCE"
+
+
+@pytest.mark.parametrize("leaf, expected", [
+    ("Teaching Assistant Positions:", "Teaching Assistant Positions"),  # colon leaf
+    ("IV. VISITING PROFESSOR", "VISITING PROFESSOR"),                   # enumerated caps leaf
+])
+def test_a_strong_hierarchy_leaf_stamps_the_entries_under_it(leaf, expected):
+    entries = [_e("Intro to Statistics, Fall 2019", "K1", [_TEACHING, leaf]),
+               _e("Northgate University, 2018", "K1", [_TEACHING, leaf])]
+    assert _stamps(entries) == [expected, expected]
+
+
+def test_a_top_level_leaf_never_stamps():
+    assert _stamps([_e("Intro to Statistics", "K1", ["TEACHING ASSISTANT POSITIONS:"])]) == [None]
+
+
+@pytest.mark.parametrize("leaf", [
+    "Teaching Assistant Positions",                    # bare Title-Case leaf: not strong
+    "Licenses (Include State, Date, Status, and Number):",  # over MAX_LABEL_WORDS
+    "PUBLICATIONS:",                                   # generic
+    "TEACHING EXPERIENCE:",                            # repeats its parent
+    "Courses Taught in 2019:",                         # digit
+])
+def test_a_weak_long_or_generic_leaf_stamps_nothing(leaf):
+    assert _stamps([_e("Intro to Statistics", "K1", [_TEACHING, leaf])]) == [None]
+
+
+def test_a_t_heading_inside_the_leaf_wins_and_t_or_dropped_entries_get_no_leaf_stamp():
+    h = [_TEACHING, "Course Roles:"]
+    entries = [_e("first course", "K1", h), _e("Alpha University:", "T", h), _e("second course", "K1", h),
+               _dropped("a fragment", "K1", is_fragment=True) | {"hierarchy": h}]
+    assert _stamps(entries) == ["Course Roles", None, "Alpha University", None]
+
+
+def test_a_leaf_over_the_run_cap_stamps_nothing():
+    h = [_TEACHING, "Course Roles:"]
+    assert set(_stamps([_e(f"c{i}", "K1", h) for i in range(ch.MAX_STAMPED_RUN + 1)])) == {None}
+    assert set(_stamps([_e(f"c{i}", "K1", h) for i in range(ch.MAX_STAMPED_RUN)])) == {"Course Roles"}
+
+
+def test_a_flat_leaf_stamps_nothing():
+    h = ["Personal", "OTHER DETAILS:"]
+    n = ch.FLAT_LETTER_MIN_ENTRIES
+    entries = [_e(f"{code} {i}", code, h) for code in ("A", "D1", "P") for i in range(n)]
+    assert set(_stamps(entries)) == {None}

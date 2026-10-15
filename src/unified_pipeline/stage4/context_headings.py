@@ -5,7 +5,9 @@ Stage 3b codes a bare sub-heading such as "University of Michigan:" or
 trace of it, so stage 4 extracts each child with no institution / role /
 audience that only the heading carried. `stamp_context_headings` copies the
 governing heading onto the children as `context_heading`; the prompt builder
-(`extraction.build_extraction_prompt`) then shows it to the LLM.
+(`extraction.build_extraction_prompt`) then shows it to the LLM. A sub-heading
+stage 1b made a hierarchy level instead ("IV. VISITING PROFESSOR",
+"Teaching Assistant Positions:") reaches stage 4 the same way, from the leaf.
 
 Pure and offline: no LLM, no I/O. Never touches hierarchy, taxonomy_code or
 text, and never mutates its input.
@@ -277,6 +279,56 @@ def _heading_runs(entries: list[dict[str, Any]]) -> list[_Run]:
     return runs
 
 
+#: Fewest hierarchy levels before a leaf counts as a sub-heading. A depth-1
+#: leaf is the section title itself ("TEACHING EXPERIENCE"), which the taxonomy
+#: code already says; a deeper leaf is a sub-heading stage 1b nested under it
+#: ("Teaching Assistant Positions:", "IV. VISITING PROFESSOR"), and stage 4
+#: never sees the hierarchy, so the role / level it names was lost (#985:
+#: web07, pilot JFBPNC 15 K1 rows with no role).
+MIN_LEAF_HEADING_DEPTH = 2
+
+
+def _leaf_heading(hierarchy: tuple[str, ...], flat: set[tuple[str, ...]]) -> str | None:
+    """The stamp a hierarchy's leaf gives the entries under it, or None when
+    the leaf is a section title, a flat (mis-hierarchied) leaf, not strongly
+    heading-shaped, over MAX_LABEL_WORDS words, or generic (including a
+    repeat of its parent).
+
+    Strong shape only (trailing colon or ALL CAPS): a bare Title-Case leaf
+    ("Board Certification", "Doctoral Chair") is stage 1b's commonest leaf
+    (8,880 entries over 341 stored 3b artifacts, against 3,359 newly stamped
+    by the strong shapes), and most of it is a template's section title that
+    names only the kind of record; it waits on a paid stage-4 A/B (#985). The word cap drops
+    a form instruction leaf ("Licenses (Include State, Date, Status, ...):").
+    """
+    if len(hierarchy) < MIN_LEAF_HEADING_DEPTH or hierarchy in flat:
+        return None
+    leaf = hierarchy[-1]
+    if not _is_heading_shaped(leaf, strong_only=True):
+        return None
+    heading = _strip_heading(leaf)
+    if len(heading.split()) > MAX_LABEL_WORDS:
+        return None
+    return None if _is_generic(heading, list(hierarchy[:-1])) else heading
+
+
+def _leaf_stamps(entries: list[dict[str, Any]]) -> dict[int, str]:
+    """Entry index -> its hierarchy leaf, for every extractable (non-T, not
+    dropped) entry whose leaf is a usable sub-heading governing at most
+    MAX_STAMPED_RUN such entries."""
+    groups: dict[tuple[str, ...], list[int]] = {}
+    for idx, entry in enumerate(entries):
+        if not _is_dropped(entry) and entry.get("taxonomy_code") != HEADING_TAXONOMY_CODE:
+            groups.setdefault(tuple(entry.get("hierarchy") or []), []).append(idx)
+    flat = _flat_hierarchies(entries)
+    stamps: dict[int, str] = {}
+    for hierarchy, indices in groups.items():
+        heading = _leaf_heading(hierarchy, flat)
+        if heading is not None and len(indices) <= MAX_STAMPED_RUN:
+            stamps.update(dict.fromkeys(indices, heading))
+    return stamps
+
+
 def stamp_context_headings(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return copies of `entries` with `context_heading` set on the entries
     that follow a heading under the same hierarchy.
@@ -290,8 +342,14 @@ def stamp_context_headings(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     entry, a change of taxonomy family among the children of a flat leaf, or
     MAX_FOREIGN_LETTER_STREAK children of a letter other than the run's own.
     A heading that would govern more than MAX_STAMPED_RUN entries stamps nothing.
+
+    An entry no T heading stamps takes its hierarchy leaf instead, when stage
+    1b nested that leaf under a section as a sub-heading (`_leaf_stamps`). A T
+    heading wins: it sits inside the leaf, so it is the narrower context.
     """
     out = [dict(entry) for entry in entries]
+    for idx, heading in _leaf_stamps(entries).items():
+        out[idx]["context_heading"] = heading
     for run in _heading_runs(entries):
         if len(run.indices) > MAX_STAMPED_RUN:
             continue
