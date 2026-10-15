@@ -969,6 +969,22 @@ def test_in_press_note_is_a_comment_on_the_tracked_citation_even_with_comments_o
     assert [c["text"] for c in gen._comments] == [note]
 
 
+def test_stale_in_press_note_is_a_comment_on_an_unenriched_citation():
+    # #1871: stage 5 matched nothing, so the citation renders as the CV wrote
+    # it, untracked; the stale-in-press note still reaches the docx.
+    gen = _generator()
+    note = "The CV lists this as in press (2013), but CViche could not match it to a PubMed record."
+    entry = _citation_entry("Doe J. A study. J. 2013, in press.", "Doe J", 2013)
+    entry.update(enrichment_status="no_identifier", in_press_note=note)
+
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="")
+
+    header_idx = gen._find_paragraph_with_text("Peer-reviewed Research Articles:")
+    para = next(p for p in gen.doc.paragraphs[header_idx:header_idx + 4] if "A study" in p.text)
+    assert para._p.find(qn("w:commentRangeStart")) is not None
+    assert [c["text"] for c in gen._comments] == [note]
+
+
 def _superseded_entry():
     entry = _citation_entry("Doe J. A study. J. 2025;1:1-2.", "Doe J", 2025)
     entry.update(enrichment_status="enriched", text="Doe J. A study. Other J. In press.",

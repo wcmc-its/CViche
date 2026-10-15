@@ -16,6 +16,7 @@ No network, no LLM, no files.
 """
 
 import contextvars
+import logging
 import sys
 import threading
 import time
@@ -366,3 +367,18 @@ def test_make_progress_printer_numbers_by_completion_and_prints_one_block(capsys
 
     assert seen == [(1, 2), (2, 0), (3, 1)]
     assert capsys.readouterr().out == "[1/3] item2\n  detail\n[2/3] item0\n  detail\n[3/3] item1\n  detail\n"
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_failing_on_result_does_not_discard_results(workers, caplog):
+    """#1862: on_result is progress reporting; a raising callback is logged and
+    every call's result is still returned, on both the serial and pool paths."""
+
+    def on_result(_i, _result):
+        raise OSError("stdout closed")
+
+    with caplog.at_level(logging.ERROR, logger="unified_pipeline.core.batch_pool"):
+        result = map_in_order(lambda i: i * 2, [(i,) for i in range(4)], workers=workers, on_result=on_result)
+
+    assert result == [0, 2, 4, 6]
+    assert caplog.text.count("on_result failed") == 4
