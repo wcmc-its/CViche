@@ -1998,7 +1998,7 @@ def test_pubmed_list_not_cut_from_the_cv_byline_is_none(cv, pubmed):
     'MBChB', 'FRCSEd', 'PhD(c)', 'MSc(Med)', 'Hons', 'Ng', 'MD, PhD', 'Ed Eds', 'Sr Jr', 'II III', 'IV Editors', 'Editor Eds',
     # unlisted degrees by shape: mixed case, parenthesised, four or more capitals
     'MBChB PhD', 'PharmD BCPS', 'PhD ABPP', 'MD (Hons)', 'MD (Hons', 'MD MSc(Med)', 'MBChB MD',
-    'MD DPhil', 'MPhil MD', 'PhDr MD', 'MD MScMed'])
+    'MD DPhil', 'MPhil MD', 'PhDr MD', 'MD MScMed', 'MD FAAOS', 'MD FACMGG'])
 def test_cv_piece_that_is_no_name_is_none(piece):
     assert _restored(CAPPED_CV[:10] + [piece], CAPPED_CV[:10]) is None
 
