@@ -169,6 +169,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Appendix: %s': 'info',
     'Assigned no percent effort: the grant title substring-matches %d project names in the effort header': 'debug',
     'Could not add citation as insertion: %s': 'warning',
+    'Citation insertion failure detail: %s': 'debug',
     'Could not find section header %r': 'warning',
     'Could not read original document for personal data fallback (uid=%s, path=%s): %s': 'warning',
     'Discarded a percent effort figure: NaN': 'debug',
@@ -396,7 +397,7 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
     fails this guard until it is added to the contract table on purpose.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
-    assert len(text_level_records) == 130, (
+    assert len(text_level_records) == 131, (
         "literal call-site count under stage6/sections/ changed -- update "
         "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
         "text now repeats)"

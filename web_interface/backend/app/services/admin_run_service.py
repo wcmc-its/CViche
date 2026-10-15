@@ -217,8 +217,9 @@ def queue_stats(db: Session) -> QueueStatsResponse:
         # The endpoint that diagnoses a stuck queue must still answer when
         # Valkey itself is the problem. The exception's own text can carry a
         # host:port (e.g. "Error 111 connecting to valkey:6379") -- that goes
-        # only to the log, never the response.
-        logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
+        # only to the DEBUG log, never the response.
+        logger.warning("Queue stats unavailable: %s", type(e).__name__)
+        logger.debug("Queue stats unavailable: %s", e)
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
     return QueueStatsResponse(
         enabled=True, db=db_view, **per_queue[run_queue.SINGLE.name],

@@ -369,7 +369,8 @@ def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
         session.rollback()
         if not is_retryable_write_conflict(e):
             raise
-        logger.warning("Skipped %s write due to concurrent DB conflict: %s", what, e)
+        logger.warning("Skipped %s write due to concurrent DB conflict: %s", what, type(e).__name__)
+        logger.debug("Skipped %s write due to concurrent DB conflict: %s", what, e)
         return False
     finally:
         session.close()

@@ -70,6 +70,7 @@ from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
 )
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.stage4.extraction import (
     UnextractedContentReport,
     calculate_unextracted_content,
@@ -1798,7 +1799,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 # are expected here; a code bug must surface, not read as a missing
                 # file (#531 review).
                 if self.verbose:
-                    logger.warning(f"Could not load cv_owner_location from Stage 4: {e}")
+                    logger.warning("Could not load cv_owner_location from Stage 4: %s", redacted_error_label(e))
+                    logger.debug("Could not load cv_owner_location from Stage 4: %s", e)
         return cv_owner_location
 
     def _resolve_original_doc_path(
@@ -3386,7 +3388,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return first_para
         except Exception as e:
             if self.verbose:
-                logger.warning(f"  Warning: Could not insert overflow bullet: {e}")
+                logger.warning("  Warning: Could not insert overflow bullet: %s", redacted_error_label(e))
+                logger.debug("  Warning: Could not insert overflow bullet: %s", e)
             return None
 
     def _remove_abbreviated_entry(self, para: Paragraph):
@@ -3415,7 +3418,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 parent.remove(p_element)
         except Exception as e:
             if self.verbose:
-                logger.warning(f"  Warning: Could not remove abbreviated entry: {e}")
+                logger.warning("  Warning: Could not remove abbreviated entry: %s", redacted_error_label(e))
+                logger.debug("  Warning: Could not remove abbreviated entry: %s", e)
 
     def _route_overflow_to_appendix(self, entry: dict, coverage_pct: float = 0):
         """Queue an overflow entry for reconsideration before adding to appendix.
@@ -3685,7 +3689,8 @@ Now analyze the text above:"""
 
         except Exception as e:
             if self.verbose:
-                logger.warning(f"  Warning: Could not insert reconsidered segment: {e}")
+                logger.warning("  Warning: Could not insert reconsidered segment: %s", redacted_error_label(e))
+                logger.debug("  Warning: Could not insert reconsidered segment: %s", e)
             return False
 
     def _find_subsection_header(self, search_text: str,
@@ -4457,7 +4462,8 @@ Now analyze the text above:"""
             self.stats['comments_added'] += 1
         except Exception as e:
             if self.verbose:
-                logger.warning(f"  Warning: Could not add comment: {e}")
+                logger.warning("  Warning: Could not add comment: %s", redacted_error_label(e))
+                logger.debug("  Warning: Could not add comment: %s", e)
 
     def _add_track_change_insertion(self, para: Paragraph, text: str, author: str = "PubMed Enrichment"):
         """Mark text as an insertion (track change) that appears in Word's review mode.
@@ -4523,7 +4529,8 @@ Now analyze the text above:"""
             return ins
         except Exception as e:
             if self.verbose:
-                logger.warning(f"  Warning: Could not add track change: {e}")
+                logger.warning("  Warning: Could not add track change: %s", redacted_error_label(e))
+                logger.debug("  Warning: Could not add track change: %s", e)
             # Fall back to normal text
             run = para.add_run(text)
             _set_font(run)
@@ -4586,7 +4593,8 @@ Now analyze the text above:"""
             return del_elem
         except Exception as e:
             if self.verbose:
-                logger.warning(f"  Warning: Could not add track change deletion: {e}")
+                logger.warning("  Warning: Could not add track change deletion: %s", redacted_error_label(e))
+                logger.debug("  Warning: Could not add track change deletion: %s", e)
             return None
 
     def _add_track_change_pair(self, para: Paragraph, original_text: str, new_text: str,
@@ -4657,7 +4665,8 @@ Now analyze the text above:"""
 
         except Exception as e:
             if self.verbose:
-                logger.warning(f"  Warning: Could not create comments.xml: {e}")
+                logger.warning("  Warning: Could not create comments.xml: %s", redacted_error_label(e))
+                logger.debug("  Warning: Could not create comments.xml: %s", e)
                 import traceback
                 traceback.print_exc()
 

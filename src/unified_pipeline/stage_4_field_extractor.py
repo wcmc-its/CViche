@@ -34,6 +34,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.log_redaction import redacted_error_label
 
 # Every name below is re-exported from this module by being imported here: it
 # is the public import surface of the stage 4 split (#498), pinned by
@@ -237,7 +238,8 @@ def run_validation(output_path: str) -> None:
             logger.warning("\n⚠️  Validation completed with warnings")
 
     except Exception as e:
-        logger.exception(f"\n⚠️  Validation error: {e}")
+        logger.error("\n⚠️  Validation error: %s", redacted_error_label(e))
+        logger.debug("Validation error", exc_info=True)  # the traceback ends in str(e) (§4.7)
         logger.warning("   Extraction still successful")
 
 if __name__ == "__main__":
@@ -269,5 +271,6 @@ if __name__ == "__main__":
         logger.info("\n Success")
 
     except Exception as e:
-        logger.exception(f"Error: {e}")
+        logger.error("Error: %s", redacted_error_label(e))
+        logger.debug("Error", exc_info=True)  # the traceback ends in str(e) (§4.7)
         sys.exit(1)

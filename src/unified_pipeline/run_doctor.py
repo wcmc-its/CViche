@@ -761,6 +761,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     subpoint_text,
 )
 from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.quality_score import (
     prompt_log_fallback_served,
     stage3b_fallback_ratios,
@@ -1567,7 +1568,8 @@ def _load_stage_errors(path: Path, on_unreadable: Callable[[str, str], None]) ->
     try:
         return read_stage_errors(path)
     except (OSError, ValueError) as e:
-        logger.warning("run_doctor could not read %s (%s): %s", path, type(e).__name__, e)
+        logger.warning("run_doctor could not read %s (%s)", path, redacted_error_label(e))
+        logger.debug("run_doctor could not read %s: %s", path, e)
         on_unreadable("stage_errors", f"{type(e).__name__}: {e}")
         return None
 
