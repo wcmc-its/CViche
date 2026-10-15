@@ -1832,6 +1832,34 @@ def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(monke
     assert 1 not in break_starts  # the parent int alone kept it out of break_entries
 
 
+def test_a_grant_span_across_two_tables_is_one_entry_and_leaves_no_break(monkeypatch):
+    """#1873 (YDSVDB): one WCM grant is a table, a "Your role" line and a
+    table. The model's span "1.0" to "3.1" is one entry: no row is recovered
+    on its own, and the line between the tables is not left as a break."""
+    doc_elements = [
+        _para(0, "RESEARCH"),
+        {"unified_idx": 1, "type": "table_content",
+         "data": [["Award Source:", "Synthetic Brennic Foundation"], ["Project title:", "Moorland lattice survey"]]},
+        _para(2, "Your role*\tCo-PI"),
+        {"unified_idx": 3, "type": "table_content",
+         "data": [["Your percent (%) effort:", "2%"], ["The major goals of this project are:", "Map the lattices"]]},
+    ]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": [
+        {"element_idx_start": "1.0", "element_idx_end": "3.1", "element_type": "table_row", "confidence": 0.95},
+    ]}))
+    context = stage2._DocumentContext(
+        doc_elements=doc_elements, header_indices={0}, element_index_map=_idx_map(doc_elements),
+        header_info={0: ["Research"]}, doc=Document(),
+    )
+    result = stage2._extract_section(context, ["Research"], 0, 3, document_uid="TEST", cancel_check=None)
+
+    content = [e for e in result.entries if e["element_type"] not in ("header", "break")]
+    assert [(e["element_idx_start"], e["element_idx_end"]) for e in content] == [("1.0", "3.1")]
+    assert "Co-PI" in content[0]["text"] and "Map the lattices" in content[0]["text"]
+    assert not [e for e in result.entries if e["element_type"] == "break"]
+    assert result.assigned == {0, 1, 2, 3}
+
+
 def test_extract_section_signature_bundles_the_five_constants_into_one_context_param():
     """#915 review item 6: doc_elements, header_indices, element_index_map,
     header_info, doc are constant across every call in a run_stage_2
