@@ -61,10 +61,13 @@ def test_each_uploader_keeps_one_copy_and_a_pre_1754_copy_is_still_listed(db, st
     store.put_file(_RUN, f"corrected/{_RUN}_diff.json", b"{}")
     svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW)
     svc.record_corrected_docx(db, _RUN, 12, _docx(_ENTRIES[1]), _NOW)
-    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(*_ENTRIES), _LATER) == 0
+    # One build, compared by identity of bytes: a second _docx() call can land
+    # in the next 2-second zip timestamp and differ in its header bytes.
+    replacement = _docx(*_ENTRIES)
+    assert svc.record_corrected_docx(db, _RUN, _USER, replacement, _LATER) == 0
 
     assert svc.stored_uploaders(_RUN) == [None, _USER, 12]
-    assert store.get_file(_RUN, f"corrected/{_RUN}_u{_USER}_corrected.docx") == _docx(*_ENTRIES)
+    assert store.get_file(_RUN, f"corrected/{_RUN}_u{_USER}_corrected.docx") == replacement
     assert json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, 12)))["by_type"]["deleted"] == 1
     assert svc.corrected_diff_key(_RUN, None) == f"corrected/{_RUN}_diff.json"
     # One corrected_copies row per uploader; the second upload replaced user 7's.

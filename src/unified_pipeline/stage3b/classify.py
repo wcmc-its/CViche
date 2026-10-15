@@ -1185,10 +1185,13 @@ _PLACE_WORD_RE = re.compile(
     r"\b(?:university|college|school|hospital|health|department|institute|center|centre)\b",
     re.IGNORECASE)
 _PLACE_LINE_MAX_WORDS = 8
-# A comma marks a role or title before the place ("Research Fellow,
-# Karolinska Institute"); "Journal" marks a venue that names a college
-# ("Journal of the American College of Surgeons", FVQANK's own target row).
-_NOT_A_PLACE_LINE_RE = re.compile(r",|\bjournal\b", re.IGNORECASE)
+# A comma-joined line is a place line only when every part is one: a role or
+# title before the place ("Research Fellow, Karolinska Institute") is a
+# record, a nested place ("University of Florida College of Medicine,
+# Department of Anesthesiology", ULHCAP/WPDLWC) is not. "Journal" marks a
+# venue that names a college ("Journal of the American College of Surgeons",
+# FVQANK's own target row).
+_JOURNAL_RE = re.compile(r"\bjournal\b", re.IGNORECASE)
 _FORM_LABEL_RE = re.compile(r"\w:(?:\s|$)")
 _FORM_LABEL_MIN_LABELS = 2
 _TEMPLATE_PLACEHOLDER_RE = re.compile(r"\b(?:mm/yy|mm/dd|yyyy)\b", re.IGNORECASE)
@@ -1196,18 +1199,22 @@ _PARENTHESISED_RE = re.compile(r"\([^)]*\)?")
 
 
 def _is_place_or_label_line(text: str) -> bool:
-    """True when `text` is a bare institution name (short, a place word, no
-    comma or journal), a line ending in a colon, a row of two or more
-    "Label:" cells, or a template placeholder."""
+    """True when `text` is a bare institution name (every comma-separated
+    part short, naming a place word, and not a journal), a line ending in a
+    colon, a row of two or more "Label:" cells, or a template placeholder."""
     stripped = text.strip()
     if stripped.endswith(":") or _TEMPLATE_PLACEHOLDER_RE.search(stripped):
         return True
     if len(_FORM_LABEL_RE.findall(stripped)) >= _FORM_LABEL_MIN_LABELS:
         return True
-    if _NOT_A_PLACE_LINE_RE.search(stripped):
+    if _JOURNAL_RE.search(stripped):
         return False
-    words = _PARENTHESISED_RE.sub(" ", stripped).split()
-    return len(words) <= _PLACE_LINE_MAX_WORDS and bool(_PLACE_WORD_RE.search(stripped))
+    parts = [part.strip() for part in _PARENTHESISED_RE.sub(" ", stripped).split(",")]
+    return all(_is_place_part(part) for part in parts)
+
+
+def _is_place_part(part: str) -> bool:
+    return len(part.split()) <= _PLACE_LINE_MAX_WORDS and bool(_PLACE_WORD_RE.search(part))
 
 
 class _SourcePlacement(NamedTuple):

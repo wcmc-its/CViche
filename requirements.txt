@@ -13,4 +13,4 @@ lxml==6.1.3
 boto3==1.43.111
 pymysql==1.2.3
 cryptography==50.0.2
-pydantic==2.14.0
+pydantic==2.14.1
