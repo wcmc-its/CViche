@@ -130,6 +130,7 @@ class ExtractedFields(TypedDict, total=False):
     organization: Any
     output_type: Any
     pages: Any
+    panel_name: Any
     patent_number: Any
     percent_effort: Any
     phone: Any
