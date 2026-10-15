@@ -18,6 +18,7 @@ from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     apply_header_pin,
     content_pin_code,
     is_note_not_record,
+    is_reviewer_lead_in,
     leaf_header_code,
     mentee_pin_code,
     pinned_header_code,
@@ -871,3 +872,127 @@ def test_running_header_is_a_note_only_against_the_opening_line():
 ])
 def test_records_with_a_pointer_or_url_inside_are_not_notes(text):
     assert not is_note_not_record(text)
+
+
+# --- #1413: a journal after a reviewer lead-in in an earlier batch is Q4D -------
+
+EDITORIAL_HEADING = ("EDITORIAL ACTIVITIES",)
+REVIEWER_LEAD_IN = "Reviewer for the following journals and conferences:"
+
+
+def _reviewer_group(*rows, lead_in=REVIEWER_LEAD_IN, hierarchy=EDITORIAL_HEADING):
+    """A lead-in line, one Q4D journal, then `rows` (code, text, confidence)."""
+    return [
+        _row("Q4D", lead_in, confidence=0.85, hierarchy=hierarchy),
+        _row("Q4D", "Example Journal of Medicine", confidence=0.95, hierarchy=hierarchy),
+        *(_row(code, text, confidence=conf, hierarchy=hierarchy) for code, text, conf in rows),
+    ]
+
+
+# Two entries per call: the lead-in and the first journal went in call 1, the rows after them later.
+_TWO_PER_CALL = 2
+
+
+def test_unsure_board_answer_after_an_unseen_reviewer_lead_in_becomes_q4d():
+    group = _reviewer_group(("Q4C", "Example Health Services Review", 0.5),
+                            ("Q4C", "The Example Journal of Care", 0.5))
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 2
+    assert [e["taxonomy_code"] for e in out] == ["Q4D", "Q4D", "Q4D", "Q4D"]
+    assert [e.get("pre_pin_code") for e in out[2:]] == ["Q4C", "Q4C"]
+    assert all(e["classification_source"] == "llm" for e in out)
+
+
+def test_reviewer_pin_needs_the_batch_size():
+    # No batch size: the group went to the model in one call, which held the lead-in.
+    group = _reviewer_group(("Q4C", "Example Health Services Review", 0.5))
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and out == group
+
+
+def test_board_answer_in_the_lead_ins_own_batch_stays():
+    group = _reviewer_group(("Q4C", "Example Health Services Review", 0.5))
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=len(group))
+    assert n == 0 and out == group
+
+
+@pytest.mark.parametrize("row", [
+    ("Q4C", "Example Health Services Review", 0.9),                # a confident answer
+    ("Q4C", "Associate Editor, Example Health Services Review", 0.5),  # names a role
+    ("Q4C", "Example Society editorial board", 0.5),
+    ("Q4A", "Example Health Services Review", 0.5),                # not the board code
+])
+def test_reviewer_pin_leaves_a_firm_or_role_naming_answer(row):
+    group = _reviewer_group(row)
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 0 and out == group
+
+
+def test_reviewer_pin_leaves_rows_under_a_board_heading():
+    group = _reviewer_group(("Q4C", "Example Health Services Review", 0.5),
+                            hierarchy=("Editorial Boards",))
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 0 and out == group
+
+
+def test_a_confident_non_editorial_row_ends_the_reviewer_list():
+    group = _reviewer_group(("I", "Example Society of Medicine", 0.9),
+                            ("Q4C", "Example Health Services Review", 0.5))
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 0 and out == group
+
+
+def test_an_unsure_non_editorial_row_does_not_end_the_reviewer_list():
+    # GINAAP coded "Society for Medical Decision Making" I at 0.6 inside the list.
+    group = _reviewer_group(("I", "Example Society of Medicine", 0.6),
+                            ("Q4C", "Example Health Services Review", 0.5))
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 1 and out[-1]["taxonomy_code"] == "Q4D" and out[2] == group[2]
+
+
+def test_another_lead_in_ends_the_reviewer_list():
+    group = [*_reviewer_group(), _row("Q4C", "Editorial board positions:", confidence=0.9,
+                                      hierarchy=EDITORIAL_HEADING),
+             _row("Q4C", "Example Health Services Review", confidence=0.5, hierarchy=EDITORIAL_HEADING)]
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 0 and out == group
+
+
+def test_a_board_lead_in_opens_no_reviewer_list():
+    group = _reviewer_group(("Q4C", "Example Health Services Review", 0.5),
+                            lead_in="Editorial board member and reviewer for:")
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 0 and out == group
+
+
+@pytest.mark.parametrize("text", [
+    REVIEWER_LEAD_IN,
+    "Ad-Hoc Reviewer for:",
+    "  Ongoing reviewer for:  ",
+    "Reviewer for epidemiology journals:",
+])
+def test_reviewer_lead_ins(text):
+    assert is_reviewer_lead_in(text)
+
+
+@pytest.mark.parametrize("text", [
+    "In review (manuscripts submitted or in preparation):",           # a publication list
+    "Submitted, under review:",
+    "Example Symposium Review, Example University:",
+    "Editorial board member and reviewer for:",                        # names a board role
+    "Ad hoc Reviewer",                                                  # no colon: not a lead-in
+    "Reviewer for the Example Journal of Medicine, Example Society of Medicine, and others since 2031:",
+])
+def test_not_reviewer_lead_ins(text):
+    assert not is_reviewer_lead_in(text)
+
+
+def test_reviewer_pin_is_not_flipped_back_by_the_reasoning_check():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    group = _reviewer_group(("Q4C", "Example Health Services Review", 0.5))
+    out, _ = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    (corrected,), _ = apply_reasoning_corrections([{**out[-1], "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    assert corrected["taxonomy_code"] == "Q4D"
+

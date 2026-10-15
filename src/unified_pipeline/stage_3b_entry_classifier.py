@@ -70,6 +70,7 @@ from unified_pipeline.core.batch_pool import (
 )
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.stage3b.classify import (  # noqa: F401
+    CLASSIFY_BATCH_SIZE,
     NO_HIERARCHY_KEY,
     ClassificationStats,
     SharedSystemPrompt,
@@ -166,8 +167,8 @@ def _classify_group(
     primary_codes = context.get_primary_codes()
 
     classified, stats = classify_entries_batch(
-        group_entries, context, taxonomy, shared_prompt=shared_prompt)
-    classified, _pinned = apply_header_pin(classified, context)
+        group_entries, context, taxonomy, batch_size=CLASSIFY_BATCH_SIZE, shared_prompt=shared_prompt)
+    classified, _pinned = apply_header_pin(classified, context, batch_size=CLASSIFY_BATCH_SIZE)
 
     lines = [f"    Entries: {len(group_entries)}"]
     if primary_codes:

@@ -24,6 +24,9 @@ An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
 A content pin (#1695) recodes a per-article citation-metrics line ("<Surname> et
 al. (<year>) <journal> JIF: <x>") from a publication or editorial code to S0.
+A reviewer pin (#1413) recodes an unsure Q4C journal name to Q4D when the
+"Reviewer for the following journals:" line heading its list went to the model
+in an earlier batch.
 
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`; no LLM, no I/O. Imports only `.context`.
@@ -285,6 +288,35 @@ _MENTOR_GRANT_HEADING = re.compile(
 )
 _MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is a mentored trainee grant"
 
+# --- #1413: a journal listed under a reviewer lead-in is a review, not a board seat ---
+#
+# "Reviewer for the following journals and conferences:" heads a flat list of
+# journal names. Stage 3b classifies a group in batches of CLASSIFY_BATCH_SIZE,
+# so a list longer than one batch reaches the model in two calls, and the second
+# call holds journal names only, never the lead-in. With nothing saying the owner
+# reviews for them, the model answered Q4C (editorial board) at 0.5 for those
+# names and they rendered as Editorial Board rows (JJUQDF 342-346, 3 of 4 runs;
+# RVTAQT the same). The pin restores the lead-in's reading for that later batch
+# only: an unsure Q4C that names no role, in a later batch than the reviewer
+# lead-in, while no row since the lead-in was confidently coded outside the
+# editorial (Q4) family. An unsure non-editorial row does not end the list: the
+# same batch on GINAAP coded "Society for Medical Decision Making" I at 0.6.
+_JOURNAL_REVIEWER_CODE = "Q4D"
+_EDITORIAL_BOARD_CODE = "Q4C"
+_REVIEWER_PIN_MAX_MODEL_CONFIDENCE = 0.80
+# A lead-in is a short line ending in a colon; a longer one is a record with a colon in it.
+_LEAD_IN_END = ":"
+_LEAD_IN_MAX_WORDS = 12
+# "Reviewer"/"Ad hoc" name the owner's role; a bare "review" does not ("In review:",
+# "Submitted, under review:", "<Meeting> Review, <University>:" head other lists).
+_REVIEWER_WORD = re.compile(r"\breviewers?\b|\bad[\s-]hoc\b", re.I)
+# A role word in the row or the lead-in keeps the model's answer ("Editorial board
+# member and reviewer for:", "Associate Editor, <journal>"); so does a heading that
+# names a board. "EDITORIAL ACTIVITIES" names no board: the reviewer list sits under it.
+_JOURNAL_ROLE_WORD = re.compile(r"board|editor|member|panel|consult|advis|chair|committee", re.I)
+_BOARD_HEADING = re.compile(r"board", re.I)
+_REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for these journals"
+
 # A line that only points elsewhere ("<label> - see section N") or is only a
 # URL is a note, not a record: a T it was given must survive T-validation.
 _POINTER = re.compile(r"\(?\bsee\s+(?:sections?|items?|pages?|above|below|publications?)\b[^)]*\)?", re.I)
@@ -515,6 +547,51 @@ def mentor_grant_pin_code(entry: dict) -> tuple[str, str] | None:
     return _MENTOR_GRANT_CODE, _MENTOR_GRANT_WHY
 
 
+def is_lead_in(text: str) -> bool:
+    """A short line that ends in a colon: it introduces the rows after it (#1413)."""
+    stripped = (text or "").strip()
+    return stripped.endswith(_LEAD_IN_END) and len(stripped.split()) <= _LEAD_IN_MAX_WORDS
+
+
+def is_reviewer_lead_in(text: str) -> bool:
+    """A lead-in that names reviewing and no editorial role: "Reviewer for the following journals:"."""
+    return is_lead_in(text) and bool(_REVIEWER_WORD.search(text)) and not _JOURNAL_ROLE_WORD.search(text)
+
+
+def reviewer_pin_code(entry: dict, after_unseen_reviewer_lead_in: bool) -> tuple[str, str] | None:
+    """(Q4D, why) for an unsure, role-less Q4C after a reviewer lead-in its batch did not hold, else None.
+
+    `after_unseen_reviewer_lead_in` says a reviewer lead-in opened the current
+    run of editorial rows in an EARLIER classification batch than this entry, so
+    the model never saw it (#1413). The heading must not name a board.
+    """
+    if not after_unseen_reviewer_lead_in or entry.get("taxonomy_code") != _EDITORIAL_BOARD_CODE:
+        return None
+    if _safe_confidence(entry) > _REVIEWER_PIN_MAX_MODEL_CONFIDENCE:
+        return None
+    leaf = str((entry.get("hierarchy") or [""])[-1])
+    if _JOURNAL_ROLE_WORD.search(entry.get("text") or "") or _BOARD_HEADING.search(leaf):
+        return None
+    return _JOURNAL_REVIEWER_CODE, _REVIEWER_PIN_WHY
+
+
+def _next_reviewer_lead_in(entry: dict, position: int, current: int | None) -> int | None:
+    """The position of the reviewer lead-in still open after `entry`, or None.
+
+    A lead-in line opens a run (a reviewer one) or closes it (any other); a
+    model row confidently coded outside the editorial family ends the list. An
+    unsure, empty or fallback row changes nothing.
+    """
+    text = entry.get("text") or ""
+    if is_lead_in(text):
+        return position if is_reviewer_lead_in(text) else None
+    code = entry.get("taxonomy_code") or ""
+    leaves_the_list = (entry.get("classification_source") == _MODEL_SOURCE
+                       and not _EDITORIAL_CODE.match(code)
+                       and _safe_confidence(entry) > _REVIEWER_PIN_MAX_MODEL_CONFIDENCE)
+    return None if leaves_the_list else current
+
+
 def is_note_not_record(text: str, opening_line: str | None = None) -> bool:
     """A T line T-validation must leave T: a bare URL, a pointer-only line, or the running header.
 
@@ -554,31 +631,48 @@ def _recode(entry: dict, code: str, why: str) -> dict:
     }
 
 
-def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool) -> tuple[str, str] | None:
-    """(code, why) for one model answer: the header pin, then the mentor-grant, mentee and content pins."""
+def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
+             after_unseen_reviewer_lead_in: bool) -> tuple[str, str] | None:
+    """(code, why) for one model answer: the header pin, then the mentor-grant, mentee, content and reviewer pins."""
     header_code = header_pin_code(entry, pin, leaf)
     if header_code:
         return header_code, _HEADER_PIN_WHY
-    return mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee) or content_pin_code(entry)
+    return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee) or content_pin_code(entry)
+            or reviewer_pin_code(entry, after_unseen_reviewer_lead_in))
 
 
-def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext) -> tuple[list[dict], int]:
+def _in_later_batch(position: int, lead_in_at: int | None, batch_size: int | None) -> bool:
+    """Whether the row at `position` went to the model in a later call than the lead-in at `lead_in_at`."""
+    if lead_in_at is None or batch_size is None:
+        return False
+    return position // batch_size > lead_in_at // batch_size
+
+
+def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
+                     batch_size: int | None = None) -> tuple[list[dict], int]:
     """Recode model answers that lose to the group's pinned header code or to a content pin.
 
     Returns (entries, number recoded). A recoded entry keeps the model's answer
     in `pre_pin_code` / `pre_pin_reasoning`; `classification_source` stays
     "llm" (stage 3b's zero-classification gate counts it). The header pin is
-    checked first, then the mentor-grant pin (#1710), the mentee pin (#1251) and a content pin.
+    checked first, then the mentor-grant pin (#1710), the mentee pin (#1251), a
+    content pin and the reviewer pin (#1413).
+
+    `batch_size` is the number of entries per classification call the group was
+    sent in, in the order given here; None means the group went in one call, so
+    the model saw every lead-in and the reviewer pin never applies.
     """
     pin, leaf = pinned_header_code(context), leaf_header_code(context)
-    out, recoded, after_mentee = [], 0, False
-    for entry in entries:
+    out, recoded, after_mentee, reviewer_lead_in_at = [], 0, False, None
+    for position, entry in enumerate(entries):
         if entry.get("classification_source") == _MODEL_SOURCE:
-            pinned = _pin_for(entry, pin, leaf, after_mentee)
+            unseen_lead_in = _in_later_batch(position, reviewer_lead_in_at, batch_size)
+            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in)
             if pinned and pinned[0] != entry.get("taxonomy_code"):
                 recoded += 1
                 entry = _recode(entry, *pinned)
         after_mentee = after_mentee or entry.get("taxonomy_code") in _MENTEE_RECORD_CODES
+        reviewer_lead_in_at = _next_reviewer_lead_in(entry, position, reviewer_lead_in_at)
         out.append(entry)
     if recoded:
         logger.info("Stage 3b header pin: %d entr%s recoded", recoded, "y" if recoded == 1 else "ies")
