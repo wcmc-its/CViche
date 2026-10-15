@@ -12,7 +12,7 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
   }`
 
 const menuItemClass = ({ isActive }: { isActive: boolean }) =>
-  `block px-4 py-3 text-sm font-medium focus-visible:outline-none focus-visible:bg-sand-100 hover:bg-sand-100 ${
+  `block px-4 py-3 text-sm font-medium focus-visible:outline-hidden focus-visible:bg-sand-100 hover:bg-sand-100 ${
     isActive ? 'text-gray-900 bg-sand-100' : 'text-gray-700'
   }`
 
@@ -79,7 +79,7 @@ function NarrowMenu({ showDashboard, onRunPage }: NarrowMenuProps) {
         aria-expanded={open}
         aria-controls="header-menu"
         onClick={() => setOpen((o) => !o)}
-        className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-700 hover:bg-sand-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+        className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-700 hover:bg-sand-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
       >
         {open ? <X className="h-5 w-5" aria-hidden="true" /> : <Menu className="h-5 w-5" aria-hidden="true" />}
       </button>
@@ -122,7 +122,7 @@ export default function AppHeader() {
           </>
         ) : (
           <>
-            <nav aria-label="Main" className="flex h-full min-w-0 overflow-x-auto [scrollbar-width:none]">
+            <nav aria-label="Main" className="flex h-full min-w-0 overflow-x-auto scrollbar-none">
               <NavLink to="/runs" className={({ isActive }) => tabClass({ isActive: isActive || onRunPage })}>Runs</NavLink>
               <NavLink to="/" end className={tabClass}><NewRunLabel /></NavLink>
               {showDashboard && <NavLink to="/admin" className={tabClass}>Dashboard</NavLink>}

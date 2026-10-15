@@ -45,7 +45,7 @@ export default function ConsentPublishCard({ currentVersion, onPublished }: Cons
   }
 
   return (
-    <section className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+    <section className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
       <div className="flex items-baseline justify-between gap-3 mb-4">
         <h3 className="text-sm font-semibold text-gray-900">Consent terms</h3>
         <span className="text-sm text-gray-600">
@@ -59,7 +59,7 @@ export default function ConsentPublishCard({ currentVersion, onPublished }: Cons
         type="button"
         onClick={open}
         disabled={loading}
-        className="px-4 py-2 text-sm font-medium text-gray-900 bg-white border border-sand-400 rounded-lg hover:bg-sand-50 disabled:opacity-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+        className="px-4 py-2 text-sm font-medium text-gray-900 bg-white border border-sand-400 rounded-lg hover:bg-sand-50 disabled:opacity-50 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
       >
         Publish new version…
       </button>

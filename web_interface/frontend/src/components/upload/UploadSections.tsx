@@ -44,7 +44,7 @@ export function WhoToggle({ value, queueMode, onChange }: WhoToggleProps) {
             return (
               <label
                 key={option}
-                className={`cursor-pointer rounded-md px-3 py-1.5 text-[13px] font-medium has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary-500 ${
+                className={`cursor-pointer rounded-md px-3 py-1.5 text-[13px] font-medium has-focus-visible:ring-2 has-focus-visible:ring-primary-500 ${
                   selected ? 'bg-white text-gray-900 shadow-[0_1px_2px_rgba(60,40,10,0.12)]' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
@@ -85,11 +85,11 @@ export function IntakeEmailLine({ address, multi }: { address: string; multi: bo
       <Mail className="mt-[3px] h-3.5 w-3.5 flex-none" aria-hidden="true" />
       <span className="min-w-0">
         {multi ? 'Or forward CVs as attachments from your WCM email to' : 'Or forward your CV as an attachment from your WCM email to'}{' '}
-        <a href={`mailto:${address}`} className="font-semibold text-primary-700 hover:underline [overflow-wrap:anywhere]">{address}</a>
+        <a href={`mailto:${address}`} className="font-semibold text-primary-700 hover:underline wrap-anywhere">{address}</a>
         {multi ? '. Each attachment becomes its own run.' : '.'}
       </span>
       <button type="button" onClick={() => void copy()} title="Copy address"
-        className="flex flex-none items-center gap-1 rounded-md px-1.5 py-px text-xs text-gray-600 hover:bg-sand-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500">
+        className="flex flex-none items-center gap-1 rounded-md px-1.5 py-px text-xs text-gray-600 hover:bg-sand-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500">
         <Copy className="h-[13px] w-[13px]" aria-hidden="true" />
         <span aria-live="polite">{copied ? 'Copied' : 'Copy'}</span>
       </button>
@@ -129,7 +129,7 @@ export function TemplateWarning({ acknowledged, onAcknowledge }: TemplateWarning
   return (
     <section className="bg-amber-50 border border-amber-300 rounded-lg p-4" role="alert" aria-label="Blank template warning">
       <div className="flex items-start gap-3">
-        <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
+        <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" aria-hidden="true" />
         <div className="text-sm text-amber-800">
           <p className="font-semibold">This looks like a blank WCM CV template.</p>
           <p className="mt-1">
@@ -143,7 +143,7 @@ export function TemplateWarning({ acknowledged, onAcknowledge }: TemplateWarning
               type="checkbox"
               checked={acknowledged}
               onChange={(e) => onAcknowledge(e.target.checked)}
-              className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600 focus-visible:ring-amber-500"
+              className="mt-0.5 h-4 w-4 rounded-sm border-amber-400 text-amber-600 focus-visible:ring-amber-500"
             />
             <span>I understand and want to process this file anyway.</span>
           </label>
@@ -158,7 +158,7 @@ export function DuplicateNotice({ message }: { message: string }) {
   return (
     <section className="bg-amber-50 border border-amber-300 rounded-lg p-4" role="alert" aria-label="Duplicate file notice">
       <div className="flex items-start gap-3">
-        <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
+        <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" aria-hidden="true" />
         <p className="text-sm text-amber-800">{message}</p>
       </div>
     </section>

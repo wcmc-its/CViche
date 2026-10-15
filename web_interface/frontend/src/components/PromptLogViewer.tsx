@@ -33,7 +33,7 @@ export default function PromptLogViewer({
     >
       {/* Left sidebar - file list */}
       <nav
-        className="w-full md:w-64 flex-shrink-0 bg-sand-50 border border-sand-200 rounded-[10px] p-2 overflow-y-auto"
+        className="w-full md:w-64 shrink-0 bg-sand-50 border border-sand-200 rounded-[10px] p-2 overflow-y-auto"
         aria-label="Prompt log files"
       >
         <ul className="space-y-1" role="list">
@@ -41,7 +41,7 @@ export default function PromptLogViewer({
             <li key={i}>
               <button
                 onClick={() => onSelectPromptLog(log.filename)}
-                className={`w-full text-left px-3 py-2 rounded text-xs truncate transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
+                className={`w-full text-left px-3 py-2 rounded text-xs truncate transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden ${
                   selectedPromptLog === log.filename
                     ? 'bg-primary-600 text-white'
                     : 'bg-white hover:bg-sand-100 text-gray-700'

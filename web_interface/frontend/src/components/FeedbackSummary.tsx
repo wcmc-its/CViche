@@ -67,7 +67,7 @@ function IssueChips({ feedback }: { feedback: FeedbackDetail }) {
             <span className="inline-block rounded-full border border-ink bg-sand-50 px-2.5 py-0.5 text-[13px] font-medium text-gray-900">
               {issue.label}
             </span>
-            {detail && <span className="mt-1 block text-sm text-gray-700 [overflow-wrap:anywhere]">{detail}</span>}
+            {detail && <span className="mt-1 block text-sm text-gray-700 wrap-anywhere">{detail}</span>}
           </li>
         )
       })}
@@ -121,7 +121,7 @@ function SubmissionCard({ feedback, sectionNames }: { feedback: FeedbackDetail; 
         {answersFor(feedback, sectionNames).map((answer) => (
           <div key={answer.label} className="py-2.5 border-t border-sand-200 first:border-t-0 grid gap-x-6 gap-y-1 sm:grid-cols-[240px_minmax(0,1fr)] items-start">
             <dt className="text-sm font-medium text-gray-900">{answer.label}</dt>
-            <dd className="text-sm text-gray-700 [overflow-wrap:anywhere]">{answer.value}</dd>
+            <dd className="text-sm text-gray-700 wrap-anywhere">{answer.value}</dd>
           </div>
         ))}
       </dl>

@@ -110,7 +110,7 @@ function CopyLinkButton({ batchId }: { batchId: string }) {
     <button
       type="button"
       onClick={() => void copy()}
-      className="flex items-center gap-1.5 rounded-lg border border-sand-400 bg-white px-3.5 py-[9px] text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+      className="flex items-center gap-1.5 rounded-lg border border-sand-400 bg-white px-3.5 py-[9px] text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
     >
       <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
       {copied ? 'Link copied' : 'Copy link'}
@@ -129,7 +129,7 @@ function StatusBar({ counts, timeLeft }: { counts: BatchStatusCounts; timeLeft: 
         <div className="flex flex-wrap gap-4" data-testid="batch-status-counts">
           {shown.map((s) => (
             <span key={s.key} className="flex items-center gap-1.5 text-gray-700">
-              <span className={`h-2 w-2 rounded-sm ${s.color}`} aria-hidden="true" />
+              <span className={`h-2 w-2 rounded-xs ${s.color}`} aria-hidden="true" />
               {statusLabel(s.key)} <strong className="tabular-nums">{counts[s.key]}</strong>
             </span>
           ))}
