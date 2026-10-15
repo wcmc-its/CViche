@@ -169,6 +169,40 @@ def test_is_header_match_separator_only_paragraph_does_not_match():
     assert is_header_match("education", "*" * 40, strict=True) is False
 
 
+def test_is_header_match_ignores_a_trailing_underscore_rule():
+    # BIITRL / #1848: '_' is a word character, so the header's closing \b never
+    # matched inside the rule, and the exact test saw the underscores.
+    header = normalize_text("MEMBERSHIPS IN PROFESSIONAL/MEDICAL ORGANIZATIONS")
+    para = normalize_text("MEMBERSHIPS IN PROFESSIONAL/MEDICAL ORGANIZATIONS" + "_" * 34)
+    assert is_header_match(header, para, strict=True) is True
+    assert is_header_match(header, para, strict=False) is True
+
+
+def test_map_hierarchy_node_places_a_heading_that_precedes_a_rule_on_its_own_line():
+    # #1848: both BIITRL headings named in the issue, each followed by its rule.
+    elements = [
+        _elem(0, "A. Person"),
+        _elem(1, "MEMBERSHIPS IN PROFESSIONAL/MEDICAL ORGANIZATIONS" + "_" * 34),
+        _elem(2, "Professional"),
+        _elem(3, "LICENSURE AND BOARD CERTIFICATION" + "_" * 55),
+        _elem(4, "Board Certification:"),
+    ]
+    for header, line in (("MEMBERSHIPS IN PROFESSIONAL/MEDICAL ORGANIZATIONS", 1),
+                         ("LICENSURE AND BOARD CERTIFICATION", 3)):
+        mapped, _ = map_hierarchy_node({"text": header, "level": "H1"}, elements, [], 0)
+        assert mapped["element_idx"] == line
+        assert "run_in" not in mapped
+
+
+def test_map_hierarchy_node_does_not_flag_a_rule_after_a_gap_as_a_run_in_record():
+    # PVXLKN: "4. POSITIONS   ____": the text after the gap is the rule, not
+    # the section's first record.
+    elements = [_elem(0, "A. Person"), _elem(1, "4. POSITIONS   " + "_" * 47)]
+    mapped, _ = map_hierarchy_node({"text": "4. POSITIONS", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] == 1
+    assert "run_in" not in mapped
+
+
 def test_map_hierarchy_node_places_a_heading_that_follows_a_separator_run():
     elements = [_elem(0, "A. Person"), _elem(1, "*" * 85 + " EDUCATION:"), _elem(2, "PhD, 2001")]
     mapped, _ = map_hierarchy_node({"text": "EDUCATION", "level": "H1"}, elements, [], 0)
@@ -1525,6 +1559,14 @@ def test_parent_range_end_ignores_a_follower_sharing_a_descendants_text():
     assert stage1b._parent_range_end(
         elements, 0, frozenset({"regional"}), frozenset({"honors", "regional"})
     ) == 3
+
+
+def test_parent_range_end_stops_at_a_follower_line_with_a_trailing_rule():
+    # #1848: a ruled follower heading ends the range like a plain one.
+    elements = [_elem(0, "Honors"), _elem(1, "Prize, 2001"), _elem(2, "SERVICE" + "_" * 30), _elem(3, "Panel")]
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"service"}), frozenset({"honors"})
+    ) == 2
 
 
 def test_parent_range_end_runs_to_the_document_end_without_a_follower_line():
