@@ -34,6 +34,7 @@ from ..formatting import (
     DATE_SPAN_SEPARATOR,
     _set_font,
     format_date_for_section,
+    format_date_list,
     format_date_range,
     further_date_spans,
     with_event_status,
@@ -192,9 +193,14 @@ def _own_talk_date(fields: dict) -> str:
     A multi-day talk within one year still renders its one year, because the
     range collapses when both ends format to the same string. A `{start_date,
     end_date}` mapping (#1233) already carries its own end, so a separate
-    `end_date` is not appended to it.
+    `end_date` is not appended to it. A list of dates under one key
+    ("1999-09-30; 1999-10-14") is each date formatted, not the string
+    verbatim (`format_date_list`, OIEPQD GOWQKA 531/533, #1245).
     """
     start = next((v for v in (_date_field(fields, k) for k in _TALK_DATE_KEYS) if v), '')
+    listed = format_date_list(start, 'R')
+    if listed:
+        return listed
     end = _date_field(fields, _TALK_END_DATE_KEY)
     if start and end and not isinstance(start, Mapping):
         return format_date_range(start, end, 'R')

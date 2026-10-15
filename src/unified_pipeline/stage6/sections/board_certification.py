@@ -55,6 +55,7 @@ from typing import Literal
 
 from unified_pipeline.core.render_check import entry_lines
 
+from ..fan_out import is_split_record
 from ..formatting import _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
 
@@ -218,6 +219,7 @@ def _board_cell_text(fields: dict) -> str:
 
 def _format_certification_date_str(
     fields: dict, source_text: str = '', current_year: int | None = None,
+    own_line: bool = False,
 ) -> str:
     """Build the F2 "yyyy-yyyy" (or "yyyy-Present") date string for one
     entry's structured fields.
@@ -236,6 +238,14 @@ def _format_certification_date_str(
     bare-year entries below (`LATER_RECERTIFICATIONS_FIELD`, #1270) join it as
     one list: "1998 (recertified 2005, 2015)". `current_year` is passed on to
     `_with_recertification`, so a caller that pins the year pins both clocks.
+
+    `own_line` says `source_text` is this one certification's line, so the
+    further recertification years it names are this record's
+    (`_every_recertification_year`); a fused line the fields detect, or a
+    fanned record's parent line, names other records' years, so the callers
+    for those leave it False. A fused entry the fields do not detect still
+    passes True; `_every_recertification_year` reads only the one text line
+    that names stage 4's year, which keeps the other lines' years out.
     """
     start_date = fields.get('start_date') or fields.get('year_certified') or ''
     end_date = fields.get('end_date') or ''
@@ -255,7 +265,8 @@ def _format_certification_date_str(
         later_years = _later_recertification_years(fields)
         if later_years:
             recert_fmt = ', '.join((recert_fmt, *later_years))
-        return _with_recertification(start_fmt, recert_fmt, source_text, current_year)
+        return _with_recertification(start_fmt, recert_fmt, source_text, current_year,
+                                     own_line=own_line)
     if start_fmt:
         return start_fmt
     if end_fmt:
@@ -281,8 +292,93 @@ def _cv_states_the_range(start_fmt: str, recert_fmt: str, source_text: str) -> b
     return re.search(pattern, str(source_text)) is not None
 
 
+# The years the source line names straight after a recertification word:
+# "Recertification 2015", "recertified 1999, 2006 and 2016",
+# "Recertification: 2017 (Expires 2027)" (2017 only).
+_YEAR = r'(?:19|20)\d{2}'
+_RECERTIFICATION_YEARS_RE = re.compile(
+    rf'\brecertif\w*[\s:]*(?:in\s+)?({_YEAR}(?:\s*(?:,|;|&|\band\b)\s*{_YEAR})*)\b',
+    re.IGNORECASE)
+_LISTED_YEAR_RE = re.compile(_YEAR)
+# How the Dates cell joins several recertification years.
+_RECERTIFICATION_YEAR_JOIN = ', '
+# A line that is only a further recertification of the certification above
+# it: a recertification word and years, nothing else ("Recertified 2015",
+# "Recertification: 2015, 2018", "re-certified 2015 and 2025."). An
+# allow-list, not a deny-list (PR #1847 review round 4): any other word on the
+# line (a specialty, a board, "in", an acronym, "expires") makes it a line of
+# its own, which ends the run.
+_BARE_RECERTIFICATION_LINE_RE = re.compile(
+    rf'(?:re-?certified|recertification)[\s:,]*(?:{_YEAR}(?:[\s,;&]+|\s*and\s*)?)+\.?',
+    re.IGNORECASE)
+
+
+def _every_recertification_year(recert_fmt: str, source_text: str, current_year: int) -> str:
+    """Every recertification year the record's own lines name, oldest
+    first, when stage 4 kept only one of them.
+
+    `recertification_date` holds one value, so a line "Board certified 2012
+    / Recertification 2015 / Recertification 2018" kept 2018 and lost 2015
+    (X6 UXBHHF 123, #1245). The other years are read only when stage 4's
+    year is one of them, so a year from another clause is never added;
+    anything else returns `recert_fmt` unchanged.
+
+    Only the one text line that names stage 4's year is read, with the
+    certification it continues (`_own_certification_lines`). A record that
+    is not fanned can still carry two certifications' lines when stage 4
+    returned one record for them ("ABIM, 2005, recertified 2015\nABIM
+    Cardiovascular Disease, 2008, recertified 2018"), and the first line's
+    2015 is the other certification's (PR #1847 review). When no line or
+    more than one line names it, `recert_fmt` is returned unchanged.
+    """
+    lines = str(source_text).splitlines()
+    naming_it = [index for index, line in enumerate(lines)
+                 if recert_fmt in _recertification_years(line)]
+    if len(naming_it) != 1:
+        return recert_fmt
+    # A later year past `current_year` is an expiry, not a recertification,
+    # as on the single-value path (PR #1847 review round 4).
+    years = {year for line in _own_certification_lines(lines, naming_it[0])
+             for year in _recertification_years(line)
+             if int(year) <= current_year}
+    return _RECERTIFICATION_YEAR_JOIN.join(sorted(years))
+
+
+def _own_certification_lines(lines: list[str], index: int) -> list[str]:
+    """Line `index` with the lines of the same certification: when it is a
+    bare recertification line ("Recertified 2025"), the run of them it
+    sits in and the certification line they follow ("ABIM, 2005\n
+    Recertified 2015\nRecertified 2025", PR #1847 review); otherwise the
+    bare recertification lines that follow it. Any line that is not bare
+    ends the run, so another certification's years stay out, including a
+    recertification line that names its own specialty ("Recertified Sleep
+    Medicine 2005, recertified 2015", PR #1847 review round 4)."""
+    start = index
+    while start > 0 and _is_bare_recertification_line(lines[start]):
+        start -= 1
+    end = index + 1
+    while end < len(lines) and _is_bare_recertification_line(lines[end]):
+        end += 1
+    return lines[start:end]
+
+
+def _is_bare_recertification_line(line: str) -> bool:
+    """Whether `line` is only a recertification word and its years
+    (`_BARE_RECERTIFICATION_LINE_RE`), naming nothing else."""
+    return _BARE_RECERTIFICATION_LINE_RE.fullmatch(line.strip()) is not None
+
+
+def _recertification_years(line: str) -> list[str]:
+    """The distinct years `line` names straight after a recertification word."""
+    return list(dict.fromkeys(
+        year
+        for match in _RECERTIFICATION_YEARS_RE.finditer(line)
+        for year in _LISTED_YEAR_RE.findall(match.group(1))))
+
+
 def _with_recertification(
     start_fmt: str, recert_fmt: str, source_text: str = '', current_year: int | None = None,
+    own_line: bool = False,
 ) -> str:
     """The Dates cell for a certification with a recertification value and
     no stated end.
@@ -312,6 +408,8 @@ def _with_recertification(
         return f"{start_fmt}-{recert_fmt}"
     if _cv_states_the_range(start_fmt, recert_fmt, source_text):
         return f"{start_fmt}-{recert_fmt}"
+    if own_line:
+        recert_fmt = _every_recertification_year(recert_fmt, source_text, current_year)
     if recert_fmt[0].isdigit():
         return f"{start_fmt} ({_RECERTIFIED_LABEL} {recert_fmt})"
     return f"{start_fmt} (recertification: {recert_fmt})"
@@ -861,7 +959,8 @@ class BoardCertificationSection:
             # are reparsed from text. See _renders_as_structured_row.
             if _renders_as_structured_row(fields, original_text):
                 certificate_number = _certificate_number_text(fields.get('certificate_number', ''))
-                date_str = _format_certification_date_str(fields, original_text, current_year)
+                date_str = _format_certification_date_str(
+                    fields, original_text, current_year, own_line=not is_split_record(entry))
                 self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
             else:
                 self._parse_and_add_multiple_certifications(table, original_text, entry)

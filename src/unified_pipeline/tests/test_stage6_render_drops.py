@@ -825,6 +825,15 @@ def test_named_degree_or_college_row_stays_in_b1(entry: dict) -> None:
     assert _precollegiate_records(gen) == []
 
 
+@pytest.mark.parametrize("institution", ["Example Preparatory School", "Example Academy"])
+def test_a_school_level_written_as_the_degree_moves_to_other_education(
+        institution: str) -> None:
+    # #1245 (NDMRSO BNYLDF 180, #1379 residual): stage 4 wrote "High School"
+    # into `degree`, and the row stayed in B1 with an empty Year Awarded.
+    entry = _b1(institution, degree="High School")
+    assert _gen_and_code(entry)[1] == "B2"
+
+
 def test_text_is_read_when_stage4_names_no_institution() -> None:
     entry = _b1("  ", text="Example High School, Springfield 1990-1994")
     assert _gen_and_code(entry)[1] == "B2"

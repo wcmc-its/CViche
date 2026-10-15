@@ -1123,16 +1123,32 @@ PRECOLLEGIATE_TARGET_CODE = 'B2'
 PRECOLLEGIATE_REROUTE_CHECK = 'precollegiate_education_reroute'
 
 
+def _names_precollegiate_school(value: object) -> bool:
+    """Whether `value` is a string naming pre-collegiate schooling."""
+    return isinstance(value, str) and bool(_PRECOLLEGIATE_SCHOOL_RE.search(value))
+
+
 def _is_precollegiate_without_degree(entry: Mapping[str, Any]) -> bool:
     """Whether a B1 entry names no degree and its institution (its text when
-    stage 4 wrote none) names pre-collegiate schooling."""
+    stage 4 wrote none) names pre-collegiate schooling.
+
+    A `degree` that is itself a pre-collegiate school level ("High School")
+    names no degree and is enough on its own: stage 4 wrote the schooling
+    into the degree slot, and
+    the row stayed in B1 with an empty Year Awarded (NDMRSO BNYLDF 180,
+    #1379 residual, #1245)."""
     fields = entry.get('extracted_fields')
-    if not isinstance(fields, Mapping) or not _is_blank_value(fields.get('degree')):
+    if not isinstance(fields, Mapping):
+        return False
+    degree = fields.get('degree')
+    if _names_precollegiate_school(degree):
+        return True
+    if not _is_blank_value(degree):
         return False
     institution = fields.get('institution')
     if not isinstance(institution, str) or not institution.strip():
         institution = entry.get('text') or ''
-    return isinstance(institution, str) and bool(_PRECOLLEGIATE_SCHOOL_RE.search(institution))
+    return _names_precollegiate_school(institution)
 
 
 def _route_precollegiate_education(entry: dict[str, Any], code: str,

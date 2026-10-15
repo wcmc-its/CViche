@@ -18,6 +18,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -34,6 +35,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _bare_year,
     _classify_cert_token,
     _format_certification_date_str,
+    _is_bare_recertification_line,
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
@@ -41,6 +43,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _split_multi,
     _with_recertification,
 )
+from unified_pipeline.stage6.fan_out import LAST_STAGE4_RECORD  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -1455,6 +1458,191 @@ class TestRecertificationIsNeverTheRangeEnd:
         gen = _generator()
         gen._fill_board_certification([_certification("Example Board of Testing", "2005", "2015")])
         assert _rows_after_board(gen) == [("Example Board of Testing", "A12345", "2005 (recertified 2015)")]
+
+
+class TestEveryRecertificationYearOnTheLine:
+    """#1245 (X6 UXBHHF 123): `recertification_date` holds one value, so a
+    line naming two recertifications kept the last and lost the other.
+    Invented values."""
+
+    _LINE = "Example Board 2012-current\tBoard certified 2012\tRecertification 2015\tRecertification 2018"
+
+    def _dates(self, recertified, text, own_line=True):
+        fields = {"year_certified": "2012", "recertification_date": recertified}
+        return _format_certification_date_str(fields, text, own_line=own_line)
+
+    def test_each_recertification_the_line_names_is_listed(self):
+        assert self._dates("2018", self._LINE) == "2012 (recertified 2015, 2018)"
+
+    def test_a_listed_run_after_one_recertification_word_is_read(self):
+        assert self._dates("2016", "Example Board 2012 (recertified 2014 and 2016)") \
+            == "2012 (recertified 2014, 2016)"
+
+    def test_the_years_are_listed_oldest_first(self):
+        assert self._dates("2015", "Example Board 2012; Recertified 2018; Recertified 2015") \
+            == "2012 (recertified 2015, 2018)"
+
+    def test_a_year_after_another_word_is_not_a_recertification(self):
+        assert self._dates("2017", "Example Board 2012\tRecertification: 2017 (Expires 2027)") \
+            == "2012 (recertified 2017)"
+
+    def test_a_line_that_does_not_name_stage_4s_year_is_not_read(self):
+        assert self._dates("2019", self._LINE) == "2012 (recertified 2019)"
+
+    def test_another_certifications_line_in_the_text_is_not_read(self):
+        # PR #1847 review: one unfanned record whose text names two
+        # certifications; the first line's 2015 is the other one's.
+        fields = {"certifying_board": "Example Board of Sample", "year_certified": "2008",
+                  "recertification_date": "2018"}
+        text = ("Example Board of Testing, 2005, recertified 2015\n"
+                "Example Board of Sample, 2008, recertified 2018")
+        assert _format_certification_date_str(fields, text, own_line=True) \
+            == "2008 (recertified 2018)"
+
+    def test_two_lines_naming_stage_4s_year_read_neither(self):
+        text = ("Example Board of Testing, 2005, recertified 2015, 2018\n"
+                "Example Board of Sample, 2008, recertified 2012, 2018")
+        assert self._dates("2018", text) == "2012 (recertified 2018)"
+
+    def test_the_rendered_row_ignores_another_certifications_line(self):
+        gen = _generator()
+        entry = _certification("Example Board of Sample", "2008", "2018")
+        entry["text"] = ("Example Board of Testing, 2005, recertified 2015\n"
+                         "Example Board of Sample, 2008, recertified 2018")
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Sample", "A12345", "2008 (recertified 2018)")]
+
+    _BARE_LINES = ("Example Board of Testing, 2005\n"
+                   "Recertified 2015\n"
+                   "Recertified 2025")
+
+    def _bare_dates(self, recertified, text):
+        fields = {"year_certified": "2005", "recertification_date": recertified}
+        return _format_certification_date_str(fields, text, own_line=True)
+
+    def test_bare_recertification_lines_under_one_certification_are_read(self):
+        # PR #1847 review: one certification whose recertifications are
+        # each a line of their own.
+        assert self._bare_dates("2025", self._BARE_LINES) == "2005 (recertified 2015, 2025)"
+
+    def test_an_earlier_bare_line_reads_the_later_ones(self):
+        assert self._bare_dates("2015", self._BARE_LINES) == "2005 (recertified 2015, 2025)"
+
+    def test_the_certification_line_above_bare_lines_is_read(self):
+        text = "Example Board of Testing, 2005, recertified 2010\nRecertified 2015"
+        assert self._bare_dates("2015", text) == "2005 (recertified 2010, 2015)"
+
+    def test_a_future_bare_line_year_is_not_a_recertification(self):
+        # PR #1847 review round 4: a future year reads as an expiry.
+        text = "Example Board of Testing, 2005\nRecertified 2015\nRecertified 2030"
+        fields = {"year_certified": "2005", "recertification_date": "2015"}
+        assert (_format_certification_date_str(fields, text, own_line=True, current_year=2026)
+                == "2005 (recertified 2015)")
+
+    def test_bare_lines_under_another_certification_are_not_read(self):
+        text = ("Example Board of Testing, 2001\nRecertified 2011\n"
+                "Example Board of Sample, 2005\nRecertified 2015\nRecertified 2025")
+        assert self._bare_dates("2025", text) == "2005 (recertified 2015, 2025)"
+        text = ("Example Board of Sample, 2005\nRecertified 2015\n"
+                "Example Board of Testing, 2001\nRecertified 2011")
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    def test_a_recertification_line_naming_its_own_specialty_ends_the_run(self):
+        # PR #1847 review round 3: the second line starts "Recertified" but
+        # is another certification; the first line's 2011 is not this one's.
+        text = ("Example Board of Testing Internal Medicine, 2001, recertified 2011\n"
+                "Recertified in Sample Disease (EBT), 2005; recertified 2015")
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    @pytest.mark.parametrize("second_line", [
+        "Recertified in Sample Disease, 2010; recertified 2020",
+        "Recertified (EBT) 2010; recertified 2020",
+    ])
+    def test_a_following_line_naming_a_specialty_or_board_is_not_read(self, second_line):
+        text = "Example Board of Testing, 2005, recertified 2015\n" + second_line
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    @pytest.mark.parametrize("second_line", [
+        "Recertified Sleep Medicine 2005, recertified 2015",
+        "Recertified in Sleep Medicine 2005, recertified 2015",
+        "Recertified Sleep Medicine, 2005; recertified 2015",
+        "Recertified ABSM 2005, recertified 2015",
+    ])
+    def test_a_recertification_line_naming_any_specialty_is_its_own_certification(
+            self, second_line):
+        # PR #1847 review round 4: with or without "in", a specialty after
+        # the recertification word is another certification, so the first
+        # line's 2011 stays out, as on dev.
+        text = "Internal Medicine, 2001, Recertified 2011\n" + second_line
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    def test_the_rendered_row_ignores_a_recertification_line_naming_a_specialty(self):
+        gen = _generator()
+        entry = _certification("Example Board of Testing", "2005", "2015")
+        entry["text"] = ("Internal Medicine, 2001, Recertified 2011\n"
+                         "Recertified Sleep Medicine 2005, recertified 2015")
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2005 (recertified 2015)")]
+
+    @pytest.mark.parametrize("line", [
+        "Recertified 2015",
+        "recertified 2015.",
+        "Re-certified 2015",
+        "Recertification: 2015",
+        "Recertification 2015, 2018",
+        "Recertified 2015; 2018 & 2021",
+        "Recertified 2015 and 2025",
+        "  Recertified 2015  ",
+    ])
+    def test_a_recertification_word_and_years_alone_is_a_bare_line(self, line):
+        assert _is_bare_recertification_line(line)
+
+    @pytest.mark.parametrize("line", [
+        "Recertified in 2025",
+        "Recertified Sleep Medicine 2015",
+        "Recertified 2015 Sleep Medicine",
+        "Recertified (ABIM) 2015",
+        "Recertified 2015 (expires 2025)",
+        "Recertified",
+        "Board certified 2015",
+        "Recertified 1815",
+        "Example Board, 2005",
+    ])
+    def test_any_other_word_on_the_line_is_not_a_bare_line(self, line):
+        assert not _is_bare_recertification_line(line)
+
+    def test_recertified_in_a_year_ends_the_run(self):
+        # Round 4 allow-list: "in" is a word the allow-list does not name.
+        text = "Example Board of Testing, 2005\nRecertified 2015\nRecertified in 2025"
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    def test_an_indented_bare_recertification_line_is_read(self):
+        text = "Example Board of Testing, 2005\nRecertified 2015\n  Recertified 2025"
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015, 2025)"
+
+    def test_a_line_that_is_not_the_records_own_is_not_read(self):
+        assert self._dates("2018", self._LINE, own_line=False) == "2012 (recertified 2018)"
+
+    def test_the_rendered_row_lists_both_recertifications(self):
+        gen = _generator()
+        entry = _certification("Example Board of Testing", "2012", "2018")
+        entry["text"] = self._LINE
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2012 (recertified 2015, 2018)")]
+
+    def test_a_fanned_record_does_not_take_its_siblings_years(self):
+        # XAYKXA 124: the last of stage 4's records carries the parent's
+        # whole line, whose other year is the sibling record's.
+        gen = _generator()
+        entry = _certification("Example Board of Testing", "2012", "2018")
+        entry["text"] = self._LINE
+        entry[LAST_STAGE4_RECORD] = {}
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2012 (recertified 2018)")]
 
 
 class TestYearLedFusedRowRendersItsStructuredFields:
