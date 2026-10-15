@@ -190,6 +190,8 @@ REVIEW_FLAGS = {
                                "add it from your CV."),
     "stage2_text_break": ("Some text in this section of your CV was set aside and is not in the "
                           "document: check it against your CV."),
+    "stage2_span_overlap": ("Lines from your CV were read into two entries, so they may appear "
+                            "twice, once in the wrong section: keep the copy that belongs here."),
     "cross_entry_value": ("A date, amount, effort, role or name here may come from a different "
                           "entry of your CV: check this entry against the CV."),
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "

@@ -492,7 +492,13 @@ Lints, ranked by the severity of the failure class they catch:
                           section; with the docx, only lines that render
                           nowhere. Reads stage 2; stage 1a and the docx when
                           present
-14at. cross_entry_value   a stage-4 value (a date's year, an amount, an
+14at. stage2_span_overlap a stage-2 record entry that shares two or more
+                          source elements (paragraphs or table rows) with an
+                          entry before it, so the shared lines render twice,
+                          often under the wrong section (#1433; ATUVAL
+                          867-869, web172 112.x). WARN, one per pair of
+                          sections. Reads stage 2 only
+14au. cross_entry_value   a stage-4 value (a date's year, an amount, an
                           effort, a grant number, the owner's grant role or
                           a person's name) that its own entry's text lacks
                           and another entry of the same stage-4 call states
@@ -711,6 +717,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_record_date_shift,
     lint_segmentation,
     lint_segmentation_collapse,
+    lint_stage2_span_overlap,
     lint_stage2_text_break,
     lint_stage2_unaccounted,
     lint_table_lost,
@@ -880,6 +887,7 @@ KNOWN_LINTS = (
     "record_date_shift",
     "header_consumed_record",
     "stage2_text_break",
+    "stage2_span_overlap",
     "cross_entry_value",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -1166,6 +1174,12 @@ LINT_PREVALENCE = {
     # measured 2026-10-12. Same mixed-corpus caveat as above; the old farm
     # runs carry far more text breaks than current ones.
     "stage2_text_break": 0.354,
+    # stage2_span_overlap (#1433; S2-SO in doctor/PRECISION.md): 19 of 278
+    # local stage-2 runs -- the 106 under src/unified_pipeline/outputs, the
+    # 2026-09-11 and 2026-09-17 _autopsy_artifacts batches (40 and 20) and
+    # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
+    # caveat as above.
+    "stage2_span_overlap": 0.068,
     # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 22 of 400
     # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15.
     # Most predate #1609, which now removes a borrowed date, amount, percent or
@@ -1777,6 +1791,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks",)),
     LintSpec("stage2_text_break", lint_stage2_text_break, ("stage_2",),
              optional=("stage_1a", "blocks")),
+    LintSpec("stage2_span_overlap", lint_stage2_span_overlap, ("stage_2",)),
     LintSpec("cross_entry_value", lint_cross_entry_value, ("stage_4",),
              optional=("stage_3b",)),
 )
