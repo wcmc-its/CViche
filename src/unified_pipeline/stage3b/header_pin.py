@@ -24,6 +24,8 @@ An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
 A content pin (#1695) recodes a per-article citation-metrics line ("<Surname> et
 al. (<year>) <journal> JIF: <x>") from a publication or editorial code to S0.
+A chief-trainee pin (#1731) recodes a position or leadership code on a line
+that opens, after an optional date, with "Chief Resident(cy)" or "Chief Fellow" to C.
 A reviewer pin (#1413) recodes an unsure Q4C journal name to Q4D when the
 "Reviewer for the following journals:" line heading its list went to the model
 in an earlier batch.
@@ -193,6 +195,25 @@ _NON_TRAINING_ROLE_AFTER_TITLE = re.compile(
 _RESIDENT_PROFESSION_AFTER_TITLE = re.compile(r"^\s+(?:veterinarian|artist|scholar)s?\b", re.I)
 _TRAINING_SETTING = re.compile(r"\b(?:college|universit(?:y|ies)|hospital|school|residency)\b", re.I)
 _POSITION_CODES = frozenset({"D1", "D2", "D3"})
+
+# --- #1731: a chief resident or chief fellow is a trainee, not a leader ---
+#
+# "1979\u201180 Chief Resident B Internal Medicine, <hospital>" (NJHLUR 25, under
+# ACADEMIC APPOINTMENTS) came back D1 or D3 in all four rolls of the #1731 A/B,
+# with the prompt saying a chief trainee is C; its non-breaking hyphen also kept
+# `_TRAINEE_TITLE`'s date lead from reading the date. Because "Chief" opens it,
+# the D2 leadership split can also send such a line to L3 or O. The title must
+# OPEN the line after an optional date or date range: "Attending Staff Physician
+# and Chief Resident" (RVOPTG 60) is a staff appointment and keeps its D2, and a
+# "Chief Residency Selection Committee" line keeps its P (P is not overridable).
+_CHIEF_TRAINEE_CODE = "C"
+_CHIEF_TRAINEE_OVERRIDABLE = frozenset({"D1", "D2", "D3", "L3", "O"})
+_ANY_DASH = r"[-\u2010-\u2015]"
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+_DATE = rf"(?:{_MONTH}\s+)?(?:\d{{1,2}}/)?(?:(?:19|20)\d{{2}}|['\u2019]?\d{{2}})"
+_DATE_LEAD = rf"(?:{_DATE}(?:\s*(?:{_ANY_DASH}|to\b)\s*(?:{_DATE}|present\b|current\b|date\b)?)?[\s,:;.]*)?"
+_CHIEF_TRAINEE = re.compile(rf"^[\s\u2022*]*{_DATE_LEAD}chief\s+(?:residen(?:t|cy)|fellow)\b", re.I)
+_CHIEF_TRAINEE_WHY = "A chief resident or chief fellow is postdoctoral training"
 _LIFE_SUPPORT = re.compile(
     r"\b(?:BCLS|BLS|ACLS|PALS|NRP|ATLS|basic\s+life\s+support"
     r"|advanced\s+(?:cardiac|cardiovascular|trauma|pediatric)\s+life\s+support)\b",
@@ -481,6 +502,7 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
 
     Attended courses are B2, never K4, unless the row names a teaching role;
     a training title at the head of a position row is C (postdoctoral training);
+    a chief resident or chief fellow at the head of a position or leadership row is C;
     a life-support or teaching certificate is B2, not a medical licence (F1);
     a publication code on a note that points at a numbered publication is T;
     a publication or editorial code on a per-article metrics line is S0.
@@ -491,6 +513,8 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
         return "B2", "A course the owner attended is education received"
     if code in _POSITION_CODES and _is_trainee_title(text):
         return "C", "An intern, resident or fellow title is postdoctoral training"
+    if code in _CHIEF_TRAINEE_OVERRIDABLE and _CHIEF_TRAINEE.match(text):
+        return _CHIEF_TRAINEE_CODE, _CHIEF_TRAINEE_WHY
     if code == "F1" and (_LIFE_SUPPORT.search(text) or _TEACHING_CERTIFICATE.search(text)):
         return "B2", "A life-support or teaching certificate is not a medical licence"
     if code and _PUBLICATION_CODE.match(code) and _PUBLICATION_POINTER.search(text):
