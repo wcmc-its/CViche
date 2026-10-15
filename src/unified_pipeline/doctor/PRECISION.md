@@ -426,6 +426,18 @@ STM-1 adds `session_title_missing` (INFO), two shapes. `q2_quoted_title_unheld`:
 - Not caught: an unquoted session title (SEKQUI 525, NDXXAD 487), and a title stage 4 put in an off-schema key (VYICGW 131's `topic`, which `offschema_fields` reports).
 - R (21 on the fresh render): VVRTUC 117 (years in the Title), VVRTUC 339 (venue and date), SPIHVQ 725 (venue and "10/2010"), WBZIDP 191 (a split record's row prints the whole line, the other record's title included), YUYVIG IXJMKS 946 (venue and dates) and 16 of YUYVIG RLADNC (a PDF line whose Dates column is fused into the venue, "Weill Cornell Medical 2018 College"; 1083 also carries the table's own header words). All 21 true. A first draft that also took a whole-line cell with no year fired on JNATFN 494 ("<department> Pathology Grand Rounds", all the source says); the year rule was written after it, so it is in-sample.
 - Recall on the defect #1346 found: over the farm's stored dev-242 docx, rendered before #1351 and #1785, the R shape fires on all 25 R rows #1346 lists (RNKYST 259, 261, 262; MRJDWE 145, 147, 148, 161, 167; GJXIWD's 17), 199 R hits in all. On the fresh render none of those 25 fires: stage 6 now titles them from role and event.
+| JNJ-1 | 2026-10-15 | `fix/1414-journal-name-lint` on origin/dev `6190ab29` (`lint_journal_name_joined` alone, per stored run; it reads stage 4 only) | 292 distinct stored stage-4 outputs (284 uids), each read once by content: the 126-artifact census (the 66-CV farm under `src/unified_pipeline/outputs/stage_4_field_extraction`, the 2026-09-11 and 2026-09-17 `_autopsy_artifacts` batches) and every `analysis/**/*_fields.json` in the main checkout | every hit read by hand against its journal_name and entry text | #1414 |
+
+JNJ-1 adds `journal_name_joined`: a Q4C/Q4D `journal_name` that holds a tab, a role or section word ("Editorial Board", "Advisory Board", "Ad hoc", "Reviewer", "section", "panel"; "Section" before a capital letter or a numeral is part of a title, as in "Acta Crystallographica Section E"), or two journals joined by a semicolon, a run of two spaces, or a comma between two title-cased runs of two or more words. Each such name renders as one journal row. A comma is read as a join only after the rules that keep one title whole: a one-word piece ("..., Biology, Physics", "..., USA", "JACC, ..."), a last piece after one title that opens with "The", names a publisher ("Hindawi Publishing", "Elsevier") or is a short subject list ("Journal of Neurology, Neurosurgery and Psychiatry"), and an "Official Journal of ..." subtitle. After two title-cased runs the name is a list whatever its last piece is.
+
+241 findings on 72 files (68 uids; re-run after the "Section E" exception, the same 241 findings), one per entry and one offending name each; 237 distinct uid and name pairs (re-runs of one CV, such as IEUPKK, KUUKNJ, TVQZIP, RBHRFR and ZCTARO, repeat). Read by hand: 231 true, 8 partial, 2 false, so 231 / 241 (96%). On the 126-artifact census alone: 69 findings on 16 uids, 66 true, 1 partial, 2 false.
+
+- True (231): 202 joined lists (IEUPKK 169-191 and KUUKNJ 170-191, the rows #1414 names; RINASX/EQADVR/DTFNOR 438's fifteen journals; NTCULM 135, SYWZJA 260, KYOPUV 76, GCFEBE 198, the comma lists #1808 leaves alone), 28 names that keep the owner's role, 6 of them in a joined list as well ("Ad hoc Stroke", "Journal of Clinical Pharmacology, Editorial Board", "Hong Kong Medical Journal - International Advisory Board", "Science - Board of Reviewing Editors", "J Am Coll Cardiol (Elite Reviewer)"), and the one tab (two journals of one row).
+- Partial (8): one journal and a section of it, which reads correctly as one row: KHXOUF 1181 and 1193 (stored before #1808, which now moves such a dated section column out of the name), "Frontiers in Psychiatry, Addictive Disorders", "Hepatology (Hepatology Elsewhere section)", "Biology Direct (Genomics, Bioinformatics, and Systems Biology section)", "Frontiers Psychiatry, Child & Neurodevelopmental Psychiatry section", and BFSUMA 170's "... Specialty Consultant Panel" (twice), a panel seat the name keeps.
+- False (2): one journal written with a comma, "Journal of Gerontology, Medical Sciences" (2003_Albrechtjs_Cv 168), and a publisher with the work, "Oxford University Press, Manuscript Review" (web210 319).
+- Not caught: two journals with no separator at all (KUUKNJ 168 "Apoptosis Cell Death and Differentiation", 169), the ingest residual of #1414; and a one-word journal before a comma ("Apoptosis, Cell Death and Differentiation", IEUPKK 168), which reads like a title's subject word.
+
+No labelled run carries a journal-row finding, so matched / hits is not measured. The rules were written from these runs, so all of it is in-sample.
 
 ## Per-lint precision
 
@@ -465,6 +477,7 @@ STM-1 adds `session_title_missing` (INFO), two shapes. `q2_quoted_title_unheld`:
 | `source_line_coverage` | 408 | 0 | none | 9 / 60 hand-checked (15%): held out 4 / 30, in-sample 5 / 30, unmatched hits only; 30 / 60 with the partials | 97 / 398 on labelled runs (24%): held out 23 / 175 | 70: held out 20, in-sample 50 | YUY-SLC2 |
 | `summary_unsupported_claim` | 23 | 11 | none | 23 / 26 hand-checked (88%): WARN 14 / 14 (OIE-SUM), INFO 9 / 12 (S1554-PC), in-sample | 20 / 23 by sentence (87%) | 20 | OIE-SUM, S1554-PC |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
+| `journal_name_joined` | 241 | 241 | none | 231 / 241 hand-checked (96%), 8 partial | not measured (no label) | 0 | JNJ-1 |
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
 | `llm_fallback_served` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | names text | 0 | M1 |
 | `missed_headers` | 21 | 0 | 4 / 2 / 2 | 4 / 8 (50%) | names text | 0 | M1 |
@@ -650,6 +663,7 @@ Any lint not listed here has no verdicts and is a comment.
 | `appointment_title_overlong` | 3 / 3 (100%) | none | same | — | comment |
 | `summary_unsupported_claim` | 14 / 14 (100%) | 0 / 1 (0%) | same; held out not folded (changed since dev-259) | — | comment |
 | `implausible_year` | 1 / 2 (50%) | none | same | — | comment |
+| `journal_name_joined` | 231 / 241 (96%) | none | same | — | comment |
 | `junk_or_header_row` | 105 / 107 (98%) | 46 / 51 (90%) | 151 / 158 (96%) | delete the row | suggestion |
 | `llm_fallback_served` | 1 / 1 (100%) | none | same | — | comment |
 | `missed_headers` | 4 / 8 (50%) | none | same | — | comment |
