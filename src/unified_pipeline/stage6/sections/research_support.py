@@ -53,6 +53,8 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from unified_pipeline.core.text_norm import fold_quotes
+
 from ..formatting import (
     _format_currency,
     _set_cell_vertical_alignment,
@@ -1600,12 +1602,29 @@ def _optional_grant_rows(
     goals = fields.get('major_goals') or fields.get('description') or fields.get('narrative') or ''
     shows_goals = len(goals.strip()) > _SUBSTANTIVE_TEXT_MIN_CHARS and goals.strip().lower() != title_text
     notes = str(fields.get('notes') or '').strip()
-    repeats_goals = shows_goals and len(notes) > _SUBSTANTIVE_TEXT_MIN_CHARS and notes.lower() in goals.lower()
+    body = _note_without_goals_label(notes)
+    repeats_goals = (shows_goals and len(body) > _SUBSTANTIVE_TEXT_MIN_CHARS
+                     and _comparable(body) in _comparable(goals))
     if notes and notes.lower() != title_text and not repeats_goals:
         rows.append((NOTES_LABEL, notes))
     if shows_goals:
         rows.append(('Major project goals:', goals))
     return rows
+
+
+def _comparable(text: str) -> str:
+    """``text`` lower-cased, quotes folded and whitespace collapsed: the
+    goals parse keeps a wrapped source line's tab ("oversaw<tab>funding")
+    that stage 4's note does not (YDSVDB, #1879)."""
+    return " ".join(fold_quotes(text).split()).lower()
+
+
+def _note_without_goals_label(notes: str) -> str:
+    """``notes`` without a leading goals label: stage 4 can keep the source's
+    "The major goals of this project are: <goals>" whole as the note while
+    the goals row holds <goals> alone (YDSVDB, #1879)."""
+    m = MAJOR_GOALS_LABEL_RE.match(notes)
+    return m.group('rest').strip() if m and m.group('sep') else notes
 
 
 def _first_rendering_amount(fields: GrantFields) -> str | int | float:
