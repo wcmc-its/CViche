@@ -1180,11 +1180,12 @@ LINT_PREVALENCE = {
     # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
     # caveat as above.
     "stage2_span_overlap": 0.068,
-    # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 22 of 400
-    # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15.
-    # Most predate #1609, which now removes a borrowed date, amount, percent or
-    # grant number in stage 4 itself, so current runs should hit it less.
-    "cross_entry_value": 0.055,
+    # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 19 of 400
+    # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15,
+    # re-measured after #1840 (22 before it). Most predate #1609, which now
+    # removes a borrowed date, amount, percent or grant number in stage 4
+    # itself, so current runs should hit it less.
+    "cross_entry_value": 0.048,
 }
 
 

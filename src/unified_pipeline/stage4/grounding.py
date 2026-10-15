@@ -52,15 +52,78 @@ _NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _NOT_ALNUM_RE = re.compile(r"[^0-9A-Z]")
 
+# An effort written as a fraction of a full-time post ("4 hours a week/0.100
+# FTE", RNKYST 197): a decimal beside "FTE", at most 1, read as a percent.
+# Not a whole number ("FTE 2009", "1 FTE" stay unread); the decimal is read
+# whole, so "10.5 FTE" is 10.5 and not read, never 0.5.
+_FTE_FRACTION = r"(\d*\.\d+)"
+_FTE_RE = re.compile(rf"{_FTE_FRACTION}\s*FTE|FTE[\s:]*{_FTE_FRACTION}")
+_MAX_FTE_FRACTION = 1.0
+_PERCENT_PER_FTE = 100
+
+# A year mistyped by one keystroke: a digit too many ("2009-20011") or one
+# digit wrong ("3/31/3019", "1191, 80:224"), read only in one of five date
+# shapes, and only where the date is a word of its own: it starts after a
+# space, an opening bracket or nothing (not "$3019", "$ 3019", "R01CA3019",
+# "M16-3019", "106:3019"), and ends before closing punctuation and a space or
+# nothing (not "3019-0004", "3019/45", "3019:", "3019.5", "3019K"). A range
+# right after a comma or colon and a space is a page range ("Vol 2,\t1986-2202",
+# CKDDEG) and is not read. These guards are lexical: an identifier or amount written in a date
+# shape still reads as one, so "Protocol 2018-3019", "IRB 3019-2018",
+# "pp. 2018-3019", "Blood 106 2019-3025" (a page range after a space),
+# "doi 10.1/x 2018-3019", "£ 3019 - present" and "Budget 3019 - present"
+# (an amount with no "$") each ground 2019 or 2025. Only a run of four or
+# five digits has a candidate (`_one_keystroke_years`): a cut-off year
+# ("May 201") stays missing.
+_MISTYPED_RUN = r"(?P<run>\d+)"
+_STARTS_A_WORD = r"(?<![^\s(])(?<!\$ )"
+_ENDS_A_WORD = r"(?=[.,)]*(?:\s|$))"
+_NOT_AFTER_A_VOLUME = r"(?<![,:]\s)"
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August",
+                "September", "October", "November", "December")
+_MONTH = rf"(?:{'|'.join(_MONTH_NAMES + tuple(name[:3] for name in _MONTH_NAMES))}|Sept)\.?"
+_DAY = r"\d\d?"
+_DASH = r"[-\u2013]"
+_FOUR_DIGIT_YEAR = r"(?:19|20)\d\d"
+_MISTYPED_YEAR_CONTEXT_RES = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    # "February 20015", "December 9-10, 3013" (not days run together before
+    # the year: "June 2325, 1999")
+    rf"{_STARTS_A_WORD}{_MONTH}\s+(?:{_DAY}(?:{_DASH}{_DAY})?,?\s+)?{_MISTYPED_RUN}{_ENDS_A_WORD}"
+    rf"(?![,\s]*{_FOUR_DIGIT_YEAR})",
+    # "3/31/3019", "3/3019"
+    rf"{_STARTS_A_WORD}{_DAY}/(?:{_DAY}/)?{_MISTYPED_RUN}{_ENDS_A_WORD}",
+    # "2009-20011"; "Chapter of the Year -20218"
+    rf"(?:{_STARTS_A_WORD}{_NOT_AFTER_A_VOLUME}{_FOUR_DIGIT_YEAR}\s*|(?<=[a-z] )){_DASH}\s*"
+    rf"{_MISTYPED_RUN}{_ENDS_A_WORD}",
+    # "20011-2014", "20011 - present"
+    rf"{_STARTS_A_WORD}{_NOT_AFTER_A_VOLUME}{_MISTYPED_RUN}\s*{_DASH}\s*"
+    rf"(?:{_FOUR_DIGIT_YEAR}|present|current){_ENDS_A_WORD}",
+    # a citation's year before its volume: "1191, 80:224-229", "1196;20:108"
+    rf"{_STARTS_A_WORD}{_MISTYPED_RUN}[;,]\s*\d+(?:\(\d+\))?:",
+))
+_FIVE_DIGIT_RUN = 5
+_WRITTEN_AS_A_YEAR_RE = re.compile(r"(?:18|19|20)\d\d")
+# A dollar amount, removed before the "year run into other digits" rule only
+# ("$19900" does not state 1990 through that rule). The `year[2:]` /
+# `year[1:]` digit-run rules still read amounts, as on dev ("$19,900" still
+# states 2019, "$90,000" 1990), and so does every rule for an amount with
+# another currency sign or none ("£19900", "19900 USD").
+_CURRENCY_AMOUNT_RE = re.compile(r"\$\s*[\d,.]+")
+
 
 class TextFacts(NamedTuple):
-    """The checkable tokens of one entry's text."""
+    """The checkable tokens of one entry's text. `runs_outside_amounts`,
+    `mistyped_years` and `fte_percents` serve the own-text reading only
+    (#1840); another entry's text is read strictly, without them."""
 
     years: frozenset[str]
     digit_runs: frozenset[str]
     numbers: frozenset[str]
     percents: frozenset[str]
     alnum: str
+    runs_outside_amounts: frozenset[str]
+    mistyped_years: frozenset[str]
+    fte_percents: frozenset[str]
 
 
 class GroupGrounding(NamedTuple):
@@ -86,13 +149,48 @@ def _short_range_ends(text: str) -> set[str]:
     return {start[:4 - len(end)] + end for start, end in _SHORT_RANGE_RE.findall(text)}
 
 
+def _percent_key(number: float) -> str:
+    """A percent as one spelling, so "10", "10.0" and 0.100 FTE compare equal."""
+    return f"{number:g}"
+
+
+def _fte_percents(text: str) -> frozenset[str]:
+    fractions = (float(left or right) for left, right in _FTE_RE.findall(text))
+    return frozenset(_percent_key(fraction * _PERCENT_PER_FTE)
+                     for fraction in fractions if fraction <= _MAX_FTE_FRACTION)
+
+
+def _one_keystroke_years(run: str) -> set[str]:
+    """The four-digit years `run` is one keystroke from: a digit dropped from
+    five ("20011" -> 2001, 2011), or one digit changed in four that are not
+    already a year, a nineteenth-century one included ("1879-1928" is a
+    lifespan), and do not start with 0 ("2020-0927" is a protocol number):
+    "3019" -> 2019."""
+    if len(run) == _FIVE_DIGIT_RUN:
+        candidates = {run[:i] + run[i + 1:] for i in range(len(run))}
+    elif _WRITTEN_AS_A_YEAR_RE.fullmatch(run) or run.startswith("0"):
+        return set()
+    else:
+        candidates = {run[:i] + digit + run[i + 1:] for i in range(len(run)) for digit in "0123456789"}
+    return {candidate for candidate in candidates if _YEAR_RE.fullmatch(candidate)}
+
+
+def _mistyped_years(text: str) -> frozenset[str]:
+    runs = {match.group("run") for pattern in _MISTYPED_YEAR_CONTEXT_RES
+            for match in pattern.finditer(text)}
+    return frozenset().union(*map(_one_keystroke_years, runs))
+
+
 def text_facts(text: str) -> TextFacts:
     return TextFacts(
         years=frozenset(_YEAR_RE.findall(text)) | _short_range_ends(text),
         digit_runs=frozenset(_DIGIT_RUN_RE.findall(text)),
+        runs_outside_amounts=frozenset(_DIGIT_RUN_RE.findall(_CURRENCY_AMOUNT_RE.sub(" ", text))),
         numbers=_number_tokens(text),
         percents=frozenset(_PERCENT_RE.findall(text)),
         alnum=_NOT_ALNUM_RE.sub("", text.upper()),
+        mistyped_years=_mistyped_years(text),
+        fte_percents=_fte_percents(text),
     )
 
 
@@ -115,20 +213,28 @@ def _year_in_own_text(year: str, own: TextFacts) -> bool:
     """Read generously, so a year the entry does state is never called
     borrowed: a short range end ("2004-6"), two digits ("04/21/17",
     "3-30-00"), a mistyped first digit ("l988" reads as the run "988"), or a
-    year run into the digits beside it ("172:7512022", "202526;8(4)")."""
+    year run into the digits beside it ("172:7512022", "202526;8(4)") but
+    not into a dollar amount ("$19900"; only this rule skips amounts, the
+    two- and three-digit rules still read them), or a year mistyped by one
+    keystroke in a date shape ("2009-20011", "3/31/3019";
+    `_mistyped_years`, whose guards are lexical: see `_MISTYPED_RUN`)."""
     return (year in own.years
             or year[2:] in own.digit_runs
             or year[1:] in own.digit_runs
-            or any(year in run for run in own.digit_runs))
+            or any(year in run for run in own.runs_outside_amounts)
+            or year in own.mistyped_years)
 
 
 def _in_own_text(field: str, token: str, own: TextFacts) -> bool:
     """Whether the entry's own text holds `token`, read generously (see
-    `_year_in_own_text`); an amount or percent anywhere counts."""
+    `_year_in_own_text`); an amount or percent anywhere counts, and an effort
+    the entry writes as a fraction of a full-time post ("0.100 FTE" is 10%)."""
     if field in YEAR_FIELDS:
         return _year_in_own_text(token, own)
     if field in IDENTIFIER_FIELDS:
         return token in own.alnum
+    if field in PERCENT_FIELDS and _percent_key(float(token)) in own.fte_percents:
+        return True
     return token in own.numbers
 
 
