@@ -64,7 +64,7 @@ _PERCENT_PER_FTE = 100
 # A year mistyped by one keystroke: a digit too many ("2009-20011") or one
 # digit wrong ("3/31/3019", "1191, 80:224"), read only in one of five date
 # shapes, and only where the date is a word of its own: it starts after a
-# space, an opening bracket or nothing (not "$3019", "$ 3019", "R01CA3019",
+# space, an opening bracket or nothing (not "$3019", "$ 3019" with any blank, "R01CA3019",
 # "M16-3019", "106:3019"), and ends before closing punctuation and a space or
 # nothing (not "3019-0004", "3019/45", "3019:", "3019.5", "3019K"). A range
 # right after a comma or colon and a space is a page range ("Vol 2,\t1986-2202",
@@ -76,7 +76,7 @@ _PERCENT_PER_FTE = 100
 # five digits has a candidate (`_one_keystroke_years`): a cut-off year
 # ("May 201") stays missing.
 _MISTYPED_RUN = r"(?P<run>\d+)"
-_STARTS_A_WORD = r"(?<![^\s(])(?<!\$ )"
+_STARTS_A_WORD = r"(?<![^\s(])(?<!\$\s)"
 _ENDS_A_WORD = r"(?=[.,)]*(?:\s|$))"
 _NOT_AFTER_A_VOLUME = r"(?<![,:]\s)"
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August",

@@ -93,6 +93,8 @@ def test_a_value_no_other_entry_states_is_left_alone():
     ("Effort 0.07 FTE", "percent_effort", "7%"),                             # 0.07 * 100 is not exactly 7
     ("Effort FTE: 0.25", "percent_effort", "25%"),
     ("Effort 1.0 FTE", "percent_effort", "100%"),                            # a whole post is at most 1
+    ("Effort 0.125 FTE", "percent_effort", "12.5%"),                         # not rounded to 12 or 13
+    ("Effort 0.1234 FTE", "percent_effort", "12.34%"),
     ("Period\t2009-20011", "end_date", "2011"),                              # after a tab
     ("Bialosky J. (2/1018). Biomarkers", "year", "2018"),                    # SPIHVQ: in brackets
     ("Westchester 10/17/2108", "date", "2008-10-17"),                        # CXRYCF
@@ -120,6 +122,13 @@ def test_a_year_or_amount_the_entry_states_in_another_form_is_its_own(own_text, 
     ("Award: $ 3019 - present", "start_date", "2019-01-01"),
     ("Award $3019 - present", "start_date", "2019"),     # a dollar sign right before the run
     ("Award $3019-2020", "start_date", "2019"),
+    ("Award $\t3019 - present", "start_date", "2019"),  # any blank after the dollar sign
+    ("Award $\xa03019 - present", "start_date", "2019"),
+    ("Grant 1234-3019", "start_date", "2019"),         # a range end needs a real year at the other end
+    ("pp 3019-3025", "year", "2019"),
+    ("Ext 12-3019", "date", "2019"),                   # m-yyyy with a dash is not read
+    ("reviewed 120/1019", "year", "2019"),             # a day or month is one or two digits
+    ("MAY3019", "date", "2019-05"),                    # a month needs a blank before the year
     ("Budget: $12/3019", "date", "2019-12"),
     ("Grant M16-3019-2020", "start_date", "2019"),      # inside an identifier
     ("R01CA3019-2020", "start_date", "2019"),
@@ -164,11 +173,22 @@ def test_a_year_is_never_read_out_of_an_amount_a_page_or_an_identifier(own_text,
 
 @pytest.mark.parametrize(("own_text", "value"), [
     ("Team of 1.5 FTE", "150%"),
+    ("Team of 1.05 FTE", "105%"),
     ("Team of 11 FTE", "100%"),     # not the "1" at the end of 11
     ("Team of 10.5 FTE", "50%"),    # not the 0.5 at the end of 10.5
 ])
 def test_an_fte_over_one_is_not_a_fraction_of_a_post(own_text, value):
     """'1.5 FTE' is a head count, not 150% effort."""
+    assert _borrowed([own_text, f"Other grant, Effort: {value}"],
+                     {0: [{"percent_effort": value}]}) == {0: ["percent_effort"]}
+
+
+@pytest.mark.parametrize(("own_text", "value"), [
+    ("Effort 0.125 FTE", "12%"),
+    ("Effort 0.1234 FTE", "12.3%"),
+])
+def test_an_fte_fraction_is_compared_unrounded(own_text, value):
+    """'0.125 FTE' is 12.5%, so another entry's 12% stays borrowed."""
     assert _borrowed([own_text, f"Other grant, Effort: {value}"],
                      {0: [{"percent_effort": value}]}) == {0: ["percent_effort"]}
 
