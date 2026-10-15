@@ -156,8 +156,9 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     if not para_text:
         return False
 
-    # Exact match - always accept
-    if para_text == expected_header:
+    # Exact match - always accept. The header loses its separator rules too,
+    # so a 1a header typed "Grants__" still equals its own line (#1848).
+    if para_text == _strip_separator_rules(expected_header):
         return True
 
     # The paragraph is contained in the expected header (header might be longer)
@@ -643,13 +644,6 @@ def _later_header_texts(siblings: list[HierarchyNode]) -> list[frozenset[str]]:
     return [frozenset(t for t in texts[i + 1:] if t) for i in range(len(siblings))]
 
 
-def _stripped_texts(texts: frozenset[str]) -> frozenset[str]:
-    """Each normalized header text without its separator rules; a text that
-    is nothing but a rule is dropped, so it can never equal a stripped rule
-    line."""
-    return frozenset(t for t in map(_strip_separator_rules, texts) if t)
-
-
 def _parent_range_end(
     elements: list[dict[str, Any]],
     parent_idx: int,
@@ -662,19 +656,19 @@ def _parent_range_end(
     that follows the parent in the hierarchy. A follower with the same text as
     the parent or one of its descendants is no stop: that line may be the
     descendant's own. With no such line the range runs to the end of the
-    document, as before (#916). The line loses its separator rules before the
-    comparison, so the header texts lose theirs too: a follower typed
-    "National*" stops at its own "National*" line (#1848).
+    document, as before (#916). A line with a trailing rule
+    ("MEMBERSHIPS______") also stops at its follower, unless the line as typed
+    is the parent's or a descendant's own text (#1848).
     """
-    stops = _stripped_texts(followers) - _stripped_texts(own_texts)
+    stops = followers - own_texts
     if not stops:
         return len(elements)
     for i in range(parent_idx + 1, len(elements)):
         elem = elements[i]
         if elem.get("type") not in _HEADER_LINE_TYPES:
             continue
-        line = _strip_separator_rules(normalize_text(elem.get("text", "")))
-        if line in stops:
+        line = normalize_text(elem.get("text", "")).lstrip(_SEPARATOR_CHARS)
+        if line in stops or (line not in own_texts and line.rstrip(_SEPARATOR_CHARS) in stops):
             return i
     return len(elements)
 

@@ -169,6 +169,16 @@ def test_is_header_match_separator_only_paragraph_does_not_match():
     assert is_header_match("education", "*" * 40, strict=True) is False
 
 
+def test_is_header_match_header_typed_with_a_trailing_underscore_equals_its_line():
+    # A 1a header that keeps its own rule ("Grants__") still equals its line.
+    assert is_header_match("grants__", "grants__", strict=True) is True
+    assert is_header_match("grants__", "grants__", strict=False) is True
+
+
+def test_is_header_match_ignores_a_trailing_equals_rule():
+    assert is_header_match("service", normalize_text("SERVICE" + "=" * 20), strict=True) is True
+
+
 def test_is_header_match_ignores_a_trailing_underscore_rule():
     # BIITRL / #1848: '_' is a word character, so the header's closing \b never
     # matched inside the rule, and the exact test saw the underscores.
@@ -1579,16 +1589,42 @@ def test_parent_range_end_stops_at_a_follower_heading_typed_with_a_trailing_star
 
 
 def test_parent_range_end_ignores_a_starred_follower_sharing_a_descendants_text():
-    # A later "Regional" and the parent's own child "Regional*" are one
-    # header once both lose the rule, so the child's line is no stop. The
-    # same holds with the star on the follower instead.
+    # A later "Regional" and the parent's own child "Regional*": the line as
+    # typed is the child's own text, so it is no stop.
     elements = [_elem(0, "Honors"), _elem(1, "Regional*"), _elem(2, "Prize, 2001")]
     assert stage1b._parent_range_end(
         elements, 0, frozenset({"regional"}), frozenset({"honors", "regional*"})
     ) == 3
+
+
+def test_parent_range_end_stops_at_a_follower_line_with_a_trailing_equals_rule():
+    elements = [_elem(0, "Honors"), _elem(1, "Prize, 2001"), _elem(2, "SERVICE" + "=" * 30)]
     assert stage1b._parent_range_end(
-        elements, 0, frozenset({"regional*"}), frozenset({"honors", "regional"})
-    ) == 3
+        elements, 0, frozenset({"service"}), frozenset({"honors"})
+    ) == 2
+
+
+def test_parent_range_end_stops_at_a_follower_line_with_a_spaced_trailing_rule():
+    elements = [_elem(0, "Honors"), _elem(1, "Prize, 2001"), _elem(2, "SERVICE    " + "_" * 30)]
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"service"}), frozenset({"honors"})
+    ) == 2
+
+
+def test_starred_descendant_does_not_take_its_parents_sibling_heading(tmp_path, monkeypatch):
+    # Regional's child "Invited*" has no line of its own; the "Invited" line
+    # is the sibling heading's, and stays only the sibling's.
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "A. Person", "TALKS", "Regional", "Grand Rounds, 2010", "Invited", "Keynote, 2015",
+    ], [
+        {"text": "TALKS", "level": "H1", "children": [
+            {"text": "Regional", "level": "H2", "children": [{"text": "Invited*", "level": "H3"}]},
+            {"text": "Invited", "level": "H2"},
+        ]},
+    ])
+    regional, invited = output_data["hierarchy_with_indices"][0]["children"]
+    assert regional["children"][0]["element_idx"] is None
+    assert invited["element_idx"] == 4
 
 
 def test_parent_range_end_does_not_stop_at_a_bare_rule_for_a_rule_only_follower():
