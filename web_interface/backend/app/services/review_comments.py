@@ -192,6 +192,9 @@ REVIEW_FLAGS = {
                           "document: check it against your CV."),
     "stage2_span_overlap": ("Lines from your CV were read into two entries, so they may appear "
                             "twice, once in the wrong section: keep the copy that belongs here."),
+    "institution_cleaned_name": ("Part of this institution's name in your CV, such as a "
+                                 "department or a second hospital, is missing here, or the name "
+                                 "reads \"Unknown\": check it against your CV."),
     "cross_entry_value": ("A date, amount, effort, role or name here may come from a different "
                           "entry of your CV: check this entry against the CV."),
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "

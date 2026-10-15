@@ -506,6 +506,16 @@ Lints, ranked by the severity of the failure class they catch:
                           effort and role, 559 held 573's mentee). INFO, one
                           per entry. Reads stage 4; stage 3b for the order
                           stage 4 cut its batches in
+14av. institution_cleaned_name an institution name stage 5b's lookup gave
+                          that loses the CV's own text in the document
+                          (#1257): it drops a department, platform, parent
+                          institution, second hospital or the CV's own city
+                          that no row showing the name prints, it is a
+                          placeholder ("Unknown", UYQRUN 600) a row prints,
+                          or the row prints a street address the name
+                          dropped (SXPHOG 56). WARN, one per entry. Reads
+                          stage 5b and the docx's table rows; its paragraphs
+                          when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -588,6 +598,7 @@ from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_GATE,
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
+    lint_institution_cleaned_name,
     lint_owner_contact_missing,
     lint_pubmed_title_truncated,
 )
@@ -889,6 +900,7 @@ KNOWN_LINTS = (
     "stage2_text_break",
     "stage2_span_overlap",
     "cross_entry_value",
+    "institution_cleaned_name",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1185,6 +1197,11 @@ LINT_PREVALENCE = {
     # Most predate #1609, which now removes a borrowed date, amount, percent or
     # grant number in stage 4 itself, so current runs should hit it less.
     "cross_entry_value": 0.055,
+    # institution_cleaned_name (#1257; INST-1 in doctor/PRECISION.md): 16 of
+    # 177 distinct runs rendered from origin/dev 6190ab29 (the analysis/
+    # runs, the EBYSBC/s7ab/pilot farm, OIEPQD and YUYVIG), 2026-10-15. The
+    # 5b artifacts predate #1791, so source_place_replaced should fall.
+    "institution_cleaned_name": 0.09,
 }
 
 
@@ -1794,6 +1811,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("stage2_span_overlap", lint_stage2_span_overlap, ("stage_2",)),
     LintSpec("cross_entry_value", lint_cross_entry_value, ("stage_4",),
              optional=("stage_3b",)),
+    # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
+    LintSpec("institution_cleaned_name", lint_institution_cleaned_name,
+             ("stage_5b", "table_rows"), optional=("blocks",)),
 )
 
 #: The views read from the stage-6 docx.
