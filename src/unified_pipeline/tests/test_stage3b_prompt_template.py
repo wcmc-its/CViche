@@ -400,6 +400,28 @@ def test_rule_10_trial_design_company_heading_and_unfunded_1694_1701():
                for rule in m1["key_rules"])
 
 
+def test_rule_10_any_signal_overrides_role_and_irb_number_1694_1701():
+    """The #1694/#1701 A/B: MFJRKW's 'Principal Investigator - Phase II Study
+    of Fenoldopam ... trial' went M2B -> M1 in both fix rolls, and WJUPAJ's
+    'Randomized, prospective, double blind study ... (IRB study #)' went M1 in
+    one of two. The "a role or IRB number is not funding" wording outweighed
+    the signals, so a signal now overrides it, with a worked M2 example for
+    each shape beside the M1 example."""
+    rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
+    assert "ANY one of these signals makes the entry M2A/M2B." in rule
+    assert "overrides the role, an IRB or protocol number, and a missing\n      sponsor or dollar amount" in rule
+    assert "never reason that these make it M1" in rule
+    assert ("'Principal Investigator – Phase II Study of <drug> ... a\n"
+            "        dose-finding pharmacokinetic trial' → M2A/M2B") in rule
+    assert ("'Co-investigator, \"Randomized, prospective, double blind\n"
+            "        study of <drug> ...\" (IRB study # 1234567890)' → M2A/M2B") in rule
+    # The M1 wording is scoped to entries without a signal.
+    assert "Without\n      a signal, an IRB or protocol number" in rule
+    # The positive examples come before the M1 examples they outrank.
+    assert rule.index("→ M2A/M2B\n    - A study or protocol with none") < rule.index("(IRB study # 1234567890)' → M1")
+    assert all(len(line) < 80 for line in rule.splitlines()), max(rule.splitlines(), key=len)
+
+
 def test_taxonomy_m1_m2_agree_with_rule_10_1694_1701():
     m1, m2a, m2b = (_taxonomy_code(code) for code in ("M1", "M2A", "M2B"))
     assert any("an IRB number and a role alone" in rule and "→ M1, not M2A/M2B" in rule
