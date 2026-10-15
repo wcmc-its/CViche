@@ -912,7 +912,7 @@ LINT_FIX_MINUTES = {
         "glyph_field", "grant_boundary", "grant_facts",
         "implausible_year", "licensure_fallback_truncated", "owner_missing_from_citation",
         "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
-        "shattered_prose", "span_count",
+        "session_title_missing", "shattered_prose", "span_count",
         "split_child_unsourced", "stage4_group_failures", "summary_unsupported_claim",
         "wrong_start_date", "year_not_in_source",
     ), FIX_MINUTES_FIELD_WRONG),
