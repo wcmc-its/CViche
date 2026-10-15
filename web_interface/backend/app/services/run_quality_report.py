@@ -122,7 +122,7 @@ _ROW_COPY_BY_SCORER = {
         "and for any stage the run recorded as failed.",
         "A fatal error caps the score at 40: a stage the run recorded as fatally failed, or an error "
         "message that names a program error, a traceback, or an API error code.",
-        # Proposed in #1388's PR; awaiting Paul's approval. Whether a rerun can
+        # Wording approved by Paul, 2026-10-15 (#1388). Whether a rerun can
         # help depends on the error, which only the doctor finding names.
         "Follow the Run Doctor finding below: it says whether the error was a passing failure of "
         "the AI service or one that will happen again the same way."),
@@ -131,7 +131,7 @@ _ROW_COPY_BY_SCORER = {
         "Checks that the CV owner's name was found, that a location was worked out, and that some "
         "contact detail was found.",
         "No usable name caps the score at 25.",
-        # Proposed in #1388's PR; awaiting Paul's approval.
+        # Wording approved by Paul, 2026-10-15 (#1388).
         "Add the name and contact details in Word. Or correct them in the source CV and rerun with "
         "the corrected file: rerunning the same file gives the same result."),
     scorer.score_no_output: RowCopy(
@@ -151,7 +151,7 @@ _ROW_COPY_BY_SCORER = {
         "Scans the finished document for protected details such as date of birth, social security "
         "number, passport, visa status, home address, and DEA number.",
         "Caps the score at 25.",
-        # Proposed in #1388's PR; awaiting Paul's approval.
+        # Wording approved by Paul, 2026-10-15 (#1388).
         "Delete the data in Word before sending the document on. Rerunning will not help: the data "
         "is in the source CV and CViche's filter did not catch it, so send the run to the CViche "
         "team. The Run Doctor finding names the category and the section but never the value."),
@@ -252,7 +252,7 @@ LINT_COPY = {
     "stage6_render_warnings": LintCopy(
         "Document builder warnings",
         "The step that writes the Word document logged its own warnings or failed to write a section.",
-        # Proposed in #1388's PR; awaiting Paul's approval.
+        # Wording approved by Paul, 2026-10-15 (#1388).
         "Read the message and check the named section, filling in anything missing from the source "
         "CV in Word. Rerunning will not help: the document is built by fixed rules, so it comes out "
         "the same. If a section failed to render, send the run to the CViche team."),
@@ -286,7 +286,7 @@ LINT_COPY = {
         "Protected personal data in document",
         "A date of birth, social security number or similar protected detail appears in the "
         "document. The finding names the category, never the value.",
-        # Proposed in #1388's PR; awaiting Paul's approval.
+        # Wording approved by Paul, 2026-10-15 (#1388).
         "Delete it in Word before sending the document on. Rerunning will not help: the data is in "
         "the source CV and CViche's filter did not catch it. Send the run to the CViche team so the "
         "filter can be fixed."),
@@ -346,7 +346,7 @@ LINT_COPY = {
         "A processing step failed",
         "A step of the run failed and recorded it, so what that step makes is missing. Example: the "
         "research summary when stage 4.5 fails.",
-        # Proposed in #1388's PR; awaiting Paul's approval. The wording when
+        # Wording approved by Paul, 2026-10-15 (#1388). The wording when
         # the failure was a passing one is TEMPORARY_FAILURE_WHAT_TO_DO's.
         "Check the named part of the document and fill it in from the source CV, and send the run "
         "to the CViche team. Rerunning will not help: the step failed on something in CViche or in "
@@ -426,14 +426,14 @@ LINT_COPY = {
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
         "cannot be filed under anyone.",
-        # Proposed in #1388's PR; awaiting Paul's approval.
+        # Wording approved by Paul, 2026-10-15 (#1388).
         "Add the name in Word. Or make the name clear at the top of the source CV and rerun with the "
         "corrected file: rerunning the same file gives the same result."),
     "pipeline_errors_present": LintCopy(
         "Fatal processing error",
         "A stage recorded a fatal error (a program error, traceback or API error code), so part of "
         "the output is missing.",
-        # Proposed in #1388's PR; awaiting Paul's approval. The wording when
+        # Wording approved by Paul, 2026-10-15 (#1388). The wording when
         # the failure was a passing one is TEMPORARY_FAILURE_WHAT_TO_DO's.
         "Send the run to the CViche team, and do not deliver this document. Rerunning will not "
         "help: the error comes from CViche's code or from the AI service rejecting this CV, so a "
@@ -598,7 +598,7 @@ TEMPORARY_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Proposed in #1388's PR; awaiting Paul's approval. The what-to-do for an error
+# Wording approved by Paul, 2026-10-15 (#1388). The what-to-do for an error
 # lint when every one of its findings was a passing failure (TEMPORARY_ERROR_RE);
 # otherwise the lint's LINT_COPY wording, which says a rerun will not help.
 TEMPORARY_FAILURE_WHAT_TO_DO = {
