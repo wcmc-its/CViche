@@ -914,6 +914,7 @@ LINT_FIX_MINUTES = {
     ), FIX_MINUTES_FIELD_WRONG),
     **dict.fromkeys((
         "duplicate_passages", "duplicate_records", "identical_rendered_rows", "junk_or_header_row",
+        "stage2_span_overlap",
     ), FIX_MINUTES_DUPLICATE),
     **dict.fromkeys((
         "date_only_lines", "llm_refusal_in_output", "output_hygiene", "pipe_leaks",

@@ -86,6 +86,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_segmentation_collapse,
     lint_shattered_prose,
     lint_split_child_unsourced,
+    lint_stage2_span_overlap,
     lint_stage2_text_break,
     lint_stage2_unaccounted,
     lint_stage3b_fallback_ratio,
@@ -691,6 +692,85 @@ def test_run_doctor_wires_stage2_text_break_to_stage_2_stage_1a_and_the_docx(tmp
                  {"document_uid": _UID, **stage2})
     findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_text_break"]
     assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", [f"entry 22: {_RECORD_LINE}"])]
+
+
+# --- stage2_span_overlap (#1433) -----------------------------------------------
+
+
+def _span(start, end, hierarchy=("HONORS",), etype="paragraph", text="1993\tWho's Who"):
+    return {"text": text, "element_type": etype, "element_idx_start": start,
+            "element_idx_end": end, "hierarchy": list(hierarchy)}
+
+
+def test_stage2_span_overlap_reports_two_shared_lines_across_sections():
+    # ATUVAL 867/868: one record read into a committee section and into HONORS.
+    stage2 = {"entries": [_span(867, 869, hierarchy=("COMMITTEES",)), _span(868, 869)]}
+    findings = lint_stage2_span_overlap(stage2)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("stage2_span_overlap", "WARN")]
+    assert findings[0]["message"].startswith(
+        "entry 868: sections 'COMMITTEES' and 'HONORS': 1 stage-2 entry shares source lines")
+    assert findings[0]["evidence"] == [
+        "entry 868-869 shares 2 element(s) with entry 867-869: 1993\tWho's Who"]
+
+
+def test_stage2_span_overlap_quiet_on_one_shared_line():
+    # 863-867 and 867-869 share only line 867: under SPAN_OVERLAP_MIN_ELEMENTS.
+    assert lint_stage2_span_overlap({"entries": [_span(863, 867), _span(867, 869)]}) == []
+    assert lint_stage2_span_overlap({"entries": [_span(5, 5), _span(5, 5)]}) == []
+
+
+def test_stage2_span_overlap_reads_table_row_spans_by_row_number():
+    # web172 112.x: overlapping row ranges of one table.
+    rows = {"entries": [_span("112.0", "112.2", etype="table_row"),
+                        _span("112.1", "112.13", etype="table_row")]}
+    assert [f["message"].split(":")[0] for f in lint_stage2_span_overlap(rows)] == ["entry 112.1"]
+    # Rows 1-2 and 10-20: a float-read "112.10" would be row 1.
+    apart = {"entries": [_span("112.1", "112.2", etype="table_row"),
+                         _span("112.10", "112.20", etype="table_row")]}
+    assert lint_stage2_span_overlap(apart) == []
+
+
+@pytest.mark.parametrize("start, end", [("21.0", "22.7"), ("21.0", None), (21, None), ("21.x", "21.1")])
+def test_stage2_span_overlap_reads_nothing_from_unresolvable_bounds(start, end):
+    # Two tables' rows, a missing end, a non-row key: no span to compare.
+    stage2 = {"entries": [_span(start, end, etype="table_row"),
+                          _span("21.0", "21.1", etype="table_row"), _span(21, 22)]}
+    assert lint_stage2_span_overlap(stage2) == []
+
+
+def test_stage2_span_overlap_reads_only_record_entries():
+    breaks = {"entries": [_span(10, 14, etype="break"), _span(10, 14)]}
+    headers = {"entries": [_span(10, 14, etype="header"), _span(10, 14)]}
+    # A whole-table entry's paragraph span never meets its own row keys.
+    table = {"entries": [_span(17, 18, etype="table"), _span("17.0", "17.1", etype="table_row"),
+                         _span("18.0", "18.1", etype="table_row")]}
+    for stage2 in (breaks, headers, table, {"entries": None}, {}):
+        assert lint_stage2_span_overlap(stage2) == []
+    assert len(lint_stage2_span_overlap({"entries": [_span(17, 18, etype="table"), _span(17, 18)]})) == 1
+
+
+def test_stage2_span_overlap_one_finding_per_section_pair_quoting_at_most_three():
+    # ATUVAL 598/600/602: sliding windows, each naming the first entry it overlaps.
+    windows = [_span(598 + 2 * i, 606 + 2 * i, hierarchy=("SERVICE",)) for i in range(5)]
+    other = [_span(700, 703, hierarchy=("A",)), _span(701, 703, hierarchy=("B",))]
+    findings = lint_stage2_span_overlap({"entries": [*windows, *other]})
+    assert len(findings) == 2
+    assert findings[0]["message"].startswith(
+        "entry 600: section 'SERVICE': 4 stage-2 entries share source lines with an earlier entry")
+    assert [e.split(":")[0] for e in findings[0]["evidence"]] == [
+        "entry 600-608 shares 7 element(s) with entry 598-606",
+        "entry 602-610 shares 5 element(s) with entry 598-606",
+        "entry 604-612 shares 3 element(s) with entry 598-606"]
+    assert findings[1]["message"].startswith("entry 701: sections 'A' and 'B': 1 stage-2 entry shares")
+
+
+def test_run_doctor_wires_stage2_span_overlap_to_stage_2(tmp_path):
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_span_overlap"]
+    _write_stage(root, "stage_2_entry_extraction", f"{_UID}_cv_entries.json",
+                 {"document_uid": _UID, "entries": [_span(40, 42), _span(41, 43, hierarchy=("A",))]})
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_span_overlap"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [("WARN", "entry 41")]
 
 
 def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
@@ -3261,6 +3341,113 @@ def test_owner_attribution_a_lead_line_stays_under_its_own_heading():
     assert _attribution(stage4) == []
 
 
+# owner_code_under_mentee_heading (#1251): a mentee's awards and places,
+# under a heading naming students or mentees, coded as the owner's own.
+_STUDENT_ACCOMPLISHMENTS = ["STUDENT ACCOMPLISHMENTS"]
+
+
+def _mentee_outputs(*entries):
+    return lint_owner_attribution(_cite_run(*entries), [])
+
+
+def test_owner_attribution_warns_on_a_students_awards_coded_as_the_owners():
+    # JFBPNC 567-575: the student line is N3B; the awards and program places
+    # under it were coded H, K5 and K4 and rendered as the owner's.
+    path = _STUDENT_ACCOMPLISHMENTS
+    findings = _mentee_outputs(
+        _mentee(567, "Ada Example (Dissertation Committee Member):", hierarchy=path),
+        _line_entry(569, "Awarded the Example Community Engagement Microgrant in May 2023",
+                    code="H", hierarchy=path),
+        _line_entry(571, "Rising Stars in Health Sciences Symposium Fellow", code="H", hierarchy=path),
+        _line_entry(574, "2024 Example Lead Participant", code="K5", hierarchy=path),
+        _line_entry(575, "Modelers and Storytellers Training Program", code="K4", hierarchy=path))
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "WARN", "owner_code_under_mentee_heading: 4 entries coded 2 H, 1 K4, 1 K5 as the CV "
+        "owner's under 'STUDENT ACCOMPLISHMENTS', which names students or mentees")]
+    assert findings[0]["evidence"] == [
+        "entry 569 (H): Awarded the Example Community Engagement Microgrant in May 2023",
+        "entry 571 (H): Rising Stars in Health Sciences Symposium Fellow",
+        "entry 574 (K5): 2024 Example Lead Participant"]
+
+
+@pytest.mark.parametrize("code", ["H", "I", "D1", "D2", "D3"])
+def test_owner_attribution_a_plural_students_heading_needs_no_mentee_line(code):
+    # 2082_Dr_Scot 617-633: each line names its student, so no N3 line heads them.
+    path = ["Teaching", "Undergraduate Honor Students’ Achievements"]
+    findings = _mentee_outputs(_line_entry(624, "Ada Example. 2020. Attending law school.",
+                                           code=code, hierarchy=path))
+    assert [f["message"] for f in findings] == [
+        f"owner_code_under_mentee_heading: 1 entry coded 1 {code} as the CV owner's under "
+        "'Undergraduate Honor Students’ Achievements', which names students or mentees"]
+
+
+@pytest.mark.parametrize("heading", [
+    "Mentees", "Former trainees", "Graduate advisees", "Postdoctoral fellows mentored"])
+def test_owner_attribution_each_plural_mentee_word_names_a_mentee_heading(heading):
+    path = [heading]
+    assert len(_mentee_outputs(_line_entry(5, "Example Fellowship, 2020", code="H",
+                                           hierarchy=path))) == 1
+
+
+@pytest.mark.parametrize("heading", ["Student Awards", "Student Achievements"])
+def test_owner_attribution_a_k_entry_under_awards_or_achievements(heading):
+    path = [heading]
+    assert len(_mentee_outputs(_mentee(4, "Ada Example (Advisor):", hierarchy=path),
+                               _line_entry(5, "Example Training Program, 2020", code="K4",
+                                           hierarchy=path))) == 1
+
+
+def test_owner_attribution_an_n4_line_also_heads_a_singular_students_heading():
+    # After the #1545 pin a mentee's own line can be coded N4 (EHGXAL); an H
+    # left beside it is still the mentee's.
+    path = _STUDENT_ACCOMPLISHMENTS
+    assert len(_mentee_outputs(_line_entry(4, "Ada Example: PhD candidate", code="N4", hierarchy=path),
+                               _line_entry(5, "Example Fellowship, 2020", code="H",
+                                           hierarchy=path))) == 1
+
+
+def test_owner_attribution_names_the_deepest_heading_naming_mentees():
+    # 2068_Yount_Cv 975: the leaf names a student, under a parent naming trainees.
+    path = ["DOCTORAL TRAINEES (current and completed)", "Doctoral Student Paper Awards"]
+    findings = _mentee_outputs(_line_entry(975, "Example, A. (2011). A paper.", code="H",
+                                           hierarchy=path))
+    assert "under 'Doctoral Student Paper Awards'," in findings[0]["message"]
+
+
+def test_owner_attribution_names_a_mentee_heading_above_the_leaf():
+    path = ["Graduate students", "Fellowships"]
+    findings = _mentee_outputs(_line_entry(5, "Example Fellowship, 2020", code="H", hierarchy=path))
+    assert "under 'Graduate students'," in findings[0]["message"]
+
+
+def test_owner_attribution_quiet_on_the_owners_own_student_awards():
+    # web210 148-162: a singular 'Student' heading over the owner's own
+    # awards as a student, with no mentee line under it.
+    path = ["Student/Trainee Awards"]
+    assert _mentee_outputs(_line_entry(150, "Doctoral Fellowship, 1996-1998", code="H",
+                                       hierarchy=path)) == []
+
+
+def test_owner_attribution_a_mentee_line_licenses_only_its_own_heading():
+    assert _mentee_outputs(
+        _mentee(5, "Ada Example, PhD 2019", hierarchy=["Mentoring"]),
+        _line_entry(150, "Doctoral Fellowship, 1996-1998", code="H",
+                    hierarchy=["Student Awards"])) == []
+
+
+@pytest.mark.parametrize("code, heading", [
+    ("K1", "Students taught"),            # the owner's teaching: no accomplishments
+    ("S1", "Student Accomplishments"),    # not a code the owner's sections claim
+    ("N4", "Student Accomplishments"),    # already the mentee's
+    ("H", "Honors and Awards"),           # no students or mentees named
+])
+def test_owner_attribution_quiet_outside_the_mentee_output_shape(code, heading):
+    path = [heading]
+    assert _mentee_outputs(
+        _mentee(4, "Ada Example (Committee Member):", hierarchy=path),
+        _line_entry(5, "An award or a course, 2020", code=code, hierarchy=path)) == []
+
+
 # ------------- lint 14ab: a field that identifies a citation, left out of its line
 
 _BULLETIN = "Synthetic Pharmacy Bulletin"
@@ -5331,14 +5518,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (73), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (74), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 71
+    assert len(payload["findings"]) == 72
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -5879,8 +6066,9 @@ def test_run_doctor_hands_offschema_fields_the_rendered_document(tmp_path):
     assert [f for f in payload["findings"] if f["lint"] == "offschema_fields"] == []
 
 
-def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
-    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+def _implausible_year_hits(tmp_path, rendered_line):
+    """run_doctor's implausible_year findings for one wrong-century talk
+    whose rendered line is `rendered_line`; invented values."""
     root = _build_clean_run(tmp_path)
     fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
     data = json.loads(fields.read_text())
@@ -5889,13 +6077,25 @@ def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
         "element_idx_start": 96, "text": "Invited talk, Example City 11/02",
         "extracted_fields": {"title": "Invited talk", "date": "1902-11"}})
     fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_paragraph(rendered_line)
+    output.save(str(docx_path))
+    return [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "implausible_year"]
 
-    payload = run_doctor(root, _UID)
 
-    hits = [f for f in payload["findings"] if f["lint"] == "implausible_year"]
+def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
+    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+    hits = _implausible_year_hits(tmp_path, "Invited talk, Example City, November 1902")
     assert len(hits) == 1
     assert hits[0]["severity"] == "WARN"
     assert "entry 96 (R): date=1902" in hits[0]["message"]
+
+
+def test_run_doctor_hands_implausible_year_the_render(tmp_path):
+    """The row must also hand it the docx (#1585): a wrong-century year the
+    page never prints, as an mm/yy date, is not reported."""
+    assert _implausible_year_hits(tmp_path, "Invited talk, Example City, 11/02") == []
 
 
 def test_run_doctor_hands_the_year_lints_stage_5d(tmp_path):
@@ -5913,6 +6113,11 @@ def test_run_doctor_hands_the_year_lints_stage_5d(tmp_path):
          "element_idx_end": 98, "text": "Example course 2017-2019",
          "extracted_fields": {"start_date": "2016"}}]
     fields.write_text(json.dumps(data))
+    # The page prints the wrong year, so implausible_year judges it (#1585).
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_paragraph("Example lecture, March 3, 1900")
+    output.save(str(docx_path))
 
     def year_hits():
         payload = run_doctor(root, _UID)
