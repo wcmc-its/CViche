@@ -400,6 +400,19 @@ def _pubmed_positions(pubmed_authors: list[str], cv_names: list[str]) -> list[in
     return positions
 
 
+# A word no listed credential names but shaped like one: a capital after a
+# lowercase letter ("MBChB", "MSc(Med)", "PhDr") unless it opens like a
+# two-part surname ("McDonald", "deLuca", "'tHooft", "McDonald-Smith"), a
+# word opening a parenthesis ("(Hons)"),
+# or four or more capitals ("BCPS", "FRCPC").
+_DEGREE_SHAPED_WORD = re.compile(r"\(.*|[A-Z]{4,}|(?!\S?[a-z]+[A-Z][a-z]{2,})\S*[a-z]\S*[A-Z]\S*")
+
+
+def _is_not_a_name_word(word: str) -> bool:
+    """Whether `word` ends a name rather than names an author."""
+    return word in _NOT_A_NAME_WORDS or bool(_DEGREE_SHAPED_WORD.fullmatch(word))
+
+
 def _restorable(cv_name: str, cv_text: str | None) -> bool:
     """Whether a CV name PubMed lacks can render: it is no parenthesised note
     (GCFEBE e717's "(Equal 1st author contributorship)"), is not only a
@@ -411,7 +424,7 @@ def _restorable(cv_name: str, cv_text: str | None) -> bool:
     words = ' '.join(_folded_tokens(cv_name)).lower()
     pieces = cv_name.replace('.', '').replace(',', ' ').split()
     return (not cv_name.startswith('(')
-            and len(pieces) > 1 and not set(pieces) <= _NOT_A_NAME_WORDS
+            and len(pieces) > 1 and not all(map(_is_not_a_name_word, pieces))
             and f' {words} ' in f" {' '.join(_folded_tokens(cv_text)).lower()} ")
 
 
