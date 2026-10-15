@@ -1646,7 +1646,7 @@ def test_unrendered_records_still_fires_on_a_tab_part_only_a_list_field_holds():
 def test_unrendered_records_leaves_a_tab_part_that_names_an_extracted_title_alone():
     # #1243: a grant header row renders as table cells; the part names the
     # extracted title, with the investigator beside it that no field repeats.
-    fused = ("Marsupial Outreach Program of the Guild, Dr. Farrow (PI) 2015-2017\t"
+    fused = ("Marsupial Outreach Program of the Guild, J. Farrow (PI) 2015-2017\t"
              "Chairperson of Marsupial Outreach 5/2017-10/2020\t"
              "Secretary of Wallaby Affairs 5/2013-5/2015")
     fields = {"title": "Marsupial Outreach Program of the Guild"}
