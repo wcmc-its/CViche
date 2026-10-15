@@ -4,6 +4,7 @@ nested PRICING dict, and calculate_cost().
 
 Covers requirements: CFG-01, CFG-02, CFG-03
 """
+import logging
 import os
 import sys
 from pathlib import Path
@@ -78,6 +79,35 @@ def test_malformed_yaml_fallback():
         cfg = get_stage_config("stage_2")
     assert cfg["provider"] == "bedrock"
     assert cfg["model"] == DEFAULT_MODEL
+
+
+def test_malformed_yaml_warning_carries_position_not_raw_text(caplog):
+    """#639: the WARNING names a YAML parse error by its class and the
+    line/column it points at, never by str(e); the raw text goes to DEBUG."""
+    with patch("unified_pipeline.config.Path.exists", return_value=True), \
+         patch("builtins.open", mock_open(read_data="key: value: x\n")), \
+         caplog.at_level(logging.DEBUG, logger="unified_pipeline.config"):
+        reload_config()
+        get_stage_config("stage_2")
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    debugs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert warnings == [
+        "Failed to load llm_config.yaml: ScannerError[line 1, column 11]. Using defaults."
+    ]
+    assert any("mapping values are not allowed here" in m for m in debugs)
+
+
+def test_non_yaml_load_failure_warning_is_the_bare_class_name(caplog):
+    """An error with no YAML position (here an OSError whose text could be
+    anything) is named by its class alone."""
+    with patch("unified_pipeline.config.Path.exists", return_value=True), \
+         patch("builtins.open", side_effect=PermissionError("sentinel-os-text")), \
+         caplog.at_level(logging.WARNING, logger="unified_pipeline.config"):
+        reload_config()
+        get_stage_config("stage_2")
+    assert [r.getMessage() for r in caplog.records] == [
+        "Failed to load llm_config.yaml: PermissionError. Using defaults."
+    ]
 
 
 # ---------------------------------------------------------------------------
