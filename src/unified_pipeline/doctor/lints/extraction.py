@@ -2241,18 +2241,37 @@ def _ceiling_finding(entry: _FieldsEntry, above: list[tuple[str, int]]) -> dict:
         [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]])
 
 
-def lint_implausible_year(stage4: dict, stage5d: dict | None = None) -> list[dict]:
+def _page_text(blocks: list[tuple[str, str]] | None) -> str | None:
+    """The rendered document's text, every paragraph and table, or None
+    without a render."""
+    return None if blocks is None else "\n".join(str(text or "") for _kind, text in blocks)
+
+
+def _year_on_page(year: int, page: str | None) -> bool:
+    """Whether a wrong-century year reaches the page in four digits. Stage 6
+    writes a grant's duration as mm/yy when it has the month, so stage 4's
+    "1916-03" for a source "3-16" renders "03/16", which a reader takes as
+    2016 (#1585, NECRGC YIXQFB 2642, 2664, 2669, 2674, 2684). A year written
+    anywhere on the page counts, so a hit elsewhere keeps the finding; no
+    render is no evidence either way."""
+    return page is None or _year_in_text(year, page)
+
+
+def lint_implausible_year(stage4: dict, stage5d: dict | None = None,
+                          blocks: list[tuple[str, str]] | None = None) -> list[dict]:
     """A year in a stage-4 date-named field that is below the owner's floor
     (`YearFloor`) and that the entry's own text never states
     (`_year_written`): a two-digit year given the wrong century, rendered as
     extracted. WARN, one finding per entry. Also a year above
     `IMPLAUSIBLE_YEAR_CEILING` (`_ceiling_finding`). A year a stage-5
-    formatter replaced is not judged (`_year_renders`; optional `stage5d`).
-    Report-only: the value is not repaired. Code A is skipped, since its
-    dates are personal data, not records."""
+    formatter replaced is not judged (`_year_renders`; optional `stage5d`),
+    nor one the rendered document never prints (`_year_on_page`; optional
+    `blocks`). Report-only: the value is not repaired. Code A is skipped,
+    since its dates are personal data, not records."""
     entries = _fields_entries(stage4)
     floor = _year_floor(entries)
     formatted = _formatter_texts(stage5d)
+    page = _page_text(blocks)
     findings = []
     for entry in entries:
         if entry.code == PERSONAL_DATA_CODE:
@@ -2260,7 +2279,8 @@ def lint_implausible_year(stage4: dict, stage5d: dict | None = None) -> list[dic
         years = [(key, year) for key, year in _date_field_years(entry.fields)
                  if _year_renders(year, entry, formatted)]
         bad = [f"{key}={year}" for key, year in years
-               if year < floor.year and not _year_written(year, entry.text)]
+               if year < floor.year and not _year_written(year, entry.text)
+               and _year_on_page(year, page)]
         if bad:
             findings.append(_finding(
                 "implausible_year", "WARN",
