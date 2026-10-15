@@ -1725,6 +1725,63 @@ class TestBareYearUnderARecertifiedEntryIsAFurtherRecertification:
         assert len(rows) == 2
         assert [f["evidence"] for f in gen._section_failures] == [["year=2015"]]
 
+    def test_a_certificate_number_is_not_a_date_of_the_entry_below(self):
+        # Review round 3: "Cardiology 4521" carries a certificate number and
+        # no date. The number must not make it read as dated, or 2015 would
+        # silently join Internal Medicine's recertifications.
+        internal_medicine = {
+            "text": "Internal Medicine, 1998\tRecertification 2005",
+            "extracted_fields": {"specialty": "Internal Medicine", "year_certified": "1998",
+                                 "recertification_date": "2005"}}
+        for number in ("4521", "2011"):
+            # 2011 is year-shaped; it is still the certificate number, not a date.
+            cardiology = {"text": f"Cardiology {number}",
+                          "extracted_fields": {"specialty": "Cardiology",
+                                               "certificate_number": number}}
+            entries = [internal_medicine, {"text": "2015", "extracted_fields": {}}, cardiology]
+            assert _attach_bare_years(entries, current_year=2026) == (
+                [internal_medicine, cardiology], ["2015"])
+        # A 4-digit token that cannot be a year is no date either, even when
+        # stage 4 did not extract it as the certificate number.
+        cardiology = {"text": "Cardiology 4521", "extracted_fields": {"specialty": "Cardiology"}}
+        entries = [internal_medicine, {"text": "2015", "extracted_fields": {}}, cardiology]
+        assert _attach_bare_years(entries, current_year=2026) == (
+            [internal_medicine, cardiology], ["2015"])
+        # A year in the text that is not the certificate number, or a
+        # structured date field, dates the entry.
+        for cardiology in (
+                {"text": "Cardiology 4521 2010",
+                 "extracted_fields": {"specialty": "Cardiology", "certificate_number": "4521"}},
+                {"text": "Cardiology 4521",
+                 "extracted_fields": {"specialty": "Cardiology", "certificate_number": "4521",
+                                      "year_certified": "2010"}}):
+            kept, unattached = _attach_bare_years(
+                [internal_medicine, {"text": "2015", "extracted_fields": {}}, cardiology],
+                current_year=2026)
+            assert unattached == []
+            assert kept[0]["extracted_fields"][LATER_RECERTIFICATIONS_FIELD] == ("2015",)
+
+    def test_a_run_of_bare_years_above_an_undated_certification_attaches_none(self):
+        # Review round 3: two bare years between a recertified entry and an
+        # undated one. Either may be Cardiology's date, so neither joins
+        # Internal Medicine: both stay skipped-row warnings, as on base.
+        internal_medicine = {
+            "text": "Internal Medicine, 1998\tRecertification 2005",
+            "extracted_fields": {"specialty": "Internal Medicine", "year_certified": "1998",
+                                 "recertification_date": "2005"}}
+        cardiology = {"text": "Cardiology", "extracted_fields": {"specialty": "Cardiology"}}
+        entries = [internal_medicine, {"text": "2015", "extracted_fields": {}},
+                   {"text": "2016", "extracted_fields": {}}, cardiology]
+        assert _attach_bare_years(entries, current_year=2026) == (
+            [internal_medicine, cardiology], ["2015", "2016"])
+        gen = _generator()
+        gen._fill_board_certification(entries, current_year=2026)
+        rows = _rows_after_board(gen)
+        assert ("Internal Medicine", "", "1998 (recertified 2005)") in rows
+        assert ("Cardiology", "", "") in rows
+        assert len(rows) == 2
+        assert [f["evidence"] for f in gen._section_failures] == [["year=2015"], ["year=2016"]]
+
     def test_a_dated_entry_below_does_not_block_the_attach(self):
         # Only an undated certification below claims the year; a dated one
         # has its own, so the year still joins the recertification list.
@@ -1753,6 +1810,29 @@ class TestBareYearUnderARecertifiedEntryIsAFurtherRecertification:
         gen._fill_board_certification(
             [_recertified_entry(recertification_date="2023")], current_year=2020)
         assert _rows_after_board(gen) == [("Sample Medicine", "", "1998-2023")]
+
+    def test_the_fill_defaults_to_the_run_clocks_year(self, monkeypatch):
+        # With no current_year passed, the fill reads the clock once: a bare
+        # year equal to the clock's year joins (not future), the next one
+        # warns (future, an expiry). Pins the default against an off-by-one.
+        class _Clock:
+            @staticmethod
+            def now():
+                return datetime(2026, 6, 1)
+
+        monkeypatch.setattr(
+            "unified_pipeline.stage6.sections.board_certification.datetime", _Clock)
+        gen = _generator()
+        gen._fill_board_certification(
+            [_recertified_entry(), {"text": "2026", "extracted_fields": {}}])
+        assert _rows_after_board(gen) == [
+            ("Sample Medicine", "", "1998 (recertified 2005, 2026)")]
+        assert gen._section_failures == []
+        gen = _generator()
+        gen._fill_board_certification(
+            [_recertified_entry(), {"text": "2027", "extracted_fields": {}}])
+        assert _rows_after_board(gen) == [("Sample Medicine", "", "1998 (recertified 2005)")]
+        assert [f["evidence"] for f in gen._section_failures] == [["year=2027"]]
 
 
 def test_a_one_item_certificate_number_list_renders_as_its_number():

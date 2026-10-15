@@ -583,10 +583,16 @@ def _reparse_renders_less_than_structured(rows: list[tuple]) -> bool:
 # Every F2 field that dates a certification. An entry with none of these, and
 # no year in its text, has no date for a following bare-year entry to clash with.
 _F2_DATE_FIELDS = ('start_date', 'end_date', 'year_certified', 'recertification_date')
-# Any 4-digit token in an entry's text. Deliberately broad: a match only stops
-# a bare year from being attached, so a false hit costs a warning, never a
-# wrong date.
+# Any 4-digit token in an entry's text, certificate numbers included. Used
+# only for the entry ABOVE a bare year: a hit there means the entry is
+# treated as dated, so the bare year is not taken as its year_certified and
+# goes on to the further-recertification check, which warns when it cannot
+# attach it.
 _ANY_YEAR_IN_TEXT = re.compile(r'\b\d{4}\b')
+# A token shaped like a year a certification could carry. Used for the entry
+# BELOW a bare year, where a certificate number misread as a date would make
+# an undated certification look dated and let the bare year attach above it.
+_YEAR_SHAPED_TOKEN = re.compile(r'\b(?:19|20)\d{2}\b')
 
 
 def _bare_year(entry: dict) -> str:
@@ -665,8 +671,21 @@ def _is_undated_certification(entry: dict | None) -> bool:
     In a year-first layout ("1998 Internal Medicine, recertified 2005" /
     "2015" / "Cardiology") a bare year above such an entry is more likely
     its date than a further recertification of the dated entry above, so
-    the year is not attached to the dated one."""
-    return entry is not None and not _has_any_date(entry)
+    the year is not attached to the dated one.
+
+    "Undated" is read from the structured date fields and from year-shaped
+    tokens in the text that are not the entry's certificate number:
+    `_has_any_date` counts any 4-digit token, so "Cardiology 4521" with
+    certificate number 4521 would pass as dated and the year above would
+    attach to the wrong entry."""
+    if entry is None:
+        return False
+    fields = entry.get('extracted_fields') or {}
+    if any(fields.get(name) for name in _F2_DATE_FIELDS):
+        return False
+    certificate_numbers = set(_split_multi(fields.get('certificate_number')))
+    return not any(token not in certificate_numbers
+                   for token in _YEAR_SHAPED_TOKEN.findall(entry.get('text') or ''))
 
 
 def _merge_bare_year(
@@ -706,8 +725,9 @@ def _attach_bare_years(
     decides whether the entry above can take the year. When it cannot (no
     previous entry, or a dated one the year does not continue) the year is
     returned in the second list, for the caller to record as a skipped row.
-    The entry below is passed along too: a dated entry above never takes the
-    year when the entry below is a certification with no date of its own.
+    The first entry below the run of bare years is passed along too: a dated
+    entry above never takes a year when that entry is a certification with
+    no date of its own, however many bare years sit between them.
 
     Runs on source order, before the reverse-chronological sort, since only
     there is "the entry above" the line the CV wrote it under. Returns new
@@ -723,7 +743,9 @@ def _attach_bare_years(
         if not year:
             kept.append(entry)
             continue
-        following = entries[index + 1] if index + 1 < len(entries) else None
+        # The first entry after this run of bare years: with 2+ bare years
+        # above an undated certification, none of them attaches upward.
+        following = next((later for later in entries[index + 1:] if not _bare_year(later)), None)
         merged = _merge_bare_year(kept[-1], year, current_year, following) if kept else None
         if merged is None:
             unattached.append(year)
