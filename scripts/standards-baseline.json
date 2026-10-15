@@ -7,7 +7,7 @@
   "5.4 blind `except Exception` (BLE001)": 67,
   "7.1 print() in library code (T201)": 634,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
-  "8.3 missing annotations (ANN*, RUF012)": 476,
+  "8.3 missing annotations (ANN*, RUF012)": 475,
   "8.3 typing syntax (UP*, RUF013)": 0,
   "8.4 bugbear findings (B)": 142,
   "8.4 pyflakes findings (F)": 185

@@ -659,20 +659,35 @@ def _with_further_recertification(entry: dict, year: str, current_year: int) -> 
     return {**entry, 'extracted_fields': {**fields, LATER_RECERTIFICATIONS_FIELD: later_years}}
 
 
-def _merge_bare_year(previous: dict, year: str, current_year: int) -> dict | None:
+def _is_undated_certification(entry: dict | None) -> bool:
+    """True when `entry` is a certification with no date of its own (#1270).
+
+    In a year-first layout ("1998 Internal Medicine, recertified 2005" /
+    "2015" / "Cardiology") a bare year above such an entry is more likely
+    its date than a further recertification of the dated entry above, so
+    the year is not attached to the dated one."""
+    return entry is not None and not _has_any_date(entry)
+
+
+def _merge_bare_year(
+    previous: dict, year: str, current_year: int, following: dict | None = None,
+) -> dict | None:
     """The entry above a bare-year entry with that year folded in, or None
     when it cannot take the year.
 
     An undated entry takes it as its `year_certified` (#1271). A dated one
     takes it only as a further recertification (`_with_further_recertification`,
-    #1270); which of two dates is right is otherwise not this function's
-    guess to make.
+    #1270), and never when the entry below (`following`) is a certification
+    with no date of its own, which the year may belong to instead; which of
+    two dates is right is otherwise not this function's guess to make.
     """
     if not _has_any_date(previous):
         fields = {**(previous.get('extracted_fields') or {}), 'year_certified': year}
         logger.info("board certification: attached a bare-year entry to the "
                     "undated entry above it as its year_certified")
         return {**previous, 'extracted_fields': fields}
+    if _is_undated_certification(following):
+        return None
     merged = _with_further_recertification(previous, year, current_year)
     if merged is not None:
         logger.info("board certification: attached a bare-year entry to the "
@@ -691,6 +706,8 @@ def _attach_bare_years(
     decides whether the entry above can take the year. When it cannot (no
     previous entry, or a dated one the year does not continue) the year is
     returned in the second list, for the caller to record as a skipped row.
+    The entry below is passed along too: a dated entry above never takes the
+    year when the entry below is a certification with no date of its own.
 
     Runs on source order, before the reverse-chronological sort, since only
     there is "the entry above" the line the CV wrote it under. Returns new
@@ -701,12 +718,13 @@ def _attach_bare_years(
         current_year = datetime.now().year
     kept: list[dict] = []
     unattached: list[str] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         year = _bare_year(entry)
         if not year:
             kept.append(entry)
             continue
-        merged = _merge_bare_year(kept[-1], year, current_year) if kept else None
+        following = entries[index + 1] if index + 1 < len(entries) else None
+        merged = _merge_bare_year(kept[-1], year, current_year, following) if kept else None
         if merged is None:
             unattached.append(year)
         else:
@@ -751,7 +769,9 @@ def _renders_as_structured_row(fields: dict, text: str) -> bool:
 class BoardCertificationSection:
     """Section F2 writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_board_certification(self, entries: list[dict]):
+    def _fill_board_certification(
+        self, entries: list[dict], current_year: int | None = None,
+    ) -> None:
         """Fill F2. BOARD CERTIFICATION section.
 
         WCM template has table with: Name of specialty | Board Certificate # | Date of Certification
@@ -766,7 +786,13 @@ class BoardCertificationSection:
         row-writing loop below is simply a no-op on an empty `entries`, so
         no separate early return is needed. `tables_populated` only counts
         an actual write -- a cleared placeholder is not a populated table.
+
+        `current_year` defaults to the run's clock (§7.4) and is read once:
+        the bare-year attach and each structured row's Dates cell get the
+        same year, so a year-end rollover mid-render cannot split them.
         """
+        if current_year is None:
+            current_year = datetime.now().year
         if self.verbose and entries:
             logger.info("Filling Board Certification (%s entries)...", len(entries))
 
@@ -799,7 +825,7 @@ class BoardCertificationSection:
         # issued in 2005 and recertified in 2020 sorts as 2020.
         entries = [e for e in entries
                    if not _is_header_record(e.get('extracted_fields') or {}, e.get('text', ''))]
-        entries, unattached_years = _attach_bare_years(entries)
+        entries, unattached_years = _attach_bare_years(entries, current_year)
         for year in unattached_years:
             self._warn_skipped_certification_row(year)
 
@@ -813,7 +839,7 @@ class BoardCertificationSection:
             # are reparsed from text. See _renders_as_structured_row.
             if _renders_as_structured_row(fields, original_text):
                 certificate_number = _certificate_number_text(fields.get('certificate_number', ''))
-                date_str = _format_certification_date_str(fields, original_text)
+                date_str = _format_certification_date_str(fields, original_text, current_year)
                 self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
             else:
                 self._parse_and_add_multiple_certifications(table, original_text, entry)
