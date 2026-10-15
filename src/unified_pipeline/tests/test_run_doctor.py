@@ -28,6 +28,7 @@ from docx import Document  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
+    GROUP_CREDIT_MAX_WORDS,
     IDENTICAL_ROW_EVIDENCE_RECORDS,
     IDENTICAL_ROW_FUSED_MIN_CHARS,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
@@ -3586,7 +3587,7 @@ def test_citation_field_dropped_is_a_registered_lint():
                and spec.inputs == ("stage_4", "blocks") for spec in LINT_REGISTRY)
 
 
-# ------------------------- lint 14av: group_credit_dropped (#1661)
+# ------------------------- lint 14aw: group_credit_dropped (#1661)
 
 _GROUP_PEOPLE = "Ashdown A, Brimley B, Corwen C"
 _GROUP_CREDIT = "HVTN 505 Protocol Team"
@@ -3688,6 +3689,58 @@ def test_group_credit_dropped_leaves_a_lost_owner_to_owner_missing():
     assert [f["lint"] for f in lint_owner_missing_from_citation(stage4, blocks)] == [
         "owner_missing_from_citation"]
     assert lint_group_credit_dropped(stage4, blocks) == []
+
+
+def test_group_credit_dropped_is_info_when_the_run_has_no_known_owner():
+    # No cv_owner surname: nothing says the group was the owner's only credit.
+    entry = _cited(11, _GROUP_SOURCE, authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    findings = lint_group_credit_dropped(_cite_run(entry, owner={"first_name": "", "last_name": ""}),
+                                         _bibliography(_GROUP_DROPPED_LINE))
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "INFO", "entry 11 (S1): the source byline credits 'hvtn 505 protocol team', and the "
+        "rendered citation does not")]
+
+
+def test_group_credit_dropped_ignores_a_stopword_the_line_rewords():
+    # "Task Force on Aging Research" rendered as "Aging Research Task Force":
+    # every word but the stopword "on" is kept, so the group is.
+    entry = _cited(12, _source(authors=f"{_GROUP_PEOPLE}, Task Force on Aging Research"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    line = f"{_GROUP_PEOPLE}, Aging Research Task Force. {_CITE_TITLE}. {_CITE_TRAILER}"
+    assert _group_findings(entry, line) == []
+
+
+@pytest.mark.parametrize("credit", [
+    "LIFE Investigators", "Tidal Genomics Consortium", "Tidal Genomics Consortia",
+    "Data Safety Monitoring Board",
+])
+def test_group_credit_dropped_fires_on_each_collective_word(credit):
+    entry = _cited(13, _source(authors=f"{_GROUP_PEOPLE}, {credit}"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    assert _group_findings(entry, _GROUP_DROPPED_LINE) == [(
+        "WARN", f"entry 13 (S1): the source byline credits {credit.lower()!r}, and the "
+        "rendered citation does not, so nothing in it credits the CV owner")]
+
+
+@pytest.mark.parametrize("lead", ["and the", "on behalf of the", "et al"])
+def test_group_credit_dropped_starts_the_credit_after_its_lead(lead):
+    # "Corwen C <lead> HVTN 505 Protocol Team" is one credit: the group starts after the lead.
+    entry = _cited(14, _source(authors=f"Ashdown A, Brimley B, Corwen C {lead} {_GROUP_CREDIT}"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    assert _group_findings(entry, _GROUP_DROPPED_LINE) == [(
+        "WARN", "entry 14 (S1): the source byline credits 'hvtn 505 protocol team', and the "
+        "rendered citation does not, so nothing in it credits the CV owner")]
+
+
+@pytest.mark.parametrize("credit, fires", [
+    ("Tidal Estuary Sediment Core Analysis Study Protocol Team", True),  # 8 words
+    ("Synthetic Tidal Estuary Sediment Core Analysis Study Protocol Team", False),  # 9 words
+])
+def test_group_credit_dropped_caps_a_credit_at_max_words(credit, fires):
+    assert len(credit.split()) == GROUP_CREDIT_MAX_WORDS + (0 if fires else 1)
+    entry = _cited(15, _source(authors=f"{_GROUP_PEOPLE}, {credit}"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    assert [s for s, _ in _group_findings(entry, _GROUP_DROPPED_LINE)] == (["WARN"] if fires else [])
 
 
 def test_group_credit_dropped_is_a_registered_lint():

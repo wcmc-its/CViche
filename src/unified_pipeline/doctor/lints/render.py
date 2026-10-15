@@ -2772,12 +2772,14 @@ def _group_credits(citation: RenderedCitation) -> list[str]:
 
 def lint_group_credit_dropped(stage4: dict,
                               blocks: list[tuple[str, str]]) -> list[dict]:
-    """One INFO per rendered citation whose source byline credits a group
+    """One finding per rendered citation whose source byline credits a group
     (`_group_credits`) and whose own bibliography line does not hold every
     word of that credit (`_credit_words`), wherever in the line: a PubMed
     rebuild moves the group after the title ("... zidovudine. The ACTG 184
     Protocol Team."). A citation that also lost the owner is
-    owner_missing_from_citation's WARN, not reported again here."""
+    owner_missing_from_citation's WARN, not reported again here. WARN when
+    the source names the CV owner nowhere (`_owner_credit`), so the group was
+    their only credit; INFO when it does, or the run has no owner surname."""
     owner = _owner_surname_words(stage4)
     findings = []
     for citation in _rendered_citations(stage4, blocks):
