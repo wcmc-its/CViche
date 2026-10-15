@@ -40,6 +40,7 @@ import requests
 
 from unified_pipeline.core.credentials import CREDENTIALS
 from unified_pipeline.core.pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.stage4.coercion import is_verbatim_author
 
 logger = logging.getLogger(__name__)
@@ -1566,7 +1567,8 @@ class PubMedEnricher:
 
         except Exception as e:
             if self.verbose:
-                logger.warning(f"    ⚠️ Parse error: {e}")
+                logger.warning("    ⚠️ Parse error: %s", redacted_error_label(e))
+                logger.debug("    ⚠️ Parse error: %s", e)
             return None, None
 
     def _get_text(self, elem: ET.Element, path: str) -> str:

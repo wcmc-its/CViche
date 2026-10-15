@@ -421,7 +421,8 @@ def _bind(cfg: LDAPConfig) -> Iterator[Connection]:
         )
         raise EdConfigurationError(str(exc)) from exc
     except (LDAPException, OSError, ConnectionError) as exc:
-        logger.warning("ED directory unreachable at %s: %s", cfg.ldap_url, exc)
+        logger.warning("ED directory unreachable at %s: %s", cfg.ldap_url, type(exc).__name__)
+        logger.debug("ED directory unreachable at %s: %s", cfg.ldap_url, exc)
         raise EdUnavailableError(str(exc)) from exc
     finally:
         if conn:

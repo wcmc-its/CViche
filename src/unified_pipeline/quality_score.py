@@ -100,6 +100,7 @@ from unified_pipeline.llm_provenance import (
     STAGE4_5_FALLBACK_CALLS_KEY,
     STAGE4_ENTRY_FALLBACK_KEY,
 )
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.stage4.error_codes import NO_MATCHING_EXTRACTION
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
@@ -626,7 +627,8 @@ def prompt_log_fallback_served(log_dir: Path | None) -> list[FallbackServedCall]
             model = record["response"].get(FALLBACK_SERVED_KEY)
             purpose = str(record.get("purpose") or "?")
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-            logger.warning("skipping unreadable prompt log %s (%s): %s", path.name, type(e).__name__, e)
+            logger.warning("skipping unreadable prompt log %s (%s)", path.name, redacted_error_label(e))
+            logger.debug("skipping unreadable prompt log %s: %s", path.name, e)
             continue
         if model and purpose not in _PROMPT_LOG_PURPOSES_RECORDED_ELSEWHERE:
             served[(purpose, str(model))] += 1
@@ -681,7 +683,8 @@ def _structured_stage_errors(outputs_dir: Path) -> tuple[list[str], list[str], l
         except json.JSONDecodeError:
             continue  # already counted as unreadable by the *.json loop
         except (OSError, ValueError) as e:
-            logger.warning("quality_score could not read %s (%s)", errors_file, e)
+            logger.warning("quality_score could not read %s (%s)", errors_file, redacted_error_label(e))
+            logger.debug("quality_score could not read %s (%s)", errors_file, e)
             invalid.append(f"{errors_file.name}: unreadable")
             continue
         for record in records:
@@ -909,7 +912,7 @@ LINT_FIX_MINUTES = {
         "glyph_field", "grant_boundary", "grant_facts",
         "implausible_year", "licensure_fallback_truncated", "owner_missing_from_citation",
         "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
-        "shattered_prose", "span_count",
+        "session_title_missing", "shattered_prose", "span_count",
         "split_child_unsourced", "stage4_group_failures", "summary_unsupported_claim",
         "wrong_start_date", "year_not_in_source",
     ), FIX_MINUTES_FIELD_WRONG),

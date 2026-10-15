@@ -168,6 +168,9 @@ class MentoringPartition:
     are the N4 lines under the section header. `moved_to_current` is how
     many N3B entries the ongoing-mentorship rule reclassified, and
     `moved_to_past` how many N3A entries `_n3a_entry_has_ended` did.
+    `refused` are N3A/N3B entries whose mentee name is an award's
+    (`_mentee_name_is_award_title`, #1702): rendered nowhere in this section,
+    they go to the Appendix.
     """
 
     current: tuple[Mapping[str, Any], ...] = ()
@@ -177,6 +180,7 @@ class MentoringPartition:
     outcomes: tuple[Mapping[str, Any], ...] = ()
     moved_to_current: int = 0
     moved_to_past: int = 0
+    refused: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def mentee_count(self) -> int:
@@ -476,6 +480,58 @@ def _mentee_name(entry: Mapping[str, Any]) -> str:
     return _plain_text(fields.get('name')) or _plain_text(fields.get('mentee_name'))
 
 
+# #1702 (YIXQFB 2590, NECRGC): an award named after a person ("<program>
+# <person> Scholar Award") on a mentee row's continuation became a Past Mentees
+# table for that person -- stage 4 took the honoree as `mentee_name`. A mentee
+# name whose every occurrence in the entry text is directly followed by one of
+# these nouns is the award's name, not the mentee's. "Fellow" is left out on
+# purpose: "<name>, Fellow" is a mentee's level.
+_AWARD_TITLE_NOUN_RE = re.compile(
+    r'\s+(?:Scholars?(?:hip)?|Awards?|Fellowships?|Prizes?|Lectures?(?:hip)?|Medals?)\b',
+    re.IGNORECASE)
+AWARD_TITLE_MENTEE_CHECK = 'mentee_name_from_award_title'
+
+
+def _mentee_name_is_award_title(entry: Mapping[str, Any]) -> bool:
+    """True when the entry's mentee name occurs in its text, and every
+    occurrence is directly followed by an award noun (`_AWARD_TITLE_NOUN_RE`).
+    A name the text never spells out is left alone: stage 4 may have
+    reordered it, and the text has nothing to say against it."""
+    name = _mentee_name(entry)
+    if not name:
+        return False
+    name_re = re.compile(r'(?<!\w)' + r'\s+'.join(map(re.escape, name.split())) + r'(?!\w)',
+                         re.IGNORECASE)
+    text = _text(entry.get('text'))
+    ends = [match.end() for match in name_re.finditer(text)]
+    return bool(ends) and all(_AWARD_TITLE_NOUN_RE.match(text, end) for end in ends)
+
+
+def award_title_mentee_warning(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """The WARN render-warnings record for a mentee row refused by
+    `_mentee_name_is_award_title` and listed in the Appendix. The element
+    index only, never entry text."""
+    element_idx = entry.get('element_idx_start', '?')
+    code = entry.get('taxonomy_code', '?')
+    return {
+        'check': AWARD_TITLE_MENTEE_CHECK,
+        'code': code,
+        'section': 'mentoring',
+        'message': (f"{code}: entry at element {element_idx} names its mentee only "
+                    "inside an award title; listed in the Appendix, not as a mentee table"),
+        'evidence': [f"element_idx_start={element_idx}"],
+        'severity': 'WARN',
+    }
+
+
+def _without_mentee_name(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of `entry` whose extracted fields name no mentee; the input is
+    left as it was."""
+    fields = {key: value for key, value in (entry.get('extracted_fields') or {}).items()
+              if key not in ('name', 'mentee_name')}
+    return {**entry, 'extracted_fields': fields}
+
+
 def _outcome_mentee_anchor(coded: Sequence[tuple[Mapping[str, Any], str]],
                            index: int) -> int | None:
     """Where in `coded` (document order, each entry with the code it is
@@ -569,6 +625,11 @@ def _partition_mentoring_entries(
                    if not _n3a_entry_has_ended(entry, current_year)] + moved
     n3b_entries = [entry for entry in n3b_coded if not _entry_is_ongoing(entry)] + ended
 
+    # A mentee named only inside an award title is no mentee (#1702).
+    refused = tuple(e for e in n3a_entries + n3b_entries if _mentee_name_is_award_title(e))
+    n3a_entries = [e for e in n3a_entries if not any(e is r for r in refused)]
+    n3b_entries = [e for e in n3b_entries if not any(e is r for r in refused)]
+
     # Aggregate summaries (no mentee named) get a line, not a table.
     n3a_summaries = [e for e in n3a_entries if not _is_mentee_record(e)]
     n3b_summaries = [e for e in n3b_entries if not _is_mentee_record(e)]
@@ -591,6 +652,7 @@ def _partition_mentoring_entries(
         outcomes=tuple(n4_entries),
         moved_to_current=len(moved),
         moved_to_past=len(ended),
+        refused=refused,
     )
 
 
@@ -842,6 +904,7 @@ class MentoringSection:
         self._fill_training_grants(entries_by_code.get('N2', []))
 
         partition = _partition_mentoring_entries(entries_by_code, current_year=current_year)
+        self._decline_award_title_mentees(partition.refused)
         current_anchor, past_anchor = self._mentoring_anchors()
 
         # Placeholder removal happens before the empty-partition return
@@ -915,6 +978,14 @@ class MentoringSection:
                     len(partition.outcomes))
             else:
                 self._insert_mentoring_summaries(partition.outcomes, mentoring_anchor)
+
+    def _decline_award_title_mentees(self, refused: Sequence[Mapping[str, Any]]) -> None:
+        """Hand each refused mentee entry, its name cleared, to `generate()`'s
+        Appendix fill with a WARN -- the route `_fill_research_support` takes
+        for a grant it declines (#1702)."""
+        for entry in refused:
+            self._declined_grant_entries.append(_without_mentee_name(entry))
+            self._section_failures.append(award_title_mentee_warning(entry))
 
     def _paragraph_element(self, index: int | None) -> BaseOxmlElement | None:
         """The body element behind a `_find_paragraph_*` result, or None.

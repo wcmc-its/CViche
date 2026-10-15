@@ -629,9 +629,10 @@ def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_m
     assert resp.status_code == 502, resp.text
     assert resp.json()["detail"]["error"] == "storage_unavailable"
     assert db.query(Run).count() == 0
-    # #797: exhaustion is not silent -- the caller logs it at ERROR.
+    # #797: exhaustion is not silent -- the caller logs it at ERROR, by class
+    # (#639: the exception's own text goes to DEBUG only).
     assert any(
-        r.levelno == logging.ERROR and "could not allocate a collision-free run id" in r.getMessage()
+        r.levelno == logging.ERROR and "RunIdAttemptsExhausted" in r.getMessage()
         for r in caplog.records
     )
     # One fresh id per attempt, bounded by the named retry constant.

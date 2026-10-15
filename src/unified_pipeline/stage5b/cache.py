@@ -25,6 +25,8 @@ import logging
 import os
 from pathlib import Path
 
+from unified_pipeline.log_redaction import redacted_error_label
+
 logger = logging.getLogger(__name__)
 
 # Paths, anchored to src/unified_pipeline/ (this module moved one directory
@@ -46,7 +48,8 @@ def load_institution_cache():
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Could not load institution cache: %s", e)
+            logger.warning("Could not load institution cache: %s", redacted_error_label(e))
+            logger.debug("Could not load institution cache: %s", e)
             INSTITUTION_CACHE = {}
             return
         if not isinstance(loaded, dict):
@@ -62,7 +65,8 @@ def load_institution_cache():
             with open(OLD_CACHE_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Could not migrate old cache: %s", e)
+            logger.warning("Could not migrate old cache: %s", redacted_error_label(e))
+            logger.debug("Could not migrate old cache: %s", e)
             INSTITUTION_CACHE = {}
             return
         if not isinstance(loaded, dict):
@@ -88,7 +92,8 @@ def save_institution_cache():
             json.dump(INSTITUTION_CACHE, f, indent=2, ensure_ascii=False)
         os.replace(tmp_path, CACHE_FILE)
     except OSError as e:
-        logger.warning("Could not save institution cache: %s", e)
+        logger.warning("Could not save institution cache: %s", redacted_error_label(e))
+        logger.debug("Could not save institution cache: %s", e)
 
 
 def store_for_run(persist: bool) -> dict[str, dict | None]:

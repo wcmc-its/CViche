@@ -335,13 +335,16 @@ def test_insertion_exception_logs_via_project_logger_not_print(monkeypatch, capl
     para = doc.add_paragraph()
     citation = "1. Doe J. Great study. Journal Name. 2024;10(2):100-110."
 
-    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage6.sections.bibliography"):
+    with caplog.at_level(logging.DEBUG, logger="unified_pipeline.stage6.sections.bibliography"):
         gen._add_citation_with_bold_author_as_insertion(para, citation, "Doe J", "")
 
+    # #639: the WARNING names the class; the exception text is DEBUG-only.
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["Could not add citation as insertion: RuntimeError"]
     assert any(
-        "Could not add citation as insertion" in record.message
-        and "simulated XML build failure (test)" in record.message
+        "simulated XML build failure (test)" in record.message
         for record in caplog.records
+        if record.levelno == logging.DEBUG
     )
     # Nothing went to stdout -- the print() is gone, not just quieter.
     assert capsys.readouterr().out == ""
