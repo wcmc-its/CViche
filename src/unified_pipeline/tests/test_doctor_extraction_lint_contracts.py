@@ -75,6 +75,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _rendered_row_value_sets,
     _shared_entry_pieces,
     _short_end_year,
+    journal_name_shapes,
     lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
@@ -85,6 +86,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_grant_bucket,
     lint_implausible_year,
     lint_invented_records,
+    lint_journal_name_joined,
     lint_multi_record_coverage,
     lint_offschema_fields,
     lint_orphaned_fragments,
@@ -5467,3 +5469,101 @@ def test_cross_entry_value_reads_a_list_of_names_as_its_text():
         _cev_entry(2, "Other Grant 2003-2005 (PI: Owner; Co-I: Laura Sample)", {}))
     [finding] = lint_cross_entry_value(stage4)
     assert "co_investigators=\"['Laura Sample']\" (in 2's text)" in finding["message"]
+
+
+# ==========================================================================
+# lint_journal_name_joined (#1414): a Q4C/Q4D journal_name that renders two
+# journals, or a journal and the owner's role, as one row.
+
+def _journal_entry(name, code="Q4D", text="Example reviewing line"):
+    return {"element_idx_start": 7, "taxonomy_code": code, "text": text,
+            "extracted_fields": {"journal_name": name}}
+
+
+def _journal_findings(*entries):
+    return lint_journal_name_joined({"entries": list(entries)})
+
+
+@pytest.mark.parametrize("name, shapes", [
+    # A lost column separator kept as a tab.
+    ("Example Child Research\tThe Example Journal of Child Health", ["tab"]),
+    # A role or section word left in the name.
+    ("Example Journal of Pharmacology, Editorial Board",
+     ["role word 'Editorial Board'", "joined"]),
+    ("Example Medical Journal - International Advisory Board", ["role word 'Advisory Board'"]),
+    ("Ad hoc Example Neurology", ["role word 'Ad hoc'"]),
+    ("Example Cardiology (Elite Reviewer)", ["role word 'Reviewer'"]),
+    ("Example Science - Board of Reviewing Editors", ["role word 'Editors'"]),
+    ("Example Hepatology (Example Elsewhere section)", ["role word 'section'"]),
+    # Two journals joined by a semicolon or by a double space.
+    ("Example Cancer; Example Journal of Cancer", ["joined"]),
+    ("Example Cancer Therapeutics  Example Surgical Endoscopy", ["joined"]),
+    # A comma between two title-cased runs (IEUPKK 190).
+    ("Molecular Cancer Therapeutics, Surgical Endoscopy", ["joined"]),
+    # A list already, so its last piece opening with "The" is a journal.
+    ("Example Biology, Example Chemistry, The Journal of Immunology", ["joined"]),
+    # A long last piece after one title is a journal, not a subject list.
+    ("Child Development, Journal of the American Academy of Child and Adolescent Psychiatry",
+     ["joined"]),
+])
+def test_journal_name_shapes_flags(name, shapes):
+    assert journal_name_shapes(name) == shapes
+
+
+@pytest.mark.parametrize("name", [
+    # One title with commas in it: a one-word piece is part of the title.
+    "International Journal of Radiation Oncology, Biology, Physics",
+    "Proceedings of the National Academy of Sciences, USA",
+    "Annals of Otology, Rhinology, and Laryngology",
+    "JACC, Journal of the American College of Cardiology",
+    "Cognitive, Affective, Behavioral Neuroscience",
+    # A comma inside a parenthetical joins nothing.
+    "Example Journal (Example Society, Example Chapter)",
+    # A subject list after one title.
+    "Journal of Neurology, Neurosurgery and Psychiatry",
+    "Global Health, Epidemiology & Genomics",
+    # A continuation, a publisher, a subtitle.
+    "Child Abuse and Neglect, The International Journal",
+    "Advances in Medicine, Hindawi Publishing",
+    "Revista Example, Official Journal of the Example Society (EXS), Elsevier",
+    # A parenthetical cut out leaves no double space to read as a join.
+    "Bio Medical Central (BMC) Psychiatry",
+    # A bare "Board" or "Review" is a title word, not a role.
+    "Journal of the American Board of Example Medicine",
+    "Obesity Reviews",
+    "Example Journal",
+])
+def test_journal_name_shapes_silent(name):
+    assert journal_name_shapes(name) == []
+
+
+def test_journal_name_joined_warns_once_per_entry():
+    findings = _journal_findings(_journal_entry("Example Cancer; Example Journal of Cancer"))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("journal_name_joined", "WARN")]
+    assert findings[0]["message"] == (
+        "entry 7 (Q4D): journal_name 'Example Cancer; Example Journal of Cancer' (joined) "
+        "-- renders as one journal row")
+    assert findings[0]["evidence"] == ["Example reviewing line"]
+
+
+def test_journal_name_joined_reads_each_stage4_record():
+    entry = _journal_entry("Example Journal", code="Q4C")
+    entry["extracted_fields"][STAGE4_RECORDS_KEY] = [
+        {"journal_name": "Example Journal"},
+        {"journal_name": "Example Journal of Pharmacology, Editorial Board"},
+        {"journal_name": None},
+    ]
+    findings = _journal_findings(entry)
+    assert len(findings) == 1
+    assert "'Example Journal of Pharmacology, Editorial Board'" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("entry", [
+    _journal_entry("Example Cancer; Example Journal of Cancer", code="Q4A"),
+    _journal_entry("Example Journal"),
+    {"element_idx_start": 1, "taxonomy_code": "Q4D", "text": "x", "extracted_fields": {}},
+    {"element_idx_start": 1, "taxonomy_code": "Q4D", "text": "x",
+     "extracted_fields": {"journal_name": ["Example A", "Example B"]}},
+])
+def test_journal_name_joined_silent(entry):
+    assert _journal_findings(entry) == []
