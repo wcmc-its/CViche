@@ -90,6 +90,21 @@ _MOC_TOKEN_PATTERN = re.compile(r'^MOC(?:[\s:.\-]*\d{4})?$', re.IGNORECASE)
 # certificate number (#1234).
 SKIPPED_ROW_CHECK = 'board_certification_row_skipped'
 
+# A renderer-private F2 field, never a stage-4 one: the further
+# recertification years a CV writes on lines of their own under an entry that
+# already names a recertification (#1270, FOKNKW: "Pediatrics, October 1998
+# Recertification 2005" with "2015" on the next line). A tuple of 4-digit
+# years in source order, set only by `_with_further_recertification`.
+LATER_RECERTIFICATIONS_FIELD = 'later_recertification_years'
+# The word the Dates cell names a recertification with: "2005 (recertified
+# 2015)". `_with_recertification` writes it and `_RECERTIFIED_CELL_RE` reads it
+# back, so the two cannot drift apart.
+_RECERTIFIED_LABEL = 'recertified'
+# A Dates cell that ends by naming its recertification year(s) as events:
+# "1998 (recertified 2005)" or "1998 (recertified 2005, 2015)". Only such a
+# cell has a list a further recertification year can join.
+_RECERTIFIED_CELL_RE = re.compile(rf'\({_RECERTIFIED_LABEL} [^()]*\)$')
+
 CertTokenType = Literal['year', 'cert_number', 'specialty'] | None
 
 
@@ -215,7 +230,9 @@ def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
 
     `recertification_date` is never the end of the range (EBYSBC E33, #1245)
     unless the entry's `source_text` writes the two years as one range: see
-    `_with_recertification`.
+    `_with_recertification`. Further recertification years attached from
+    bare-year entries below (`LATER_RECERTIFICATIONS_FIELD`, #1270) join it as
+    one list: "1998 (recertified 2005, 2015)".
     """
     start_date = fields.get('start_date') or fields.get('year_certified') or ''
     end_date = fields.get('end_date') or ''
@@ -232,6 +249,9 @@ def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
         return start_fmt
     if start_fmt and recertification_date:
         recert_fmt = format_date_for_section(recertification_date, 'F2')
+        later_years = _later_recertification_years(fields)
+        if later_years:
+            recert_fmt = ', '.join((recert_fmt, *later_years))
         return _with_recertification(start_fmt, recert_fmt, source_text)
     if start_fmt:
         return start_fmt
@@ -290,7 +310,7 @@ def _with_recertification(
     if _cv_states_the_range(start_fmt, recert_fmt, source_text):
         return f"{start_fmt}-{recert_fmt}"
     if recert_fmt[0].isdigit():
-        return f"{start_fmt} (recertified {recert_fmt})"
+        return f"{start_fmt} ({_RECERTIFIED_LABEL} {recert_fmt})"
     return f"{start_fmt} (recertification: {recert_fmt})"
 
 
@@ -587,21 +607,88 @@ def _has_any_date(entry: dict) -> bool:
     return _ANY_YEAR_IN_TEXT.search(entry.get('text') or '') is not None
 
 
-def _attach_bare_years(entries: list[dict]) -> tuple[list[dict], list[str]]:
+def _later_recertification_years(fields: dict) -> tuple[str, ...]:
+    """The further recertification years attached to an entry (#1270)."""
+    return tuple(fields.get(LATER_RECERTIFICATIONS_FIELD) or ())
+
+
+def _latest_recertification_year(fields: dict) -> str:
+    """The latest recertification year an entry names, or '' when its
+    recertification is not a single year (none, a range, "Present", free
+    text): only a single year has a "later" for a bare year to be."""
+    later_years = _later_recertification_years(fields)
+    if later_years:
+        return later_years[-1]
+    recert_fmt = format_date_for_section(fields.get('recertification_date') or '', 'F2')
+    return recert_fmt if _SINGLE_YEAR_RE.fullmatch(recert_fmt) else ''
+
+
+def _with_further_recertification(entry: dict, year: str, current_year: int) -> dict | None:
+    """`entry` with a bare `year` appended as one more recertification, or
+    None when the year cannot be read as one (#1270).
+
+    FOKNKW lists "Pediatrics, October 1998  Recertification 2005" and writes
+    "2015" on the next line, under the recertification column; stage 4 makes
+    the 2015 an entry of its own with every field empty. It is read as a
+    further recertification only when all three hold: the entry's Dates cell
+    already names its recertification as an event ("1998 (recertified
+    2005)", see `_with_recertification`), so there is a list to join; the
+    year is later than every recertification already named, so it continues
+    the list rather than contradicting it; and the year is not after
+    `current_year`, since a future year is an expiry, not a recertification.
+    Anything else returns None, and the caller keeps the skipped-row warning.
+    """
+    fields = entry.get('extracted_fields') or {}
+    latest = _latest_recertification_year(fields)
+    if not latest or not int(latest) < int(year) <= current_year:
+        return None
+    date_cell = _format_certification_date_str(fields, entry.get('text') or '')
+    if not _RECERTIFIED_CELL_RE.search(date_cell):
+        return None
+    later_years = (*_later_recertification_years(fields), year)
+    return {**entry, 'extracted_fields': {**fields, LATER_RECERTIFICATIONS_FIELD: later_years}}
+
+
+def _merge_bare_year(previous: dict, year: str, current_year: int) -> dict | None:
+    """The entry above a bare-year entry with that year folded in, or None
+    when it cannot take the year.
+
+    An undated entry takes it as its `year_certified` (#1271). A dated one
+    takes it only as a further recertification (`_with_further_recertification`,
+    #1270); which of two dates is right is otherwise not this function's
+    guess to make.
+    """
+    if not _has_any_date(previous):
+        fields = {**(previous.get('extracted_fields') or {}), 'year_certified': year}
+        logger.info("board certification: attached a bare-year entry to the "
+                    "undated entry above it as its year_certified")
+        return {**previous, 'extracted_fields': fields}
+    merged = _with_further_recertification(previous, year, current_year)
+    if merged is not None:
+        logger.info("board certification: attached a bare-year entry to the "
+                    "entry above it as a further recertification")
+    return merged
+
+
+def _attach_bare_years(
+    entries: list[dict], current_year: int | None = None,
+) -> tuple[list[dict], list[str]]:
     """Fold each bare-year F2 entry into the entry above it in source order.
 
-    A CV that lists a certification and puts its year on the next line comes
+    A CV that lists a certification and puts a year on the next line comes
     out of stage 4 as two records: the certification, and a year with every
-    field empty, which used to be skipped (#1271). The year becomes the
-    previous entry's `year_certified` when that entry has no date of its own.
-    Otherwise (no previous entry, or one that is already dated) the year is
-    returned in the second list, for the caller to record as a skipped row:
-    which of two dates is right is not this function's guess to make.
+    field empty, which used to be skipped (#1271, #1270). `_merge_bare_year`
+    decides whether the entry above can take the year. When it cannot (no
+    previous entry, or a dated one the year does not continue) the year is
+    returned in the second list, for the caller to record as a skipped row.
 
     Runs on source order, before the reverse-chronological sort, since only
     there is "the entry above" the line the CV wrote it under. Returns new
     entry dicts for the ones it changes; the input is not mutated.
+    `current_year` defaults to the run's clock (§7.4); a test pins it.
     """
+    if current_year is None:
+        current_year = datetime.now().year
     kept: list[dict] = []
     unattached: list[str] = []
     for entry in entries:
@@ -609,14 +696,11 @@ def _attach_bare_years(entries: list[dict]) -> tuple[list[dict], list[str]]:
         if not year:
             kept.append(entry)
             continue
-        previous = kept[-1] if kept else None
-        if previous is None or _has_any_date(previous):
+        merged = _merge_bare_year(kept[-1], year, current_year) if kept else None
+        if merged is None:
             unattached.append(year)
-            continue
-        fields = {**(previous.get('extracted_fields') or {}), 'year_certified': year}
-        kept[-1] = {**previous, 'extracted_fields': fields}
-        logger.info("board certification: attached a bare-year entry to the "
-                    "undated entry above it as its year_certified")
+        else:
+            kept[-1] = merged
     return kept, unattached
 
 

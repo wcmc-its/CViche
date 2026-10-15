@@ -26,7 +26,9 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
+    _RECERTIFIED_CELL_RE,
     CERTIFICATE_NUMBER_PATTERN,
+    LATER_RECERTIFICATIONS_FIELD,
     SKIPPED_ROW_CHECK,
     _attach_bare_years,
     _bare_year,
@@ -1491,7 +1493,8 @@ class TestBareYearEntryAttachesToTheEntryAbove:
     """#1271 (folded into #1270): an entry whose text is only a year, with
     every stage-4 field empty, becomes the date of the undated entry above it
     in source order; when that entry already has a date it stays a skipped
-    row with a render warning."""
+    row with a render warning, unless the year continues the entry's
+    recertification list (#1270, the class below)."""
 
     def test_the_year_becomes_the_undated_previous_rows_date(self):
         gen = _generator()
@@ -1560,3 +1563,103 @@ class TestBareYearEntryAttachesToTheEntryAbove:
         with caplog.at_level(logging.WARNING):
             gen._fill_board_certification([{"text": "1977", "extracted_fields": {}}])
         assert "counts disagree" not in caplog.text
+
+
+def _recertified_entry(recertification_date: str | dict = "2005") -> dict:
+    """FOKNKW's shape (#1270): a specialty with a certification year and a
+    recertification year, both from stage 4, and no board or number."""
+    return {"text": "Sample Medicine, October 1998\tRecertification 2005",
+            "extracted_fields": {"specialty": "Sample Medicine", "year_certified": "1998",
+                                 "recertification_date": recertification_date}}
+
+
+class TestBareYearUnderARecertifiedEntryIsAFurtherRecertification:
+    """#1270 residual (FOKNKW): a bare year under an entry that already names
+    a recertification year joins that entry's recertification list instead
+    of being skipped with a warning. Every other dated entry still warns."""
+
+    def test_foknkw_renders_the_year_as_a_second_recertification(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine, August 1998\tRecertification 2008",
+             "extracted_fields": {"specialty": "Example Medicine", "year_certified": "1998",
+                                  "recertification_date": "2008"}},
+            _recertified_entry(),
+            {"text": "\t\t\t       2015", "extracted_fields": {}},
+        ])
+        rows = _rows_after_board(gen)
+        assert ("Sample Medicine", "", "1998 (recertified 2005, 2015)") in rows
+        assert ("Example Medicine", "", "1998 (recertified 2008)") in rows
+        assert len(rows) == 2
+        assert gen._section_failures == []
+
+    def test_two_bare_years_both_join_in_source_order(self):
+        kept, unattached = _attach_bare_years(
+            [_recertified_entry(), {"text": "2015", "extracted_fields": {}},
+             {"text": "2025", "extracted_fields": {}}], current_year=2026)
+        assert unattached == []
+        assert _format_certification_date_str(kept[0]["extracted_fields"]) == \
+            "1998 (recertified 2005, 2015, 2025)"
+
+    def test_the_entry_above_is_not_mutated(self):
+        entry = _recertified_entry()
+        kept, _ = _attach_bare_years([entry, {"text": "2015", "extracted_fields": {}}],
+                                     current_year=2026)
+        assert kept[0] is not entry
+        assert LATER_RECERTIFICATIONS_FIELD not in entry["extracted_fields"]
+
+    def test_a_year_not_after_the_last_recertification_still_warns(self):
+        for year in ("2005", "2001"):
+            entries = [_recertified_entry(), {"text": year, "extracted_fields": {}}]
+            assert _attach_bare_years(entries, current_year=2026) == (entries[:1], [year])
+
+    def test_a_year_before_an_already_attached_one_still_warns(self):
+        # 2010 is after the stated 2005 but before the 2015 already joined.
+        kept, unattached = _attach_bare_years(
+            [_recertified_entry(), {"text": "2015", "extracted_fields": {}},
+             {"text": "2010", "extracted_fields": {}}], current_year=2026)
+        assert unattached == ["2010"]
+        assert kept[0]["extracted_fields"][LATER_RECERTIFICATIONS_FIELD] == ("2015",)
+
+    def test_a_range_recertification_still_warns(self):
+        # "1998 (recertified 2005-2010)" names a span, not a single latest year.
+        for recertification_date in ("2005-2010", {"start_date": "2005", "end_date": "2010"}):
+            entries = [_recertified_entry(recertification_date=recertification_date),
+                       {"text": "2015", "extracted_fields": {}}]
+            assert _attach_bare_years(entries, current_year=2026) == (entries[:1], ["2015"])
+
+    def test_a_future_year_is_an_expiry_and_still_warns(self):
+        entries = [_recertified_entry(), {"text": "2030", "extracted_fields": {}}]
+        assert _attach_bare_years(entries, current_year=2026) == (entries[:1], ["2030"])
+        # The current year itself is a recertification already taken.
+        kept, unattached = _attach_bare_years(
+            [_recertified_entry(), {"text": "2026", "extracted_fields": {}}], current_year=2026)
+        assert unattached == []
+
+    def test_a_recertification_that_reads_as_an_end_still_warns(self):
+        # Future recertification (an expiry) renders a range, not an event.
+        future = _recertified_entry(recertification_date="2030")
+        # The source line writes "1998-2005" itself: a range, not an event.
+        stated_range = {"text": "Sample Medicine 1998-2005",
+                        "extracted_fields": {"specialty": "Sample Medicine", "year_certified": "1998",
+                                             "recertification_date": "2005"}}
+        for previous in (future, stated_range):
+            entries = [previous, {"text": "2015", "extracted_fields": {}}]
+            assert _attach_bare_years(entries, current_year=2026) == (entries[:1], ["2015"])
+
+    def test_no_single_year_recertification_still_warns(self):
+        # Present, free text, or no certification year to be "recertified" from.
+        no_start = {"text": "Sample Medicine Recertification 2005",
+                    "extracted_fields": {"specialty": "Sample Medicine",
+                                         "recertification_date": "2005"}}
+        for previous in (_recertified_entry(recertification_date="Present"),
+                         _recertified_entry(recertification_date="not required"),
+                         no_start):
+            entries = [previous, {"text": "2015", "extracted_fields": {}}]
+            assert _attach_bare_years(entries, current_year=2026) == (entries[:1], ["2015"])
+
+    def test_a_cell_naming_the_recertification_matches_the_join_pattern(self):
+        assert _RECERTIFIED_CELL_RE.search("1998 (recertified 2005)")
+        assert _RECERTIFIED_CELL_RE.search("1998 (recertified 2005, 2015)")
+        assert not _RECERTIFIED_CELL_RE.search("1998-2005")
+        assert not _RECERTIFIED_CELL_RE.search("1998 (recertification: not required)")
