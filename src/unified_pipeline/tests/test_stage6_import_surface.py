@@ -165,6 +165,7 @@ RELOCATED_BY_398_RESIDUE = {
         "RENDER_PIECE_WINDOW",
         "RENDER_TOKEN_MIN_COUNT",
         "RENDER_TOKEN_OVERLAP",
+        "T_RECORD_OVERLAP",
         "RETIRED_TAXONOMY_CODES",
         "UNRENDERED_MIN_RECORD_LINES",
         "_COLUMN_HEADER_WORDS",
@@ -184,8 +185,10 @@ RELOCATED_BY_398_RESIDUE = {
         "m1_record_rendered",
         "normalize_retired_code",
         "segment_already_rendered",
+        "segment_held_by_fields",
         "segments_cover_source",
         "t_recovery_lines",
+        "tab_aware_record_lines",
         "token_pairs",
     ),
 }
@@ -249,7 +252,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 36, (
+    assert len(_RELOCATED_CASES) == 39, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )

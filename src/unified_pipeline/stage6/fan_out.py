@@ -30,7 +30,8 @@ What is deliberately NOT fanned out:
   raw text would be lost;
 - an entry a stage-5 formatter already rendered whole (`formatted_text` /
   `formatted_citation`), which would repeat that rendering on every child;
-- an entry whose text has a token no rendered field holds (`_fields_carry_text`);
+- an entry whose text has a token no rendered field holds (`_fields_carry_text`),
+  except a code that writes no text at all (`_NO_TEXT_COVERAGE_CODES`, B1);
 - an entry that carries more than one such list, or an item that carries a key
   outside the schema next to schema keys (web228's K4 `sessions: [{date, title,
   duration}]`: `title` is the session's own name and no K4 renderer reads it, so
@@ -320,7 +321,30 @@ _EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
 # Codes that keep the entry's text (K2/K4 refuse to split by design) lose
 # nothing to a declined list; warning on them put 31 false alarms in 16
 # corpus CVs.
-_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1', 'D1', 'D2', 'D3', 'F1', 'I', 'Q1', 'Q2'})
+# P, Q3 and R were silent. Their sections write the parent's fields and
+# nothing from a list left whole: on the 302-CV render set P's `committees`
+# and R's `additional_presentations` values are absent from the document
+# (P also writes the stripped entry text, so a kept-whole P entry loses role
+# and date detail rather than the list). Q3 has no corpus case; its section is
+# the same fields-only kind. A period-only `additional_dates` list on P or R
+# is rendered (`with_extra_date_spans`, `further_date_spans`), so such a
+# warning can be a false alarm, as it can for Q1.
+# H and O stay out: H's `dates` / `additional_dates` (`honors._record_date`)
+# and O's `additional_dates` (`leadership.py`, `with_extra_date_spans`) are the
+# lists their sections do write, so on the corpus every H and O warning was a
+# false alarm (HZGJFM H 261/262, VNUAHA O 142 render the spans).
+_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({
+    'B1', 'D1', 'D2', 'D3', 'F1', 'I', 'P', 'Q1', 'Q2', 'Q3', 'R'})
+
+# #1187: a code whose section writes none of an entry's text and none of a
+# record list left whole, so `_fields_carry_text` has nothing to protect: the
+# words no field holds are missing from the document whether the entry fans
+# out or not, and declining only loses the records too. B1:
+# `sections/education.py` writes a row from the degree and institution fields
+# and nothing from the text. Four corpus entries (`degrees` lists whose text
+# names a section label such as "Graduate:" or a country or city no B1 field
+# holds) were kept whole by that test and lost every degree in them.
+_NO_TEXT_COVERAGE_CODES = frozenset({'B1'})
 
 # Date fields a section writes on top of its `_RENDERED_FIELDS`, which names
 # schema fields only: stage 4 emits these from the active (config-file) schema
@@ -539,10 +563,19 @@ def _fields_carry_text(entry: Mapping[str, Any],
     every token of the entry's text -- see `_STOPWORDS` for what is not counted.
     A schema key the renderer never reads, and a key outside the schema, hold
     nothing."""
+    uncovered = _uncovered_tokens(entry, child_fields)
+    return uncovered is not None and not uncovered
+
+
+def _uncovered_tokens(entry: Mapping[str, Any],
+                      child_fields: Sequence[Mapping[str, Any]]) -> Counter[str] | None:
+    """The tokens of the entry's text that no field the renderer writes holds
+    (`_fields_carry_text` is "none"); None for a code with no
+    `_RENDERED_FIELDS`, whose text cannot be checked."""
     code = str(entry.get('taxonomy_code'))
     rendered = _RENDERED_FIELDS.get(code)
     if rendered is None:
-        return False
+        return None
     held: Counter[str] = Counter()
     for fields in child_fields:
         for key, value in fields.items():
@@ -551,7 +584,7 @@ def _fields_carry_text(entry: Mapping[str, Any],
             elif _is_written_date(code, key, value, fields):
                 held += _tokens(_leaf_text(value))
     text = _text_to_cover(str(entry.get('text') or ''), child_fields, rendered, code)
-    return not _tokens(text) - held
+    return _tokens(text) - held
 
 
 def _record_list(value: object, schema: frozenset[str],
@@ -746,6 +779,35 @@ def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> 
             'severity': _WARN_SEVERITY,
         })
     return out
+
+
+def _unlisted_year_warnings(unlisted: Mapping[tuple[str, str], int]) -> list[dict[str, Any]]:
+    """One sidecar WARN per (code, list key) for entries that fanned out
+    without the text coverage test (`_NO_TEXT_COVERAGE_CODES`) while their text
+    names a year no record holds: a dated record stage 4 left out of the list
+    (#1187). Not raised for stage 4's own records list."""
+    out = []
+    for (code, key), count in sorted(unlisted.items()):
+        noun = 'entry' if count == 1 else 'entries'
+        out.append({
+            'check': REJECTED_LIST_CHECK,
+            'code': code,
+            'section': None,
+            'message': (f"{count} {code} {noun}: `{key}` was split into separate "
+                        "rows, but the entry's text names a year no record "
+                        "holds; a record may be missing from the output"),
+            'evidence': [f"{code}.{key}: {count} {noun}"],
+            'severity': _WARN_SEVERITY,
+        })
+    return out
+
+
+def _lists_a_year_no_record_holds(entry: Mapping[str, Any],
+                                  children: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the entry's text names a year (a dated record) that none of its
+    children's fields hold (#1187)."""
+    uncovered = _uncovered_tokens(entry, [child['extracted_fields'] for child in children])
+    return any(_YEAR_TOKEN_RE.fullmatch(token) for token in uncovered or ())
 
 
 def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> dict[str, list[str]]:
@@ -950,7 +1012,8 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str],
     records = ([_own_values(scalars, items)] if own else []) \
         + [dict(item) for item in items]
     child_fields = [{**copy.deepcopy(scalars), **copy.deepcopy(record)} for record in records]
-    if not _fields_carry_text(entry, child_fields):
+    if str(entry.get('taxonomy_code')) not in _NO_TEXT_COVERAGE_CODES \
+            and not _fields_carry_text(entry, child_fields):
         return None
     texts = _child_texts(entry.get('text'), records)
     built = _texts_are_built(entry.get('text'), records)
@@ -1042,14 +1105,22 @@ def fan_out_multi_record_entries(
     """
     out: list[dict[str, Any]] = []
     rejected: dict[tuple[str, str], list[list[str]]] = {}
+    unlisted: Counter[tuple[str, str]] = Counter()
     for entry in entries:
         code = entry.get('taxonomy_code')
         schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
         children = _fan_out_entry(entry, schema, records_key)
+        # Only a generic list: stage 4's own records list reads its years from
+        # the reply, and B1 attendance ranges there are not lost records.
+        if (children and code in _NO_TEXT_COVERAGE_CODES and FANNED_OUT_FROM in children[0]
+                and children[0][FANNED_OUT_FROM]['key'] != records_key
+                and _lists_a_year_no_record_holds(entry, children)):
+            unlisted[(str(code), children[0][FANNED_OUT_FROM]['key'])] += 1
         if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
             for key, stray in _declined_record_lists(entry, schema).items():
                 rejected.setdefault((str(code), key), []).append(stray)
         out.extend(children if children is not None else [entry])
     if warnings is not None:
         warnings.extend(_rejection_warnings(rejected))
+        warnings.extend(_unlisted_year_warnings(unlisted))
     return out
