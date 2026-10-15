@@ -588,7 +588,11 @@ class TestB1DatesAttended:
         # never writes the string, so its tokens are not held.
         entry = _two_degrees([{'dates_attended': '2001-2005', 'start_date': '2005'},
                               {'dates_attended': '2006-2008', 'start_date': '2008'}])
-        assert _fan(entry) == [entry]
+        children = [dict(item) for item in entry['extracted_fields']['degrees']]
+        assert not fan_out._fields_carry_text(entry, children)
+        # B1 skips that test, so the degrees still fan out; the years it
+        # leaves unheld are what the warning reports.
+        assert [c['extracted_fields']['degree'] for c in _fan(entry)] == ['BSc', 'MSc']
 
     def test_discipline_is_a_rendered_field_so_a_degree_with_one_fans_out(self):
         entry = _two_degrees(_NESTED_DATES)
@@ -596,15 +600,40 @@ class TestB1DatesAttended:
         entry['extracted_fields']['degrees'][0]['discipline'] = 'Zzfield'
         assert [c['extracted_fields']['degree'] for c in _fan(entry)] == ['BSc', 'MSc']
 
+    def test_a_section_label_and_a_place_no_field_holds_do_not_keep_the_degrees_whole(self):
+        # B1 writes no text, so declining on a word no field holds lost the
+        # degrees too (#1187: four corpus entries).
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] = 'Qualifications:\t' + entry['text'] + ', Zzcountry'
+        children = _fan(entry)
+        assert [c['extracted_fields']['degree'] for c in children] == ['BSc', 'MSc']
+
+    def test_another_code_still_keeps_an_entry_whole_for_a_word_no_field_holds(self):
+        entry = {'taxonomy_code': 'Q2', 'element_idx_start': 3,
+                 'text': 'Zzlabel: Alpha Council 2001\tBeta Council 2004',
+                 'extracted_fields': {'committees': [
+                     {'committee_name': 'Alpha Council', 'start_date': '2001'},
+                     {'committee_name': 'Beta Council', 'start_date': '2004'}]}}
+        assert _fan(entry) == [entry]
+
     def test_both_degrees_render(self, tmp_path):
+        self._assert_degrees_render(tmp_path, _two_degrees(_NESTED_DATES))
+
+    def test_both_degrees_render_beside_a_section_label_and_a_place(self, tmp_path):
+        # The text shape the coverage skip is for (#1187 "Check" line).
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] = 'Qualifications:\t' + entry['text'] + ', Zzcountry'
+        self._assert_degrees_render(tmp_path, entry)
+
+    @staticmethod
+    def _assert_degrees_render(tmp_path, entry):
         import json
 
         from docx import Document
 
         from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
         source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
-        source.write_text(json.dumps({'document_uid': 'TESTAA',
-                                      'entries': [_two_degrees(_NESTED_DATES)]}))
+        source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [entry]}))
         WCMTemplateGenerator(verbose=False).generate(
             str(source), str(target), research_summary_path=None)
         body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
@@ -628,9 +657,51 @@ class TestRejectedListWarning:
         assert 'gpa' in warning['evidence']
         assert '3.9' not in str(warning)
 
+    def test_a_degree_stage_4_left_out_of_a_fanned_out_list_warns(self):
+        # The text names three degrees and the list holds two. B1 skips the
+        # coverage test, so the list fans out, and the third degree's year is
+        # reported instead of dropped without a signal (#1187).
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] += '\tPhD Quillmere University 2012'
+        assert len(_fan(entry)) == 2
+        (warning,) = self._warnings(entry)
+        assert (warning['check'], warning['code'], warning['severity']) == (
+            fan_out.REJECTED_LIST_CHECK, 'B1', 'WARN')
+        assert warning['evidence'] == ['B1.degrees: 1 entry']
+        assert '2012' not in str(warning) and 'Quillmere' not in str(warning)
+
+    def test_a_stage4_records_list_with_attendance_years_does_not_warn(self):
+        # Years held only by attendance ranges in the text are not a missing
+        # record when stage 4 split the reply itself (#1187).
+        records = [{'degree': 'BS', 'institution': 'Harrowfield University', 'year': '1999'},
+                   {'degree': 'MD', 'institution': 'Birch Hollow University', 'year': '2003'}]
+        entry = _stage4_entry(records, code='B1', text=(
+            'Harrowfield University 1995-1999 BS\tBirch Hollow University 1999-2003 MD'))
+        warnings = []
+        children = fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings, _RECORDS)
+        assert len(children) == 2
+        assert warnings == []
+
+    def test_words_no_field_holds_without_a_year_do_not_warn(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] = 'Qualifications:\t' + entry['text'] + ', Zzcountry'
+        assert len(_fan(entry)) == 2
+        assert self._warnings(entry) == []
+
+    def test_a_year_no_record_holds_does_not_warn_for_a_code_that_tests_coverage(self):
+        # Q2 still keeps the entry whole on any unheld token, and then the
+        # existing declined-list warning is the only one raised.
+        entry = {'taxonomy_code': 'Q2', 'element_idx_start': 3,
+                 'text': 'Alpha Council 2001\tBeta Council 2004\tGlade Panel 2009',
+                 'extracted_fields': {'committees': [
+                     {'committee_name': 'Alpha Council', 'start_date': '2001'},
+                     {'committee_name': 'Beta Council', 'start_date': '2004'}]}}
+        (warning,) = self._warnings(entry)
+        assert 'was split' not in warning['message']
+
     def test_a_declined_record_list_warns_without_stray_keys(self):
         entry = _two_degrees([{}, {}])
-        entry['text'] = entry['text'] + ' Zzunheld'
+        entry['extracted_fields']['formatted_text'] = 'Rendered whole by stage 5c'
         (warning,) = self._warnings(entry)
         assert warning['evidence'] == ['B1.degrees: 1 entry']
 
@@ -1129,13 +1200,28 @@ class TestDeclinedListWarnsForEveryFieldRenderedCode:
         ('D1', {'title': 'Instructor'}), ('D2', {'title': 'Attending'}),
         ('D3', {'title': 'Consultant'}), ('F1', {'state_country': 'Arden'}),
         ('I', {'organization': 'Glade Society'}), ('Q1', {'role': 'Chair'}),
-        ('Q2', {'committee_name': 'Alpha Council'})])
+        ('Q2', {'committee_name': 'Alpha Council'}),
+        # Silent until #1187: each writes the parent's fields and none of a list.
+        ('P', {'committee_name': 'Glade Board'}), ('Q3', {'panel_name': 'Glade Panel'}),
+        ('R', {'event_name': 'Glade Meeting'})])
     def test_a_declined_list_warns(self, code, list_item):
         entry = {'taxonomy_code': code, 'text': 'Zzunheld prose no field carries',
                  'extracted_fields': {'records': [dict(list_item), dict(list_item)]}}
         warnings = []
         assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
         assert [(w['check'], w['code']) for w in warnings] == [(fan_out.REJECTED_LIST_CHECK, code)]
+
+    @pytest.mark.parametrize('code,list_key', [('H', 'dates'), ('H', 'additional_dates'),
+                                               ('O', 'additional_dates')])
+    def test_a_declined_date_span_list_the_section_renders_does_not_warn(self, code, list_key):
+        # H and O write these lists into their date cell, so a declined one
+        # loses nothing and a warning would cost quality-score points.
+        entry = {'taxonomy_code': code, 'text': 'Zzunheld prose no field carries',
+                 'extracted_fields': {list_key: [{'start_date': '2001', 'end_date': '2002'},
+                                                 {'start_date': '2005', 'end_date': '2006'}]}}
+        warnings = []
+        assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
+        assert warnings == []
 
 
 class TestParentKeepsItsOwnPart:

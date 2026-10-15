@@ -2455,6 +2455,28 @@ def test_implausible_year_reads_nested_and_integer_values(value):
     assert len(_implausible(_fields_entry("B1", {"dates_attended": value}, text="'05"))) == 1
 
 
+# #1585 (NECRGC YIXQFB 2642): stage 4 read "3-16" as 1916-03, but stage 6
+# prints the duration "03/16-07/21", so the wrong century never reaches the
+# page; 2743 printed "1909-1908" and is true.
+_WRONG_CENTURY_GRANT = _fields_entry("M2B", {"start_date": "1916-03-01"},
+                                     text="Example grant 3-16 to 7-21", idx=2642)
+
+
+def test_implausible_year_silent_when_the_render_never_prints_the_year():
+    blocks = [("table", "Project title:\nExample grant\nDuration of support:\n03/16-07/21")]
+    assert lint_implausible_year({"entries": [_WRONG_CENTURY_GRANT]}, None, blocks) == []
+
+
+def test_implausible_year_fires_when_the_render_prints_the_year():
+    blocks = [("table", "Project title:\nExample grant\nDuration of support:\n1916-2021")]
+    findings = lint_implausible_year({"entries": [_WRONG_CENTURY_GRANT]}, None, blocks)
+    assert len(findings) == 1 and "start_date=1916" in findings[0]["message"]
+
+
+def test_implausible_year_without_a_render_judges_stage_4_alone():
+    assert len(lint_implausible_year({"entries": [_WRONG_CENTURY_GRANT]})) == 1
+
+
 def _degree(year, text=None, code="B1"):
     return _fields_entry(code, {"degree": "MD", "year": year},
                          text=f"MD, Example University {year}" if text is None else text)

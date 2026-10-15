@@ -624,7 +624,7 @@
         "role": {"extract": true, "category": "template", "wcm_column": "Role(s)"},
         "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
         "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
-        "panel_name": {"extract": false, "category": "optional"},
+        "panel_name": {"extract": true, "category": "template", "wcm_column": "Organization Name", "notes": "Stage 6 appends the study section to the agency in this column (#466); requested by contract, not left to the field guide (#470)"},
         "review_type": {"extract": false, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
       }
