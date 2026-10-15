@@ -1527,6 +1527,24 @@ DUPLICATE_RECORD_ID_TITLE_OVERLAP = 0.8
 _RECORD_PMID_MIN_DIGITS = 5
 _DOI_PREFIX_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 _YEAR_IN_VALUE_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_PMID_ID_PREFIX = "pmid:"
+
+# Two more answers to "is this pair one record rendered twice" (#1585,
+# batches YUYVIG and NECRGC):
+#   - Two citations with two different PMIDs are two papers, whatever their
+#     titles: one guideline or consensus paper co-published in two journals
+#     (NECRGC YIXQFB, three pairs, each two PubMed records).
+#   - When each copy is its own source entry (spans that do not overlap) and
+#     each entry's own source text states the title, the CV lists the record
+#     twice and the output is faithful to it (YUYVIG BLBVPD, OKRTPJ, RLADNC,
+#     ULHCAP, UVZNIC; NECRGC FVQANK, GNONHA, JEFZWH, SPIHVQ: 11 pairs the
+#     verifiers judged false as pipeline defects). That pair is reported at
+#     INFO, not WARN: the owner may still want to delete one copy, but no
+#     stage made it. A copy under a source heading naming abstracts but coded
+#     as an article (S1-S3) is not the source listing the article twice: the
+#     abstract was recoded, and that recode is what put a second copy among
+#     the articles (YUYVIG SQMWHM, #446), so it stays WARN.
+_ABSTRACT_HEADING_RE = re.compile(r"\babstracts?\b", re.IGNORECASE)
 
 
 class _RecordIdentity(NamedTuple):
@@ -1540,6 +1558,12 @@ class _RecordIdentity(NamedTuple):
     funder: str
     grant_number: str
     pi: str
+    # Where the copy came from (`_source_lists_twice`): its source span, None
+    # without an integer start; whether its own source text states the
+    # title; and whether it is an abstract the classifier coded as an article.
+    span: tuple[int, int] | None = None
+    source_states_title: bool = False
+    recoded_abstract: bool = False
 
 
 def _value_year(value: object) -> int | None:
@@ -1551,7 +1575,7 @@ def _record_ids(fields: Mapping) -> frozenset[str]:
     ids = set()
     pmid = re.sub(r"\D", "", str(fields.get("pmid") or ""))
     if len(pmid) >= _RECORD_PMID_MIN_DIGITS:
-        ids.add(f"pmid:{pmid}")
+        ids.add(f"{_PMID_ID_PREFIX}{pmid}")
     doi = _DOI_PREFIX_RE.sub("", str(fields.get("doi") or "").strip()).lower()
     if doi.startswith("10."):
         ids.add(f"doi:{doi}")
@@ -1576,8 +1600,47 @@ def _record_identities(stage_5d: Mapping) -> list[_RecordIdentity]:
         identities.append(_RecordIdentity(
             entry.element_idx, entry.code, title,
             _value_year(entry.fields.get("start_date" if grant else "year")),
-            ids, grant_key("agency"), grant_key("grant_number"), grant_key("pi_name")))
+            ids, grant_key("agency"), grant_key("grant_number"), grant_key("pi_name"),
+            _entry_span(entry), _states_title(title, entry.text),
+            not grant and _is_recoded_abstract(entry.hierarchy)))
     return identities
+
+
+def _entry_span(entry: _FieldsEntry) -> tuple[int, int] | None:
+    """The entry's (first, last) source element, or None without an
+    integer start; a missing end is the start."""
+    start, end = entry.element_idx, entry.element_idx_end
+    if not isinstance(start, int):
+        return None
+    return start, end if isinstance(end, int) else start
+
+
+def _states_title(title: str, source_text: str) -> bool:
+    """Whether an entry's source text states its title. Spaces are dropped
+    from both, so a source that runs two words together ("anesthésiepéridurale",
+    YUYVIG ZDOAZO 801) still states it."""
+    return bool(title) and title.replace(" ", "") in _passage_key(source_text).replace(" ", "")
+
+
+def _is_recoded_abstract(hierarchy: tuple[str, ...]) -> bool:
+    """A citation-coded entry whose own source heading names abstracts."""
+    return bool(hierarchy) and _ABSTRACT_HEADING_RE.search(hierarchy[-1]) is not None
+
+
+def _source_lists_twice(a: _RecordIdentity, b: _RecordIdentity) -> bool:
+    """Whether a pair is two source entries that each state the record: the
+    CV lists it twice, rather than a stage copying one entry."""
+    return (a.source_states_title and b.source_states_title
+            and not (a.recoded_abstract or b.recoded_abstract)
+            and a.span is not None and b.span is not None
+            and (a.span[1] < b.span[0] or b.span[1] < a.span[0]))
+
+
+def _distinct_pmids(a: _RecordIdentity, b: _RecordIdentity) -> bool:
+    """Both citations carry a PMID and they share none: two PubMed records."""
+    pmids_a = {i for i in a.ids if i.startswith(_PMID_ID_PREFIX)}
+    pmids_b = {i for i in b.ids if i.startswith(_PMID_ID_PREFIX)}
+    return bool(pmids_a and pmids_b) and not pmids_a & pmids_b
 
 
 def _title_overlap(a: str, b: str) -> float:
@@ -1601,6 +1664,8 @@ def _same_record(a: _RecordIdentity, b: _RecordIdentity) -> str | None:
     if a.code in _DUPLICATE_GRANT_CODES:
         return _same_grant(a, b)
     if a.code != b.code or (a.year is not None and b.year is not None and a.year != b.year):
+        return None
+    if _distinct_pmids(a, b):
         return None
     if a.title and a.title == b.title:
         return "title"
@@ -1671,28 +1736,43 @@ def lint_duplicate_records(blocks: list[tuple[str, str]],
     record by title, PMID or DOI, or one grant under two funding codes, at
     any distance (`_duplicate_entry_pairs`). Its evidence leads with the
     entry index; a block pair both of whose blocks a record pair already
-    names is not counted twice.
+    names is not counted twice. Two citations with different PMIDs are two
+    records; a pair whose copies are two source entries that each state the
+    title is the CV listing the record twice, reported at INFO
+    (`_source_lists_twice`, #1585).
     """
     entry_pairs = _duplicate_entry_pairs(blocks, stage_5d) if stage_5d else []
     named_blocks = set().union(*(rendered for *_rest, rendered in entry_pairs))
     block_pairs = [(first, second) for first, second in _duplicate_block_pairs(blocks)
                    if not {first, second} <= named_blocks]
-    count = len(entry_pairs) + len(block_pairs)
-    if count < DUPLICATE_RECORD_WARN_COUNT:
-        return []
+    in_source = [pair for pair in entry_pairs if _source_lists_twice(pair[0], pair[1])]
+    made = [pair for pair in entry_pairs if not _source_lists_twice(pair[0], pair[1])]
+    findings = []
+    count = len(made) + len(block_pairs)
+    if count >= DUPLICATE_RECORD_WARN_COUNT:
+        evidence = [_entry_pair_evidence(pair) for pair in made]
+        evidence += [f"block {first} repeats at {second}: "
+                     f"{str(blocks[first][1])[:100]}" for first, second in block_pairs]
+        findings.append(_finding(
+            "duplicate_records", "WARN",
+            f"{count} duplicated record(s) — the same entry appears twice: one "
+            f"enumerated entry within the same output section, or one article or "
+            f"grant listed twice",
+            evidence[:5]))
+    if in_source:
+        findings.append(_finding(
+            "duplicate_records", "INFO",
+            f"{len(in_source)} record(s) the source CV itself lists twice, "
+            f"rendered twice as listed — each copy is its own source entry",
+            [_entry_pair_evidence(pair) for pair in in_source][:5]))
+    return findings
 
-    evidence = [f"entry {first.element_idx} repeats as entry {second.element_idx} "
-                f"({first.code}/{second.code}, same {why}): "
-                f"{(first.title or second.title)[:80]}"
-                for first, second, why, _rendered in entry_pairs]
-    evidence += [f"block {first} repeats at {second}: "
-                 f"{str(blocks[first][1])[:100]}" for first, second in block_pairs]
-    return [_finding(
-        "duplicate_records", "WARN",
-        f"{count} duplicated record(s) — the same entry appears twice: one "
-        f"enumerated entry within the same output section, or one article or "
-        f"grant listed twice",
-        evidence[:5])]
+
+def _entry_pair_evidence(pair: tuple[_RecordIdentity, _RecordIdentity, str, set[int]]) -> str:
+    first, second, why, _rendered = pair
+    return (f"entry {first.element_idx} repeats as entry {second.element_idx} "
+            f"({first.code}/{second.code}, same {why}): "
+            f"{(first.title or second.title)[:80]}")
 
 
 # A rendered paragraph whose whole text is a date ("June 2019", "07/2008 -
@@ -2215,8 +2295,11 @@ def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
 # line, rendered as the owner's publications (ECXGAT 2156-2204), and the
 # applicants of a grant-review panel and a laboratory's technical staff,
 # rendered as the owner's past mentees (ECXGAT 1293-1299, IZIXVF 284-298).
-# Two shapes, both read off stage 4; the first also needs the bibliography
+# Three shapes, all read off stage 4; the first also needs the bibliography
 # line each publication rendered as, so it judges only what rendered there.
+# The third (#1251, pilot JFBPNC 569-582): a student's awards and program
+# places, under a students heading, coded H, K5 and K4 and rendered as the
+# owner's honors and teaching.
 
 OWNER_ATTRIBUTION_SHAPE_UNCREDITED = "citation_without_owner"
 OWNER_ATTRIBUTION_SHAPE_NOT_MENTEES = "mentee_under_non_mentee_heading"
@@ -2256,6 +2339,31 @@ _NON_MENTEE_CONTEXT_RE = re.compile(
 _MENTEE_CONTEXT_RE = re.compile(
     r"student|fellow|trainee|mentee|post-?doc|resident|scholar|advisee|thes[ie]s"
     r"|dissertation|supervis", re.IGNORECASE)
+
+OWNER_ATTRIBUTION_SHAPE_MENTEE_OUTPUT = "owner_code_under_mentee_heading"
+
+#: Codes that state something of the CV owner's own: an honour (H), a
+#: membership (I), a position (D1-D3). Under a heading naming students or
+#: mentees they are the mentee's (#1251: JFBPNC 569-582, a student's awards
+#: coded H and rendered in the owner's honors table).
+OWNER_ONLY_CODES = frozenset({"H", "I", "D1", "D2", "D3"})
+#: Teaching codes, judged only under a heading that also names
+#: accomplishments: there they are a student's program places (JFBPNC 574
+#: and 575, coded K5 and K4), elsewhere the owner's own teaching of students.
+ACCOMPLISHMENT_CODES = frozenset({"K1", "K2", "K3", "K4", "K5"})
+#: The codes that put an entry on the mentoring side: the mentee codes and
+#: N4, mentee outputs.
+MENTORING_CODES = MENTEE_CODES | {"N4"}
+
+#: A heading naming the people the owner trains (#1251's regex).
+_MENTEE_HEADING_RE = re.compile(
+    r"\b(?:students?|mentees?|trainees?|advisees?|fellows\s+mentored)\b", re.IGNORECASE)
+#: The same people in the plural: a heading listing them, not one saying
+#: what the owner won as a student ('Student/Trainee Awards', web210 148-162).
+_MENTEE_PLURAL_HEADING_RE = re.compile(
+    r"\b(?:students|mentees|trainees|advisees|fellows\s+mentored)\b", re.IGNORECASE)
+_ACCOMPLISHMENT_HEADING_RE = re.compile(r"\b(?:accomplishments?|awards?|achievements?)\b",
+                                        re.IGNORECASE)
 
 #: Entries a finding names in its evidence, and characters of each quoted.
 OWNER_ATTRIBUTION_EVIDENCE_LIMIT = 3
@@ -2383,15 +2491,57 @@ def _non_mentee_findings(entries: list[_AttributionEntry],
         for context, members in groups.items()]
 
 
+def _mentee_heading(heading: tuple[str, ...]) -> str | None:
+    """The deepest heading on the path naming students or mentees, or None."""
+    return next((h for h in reversed(heading) if _MENTEE_HEADING_RE.search(h)), None)
+
+
+def _coded_as_owners(entry: _AttributionEntry) -> bool:
+    """An honour, membership or position, or a teaching code under a heading
+    naming accomplishments: content the owner's own sections render."""
+    return entry.code in OWNER_ONLY_CODES or (
+        entry.code in ACCOMPLISHMENT_CODES
+        and any(_ACCOMPLISHMENT_HEADING_RE.search(h) for h in entry.heading))
+
+
+def _lists_mentees(heading: tuple[str, ...], mentored: set[tuple[str, ...]]) -> bool:
+    """A path naming mentees in the plural, or one with a mentoring-coded
+    entry of its own (JFBPNC's singular 'STUDENT ACCOMPLISHMENTS' holds the
+    N3B lines naming each student)."""
+    return heading in mentored or any(_MENTEE_PLURAL_HEADING_RE.search(h) for h in heading)
+
+
+def _mentee_output_findings(entries: list[_AttributionEntry]) -> list[tuple[str, str, list[str]]]:
+    """(severity, message, evidence): one WARN per heading path naming
+    students or mentees that has entries coded as the owner's under it
+    (#1251), with the count per code."""
+    mentored = {entry.heading for entry in entries if entry.code in MENTORING_CODES}
+    groups: dict[tuple[str, ...], list[_AttributionEntry]] = defaultdict(list)
+    for entry in entries:
+        if (_mentee_heading(entry.heading) is not None and _coded_as_owners(entry)
+                and _lists_mentees(entry.heading, mentored)):
+            groups[entry.heading].append(entry)
+    return [(
+        "WARN",
+        f"{OWNER_ATTRIBUTION_SHAPE_MENTEE_OUTPUT}: {len(members)} entr"
+        f"{'y' if len(members) == 1 else 'ies'} coded "
+        f"{', '.join(f'{n} {code}' for code, n in sorted(Counter(e.code for e in members).items()))} "
+        f"as the CV owner's under '{_mentee_heading(heading)}', which names students or mentees",
+        _evidence_lines([(e.element_idx, e.code, e.text) for e in members]))
+        for heading, members in groups.items()]
+
+
 def lint_owner_attribution(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     """Other people's content rendered as the CV owner's (#1573): a run of
-    bibliography publications that never credit the owner, and mentee
-    entries under a heading naming reviewers or staff. A trainee's award
-    under a publications heading (ULHCAP-01) and a host's title read as the
+    bibliography publications that never credit the owner, mentee entries
+    under a heading naming reviewers or staff, and a mentee's awards or
+    positions coded as the owner's under a heading naming students or
+    mentees (#1251). A trainee's award under a publications or residency
+    research heading (ULHCAP-01, KDAZOM 608) and a host's title read as the
     owner's role (DYLJXC-03) are not reached yet."""
     entries = _attribution_entries(stage4)
     contexts = _attribution_contexts(entries)
-    shown = _non_mentee_findings(entries, contexts)
+    shown = _non_mentee_findings(entries, contexts) + _mentee_output_findings(entries)
     owner = _owner_surname_words(stage4)
     if owner:
         shown += [_uncredited_finding(run, contexts)
