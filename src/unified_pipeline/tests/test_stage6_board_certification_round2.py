@@ -1485,6 +1485,30 @@ class TestEveryRecertificationYearOnTheLine:
     def test_a_line_that_does_not_name_stage_4s_year_is_not_read(self):
         assert self._dates("2019", self._LINE) == "2012 (recertified 2019)"
 
+    def test_another_certifications_line_in_the_text_is_not_read(self):
+        # PR #1847 review: one unfanned record whose text names two
+        # certifications; the first line's 2015 is the other one's.
+        fields = {"certifying_board": "Example Board of Sample", "year_certified": "2008",
+                  "recertification_date": "2018"}
+        text = ("Example Board of Testing, 2005, recertified 2015\n"
+                "Example Board of Sample, 2008, recertified 2018")
+        assert _format_certification_date_str(fields, text, own_line=True) \
+            == "2008 (recertified 2018)"
+
+    def test_two_lines_naming_stage_4s_year_read_neither(self):
+        text = ("Example Board of Testing, 2005, recertified 2015, 2018\n"
+                "Example Board of Sample, 2008, recertified 2012, 2018")
+        assert self._dates("2018", text) == "2012 (recertified 2018)"
+
+    def test_the_rendered_row_ignores_another_certifications_line(self):
+        gen = _generator()
+        entry = _certification("Example Board of Sample", "2008", "2018")
+        entry["text"] = ("Example Board of Testing, 2005, recertified 2015\n"
+                         "Example Board of Sample, 2008, recertified 2018")
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Sample", "A12345", "2008 (recertified 2018)")]
+
     def test_a_line_that_is_not_the_records_own_is_not_read(self):
         assert self._dates("2018", self._LINE, own_line=False) == "2012 (recertified 2018)"
 

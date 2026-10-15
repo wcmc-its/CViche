@@ -32,7 +32,7 @@ is testable on strings alone.
                                     rather than a list of them (#1245)
     _program_line                   the dated line naming what a two-line
                                     award was given to (#1245)
-    parse_honor_entry              the whole entry -> `list[HonorRecord]`
+    parse_honor_entry               the whole entry -> `list[HonorRecord]`
     HonorsSection._add_honors_row   the only part that touches the table
 
 The delimiter contract, stated once here because the reviewer asked for it in

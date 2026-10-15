@@ -219,9 +219,12 @@ def _format_certification_date_str(fields: dict, source_text: str = '',
     unless the entry's `source_text` writes the two years as one range: see
     `_with_recertification`. `own_line` says `source_text` is this one
     certification's line, so the further recertification years it names are
-    this record's (`_every_recertification_year`); a fused line or a fanned
-    record's parent line names other records' years, so the callers for
-    those leave it False.
+    this record's (`_every_recertification_year`); a fused line the fields
+    detect, or a fanned record's parent line, names other records' years, so
+    the callers for those leave it False. A fused entry the fields do not
+    detect still passes True; `_every_recertification_year` reads only the
+    one text line that names stage 4's year, which keeps the other lines'
+    years out.
     """
     start_date = fields.get('start_date') or fields.get('year_certified') or ''
     end_date = fields.get('end_date') or ''
@@ -286,14 +289,29 @@ def _every_recertification_year(recert_fmt: str, source_text: str) -> str:
     (X6 UXBHHF 123, #1245). The other years are read only when stage 4's
     year is one of them, so a year from another clause is never added;
     anything else returns `recert_fmt` unchanged.
+
+    Only the one text line that names stage 4's year is read. A record that
+    is not fanned can still carry two certifications' lines when stage 4
+    returned one record for them ("ABIM, 2005, recertified 2015\nABIM
+    Cardiovascular Disease, 2008, recertified 2018"), and the first line's
+    2015 is the other certification's (PR #1847 review). When no line or
+    more than one line names it, `recert_fmt` is returned unchanged.
     """
-    years = list(dict.fromkeys(
-        year
-        for match in _RECERTIFICATION_YEARS_RE.finditer(str(source_text))
-        for year in _LISTED_YEAR_RE.findall(match.group(1))))
-    if recert_fmt not in years:
+    lines_naming_it = [
+        years for years in (_recertification_years(line)
+                            for line in str(source_text).splitlines())
+        if recert_fmt in years]
+    if len(lines_naming_it) != 1:
         return recert_fmt
-    return _RECERTIFICATION_YEAR_JOIN.join(sorted(years))
+    return _RECERTIFICATION_YEAR_JOIN.join(sorted(lines_naming_it[0]))
+
+
+def _recertification_years(line: str) -> list[str]:
+    """The distinct years `line` names straight after a recertification word."""
+    return list(dict.fromkeys(
+        year
+        for match in _RECERTIFICATION_YEARS_RE.finditer(line)
+        for year in _LISTED_YEAR_RE.findall(match.group(1))))
 
 
 def _with_recertification(
