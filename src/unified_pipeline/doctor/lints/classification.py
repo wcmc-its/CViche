@@ -105,7 +105,8 @@ ATTENDED_AS_TEACHER_CODES = frozenset({"K4", "S8"})
 #: only: "Research and Training" over a grants list says nothing of its rows.
 #: A heading that also names teaching ("Formal Teaching of Peers (e.g., CME
 #: and other continuing education courses)", "National Teaching and
-#: Training") lists what the owner taught.
+#: Training") lists what the owner taught, unless it names attendance too
+#: ("Continuing Education - Lectures Attended"; PR #1829 review).
 _ATTENDANCE_HEADING_RE = re.compile(
     r"professional development|career development|\btraining\b|certifications?\b"
     r"|continuing education", re.IGNORECASE)

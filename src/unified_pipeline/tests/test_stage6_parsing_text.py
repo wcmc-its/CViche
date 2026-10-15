@@ -802,11 +802,25 @@ def test_attendance_opening_outranks_a_role_word_later_in_the_text():
 
 @pytest.mark.parametrize("text", [
     "Invited talk, Example Society Annual Meeting, 2019",
+    "Talks: Example Society Annual Meeting, 2019",
+])
+def test_talk_names_a_role(text):
+    assert names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("text", [
+    # PR #1829 review: a bare grand-rounds event in a CE or development list
+    # is usually attended; "grand rounds" names a role in a heading only.
+    "Medicine Grand Rounds, Example Hospital, 2018",
     "Department of Medicine Grand Rounds, Example Hospital, 2018",
+    # "Invited" alone names a role in a heading only; "invited to
+    # participate / attend" never does.
+    "Invited to participate, Example Leadership Program, 2018",
+    "Invited to attend the Example Summit, 2019",
     "Invited, Example Visiting Professor Program, 2020",
 ])
-def test_talk_invited_and_grand_rounds_name_a_role(text):
-    assert names_teaching_or_authorship_role(text)
+def test_grand_rounds_and_invited_name_no_role_in_entry_text(text):
+    assert not names_teaching_or_authorship_role(text)
 
 
 @pytest.mark.parametrize("text", [
@@ -822,7 +836,19 @@ def test_attendance_opening_outranks_talk_invited_and_grand_rounds(text):
     ("CME Lectures Given", True),
     ("Continuing Medical Education - Teaching", True),
     ("Invited Talks", True),
+    ("Talks Given", True),
     ("Grand Rounds", True),
+    ("Invited Visiting Professorships", True),
+    # A heading that names attendance lists what the owner attended (PR
+    # #1829 review), whatever role word it also has.
+    ("CME Lectures Attended", False),
+    ("Grand Rounds Attended", False),
+    ("Conferences and Talks Attended", False),
+    ("Teaching Workshops - Participation", False),
+    ("Teaching Conferences - Attendance", False),
+    ("Lecture Series Participated In", False),
+    ("Teaching Courses Completed", False),
+    ("Invited to Participate", False),
     ("Professional Development", False),
     ("Certifications / Continuing Education", False),
     ("Career Development > ", False),

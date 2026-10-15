@@ -894,16 +894,28 @@ ATTENDANCE_OPENING_RE = re.compile(
     re.IGNORECASE)
 # A word that names the owner teaching, leading or presenting the activity
 # (#1691). "Directors Course" and "Speakers Series" name the event, not the
-# owner's role, so only the singular forms count. "Talk", "invited" and
-# "grand rounds" name a talk the owner gave ("Invited Talks", "Grand Rounds
-# Presentations"); an attended talk opens as attendance, which outranks them.
+# owner's role, so only the singular forms count. "Talk(s)" names a talk the
+# owner gave ("Invited talk, ..."); an attended talk opens as attendance,
+# which outranks it.
 TEACHING_ROLE_RE = re.compile(
     r'\b(?:lectur(?:e|er|es|ed|ing)|speaker|keynote|faculty|instructor|tutor|trainer|taught'
-    r'|talk|invited|grand\s+rounds'
+    r'|talks?'
     r'|teach(?:er|es|ing)?|(?:co-?)?director|course\s+chair'
     r'|present(?:er|ed|ing|ation)|organi[sz](?:er|ed|ing)|moderat(?:or|ed|ing)'
     r'|facilitat(?:or|ed|ing)|precept(?:or|ed|ing)|panelist)\b',
     re.IGNORECASE)
+# Words that name a role only in a HEADING ("Invited Lectures", "Grand
+# Rounds"): in entry text, a bare grand-rounds event in a CE or development
+# list is usually one the owner attended (PR #1829 review). "Invited to
+# participate / attend" is an invitation to the audience, never a role.
+_HEADING_ONLY_ROLE_RE = re.compile(
+    r'\b(?:grand\s+rounds|invited(?!\s+to\s+(?:participate|attend)))\b',
+    re.IGNORECASE)
+# A heading that names attendance ("CME Lectures Attended", "Grand Rounds
+# Attended") lists what the owner attended, whatever role word it also has
+# (PR #1829 review).
+ATTENDANCE_HEADING_WORD_RE = re.compile(
+    r'\b(?:attended|attendance|participated|participation|completed)\b', re.IGNORECASE)
 # The owner's own talk or abstract: a double-quoted title, or an author list
 # ("Smith JA, Doe B.", "Smith, J., Doe, B.", "et al", or an APA "(2020). Title"
 # or "(2021, January). Title").
@@ -916,11 +928,14 @@ _CITATION_MARKER_RE = re.compile(r"\bet al\b|\((?:19|20)\d{2}[a-z]?(?:,[^)]*)?\)
 
 def heading_names_teaching_role(heading: str) -> bool:
     """Whether a heading names a teaching or presenting role ("CME Lectures
-    Given", "Continuing Medical Education - Teaching"): its bare entries are
-    what the owner taught or presented, not what he attended. One carve-out
-    for the stage-6 B2->K4 refusal and the doctor's `attended_as_teacher`
-    lint (#1691)."""
-    return bool(TEACHING_ROLE_RE.search(heading))
+    Given", "Continuing Medical Education - Teaching", "Grand Rounds") and
+    no attendance ("CME Lectures Attended"): its bare entries are what the
+    owner taught or presented, not what he attended. One carve-out for the
+    stage-6 B2->K4 refusal and the doctor's `attended_as_teacher` lint
+    (#1691)."""
+    if ATTENDANCE_HEADING_WORD_RE.search(heading):
+        return False
+    return bool(TEACHING_ROLE_RE.search(heading) or _HEADING_ONLY_ROLE_RE.search(heading))
 
 
 def names_teaching_or_authorship_role(text: str) -> bool:

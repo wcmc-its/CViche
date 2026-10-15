@@ -414,3 +414,46 @@ def test_taught_authored_or_correctly_coded_entries_are_quiet_1691(text, code, h
     headings = (heading, "Co-Investigator on Grants") if heading == "Research and Training" \
         else (heading,)
     assert _run(_entry(text, code, *headings)) == []
+
+
+@pytest.mark.parametrize("heading", ["Continuing Education - CME Lectures Attended",
+                                     "Professional Development: Grand Rounds Attended",
+                                     "Training - Conferences and Talks Attended"])
+def test_attendance_heading_is_no_teaching_carve_out_1691(heading):
+    """PR #1829 review: a heading that names attendance is no teaching
+    carve-out (`heading_names_teaching_role`), whatever role word it also
+    has. S8 keeps `courses_attended_as_teaching` (K codes only) out of it."""
+    findings = _run(_entry("Example Sepsis Update, 2019", "S8", heading))
+    assert _shapes(findings) == ["attended_as_teacher"]
+
+
+@pytest.mark.parametrize("heading", ["CME Lectures Attended", "Grand Rounds Attended"])
+def test_k4_under_an_attended_heading_is_flagged_once_1691(heading):
+    """The heading's attendance word is `courses_attended_as_teaching`'s;
+    `attended_as_teacher` does not repeat it."""
+    findings = _run(_entry("Example Sepsis Update, 2019", "K4", heading))
+    assert _shapes(findings) == ["courses_attended_as_teaching"]
+
+
+@pytest.mark.parametrize("text", [
+    "Medicine Grand Rounds, Example Hospital, 2018",
+    "Invited to participate, Example Leadership Program, 2018",
+])
+def test_grand_rounds_or_invitation_under_ce_is_flagged_1691(text):
+    """PR #1829 review: "grand rounds" and "invited" name a role in a
+    heading only."""
+    for heading in ("Certifications / Continuing Education", "Professional Development"):
+        assert _shapes(_run(_entry(text, "K4", heading))) == ["attended_as_teacher"]
+
+
+def test_talks_given_heading_is_quiet_1691():
+    assert _run(_entry("Example Sepsis Update, 2019", "S8", "Continuing Education - Talks Given")) == []
+    assert _shapes(_run(_entry("Example Sepsis Update, 2019", "S8",
+                               "Continuing Education - Talks Attended"))) == ["attended_as_teacher"]
+
+
+def test_lint_reads_the_leaf_heading_only_1691():
+    """A teaching ancestor over an attendance leaf is no carve-out."""
+    findings = _run(_entry("Example Sepsis Update, 2019", "S8", "Invited Talks",
+                           "Professional Development"))
+    assert _shapes(findings) == ["attended_as_teacher"]

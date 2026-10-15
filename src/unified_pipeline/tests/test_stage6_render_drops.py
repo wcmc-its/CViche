@@ -556,6 +556,42 @@ def test_bare_title_under_a_teaching_heading_is_rerouted_to_k4(heading) -> None:
     assert REROUTE_REFUSED_NO_TEACHING_ROLE.replace("_", " ") in _refusal(gen)
 
 
+@pytest.mark.parametrize("heading", ["CME Lectures Attended", "Grand Rounds Attended"])
+def test_bare_title_under_an_attendance_heading_is_not_rerouted(heading) -> None:
+    """PR #1829 review: a heading that names attendance is no teaching
+    carve-out, whatever role word it also has."""
+    attended = _continuing_education("Example Sepsis Update, 2019")
+    attended["hierarchy_mismatch_detail"]["hierarchy"] = ["Teaching", heading]
+    gen, code = _gen_and_code(attended)
+    assert code == "B2"
+    assert REROUTE_REFUSED_NO_TEACHING_ROLE.replace("_", " ") in _refusal(gen)
+
+
+@pytest.mark.parametrize("text, heading", [
+    # PR #1829 review: a bare grand-rounds event and an invitation to take
+    # part name no role in entry text.
+    ("Medicine Grand Rounds, Example Hospital, 2018", "Certifications / Continuing Education"),
+    ("Invited to participate, Example Leadership Program, 2018", "Professional Development"),
+])
+def test_grand_rounds_or_invitation_entry_is_not_rerouted(text, heading) -> None:
+    entry = _continuing_education(text)
+    entry["hierarchy_mismatch_detail"]["hierarchy"] = [heading]
+    gen, code = _gen_and_code(entry)
+    assert code == "B2", text
+    assert REROUTE_REFUSED_NO_TEACHING_ROLE.replace("_", " ") in _refusal(gen)
+
+
+def test_refusal_reads_the_leaf_heading_only() -> None:
+    """A teaching ancestor over an attendance-neutral leaf does not make the
+    leaf's bare titles taught (PR #1829 review): only hierarchy[-1] counts."""
+    entry = _continuing_education("Example Sepsis Update, 2019")
+    entry["hierarchy_mismatch_detail"]["hierarchy"] = [
+        "CME Lectures Given", "Certifications / Continuing Education"]
+    gen, code = _gen_and_code(entry)
+    assert code == "B2"
+    assert REROUTE_REFUSED_NO_TEACHING_ROLE.replace("_", " ") in _refusal(gen)
+
+
 # --- #983: multi-record entries fan out before the PII pass and dedup --------
 # Invented values. Driven through `_group_entries_by_code` and the two calls
 # `generate()` makes next, so a test fails if the fan-out stops preceding either.
