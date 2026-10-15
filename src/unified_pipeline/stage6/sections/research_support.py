@@ -258,12 +258,12 @@ TWO_DIGIT_YEAR_DATE_RE = re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{1,2})')
 # major goals of this project are): | <goal>", the plain "The major goals of
 # this project are:<tab><goal>", the prose "The major goals of this project
 # are to <goal>", singular "The major goal of this project is" (YME2VA),
-# "...of this program are" (YME2VA), the bare "Major Goals:" / "Major Goals
-# of (the) Project:" label with no project/program noun before the separator
-# at all (BYFQBG), and A5IZ6Q's typo "The major gals of this project:" --
+# "...of this program are" (YME2VA), "...of this study are" (GHWROW, #1678),
+# the bare "Major Goals:" / "Major Goals of (the) Project:" label with no
+# project/program/study noun before the separator at all (BYFQBG), and A5IZ6Q's typo "The major gals of this project:" --
 # plural only; the pattern below deliberately does not also accept the
 # singular "gal", since no run has shown that typo. `proj` is the "of
-# (this|the) project/program [are|is]" anchor. `sep` -- a colon, pipe, closing
+# (this|the) project/program/study [are|is]" anchor. `sep` -- a colon, pipe, closing
 # paren or tab -- is what makes the phrase a label rather than (with `proj`
 # present) the start of the sentence; `rest` stops at the line end, since a
 # table-form grant carries one source row per line. A bare label needs `sep`
@@ -285,7 +285,7 @@ TWO_DIGIT_YEAR_DATE_RE = re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{1,2})')
 _MAJOR_GOALS_ANCHOR_PATTERN = r'(?:the\s+)?major\s+(?:goals?|gals)\b'
 MAJOR_GOALS_LABEL_RE = re.compile(
     _MAJOR_GOALS_ANCHOR_PATTERN
-    + r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program)(?:\s+(?:are|is))?)?'
+    + r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program|study)(?:\s+(?:are|is))?)?'
     + r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
     + r'(?P<rest>[^\n]*)',
     re.IGNORECASE,
@@ -293,8 +293,10 @@ MAJOR_GOALS_LABEL_RE = re.compile(
 _MAJOR_GOALS_ANCHOR_RE = re.compile(_MAJOR_GOALS_ANCHOR_PATTERN, re.IGNORECASE)
 # A paragraph-form grant tab-separates its fields, and the one observed after a
 # goal is the role ("...prognosis.<tab>Role: PI"). Any other tab stays in the
-# goal: a wrapped source line is tab-joined as well.
-MAJOR_GOALS_VALUE_END_RE = re.compile(r'\t(?=(?:your\s+)?role\b)', re.IGNORECASE)
+# goal: a wrapped source line is tab-joined as well. A space-joined role ends
+# the goal only as a "Role:" label (WWSEWY, #1678): "the role of" is prose.
+MAJOR_GOALS_VALUE_END_RE = re.compile(
+    r'\t(?=(?:your\s+)?role\b)|\s(?=(?:your\s+)?role\s*:)', re.IGNORECASE)
 
 
 class UnsupportedRebucketTargetError(ValueError):
@@ -791,10 +793,10 @@ def parse_major_goals(text: str | None) -> str | None:
     Two shapes carry it. A label -- `MAJOR_GOALS_LABEL_RE` with a separator
     (`sep`) after the anchor -- is followed by the goal, which is returned
     without the label. Without a separator the phrase must still carry the "of
-    (this|the) project/program [are|is]" anchor (`proj`): it opens the faculty
+    (this|the) project/program/study [are|is]" anchor (`proj`): it opens the faculty
     member's own sentence ("The major goals of this project are to ..."), and
     the whole sentence is the goal. A match with neither `proj` nor `sep` --
-    some other use of "major goal(s)" with no project/program noun and no
+    some other use of "major goal(s)" with no project/program/study noun and no
     separator -- is not a label at all, so it is left as grant content rather
     than treated as an unbounded whole-sentence claim.
 
@@ -1335,6 +1337,10 @@ SUBMISSION_DATE_LABEL = 'Submitted:'
 SHARE_LABEL = 'Your share of award:'
 # A study's protocol or IRB approval number, kept out of Award Source (#1694).
 PROTOCOL_NUMBER_LABEL = 'Protocol/IRB number:'
+# Goals text renders only past this many characters. A note no longer than
+# this is never read as a copy of the goals: "Pending" inside "pending IRB
+# approval" is a status remark, not the goal sentence (#1678).
+_SUBSTANTIVE_TEXT_MIN_CHARS = 10
 # The sidecar check name for a funding record that names only a protocol
 # number. Its message carries `PROTOCOL_NUMBER_MESSAGE`, which the doctor's
 # precision table (`doctor/precision.py` `_STAGE6_SHAPES`) matches on.
@@ -1569,6 +1575,10 @@ def _optional_grant_rows(
     unchanged. A record with none of them renders exactly the eight-row block.
     A note or goals text that only repeats the title is dropped: the same-text
     guard as title/agency/funding -- same fact via two paths (#829, BYFQBG#82).
+    So is a note the rendered goals text already contains: stage 4 often puts
+    the goal sentence in `notes`, and `fill_major_goals_from_text` parses the
+    same sentence into `major_goals` (UHBORP, #1678). A note too short to be
+    goals text itself stays, even when the goals happen to contain it.
     """
     title_text = (title or '').strip().lower()
     rows = []
@@ -1587,11 +1597,13 @@ def _optional_grant_rows(
     status = str(fields.get('status') or '').strip()
     if status and not grant_status_is_empty_section_label(status):
         rows.append((STATUS_LABEL, status))
-    notes = str(fields.get('notes') or '').strip()
-    if notes and notes.lower() != title_text:
-        rows.append((NOTES_LABEL, notes))
     goals = fields.get('major_goals') or fields.get('description') or fields.get('narrative') or ''
-    if len(goals.strip()) > 10 and goals.strip().lower() != title_text:  # Only if substantive
+    shows_goals = len(goals.strip()) > _SUBSTANTIVE_TEXT_MIN_CHARS and goals.strip().lower() != title_text
+    notes = str(fields.get('notes') or '').strip()
+    repeats_goals = shows_goals and len(notes) > _SUBSTANTIVE_TEXT_MIN_CHARS and notes.lower() in goals.lower()
+    if notes and notes.lower() != title_text and not repeats_goals:
+        rows.append((NOTES_LABEL, notes))
+    if shows_goals:
         rows.append(('Major project goals:', goals))
     return rows
 
