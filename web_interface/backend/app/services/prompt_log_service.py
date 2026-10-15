@@ -169,7 +169,8 @@ def list_prompt_logs(
     try:
         storage_keys = storage.list_files(run_id, prefix="prompt_logs/")
     except Exception as exc:
-        logger.warning("Could not list prompt logs in storage for %s: %s", run_id, exc)
+        logger.warning("Could not list prompt logs in storage for %s: %s", run_id, type(exc).__name__)
+        logger.debug("Could not list prompt logs in storage for %s: %s", run_id, exc)
         storage_keys = []
 
     matches: list[tuple[str, str]] = []  # (filename, storage_key)

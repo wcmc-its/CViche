@@ -229,6 +229,17 @@ def test_an_empty_template_supervision_row_falls_back_to_inference():
     assert _normalize_mentee(entry, ongoing=True).supervision_type == "Clinical"
 
 
+def test_the_template_goals_row_joins_the_project():
+    # #829, YDSVDB: no field holds the revised template's goals row; all 5 were lost.
+    entry = {"text": "Name | Jane Roe\nProject/Accomplishments** | Archive move\n"
+                     "Goals/expected Outcomes | Better archive access\n"
+                     "Type of Supervision (Research, clinical, teaching, leadership) | Lead",
+             "extracted_fields": {"research_focus": "Archive move"}}
+    assert _normalize_mentee(entry, ongoing=True).project == "Archive move\nGoals: Better archive access"
+    entry["extracted_fields"] = {}
+    assert _normalize_mentee(entry, ongoing=True).project == "Goals: Better archive access"
+
+
 def test_without_a_role_line_supervision_type_is_inferred_as_before():
     entry = {"text": "Jane Roe, PhD student; her role: none", "extracted_fields": {"mentee_level": "PhD"}}
     assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research"

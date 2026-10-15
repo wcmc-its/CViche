@@ -50,6 +50,7 @@ from unified_pipeline.core.batch_pool import (
 )
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.log_redaction import redacted_error_label
 
 logger = logging.getLogger(__name__)
 
@@ -1632,7 +1633,9 @@ def _detect_in_batches(
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
         except Exception as e:
-            logger.warning(f"    ⚠ Error in batch {batch_no}: {e} [{full_hierarchy}]")
+            # Not full_hierarchy: it is the CV's own header text (§4.7, #639).
+            logger.warning("    ⚠ Error in batch %d: %s", batch_no, redacted_error_label(e))
+            logger.debug("    ⚠ Error in batch %d: %s", batch_no, e)
             carry_counts.failed_batches += 1
             carry_counts.restored_after_failure += len(pending)
             entries.extend(pending)  # nothing replaced the carried tail: it stands

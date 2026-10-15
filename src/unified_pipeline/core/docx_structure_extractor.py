@@ -465,18 +465,28 @@ def _nonblank_lines(text: str) -> list[str]:
     return [line.strip() for line in text.strip().split("\n") if line.strip()]
 
 
+_EMPTY_LINE_RE = re.compile(r"\n\n")
+#: A blank line that may hold spaces or tabs: a blank paragraph can reach the
+#: cell text as " " (YDSVDB #259: the title cell's 14 records never split on
+#: "\n\n" while its institution and date cells did, so every title stacked
+#: into the first sub-row). Used only to complete a parallel split
+#: (`_choose_cell_splits`).
+_WHITESPACE_LINE_RE = re.compile(r"\n[ \t]*\n")
+
+
 def _double_newline_splits(
-    row: list[dict[str, Any]], min_chars: int, min_newlines: int
+    row: list[dict[str, Any]], min_chars: int, min_newlines: int,
+    blank_line_re: re.Pattern[str] = _EMPTY_LINE_RE,
 ) -> tuple[CellSplits, int]:
-    """Split each cell on blank lines (\\n\\n). Returns (per-cell segments or None, max segments)."""
+    """Split each cell on blank lines (`blank_line_re`). Returns (per-cell segments or None, max segments)."""
     cell_splits: CellSplits = []
     max_splits = 1
     for cell in row:
         cell_text = _cell_text(cell)
-        if "\n\n" not in cell_text:
+        if not blank_line_re.search(cell_text):
             cell_splits.append(None)
             continue
-        segments = [s.strip() for s in cell_text.split("\n\n") if s.strip()]
+        segments = [s.strip() for s in blank_line_re.split(cell_text) if s.strip()]
         # Split if ANY segment is substantial, or if there are 2+ non-trivial
         # segments even when short ("MBA\n\nBS").
         has_substantial = any(len(s) > min_chars or s.count("\n") >= min_newlines for s in segments)
@@ -516,6 +526,13 @@ def _is_parallel_split(cell_splits: CellSplits) -> bool:
     return any(freq >= _MIN_PARALLEL_CELLS for freq in counts.values())
 
 
+def _all_cells_split_alike(row: list[dict[str, Any]], cell_splits: CellSplits) -> bool:
+    """True if every non-blank cell split, into one shared count, across 2+ cells."""
+    filled = [splits for cell, splits in zip(row, cell_splits, strict=True) if _cell_text(cell).strip()]
+    return (len(filled) >= _MIN_PARALLEL_CELLS and None not in filled
+            and len({len(splits) for splits in filled}) == 1)
+
+
 def _choose_cell_splits(
     row: list[dict[str, Any]], min_chars: int, min_newlines: int
 ) -> tuple[CellSplits, int]:
@@ -525,9 +542,18 @@ def _choose_cell_splits(
     segment count), so multi-line entries separated by blank lines stay whole.
     Otherwise stacked parallel lists win: one blank paragraph in one cell must
     not stop 4 ranks pairing with their 4 dates (#612, web240).
+
+    A parallel blank-line split that left a cell whole is retried with blank
+    lines that hold whitespace (#259, YDSVDB: 14 titles beside 14 institutions
+    and 14 dates). The retry wins only at the same count with every cell
+    split; a looser retry merged two mentees and shifted dates elsewhere.
     """
     blank_splits, blank_max = _double_newline_splits(row, min_chars, min_newlines)
     if _is_parallel_split(blank_splits):
+        loose_splits, loose_max = _double_newline_splits(
+            row, min_chars, min_newlines, _WHITESPACE_LINE_RE)
+        if loose_max == blank_max and _all_cells_split_alike(row, loose_splits):
+            return loose_splits, loose_max
         return blank_splits, blank_max
     aligned_splits, aligned_max = _aligned_line_splits(row)
     if aligned_max > 1:

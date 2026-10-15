@@ -145,13 +145,16 @@ async def _extract_text_or_400(content: bytes, file_ext: str) -> tuple[str | Non
     except EncryptedPdfError:
         raise bad_request(_ENCRYPTED_PDF_MESSAGE)
     except PdfTimeoutError as e:  # a PdfTooComplexError, but not the file's fault (#1650)
-        logger.warning("Rejected PDF over the time limit: %s", e)
+        logger.warning("Rejected PDF over the time limit: %s", type(e).__name__)
+        logger.debug("Rejected PDF over the time limit: %s", e)
         raise bad_request(PDF_TIMEOUT_UPLOAD_MESSAGE)
     except PdfTooComplexError as e:
-        logger.warning("Rejected PDF over a parse limit: %s", e)
+        logger.warning("Rejected PDF over a parse limit: %s", type(e).__name__)
+        logger.debug("Rejected PDF over a parse limit: %s", e)
         raise bad_request(PDF_TOO_COMPLEX_MESSAGE)
     except UnreadablePdfError as e:
-        logger.warning("Rejected unreadable PDF: %s", e)
+        logger.warning("Rejected unreadable PDF: %s", type(e).__name__)
+        logger.debug("Rejected unreadable PDF: %s", e)
         raise bad_request(PDF_UNREADABLE_MESSAGE)
     except (PdfBusyError, PdfInterruptedError):  # both transient: try again
         raise HTTPException(
@@ -480,7 +483,8 @@ def _archive_or_502(
     try:
         return create_run_archive(content, file_ext, build_manifest, write_local)
     except Exception as e:
-        logger.error("Durable archive of upload failed; aborting upload: %s", e)
+        logger.error("Durable archive of upload failed; aborting upload: %s", type(e).__name__)
+        logger.debug("Durable archive of upload failed; aborting upload: %s", e)
         raise HTTPException(
             status_code=502,
             detail={
@@ -630,7 +634,8 @@ async def create_run_from_bytes(
                 manifest,
             )
         except Exception as e:
-            logger.warning("Failed to write by-submitter index (run=%s): %s", run_id, e)
+            logger.warning("Failed to write by-submitter index (run=%s): %s", run_id, type(e).__name__)
+            logger.debug("Failed to write by-submitter index (run=%s): %s", run_id, e)
 
         # Input-scaled wall-clock estimate, stored so the client stall watchdog can
         # scale its "taking longer than expected" threshold to this CV instead of a
