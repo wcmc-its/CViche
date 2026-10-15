@@ -5519,14 +5519,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (76), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (77), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 74
+    assert len(payload["findings"]) == 75
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -8942,3 +8942,26 @@ def test_run_doctor_runs_session_title_missing_on_stage_4_alone(tmp_path):
 
     assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
         ("INFO", "entry 450 (Q2)")]
+def test_run_doctor_reports_journal_name_joined_from_stage_4(tmp_path):
+    """#1414: run_doctor dispatches journal_name_joined on the stage-4 JSON
+    alone, as a WARN naming the joined journal_name."""
+    root = tmp_path / "outputs"
+    entry = {"element_idx_start": 190, "element_idx_end": 190, "taxonomy_code": "Q4D",
+             "text": "Example Cancer Therapeutics Example Surgical Endoscopy",
+             "extracted_fields": {"journal_name":
+                                  "Example Cancer Therapeutics, Example Surgical Endoscopy"}}
+    _write_stage(root, "stage_4_field_extraction", f"{_UID}_cv_fields.json",
+                 {"document_uid": _UID, "cv_owner": _OWNER, "entries": [entry]})
+
+    findings = [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "journal_name_joined"]
+
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
+        ("WARN", "entry 190 (Q4D)")]
+
+
+def test_journal_name_joined_prevalence_is_the_measured_rate():
+    """Measured 2026-10-15 (JNJ-1 in doctor/PRECISION.md): 72 of 292 distinct
+    stored stage-4 outputs."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["journal_name_joined"] == round(72 / 292, 3)
