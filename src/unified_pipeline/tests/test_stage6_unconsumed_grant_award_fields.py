@@ -269,3 +269,32 @@ def test_n3_narrative_follows_the_project():
 def test_narrative_already_in_the_project_is_not_repeated():
     rows = _mentee(research_focus="Example thesis, example note", narrative="example note")
     assert rows["Project/Accomplishments:"] == "Example thesis, example note"
+
+
+# --- a past mentee's off-schema outcome rides in Project/Accomplishments --------
+# #1245 (pilot JNATFN, 8 of 12 N3B entries): stage 4 kept each mentee's
+# accomplishment under `outcome`, which no row read, and the cell rendered
+# blank. Invented values.
+
+def test_an_off_schema_outcome_fills_project_accomplishments():
+    assert _mentee(outcome="First authored an abstract")["Project/Accomplishments:"] == \
+        "First authored an abstract"
+
+
+def test_the_outcome_follows_the_project_and_precedes_the_awards():
+    rows = _mentee(research_focus="Example focus", outcome="Co-authored a chapter",
+                   awards="Example Award")
+    assert rows["Project/Accomplishments:"] == (
+        "Example focus\nCo-authored a chapter\nAwards: Example Award")
+
+
+def test_an_outcome_the_project_already_holds_is_not_repeated():
+    rows = _mentee(research_focus="Example focus; co-authored a chapter",
+                   outcome="Co-authored a chapter")
+    assert rows["Project/Accomplishments:"] == "Example focus; co-authored a chapter"
+
+
+def test_a_list_outcome_is_joined_and_a_non_text_one_adds_nothing():
+    assert _mentee(outcome=["An abstract", "A chapter"])["Project/Accomplishments:"] == \
+        "An abstract; A chapter"
+    assert _mentee(outcome={"type": "abstract"})["Project/Accomplishments:"] == ""
