@@ -4,8 +4,7 @@ list of copies.
 
 review_loop_service stores the copy itself, one per run and uploader (#1754),
 and records its row here. The rows exist so the runs list never lists storage
-per run; scripts/backfill_corrected_copies.py writes rows for copies stored
-before the table.
+per run. Copies stored before the table were backfilled once.
 """
 from dataclasses import dataclass
 from datetime import datetime

@@ -3,10 +3,8 @@
 Stage 4 infers who the CV belongs to and writes it as ``cv_owner`` in its
 fields JSON. The run view reads that object live (PipelineViewer.tsx
 loadCvInsights); the admin runs list needs it as a filterable column, so it is
-persisted on ``runs.cv_owner_name`` when stage 4 completes and by
-scripts/backfill_cv_owner_name.py for earlier runs. Both callers share the
-functions here so the live path and the backfill can never disagree on which
-file or which name field wins.
+persisted on ``runs.cv_owner_name`` when stage 4 completes. Earlier runs were
+backfilled once (2026-10-15).
 """
 import json
 import logging
