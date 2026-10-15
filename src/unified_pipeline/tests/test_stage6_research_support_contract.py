@@ -2050,6 +2050,20 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
     (f'The major goals of this project are: {_GOAL} Role\xa0: Co-I', _GOAL),
     (f'The major goals of this project are: {_GOAL} and the youth role: outcomes',
      f'{_GOAL} and the youth'),
+    # Two spaces before the label, or none after its colon, still end the goal;
+    # "role)" and a tab-joined "the role" are prose.
+    (f'The major goals of this project are: {_GOAL}  Role: PI', _GOAL),
+    (f'The major goals of this project are: {_GOAL} Role:PI', _GOAL),
+    (f'The major goals of this project are: {_GOAL} (and define the role) of bees',
+     f'{_GOAL} (and define the role) of bees'),
+    (f'The major goals of this project are: {_GOAL} and define\tthe role of bees',
+     f'{_GOAL} and define\tthe role of bees'),
+    # Only "are"/"is" completes the `proj` label: "were:" is not one, so the
+    # whole sentence is the goal, label included, as on dev.
+    ('The major goals of this study were: map the corridors',
+     'The major goals of this study were: map the corridors'),
+    ('The major goals of this studyare: map the corridors',
+     'The major goals of this studyare: map the corridors'),
     # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
     # not the misspelled label.
     (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
@@ -2098,6 +2112,7 @@ def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     'The major goals of the department are listed in the annual report.',
     'The major goals of the students are to finish the course.',
     'The major goals of the studies are to finish the course.',
+    'The major goals of thestudy are reviewed by the board.',
     # A5IZ6Q's measured typo is the plural "gals"; the singular "gal" is not a
     # measured variant, so the anchor deliberately does not accept it.
     f'The major gal of this project is: {_GOAL}',
