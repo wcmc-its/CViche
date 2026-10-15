@@ -316,24 +316,26 @@ def tab_aware_record_lines(text: object) -> list[str]:
 
 
 def _field_strings(value: object) -> list[str]:
-    """Every string inside a field value, lists and objects flattened."""
+    """Every string inside a field value, objects flattened. A list is left out:
+    the list fields of an entry (`additional_roles`) are the ones a section may
+    not render (fan-out declined, or a field the renderer does not name), so
+    their words prove nothing was written (#1243)."""
     if isinstance(value, dict):
         return [s for item in value.values() for s in _field_strings(item)]
-    if isinstance(value, list):
-        return [s for item in value for s in _field_strings(item)]
     return [value] if isinstance(value, str) else []
 
 
 def segment_held_by_fields(segment: str, extracted_fields: dict) -> bool:
-    """True when every distinctive word of `segment` sits in a field value.
+    """True when every distinctive word of `segment` sits in a scalar field value.
 
     A tab part of a one-record entry (a mentee's name and level, then his
     fellowship, then his papers, each part dated) is the record the structured
     row renders cell by cell, so no output line carries its words together and
     the per-line check reads it as missing (#1243: the recovery pass wrote the
-    mentee line a second time). A part whose words stage 4 holds is the
-    extracted record, never a lost one; a part with a word no field holds is
-    still checked."""
+    mentee line a second time). A part whose words stage 4 holds in a scalar
+    field is the extracted record, never a lost one; a part with a word no
+    scalar field holds is still checked, and so is a part held only by a list
+    field (`additional_roles` items that stage 6 does not print)."""
     words = set(_RENDER_TOKEN_RE.findall(_norm(segment)))
     held = set(_RENDER_TOKEN_RE.findall(_norm(" ".join(_field_strings(extracted_fields)))))
     return bool(words) and words <= held

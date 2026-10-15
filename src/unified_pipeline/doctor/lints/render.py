@@ -41,6 +41,10 @@ from unified_pipeline.stage6.parsing import (
     _mid_sentence_joins,
     _refold_shattered,
 )
+from unified_pipeline.stage6.render_check import (
+    segment_already_rendered,
+    segment_held_by_fields,
+)
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
@@ -481,6 +485,19 @@ def _tab_aware_record_lines(text: object) -> list[str]:
     return lines
 
 
+def _tab_parts(text: object) -> set[str]:
+    """The tab parts of `text` that `tab_record_segments` reads as records."""
+    return {part for line in str(text or "").split("\n")
+            for part in tab_record_segments(line)}
+
+
+def _held_by_extraction(segment: str, fields: dict) -> bool:
+    """Whether a tab part is the record stage 4 extracted, which a table
+    renders cell by cell (a mentee line, a grant header row), not a lost one:
+    the same two filters stage 6's recovery pass applies to a tab part (#1243)."""
+    return segment_held_by_fields(segment, fields) or segment_already_rendered(segment, fields)
+
+
 def _bare_date_lines(text: object) -> int:
     """How many lines of an entry are a bare date column (see
     `_is_bare_date_line`)."""
@@ -609,13 +626,16 @@ def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
         # Records stage 4 kept under `stage4_records` render as rows of their
         # own, not as the entry's tab parts.
         fields = e.get("extracted_fields") or {}
-        read_lines = _record_lines if STAGE4_RECORDS_KEY in fields else _tab_aware_record_lines
+        split_by_stage4 = STAGE4_RECORDS_KEY in fields
+        read_lines = _record_lines if split_by_stage4 else _tab_aware_record_lines
         records = read_lines(e.get("text"))
+        tab_parts = set() if split_by_stage4 else _tab_parts(e.get("text"))
         if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
             continue
         absent = [r for r in records
                   if _record_rendered(r, h.text, output) is False
-                  and not offered_as_subpoint(r, subpoints)]
+                  and not offered_as_subpoint(r, subpoints)
+                  and not (r in tab_parts and _held_by_extraction(r, fields))]
         if not absent:
             continue
         findings.append(_finding(

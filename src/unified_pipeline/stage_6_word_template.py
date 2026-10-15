@@ -728,6 +728,18 @@ def _t_line_is_scaffolding(line: str, entry: dict) -> bool:
         entry.get('classification_reasoning')) is not None
 
 
+def _vouch_for_lines(lines: list[str], haystack: str,
+                     t_line_token_sets: list[set], line_token_sets: list[set]) -> str:
+    """Count recovered `lines` as rendered, so a near-identical variant in
+    another pre-dedup entry (trailing period, 'Sep' vs 'Sept') is verified
+    rendered instead of inserted a second time. Returns the new haystack."""
+    for line in lines:
+        haystack += "\x00" + _squash(line)
+        t_line_token_sets.append(_record_tokens(line))
+        line_token_sets.append(set(_RENDER_TOKEN_RE.findall(_norm(line))))
+    return haystack
+
+
 def _recovery_candidates(code: str, entry: dict) -> list[str]:
     """Lines of an entry the unrendered-record pass should look for.
 
@@ -3975,6 +3987,7 @@ Now analyze the text above:"""
                         'extraction_coverage_percent', 0)
                     tab_parts = {part for text_line in str(entry.get('text') or '').split('\n')
                                  for part in tab_record_segments(text_line)}
+                    deferred: list[str] = []
                     for line in records:
                         if code == 'T' and _t_line_is_scaffolding(line, entry):
                             continue
@@ -4023,12 +4036,18 @@ Now analyze the text above:"""
                         # instead of inserted a second time — dedup drops entries
                         # precisely because they near-duplicate a kept one, so
                         # exact-squash matching is not enough.
-                        haystack += "\x00" + _squash(line)
-                        t_line_token_sets.append(_record_tokens(line))
-                        line_token_sets.append(
-                            set(_RENDER_TOKEN_RE.findall(_norm(line))))
+                        # Tab siblings share their vocabulary and differ in the
+                        # dates: one recovered part must not vouch for the next
+                        # (#1243), so they vouch once the entry is done.
+                        if line in tab_parts:
+                            deferred.append(line)
+                        else:
+                            haystack = _vouch_for_lines(
+                                [line], haystack, t_line_token_sets, line_token_sets)
                         self.stats['unrendered_records_recovered'] += 1
                         n_recovered += 1
+                    haystack = _vouch_for_lines(
+                        deferred, haystack, t_line_token_sets, line_token_sets)
 
             # Unconsumed A-coded orphans (#316) are part of the SAME record-
             # recovery safety net the flag above governs -- gated with it,

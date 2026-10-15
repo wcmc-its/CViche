@@ -191,9 +191,9 @@ def test_tab_parts_of_an_entry_stage_4_split_into_records_are_not_recovered():
     gen = _generator()
     entry = {
         "taxonomy_code": "Q1",
-        "text": ("State Trauma Advisory Council (Appointed by Governor) 1995 - 2001\t"
-                 "Committee on Trauma Facilities, Chairman, 2002 - 2004"),
-        "extracted_fields": {"role": "Chairman", "organization": "State Trauma Advisory Council"},
+        "text": ("Regional Quokka Advisory Council (Appointed by Governor) 1995 - 2001\t"
+                 "Committee on Quokka Facilities, Chairman, 2002 - 2004"),
+        "extracted_fields": {"role": "Chairman", "organization": "Regional Quokka Advisory Council"},
         "stage4_last_record": {"key": "stage4_records", "index": 1, "count": 2, "text": None},
     }
     entry.update({LAST_STAGE4_RECORD: entry.pop("stage4_last_record")})
@@ -202,6 +202,71 @@ def test_tab_parts_of_an_entry_stage_4_split_into_records_are_not_recovered():
     gen._recover_unrendered_records({"Q1": [entry]})
 
     assert len(gen.doc.paragraphs) == before
+
+
+def test_tab_part_held_only_by_a_list_field_is_still_recovered():
+    # #1243: `additional_roles` items are not always printed (fan-out declined,
+    # or a field the section does not name), so a part whose words only a list
+    # holds is not the extracted record.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "I",
+        "text": ("Member of the Quokka Society 2009-present\t"
+                 "Chairman, Credentials Committee, 2009-2011\t"
+                 "Secretary of the Wombat Panel 2012-2014"),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member",
+                             "additional_roles": ["Chairman, Credentials Committee",
+                                                  "Secretary of the Wombat Panel"]},
+    }
+    gen.doc.add_paragraph("Member of the Quokka Society 2009-present")
+
+    gen._recover_unrendered_records({"I": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Chairman, Credentials Committee, 2009-2011" in t for t in bullets)
+    assert any("Secretary of the Wombat Panel 2012-2014" in t for t in bullets)
+    assert not segment_held_by_fields("Chairman, Credentials Committee, 2009-2011",
+                                      entry["extracted_fields"])
+
+
+def test_recovered_tab_part_does_not_vouch_for_its_sibling():
+    # #1243: siblings of one society share their vocabulary and differ in the
+    # dates. The first one written must not make the next read as rendered.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("Member of the Quokka Society 1989-present\t"
+                 "Chair, Program Committee of the Quokka Society 2015-2017\t"
+                 "Vice Chair, Program Committee of the Quokka Society 2012-2015"),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member"},
+    }
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Chair, Program Committee of the Quokka Society 2015-2017" in t for t in bullets)
+    assert any("Vice Chair, Program Committee of the Quokka Society 2012-2015" in t for t in bullets)
+
+
+def test_record_line_held_by_fields_is_still_recovered_when_it_is_not_a_tab_part():
+    # The held-by-fields skip is for tab parts only: an ordinary record line
+    # whose words the fields hold, and that the render dropped, is lost.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("2009-2011 Member of the Quokka Society in good standing\n"
+                 "2012-2014 Chair of the Wombat Panel for three years"),
+        "extracted_fields": {"notes": "2009-2011 Member of the Quokka Society in good standing "
+                                      "2012-2014 Chair of the Wombat Panel for three years"},
+    }
+    gen.doc.add_paragraph("Unrelated line about marsupial husbandry in the highlands")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    texts = [p.text for p in gen.doc.paragraphs]
+    assert "2012-2014 Chair of the Wombat Panel for three years" in texts
+    assert gen.stats['unrendered_records_recovered'] == 2
 
 
 # ------------------------------------------------ D1 positions path (KFGXBW)

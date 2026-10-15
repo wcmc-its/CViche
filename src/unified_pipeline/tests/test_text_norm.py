@@ -74,7 +74,7 @@ def test_tab_record_segments_joins_a_part_wrapped_inside_a_parenthesis():
 def test_tab_record_segments_takes_a_range_at_the_start_or_end_of_a_part_only():
     # A range in the middle of a part is a sentence or a wrapped line, not a record's date.
     assert text_norm.tab_record_segments(
-        "Host Defences and (medical 2010-2012: 4\tInfection undergraduate) hours 2013-2015: 1 hour Tutorial"
+        "Marsupial Defences and (medical 2010-2012: 4\tInfection undergraduate) hours 2013-2015: 1 hour Tutorial"
     ) == []
     assert text_norm.tab_record_segments(
         "Interim Director of the Wombat Laboratory 2016 -2018(June)\t2012-2015 Director of the Quokka Laboratory"

@@ -1614,6 +1614,62 @@ def test_unrendered_records_leaves_the_tab_parts_of_a_stage_4_split_entry_alone(
     assert lint_unrendered_records(stage4, blocks) == []
 
 
+def test_unrendered_records_leaves_a_tab_part_that_stage_4_holds_in_its_fields_alone():
+    # #1243: a mentee line renders cell by cell, so no output line carries it
+    # whole, but every word of it is in the extracted fields.
+    fused = ("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)\t"
+             "Marsupial Heart Association Fellowship (7/2009-6/2011)\t"
+             "Chairperson of Marsupial Outreach 5/2017-10/2020")
+    fields = {"mentee_name": "Quimby Farrow", "mentee_level": "MSPH, PhD (Epidemiology)",
+              "funding_source": "Marsupial Heart Association Fellowship (7/2009-6/2011)"}
+    stage4 = {"entries": [_entry(fused, start=810, taxonomy_code="N3B", extracted_fields=fields)]}
+    blocks = [("p", "MENTORING"), ("p", "Quimby Farrow | MSPH")]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert [f["evidence"] for f in findings] == [["Chairperson of Marsupial Outreach 5/2017-10/2020"]]
+
+
+def test_unrendered_records_still_fires_on_a_tab_part_only_a_list_field_holds():
+    # #1243: `additional_roles` items may not be printed, so they do not vouch.
+    fused = ("Member of the Quokka Society 2009-present\t"
+             "Chairman, Credentials Committee, 2009-2011\t"
+             "Secretary of the Wombat Panel 2012-2014")
+    fields = {"role": "Member", "additional_roles": ["Chairman, Credentials Committee",
+                                                     "Secretary of the Wombat Panel"]}
+    stage4 = {"entries": [_entry(fused, start=221, taxonomy_code="I", extracted_fields=fields)]}
+    blocks = [("p", "PROFESSIONAL ORGANIZATIONS"), ("p", "Member of the Quokka Society 2009-present")]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert len(findings) == 1
+    assert findings[0]["evidence"] == ["Chairman, Credentials Committee, 2009-2011",
+                                       "Secretary of the Wombat Panel 2012-2014"]
+
+
+def test_unrendered_records_leaves_a_tab_part_that_names_an_extracted_title_alone():
+    # #1243: a grant header row renders as table cells; the part names the
+    # extracted title, with the investigator beside it that no field repeats.
+    fused = ("Marsupial Outreach Program of the Guild, Dr. Farrow (PI) 2015-2017\t"
+             "Chairperson of Marsupial Outreach 5/2017-10/2020\t"
+             "Secretary of Wallaby Affairs 5/2013-5/2015")
+    fields = {"title": "Marsupial Outreach Program of the Guild"}
+    stage4 = {"entries": [_entry(fused, start=172, taxonomy_code="M2A", extracted_fields=fields)]}
+    blocks = [("p", "RESEARCH"), ("p", "Program | Guild")]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert [f["evidence"] for f in findings] == [["Chairperson of Marsupial Outreach 5/2017-10/2020",
+                                                  "Secretary of Wallaby Affairs 5/2013-5/2015"]]
+
+
+def test_unrendered_records_still_fires_on_a_plain_record_line_stage_4_holds_in_its_fields():
+    # The extraction filters are for tab parts only: a record line of its own
+    # that the render dropped is lost, whatever the fields hold.
+    text = ("2009-2011 Member of the Quokka Society in good standing\n"
+            "2012-2014 Chair of the Wombat Panel for three years")
+    fields = {"notes": text.replace("\n", " ")}
+    stage4 = {"entries": [_entry(text, start=30, taxonomy_code="Q1", extracted_fields=fields)]}
+    blocks = [("p", "EXTRAMURAL"), ("p", "Unrelated line about marsupial husbandry in the highlands")]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert len(findings) == 1
+    assert "2 of 2 records absent" in findings[0]["message"]
+
+
 def test_unrendered_records_reads_a_sub_point_as_delivered():
     # #1205: the two dropped rows of the test above, written under the entry
     # as tracked-deleted sub-points, are offered for review, not absent. A
