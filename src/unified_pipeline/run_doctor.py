@@ -506,6 +506,14 @@ Lints, ranked by the severity of the failure class they catch:
                           effort and role, 559 held 573's mentee). INFO, one
                           per entry. Reads stage 4; stage 3b for the order
                           stage 4 cut its batches in
+14av. group_credit_dropped a publication whose source byline credits a
+                          group, consortium or study team ("...; HVTN 505
+                          Protocol Team.") and whose rendered bibliography
+                          line holds no such credit, or garbles it into
+                          initials ("Group TS.") (#1661; NECRGC AOJEQD-01,
+                          QVAQGQ-10). WARN when the source names the CV
+                          owner nowhere else, so nothing in the line credits
+                          them; INFO otherwise. Reads stage 4 and the docx
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -680,6 +688,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_etal_added,
     lint_fanout_cell_residue,
     lint_glyph_field,
+    lint_group_credit_dropped,
     lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
@@ -889,6 +898,7 @@ KNOWN_LINTS = (
     "stage2_text_break",
     "stage2_span_overlap",
     "cross_entry_value",
+    "group_credit_dropped",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1185,6 +1195,10 @@ LINT_PREVALENCE = {
     # Most predate #1609, which now removes a borrowed date, amount, percent or
     # grant number in stage 4 itself, so current runs should hit it less.
     "cross_entry_value": 0.055,
+    # group_credit_dropped (#1661; GCD-1 in doctor/PRECISION.md): 42 of 303
+    # stored runs with a stage-4 JSON and a rendered docx, one per uid,
+    # measured 2026-10-15. Same mixed-corpus caveat as above.
+    "group_credit_dropped": 0.139,
 }
 
 
@@ -1794,6 +1808,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("stage2_span_overlap", lint_stage2_span_overlap, ("stage_2",)),
     LintSpec("cross_entry_value", lint_cross_entry_value, ("stage_4",),
              optional=("stage_3b",)),
+    LintSpec("group_credit_dropped", lint_group_credit_dropped, ("stage_4", "blocks")),
 )
 
 #: The views read from the stage-6 docx.

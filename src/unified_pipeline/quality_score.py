@@ -906,7 +906,7 @@ LINT_FIX_MINUTES = {
         "appointment_title_overlong", "citation_field_dropped", "citation_grounding",
         "cross_entry_value", "date_cell_shape",
         "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "footer_in_record",
-        "glyph_field", "grant_boundary", "grant_facts",
+        "glyph_field", "grant_boundary", "grant_facts", "group_credit_dropped",
         "implausible_year", "licensure_fallback_truncated", "owner_missing_from_citation",
         "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
         "shattered_prose", "span_count",
