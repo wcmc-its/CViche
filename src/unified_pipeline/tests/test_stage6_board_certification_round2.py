@@ -1121,6 +1121,57 @@ class TestBoardCellCarriesTheSpecialty:
         ])
         assert _rows_after_board(gen) == [("American Board of Internal Medicine", "123456", "2010")]
 
+    # #1245 (pilot WIANVH 103/106): stage 4 kept each exam part and its date
+    # under the off-schema `notes`, and the two rows rendered as the same
+    # board with a blank date. Invented values.
+    def test_off_schema_notes_follow_the_board_in_parentheses(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Sample Surgery - Part 1- Pass    7/1998",
+             "extracted_fields": {"certifying_board": "American Board of Sample Surgery",
+                                  "specialty": "Sample Surgery", "year_certified": None,
+                                  "notes": "Part 1 - Pass, 1998-07"}},
+            {"text": "American Board of Sample Surgery - Part 2- Pass    7/2002",
+             "extracted_fields": {"certifying_board": "American Board of Sample Surgery",
+                                  "specialty": "Sample Surgery", "year_certified": None,
+                                  "notes": "Part 2 - Pass, 2002-07"}},
+        ])
+        assert sorted(_rows_after_board(gen)) == [
+            ("American Board of Sample Surgery (Part 1 - Pass, 1998-07)", "", ""),
+            ("American Board of Sample Surgery (Part 2 - Pass, 2002-07)", "", ""),
+        ]
+
+    def test_notes_the_cell_already_holds_are_not_repeated(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Sample Medicine (Sample Subspecialty) | 123456 | 2010",
+             "extracted_fields": {"certifying_board": "American Board of Sample Medicine (Sample Subspecialty)",
+                                  "certificate_number": "123456", "year_certified": "2010",
+                                  "notes": "sample subspecialty"}},
+        ])
+        assert _rows_after_board(gen) == [
+            ("American Board of Sample Medicine (Sample Subspecialty)", "123456", "2010")]
+
+    def test_notes_fill_a_board_cell_stage_4_left_blank(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Sample Exam Part 1 | 123456 | 2010",
+             "extracted_fields": {"certificate_number": "123456", "year_certified": "2010",
+                                  "notes": "Sample Exam Part 1"}},
+        ])
+        assert _rows_after_board(gen) == [("Sample Exam Part 1", "123456", "2010")]
+
+    @pytest.mark.parametrize("notes", [None, "", "   ", ["Part 1"], {"part": "1"}])
+    def test_blank_or_non_text_notes_change_nothing(self, notes):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Sample Medicine | 123456 | 2010",
+             "extracted_fields": {"certifying_board": "American Board of Sample Medicine",
+                                  "certificate_number": "123456", "year_certified": "2010",
+                                  "notes": notes}},
+        ])
+        assert _rows_after_board(gen) == [("American Board of Sample Medicine", "123456", "2010")]
+
 
 class TestCertificateNumberSeparatorHeuristic:
     """#569: the comma/semicolon split that decides whether an entry is fused.

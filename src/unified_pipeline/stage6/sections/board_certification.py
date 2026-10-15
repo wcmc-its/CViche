@@ -199,6 +199,13 @@ def _is_fused_certification(fields: dict, cert_numbers: list[str]) -> bool:
     return len(_BOARD_WORD_RE.findall(board)) > 1
 
 
+# Off-schema key stage 4 puts what a board row says beside the board under
+# ("Part 1 - Pass, 1998-07"). No column read it, so the pilot WIANVH CV's
+# entries 103 and 106 rendered the board without the exam part and with a
+# blank Dates cell (#1245).
+_BOARD_NOTES_KEY = 'notes'
+
+
 def _board_cell_text(fields: dict) -> str:
     """The "Full Name of Board" cell for one entry's structured fields:
     the board, then the certification named beside it.
@@ -209,12 +216,19 @@ def _board_cell_text(fields: dict) -> str:
     `certifying_board` + `specialty`, and rendering the board alone made the
     two rows read identically (faculty feedback 2026-09-15, #897). The
     specialty is appended unless the board string already contains it.
+    Stage 4's off-schema `notes` (`_BOARD_NOTES_KEY`) follows in
+    parentheses, unless the cell already holds it.
     """
     board = str(fields.get('certifying_board') or '').strip()
     specialty = str(fields.get('specialty') or '').strip()
+    cell = board
     if specialty and specialty.casefold() not in board.casefold():
-        return f"{board}, {specialty}" if board else specialty
-    return board
+        cell = f"{board}, {specialty}" if board else specialty
+    notes = fields.get(_BOARD_NOTES_KEY)
+    notes = notes.strip() if isinstance(notes, str) else ''
+    if notes and notes.casefold() not in cell.casefold():
+        cell = f"{cell} ({notes})" if cell else notes
+    return cell
 
 
 def _format_certification_date_str(
