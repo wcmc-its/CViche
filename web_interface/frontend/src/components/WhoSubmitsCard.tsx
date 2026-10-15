@@ -9,7 +9,7 @@ function BarRow({ bar }: { bar: DepartmentBar }) {
     <>
       <span className="truncate text-gray-700">{bar.name}</span>
       <span className="flex h-2.5 overflow-hidden rounded-[3px] bg-[#D6CCB6]" aria-hidden="true">
-        <span className="h-full bg-[#1F2328]" style={{ width: `${bar.pct}%` }} />
+        <span className="h-full bg-ink" style={{ width: `${bar.pct}%` }} />
       </span>
       <span className="text-right tabular-nums text-gray-600">
         <strong className="font-semibold text-gray-900">{bar.pct}%</strong> · {bar.own} of {bar.total}
@@ -20,7 +20,7 @@ function BarRow({ bar }: { bar: DepartmentBar }) {
     <Link
       to={bar.href}
       title="Show these runs submitted on faculty's behalf"
-      className={`${ROW} hover:bg-sand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500`}
+      className={`${ROW} hover:bg-sand-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500`}
     >
       {content}
     </Link>
@@ -53,10 +53,10 @@ export default function WhoSubmitsCard({ split }: { split: SubmissionSplit | und
           </p>
           <div className="mt-3 flex gap-4 text-xs text-gray-600">
             <span className="flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-sm bg-[#1F2328]" aria-hidden="true" />Faculty themselves
+              <span className="h-2.5 w-2.5 rounded-xs bg-ink" aria-hidden="true" />Faculty themselves
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-sm bg-[#D6CCB6]" aria-hidden="true" />On their behalf
+              <span className="h-2.5 w-2.5 rounded-xs bg-[#D6CCB6]" aria-hidden="true" />On their behalf
             </span>
           </div>
           <div className="mt-3 space-y-2">

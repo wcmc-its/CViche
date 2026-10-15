@@ -47,7 +47,7 @@ export function DocxDownloadCard({ runId, filename, reviewFilename = null }: { r
           href={runRoutes.dataFile(runId, primary)}
           download
           aria-label={reviewFilename ? `Download review copy ${primary}` : `Download final output file ${primary}`}
-          className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-none"
+          className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-hidden"
         >
           <Download className="w-4 h-4" aria-hidden="true" />
           <span>Download</span>
@@ -137,7 +137,7 @@ export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput =
                       <button
                         onClick={() => onOpenJson(filename)}
                         aria-label={`View JSON file ${filename}`}
-                        className="text-blue-600 hover:text-blue-800 min-w-0 text-left text-sm font-medium flex items-center gap-1.5 [overflow-wrap:anywhere] focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none rounded"
+                        className="text-blue-600 hover:text-blue-800 min-w-0 text-left text-sm font-medium flex items-center gap-1.5 wrap-anywhere focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden rounded-sm"
                       >
                         <FileText className="w-4 h-4" aria-hidden="true" />
                         {filename}
@@ -146,7 +146,7 @@ export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput =
                         href={runRoutes.dataFile(runId, filename)}
                         download
                         aria-label={`Download ${filename}`}
-                        className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none rounded"
+                        className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden rounded-sm"
                       >
                         <Download className="w-3 h-3" aria-hidden="true" />
                         Download
@@ -157,7 +157,7 @@ export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput =
                       href={runRoutes.dataFile(runId, filename)}
                       download
                       aria-label={`Download ${filename}`}
-                      className="text-blue-600 hover:text-blue-800 min-w-0 text-left text-sm font-medium flex items-center gap-1.5 [overflow-wrap:anywhere] focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none rounded"
+                      className="text-blue-600 hover:text-blue-800 min-w-0 text-left text-sm font-medium flex items-center gap-1.5 wrap-anywhere focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden rounded-sm"
                     >
                       <FileText className="w-4 h-4" aria-hidden="true" />
                       {filename}
@@ -166,7 +166,7 @@ export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput =
                     <a
                       href={runRoutes.dataFile(runId, filename)}
                       aria-label={`Open ${filename}`}
-                      className="text-blue-600 hover:text-blue-800 min-w-0 text-left text-sm font-medium flex items-center gap-1.5 [overflow-wrap:anywhere] focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none rounded"
+                      className="text-blue-600 hover:text-blue-800 min-w-0 text-left text-sm font-medium flex items-center gap-1.5 wrap-anywhere focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden rounded-sm"
                       target="_blank"
                       rel="noopener noreferrer"
                     >

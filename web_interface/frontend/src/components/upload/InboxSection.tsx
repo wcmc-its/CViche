@@ -13,7 +13,7 @@ interface InboxSectionProps {
   canAddAll: boolean
 }
 
-const BUTTON = 'rounded-md px-2.5 py-1 text-[13px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500'
+const BUTTON = 'rounded-md px-2.5 py-1 text-[13px] font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500'
 
 function InboxRow({ item, onAdd, onDiscard }: { item: InboxItem } & Omit<InboxSectionProps, 'items' | 'canAddAll'>) {
   return (

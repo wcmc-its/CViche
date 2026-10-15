@@ -94,7 +94,7 @@ export default function LoginPage() {
           />
         </div>
 
-        <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8">
+        <section className="bg-white/95 backdrop-blur-xs rounded-lg shadow-lg p-6 md:p-8">
           <h1 className="text-xl font-semibold text-gray-900 mb-2">Sign In</h1>
           <p className="text-gray-700 mb-2">Convert a CV into WCM institutional format.</p>
           <p className="text-gray-600 mb-6 italic">
@@ -115,7 +115,7 @@ export default function LoginPage() {
                 type="button"
                 onClick={handleSSOLogin}
                 disabled={redirecting}
-                className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+                className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden"
                 style={{ touchAction: 'manipulation' }}
               >
                 {redirecting ? (
@@ -151,7 +151,7 @@ export default function LoginPage() {
                   onChange={(e) => setDisplayName(e.target.value)}
                   placeholder="Jane Smith"
                   autoComplete="name"
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none transition-colors"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden transition-colors"
                 />
               </div>
 
@@ -170,7 +170,7 @@ export default function LoginPage() {
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="jas9999@med.cornell.edu"
                   autoComplete="email"
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none transition-colors"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden transition-colors"
                 />
               </div>
 
@@ -181,7 +181,7 @@ export default function LoginPage() {
               <button
                 type="submit"
                 disabled={submitting || !displayName.trim() || !email.trim()}
-                className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+                className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden"
                 style={{ touchAction: 'manipulation' }}
               >
                 {submitting ? (

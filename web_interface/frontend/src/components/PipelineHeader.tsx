@@ -206,7 +206,7 @@ export default function PipelineHeader({
       <button
         onClick={onBack}
         aria-label="Back to runs"
-        className="self-start inline-flex items-center gap-1.5 rounded text-[13px] text-gray-600 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+        className="self-start inline-flex items-center gap-1.5 rounded-sm text-[13px] text-gray-600 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden"
       >
         <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
         Runs
@@ -216,7 +216,7 @@ export default function PipelineHeader({
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2.5">
-              <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] text-[22px] font-semibold text-gray-900">{title ?? filename}</h1>
+              <h1 className="m-0 min-w-0 wrap-anywhere text-[22px] font-semibold text-gray-900">{title ?? filename}</h1>
               <StatusPill status={status} />
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[13px] text-gray-500">
@@ -230,16 +230,16 @@ export default function PipelineHeader({
                 Original file
                 <Download className="h-3.5 w-3.5 shrink-0 opacity-60 group-hover:opacity-100" aria-hidden="true" />
               </button>
-              {title && title !== filename && <span className="min-w-0 [overflow-wrap:anywhere]">{filename}</span>}
+              {title && title !== filename && <span className="min-w-0 wrap-anywhere">{filename}</span>}
               <span>Run {runId}</span>
               {isRunning && startedAt !== null && (
                 <span>Started {new Date(startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
               )}
               {!isRunning && runDate && <span>{formatDate(runDate)}</span>}
               {!isRunning && elapsedSeconds > 0 && <span>{formatDuration(elapsedSeconds)}</span>}
-              {runByName && <span className="min-w-0 [overflow-wrap:anywhere]">Run by {runByName}</span>}
+              {runByName && <span className="min-w-0 wrap-anywhere">Run by {runByName}</span>}
               {!!imageTags?.length && (
-                <span className="min-w-0 [overflow-wrap:anywhere]" title="Image the run executed on">
+                <span className="min-w-0 wrap-anywhere" title="Image the run executed on">
                   {formatImageTags(imageTags)}
                 </span>
               )}
@@ -275,7 +275,7 @@ export default function PipelineHeader({
                 onClick={onCancel}
                 disabled={isCancelling}
                 aria-label="Cancel pipeline run"
-                className={`rounded-lg border px-3.5 py-2 text-[13px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
+                className={`rounded-lg border px-3.5 py-2 text-[13px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden ${
                   isCancelling
                     ? 'border-gray-200 bg-gray-100 text-gray-500 cursor-not-allowed'
                     : 'border-red-300 text-red-700 hover:bg-red-50'
@@ -288,7 +288,7 @@ export default function PipelineHeader({
               <button
                 onClick={onToggleDetails}
                 aria-expanded={detailsOpen}
-                className="rounded-lg border border-sand-400 px-3.5 py-2 text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+                className="rounded-lg border border-sand-400 px-3.5 py-2 text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden"
               >
                 Pipeline details
               </button>

@@ -9,7 +9,7 @@ import { BAND_STYLE } from './runs/runQuality'
 const CARD = 'flex flex-col bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6'
 const MONO = 'font-mono'
 /** A quote of CV or output text. */
-const QUOTE = 'block whitespace-pre-wrap border-l-2 border-sand-300 pl-2.5 text-gray-600 [overflow-wrap:anywhere] before:content-none after:content-none'
+const QUOTE = 'block whitespace-pre-wrap border-l-2 border-sand-300 pl-2.5 text-gray-600 wrap-anywhere before:content-none after:content-none'
 const FULL_SCORE = 100
 const PERCENT = 100
 /** The mockup collapses INFO findings until asked: they fire on most runs. */
@@ -90,7 +90,7 @@ function SectionHeading({ title, blurb }: { title: string; blurb: string }) {
   return (
     <div>
       <h2 className="m-0 text-base font-semibold text-gray-900">{title}</h2>
-      <p className="mt-1 mb-0 max-w-[460px] text-[13px] text-gray-500 [text-wrap:pretty]">{blurb}</p>
+      <p className="mt-1 mb-0 max-w-[460px] text-[13px] text-gray-500 text-pretty">{blurb}</p>
     </div>
   )
 }
@@ -145,7 +145,7 @@ function CapBanner({ report }: { report: RunQualityReport }) {
         <span className="font-semibold">
           Capped at {report.cap}{report.cap_reason ? `: ${report.cap_reason}` : ''}
         </span>
-        <span className="text-[13px] [overflow-wrap:anywhere]">
+        <span className="text-[13px] wrap-anywhere">
           {report.earned != null && <>The weighted dimensions alone would score {report.earned}. </>}
           A hard-fail cap overrides that.
           {report.cap_lint && <> See <a href={`#${doctorRowId(report.cap_lint)}`} className="underline">{title}</a> in Run Doctor below.</>}
@@ -168,12 +168,12 @@ function RowLabel({ row, canCap, weight }: { row: ScoreRowWording; canCap: boole
       onMouseLeave={() => setOpen(false)}
       onFocus={() => setOpen(true)}
       onBlur={() => setOpen(false)}
-      className="relative flex min-w-0 cursor-help items-center gap-1.5 text-gray-900 outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+      className="relative flex min-w-0 cursor-help items-center gap-1.5 text-gray-900 outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
     >
-      <span className="underline decoration-dotted decoration-sand-500 underline-offset-[3px] [overflow-wrap:anywhere]">{label}</span>
+      <span className="underline decoration-dotted decoration-sand-500 underline-offset-[3px] wrap-anywhere">{label}</span>
       {canCap && <Lock className="h-3 w-3 flex-none text-gray-400" aria-label="Can cap the score" />}
       {open && (
-        <span role="tooltip" className="absolute left-0 top-[calc(100%+8px)] z-30 flex w-[320px] max-w-[calc(100vw-32px)] cursor-default flex-col gap-1.5 rounded-[9px] bg-[#1F2328] px-3.5 py-3 text-[13px] leading-[1.45] text-gray-100 shadow-[0_10px_28px_rgba(0,0,0,.22)]">
+        <span role="tooltip" className="absolute left-0 top-[calc(100%+8px)] z-30 flex w-[320px] max-w-[calc(100vw-32px)] cursor-default flex-col gap-1.5 rounded-[9px] bg-ink px-3.5 py-3 text-[13px] leading-[1.45] text-gray-100 shadow-[0_10px_28px_rgba(0,0,0,.22)]">
           <span className="font-semibold text-white">{label}</span>
           {row.checks && <span>{row.checks}</span>}
           {row.scoring && <span className={canCap ? 'text-red-300' : 'text-gray-300'}>{row.scoring}</span>}
@@ -273,7 +273,7 @@ function QualityScoreSection({ report }: { report: RunQualityReport }) {
 function InstanceItem({ instance }: { instance: DoctorFindingInstance }) {
   return (
     <li className="flex min-w-0 flex-col gap-1">
-      <span className="[overflow-wrap:anywhere]">
+      <span className="wrap-anywhere">
         {instance.section && <strong className="font-semibold text-gray-900">{instance.section}: </strong>}
         {instance.detail}
       </span>
@@ -281,7 +281,7 @@ function InstanceItem({ instance }: { instance: DoctorFindingInstance }) {
         <q key={i} className={QUOTE}>{quote}</q>
       ))}
       {instance.notes.map((note, i) => (
-        <span key={i} className="whitespace-pre-wrap text-xs text-gray-500 [overflow-wrap:anywhere]">{note}</span>
+        <span key={i} className="whitespace-pre-wrap text-xs text-gray-500 wrap-anywhere">{note}</span>
       ))}
     </li>
   )
@@ -294,7 +294,7 @@ function FindingInstances({ finding }: { finding: DoctorFindingGroup }) {
   if (shown === 0) return null
   return (
     <details className="mt-1 text-[13px] text-gray-700">
-      <summary className="cursor-pointer select-none text-primary-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500">
+      <summary className="cursor-pointer select-none text-primary-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500">
         {shown === 1 ? 'Where' : `Where (${shown})`}
       </summary>
       <ul className="mt-2 mb-0 flex list-none flex-col gap-2.5 pl-0">
@@ -315,10 +315,10 @@ function FindingRow({ finding, capValue, style }: { finding: DoctorFindingGroup;
       <Icon className={`mt-0.5 h-4 w-4 flex-none ${style.text}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-col gap-[3px]">
         <div className="flex flex-wrap items-center gap-2">
-          {finding.title && <span className="text-sm font-semibold text-gray-900 [overflow-wrap:anywhere]">{finding.title}</span>}
+          {finding.title && <span className="text-sm font-semibold text-gray-900 wrap-anywhere">{finding.title}</span>}
           <span className={finding.title
-            ? `${MONO} text-[11px] text-gray-400 [overflow-wrap:anywhere]`
-            : `${MONO} text-[13px] font-semibold text-gray-900 [overflow-wrap:anywhere]`}>{finding.lint}</span>
+            ? `${MONO} text-[11px] text-gray-400 wrap-anywhere`
+            : `${MONO} text-[13px] font-semibold text-gray-900 wrap-anywhere`}>{finding.lint}</span>
           {tied && (
             <span className="inline-flex items-center gap-1 rounded-full bg-error-100 px-2 py-px text-xs font-semibold text-error-700">
               <Lock className="h-[11px] w-[11px]" aria-hidden="true" />
@@ -326,9 +326,9 @@ function FindingRow({ finding, capValue, style }: { finding: DoctorFindingGroup;
             </span>
           )}
         </div>
-        <span className="text-[13px] text-gray-700 [overflow-wrap:anywhere]">{finding.message}</span>
+        <span className="text-[13px] text-gray-700 wrap-anywhere">{finding.message}</span>
         {finding.what_to_do && (
-          <span className="text-[13px] text-gray-700 [overflow-wrap:anywhere]"><strong className="font-semibold">What to do:</strong> {finding.what_to_do}</span>
+          <span className="text-[13px] text-gray-700 wrap-anywhere"><strong className="font-semibold">What to do:</strong> {finding.what_to_do}</span>
         )}
         {finding.prevalence != null && (
           <span className="text-xs text-gray-400">Seen on {seenOn(finding.prevalence)} of runs</span>
@@ -366,7 +366,7 @@ function FindingGroup({ severity, items, hidden, capValue, onToggle }: FindingGr
         type="button"
         onClick={onToggle}
         aria-expanded={!hidden}
-        className="flex items-center justify-between gap-3 bg-sand-50 px-3.5 py-2.5 text-xs font-semibold uppercase tracking-[0.04em] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+        className="flex items-center justify-between gap-3 bg-sand-50 px-3.5 py-2.5 text-xs font-semibold uppercase tracking-[0.04em] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
       >
         <span className={style.text}>{style.title}</span>
         <span className="text-xs font-medium normal-case tracking-normal text-gray-500">{hint}</span>
@@ -412,11 +412,11 @@ function FixProblemLine({ problem }: { problem: FixListProblem }) {
       <Icon className={`mt-0.5 h-4 w-4 flex-none ${style.text}`} aria-label={style.one} />
       <div className="flex min-w-0 flex-col gap-[3px]">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-gray-900 [overflow-wrap:anywhere]">{problem.title}</span>
+          <span className="text-sm font-semibold text-gray-900 wrap-anywhere">{problem.title}</span>
           <span className={CHIP}>{CONFIDENCE_LABEL[problem.confidence]}</span>
           <span className={CHIP}>{EFFORT_LABEL[problem.effort]}</span>
         </div>
-        <span className="text-[13px] text-gray-700 [overflow-wrap:anywhere]"><strong className="font-semibold">What to do:</strong> {problem.what_to_do}</span>
+        <span className="text-[13px] text-gray-700 wrap-anywhere"><strong className="font-semibold">What to do:</strong> {problem.what_to_do}</span>
       </div>
     </div>
   )
@@ -496,7 +496,7 @@ function NotChecked({ items }: { items: string[] }) {
         Not checked on any run
       </span>
       <ul className="m-0 flex list-disc flex-col gap-1 pl-5">
-        {items.map((item, i) => <li key={i} className="[overflow-wrap:anywhere]">{item}</li>)}
+        {items.map((item, i) => <li key={i} className="wrap-anywhere">{item}</li>)}
       </ul>
     </div>
   )
@@ -573,7 +573,7 @@ function DoctorTabs({ view, diagnostics }: { view: FixListView; diagnostics: Rea
               aria-selected={selected}
               aria-controls={`doctor-panel-${t.key}`}
               onClick={() => setTab(t.key)}
-              className={`-mb-px border-b-2 px-0.5 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
+              className={`-mb-px border-b-2 px-0.5 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden ${
                 selected ? 'border-ink text-gray-900' : 'border-transparent text-gray-500 hover:text-gray-900'
               }`}
             >

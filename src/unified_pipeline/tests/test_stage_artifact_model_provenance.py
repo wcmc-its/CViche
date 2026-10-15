@@ -126,7 +126,7 @@ def test_5b_artifact_records_observed_model_not_just_the_helper_return(monkeypat
 
 
 def test_stage_5_model_parameters_were_removed_not_deprioritized():
-    """5b/5c/5d and the candidate surfacer now match stage_3b: their inert
+    """5b/5c/5d now match stage_3b: their inert
     `model` parameters (and the `--model` CLI flags that fed them) are gone,
     so no caller can believe it is selecting a model. The model comes only
     from config/llm_config.yaml via call_llm(stage=...)."""
@@ -135,11 +135,9 @@ def test_stage_5_model_parameters_were_removed_not_deprioritized():
     from unified_pipeline import stage_5b_institution_enrichment as s5b
     from unified_pipeline import stage_5c_teaching_formatter as s5c
     from unified_pipeline import stage_5d_citation_formatter as s5d
-    from unified_pipeline.core import candidate_surfacer
     from unified_pipeline.stage5b import lookup
     for fn in (s5b.run_stage5b, s5c.run_stage_5c, s5d.run_stage_5d,
-               lookup.lookup_institutions_llm,
-               candidate_surfacer.surface_candidates_for_subsection):
+               lookup.lookup_institutions_llm):
         assert "model" not in inspect.signature(fn).parameters, fn.__qualname__
 
 

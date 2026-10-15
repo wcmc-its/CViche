@@ -223,7 +223,7 @@ export default function AdminSubmissions() {
             placeholder="Filter by user email..."
             value={filterUser}
             onChange={(e) => setFilterUser(e.target.value)}
-            className="pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none w-64"
+            className="pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-hidden w-64"
           />
         </div>
         <label className="sr-only" htmlFor="filter-status">Filter by status</label>
@@ -231,7 +231,7 @@ export default function AdminSubmissions() {
           id="filter-status"
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
-          className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none bg-white"
+          className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-hidden bg-white"
         >
           {/* Default ("") hides never-started "created" runs (abandoned/declined
               uploads). "all" opts back in to every status; "created" inspects
@@ -255,7 +255,7 @@ export default function AdminSubmissions() {
           <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow-sm border border-sand-300 overflow-hidden">
+        <div className="bg-white rounded-lg shadow-xs border border-sand-300 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-sand-200">
               <thead className="bg-sand-50">
@@ -329,7 +329,7 @@ export default function AdminSubmissions() {
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700 max-w-[200px] truncate">
                       <span className="inline-flex items-center gap-1">
-                        <FileText className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" aria-hidden="true" />
+                        <FileText className="w-3.5 h-3.5 text-gray-400 shrink-0" aria-hidden="true" />
                         {run.filename}
                       </span>
                     </td>
@@ -394,7 +394,7 @@ export default function AdminSubmissions() {
               <button
                 onClick={handleShowMore}
                 disabled={loadingMore}
-                className="w-full py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none flex items-center justify-center gap-1.5"
+                className="w-full py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden flex items-center justify-center gap-1.5"
               >
                 {loadingMore ? (
                   <>

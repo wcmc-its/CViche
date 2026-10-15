@@ -943,9 +943,8 @@ def test_dispatch_routes_stay_plain_def_not_async():
 def test_queue_stats_route_has_a_typed_response_model():
     """N4: the admin queue-stats route must declare response_model so its
     shape is validated and documented, not returned as an untyped dict."""
-    from app.api.admin_routes import router as admin_router
-    from app.api.admin_routes.runs import get_queue_stats
-    from app.schemas import QueueStatsResponse
+    from app.main import app
 
-    route = next(r for r in admin_router.routes if r.endpoint is get_queue_stats)
-    assert route.response_model is QueueStatsResponse
+    op = app.openapi()["paths"]["/api/admin/queue/stats"]["get"]
+    schema = op["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/QueueStatsResponse"}

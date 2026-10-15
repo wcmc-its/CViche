@@ -46,7 +46,7 @@ function CopyList({ runId, copies, onError }: CopyListProps) {
       <ul className="mt-1 divide-y divide-sand-200">
         {copies.map((copy) => (
           <li key={copy.id} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1.5 text-[13px]">
-            <span className="min-w-0 break-words text-gray-700">
+            <span className="min-w-0 wrap-break-word text-gray-700">
               {uploaderLabel(copy)}
               <span className="text-gray-500">
                 {' · '}{formatDate(copy.uploaded_at)}{' · '}{copy.changes} {copy.changes === 1 ? 'change' : 'changes'}
