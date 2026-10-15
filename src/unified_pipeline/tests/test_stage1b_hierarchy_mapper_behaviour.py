@@ -1569,6 +1569,63 @@ def test_parent_range_end_stops_at_a_follower_line_with_a_trailing_rule():
     ) == 2
 
 
+def test_parent_range_end_stops_at_a_follower_heading_typed_with_a_trailing_star():
+    # #1848: the follower's own text ends in "*" (IZABPD/YDSVDB "National*").
+    # The line and the header text lose the rule alike, so they still match.
+    elements = [_elem(0, "Honors"), _elem(1, "Prize, 2001"), _elem(2, "Service*"), _elem(3, "Panel")]
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"service*"}), frozenset({"honors"})
+    ) == 2
+
+
+def test_parent_range_end_ignores_a_starred_follower_sharing_a_descendants_text():
+    # A later "Regional" and the parent's own child "Regional*" are one
+    # header once both lose the rule, so the child's line is no stop. The
+    # same holds with the star on the follower instead.
+    elements = [_elem(0, "Honors"), _elem(1, "Regional*"), _elem(2, "Prize, 2001")]
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"regional"}), frozenset({"honors", "regional*"})
+    ) == 3
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"regional*"}), frozenset({"honors", "regional"})
+    ) == 3
+
+
+def test_parent_range_end_does_not_stop_at_a_bare_rule_for_a_rule_only_follower():
+    # A follower that is nothing but "***" strips to nothing; so does a bare
+    # "____" rule line. Two empty texts are no match.
+    elements = [_elem(0, "Honors"), _elem(1, "_" * 30), _elem(2, "Prize, 2001")]
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"***"}), frozenset({"honors"})
+    ) == 3
+
+
+def test_child_is_not_mapped_past_a_starred_sibling_heading(tmp_path, monkeypatch):
+    # IZABPD/YDSVDB shape: "Regional*" has no "Invited" line of its own; the
+    # next one belongs to "National*" and must not be taken by Regional*'s child.
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "A. Person",
+        "PRESENTATIONS",
+        "Regional*",
+        "Grand Rounds, Albany, 2010",
+        "National*",
+        "Invited",
+        "Keynote, ASCO, 2015",
+        "International*",
+        "Talk, 2018",
+    ], [
+        {"text": "PRESENTATIONS", "level": "H1", "children": [
+            {"text": "Regional*", "level": "H2", "children": [{"text": "Invited", "level": "H3"}]},
+            {"text": "National*", "level": "H2", "children": [{"text": "Invited", "level": "H3"}]},
+            {"text": "International*", "level": "H2"},
+        ]},
+    ])
+    regional, national, international = output_data["hierarchy_with_indices"][0]["children"]
+    assert [regional["element_idx"], national["element_idx"], international["element_idx"]] == [2, 4, 7]
+    assert regional["children"][0]["element_idx"] is None
+    assert national["children"][0]["element_idx"] == 5
+
+
 def test_parent_range_end_runs_to_the_document_end_without_a_follower_line():
     elements = [_elem(0, "Honors"), _elem(1, "Prize, 2001")]
     assert stage1b._parent_range_end(elements, 0, frozenset({"service"}), frozenset()) == 2
