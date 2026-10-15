@@ -8,6 +8,8 @@ What each test pins:
   called borrowed (two-digit years, short range ends, a mistyped digit, a
   year run into other digits);
 - another entry's text is read strictly (a four-digit year, a percent);
+- `tokens_not_in_own_text` and `entry_holding_token`, which the doctor's
+  `cross_entry_value` lint reads, give the same verdicts field by field;
 - fields with no checkable characters (role, name) are never touched;
 - a wholly foreign record is removed only while a record of the entry's own
   remains; otherwise its borrowed fields are set to None;
@@ -25,7 +27,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from unified_pipeline.stage4.grounding import ground_group  # noqa: E402
+from unified_pipeline.stage4.grounding import (  # noqa: E402
+    entry_holding_token,
+    ground_group,
+    text_facts,
+    tokens_not_in_own_text,
+)
 
 
 def _borrowed(texts, items_by_entry):
@@ -117,3 +124,30 @@ def test_an_index_outside_the_group_passes_through():
     result = ground_group(["Mentee B 2017", "Mentee C 2021"], items)
     assert result.items == items
     assert result.borrowed_fields == {}
+
+
+def test_the_field_by_field_checks_give_ground_groups_verdict():
+    own = text_facts("NCI R01 (MPI, Effort: 20%) $326,020/year 04/21/17-03/31/23")
+    others = [text_facts("Health Rhythms (PI) $300,000 04/01/2022-2023"),
+              text_facts("NARSAD (PI, Effort: 30%) $30,000/year 07/01/1997-06/30/1999")]
+
+    assert tokens_not_in_own_text("start_date", "1997-07-01", own) == (["1997"], False)
+    assert tokens_not_in_own_text("start_date", "2017-04-21", own) == ([], True)
+    assert tokens_not_in_own_text("pi_role", "PI", own) == ([], False)
+    assert entry_holding_token("start_date", "1997", others) == 1
+    assert entry_holding_token("percent_effort", "30", others) == 1
+    assert entry_holding_token("start_date", "1985", others) is None
+
+
+def test_a_record_with_any_value_of_its_own_is_kept_and_only_its_borrowed_field_cleared():
+    """A record is foreign only when none of its checked values is the
+    entry's own: one own start year keeps it, whichever field comes last."""
+    texts = ["Mentee B, 2017-18", "Mentee C (2021-2022)"]
+    own = {"mentee_name": "Mentee B", "start_date": "2017", "end_date": "2018"}
+    mixed = {"mentee_name": "Mentee B", "start_date": "2017", "end_date": "2022"}
+
+    result = ground_group(texts, {0: [own, mixed]})
+
+    assert result.items[0] == [own, {**mixed, "end_date": None}]
+    assert result.dropped_records == {}
+    assert result.borrowed_fields == {0: ["end_date"]}

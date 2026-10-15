@@ -498,6 +498,14 @@ Lints, ranked by the severity of the failure class they catch:
                           often under the wrong section (#1433; ATUVAL
                           867-869, web172 112.x). WARN, one per pair of
                           sections. Reads stage 2 only
+14au. cross_entry_value   a stage-4 value (a date's year, an amount, an
+                          effort, a grant number, the owner's grant role or
+                          a person's name) that its own entry's text lacks
+                          and another entry of the same stage-4 call states
+                          (#1575; YUYVIG UVZNIC 592 held 603's dates, amount,
+                          effort and role, 559 held 573's mentee). INFO, one
+                          per entry. Reads stage 4; stage 3b for the order
+                          stage 4 cut its batches in
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -605,6 +613,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
+    lint_cross_entry_value,
     lint_dedup_drops,
     lint_footer_in_record,
     lint_grant_boundary,
@@ -879,6 +888,7 @@ KNOWN_LINTS = (
     "header_consumed_record",
     "stage2_text_break",
     "stage2_span_overlap",
+    "cross_entry_value",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1170,6 +1180,11 @@ LINT_PREVALENCE = {
     # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
     # caveat as above.
     "stage2_span_overlap": 0.068,
+    # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 22 of 400
+    # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15.
+    # Most predate #1609, which now removes a borrowed date, amount, percent or
+    # grant number in stage 4 itself, so current runs should hit it less.
+    "cross_entry_value": 0.055,
 }
 
 
@@ -1777,6 +1792,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("stage2_text_break", lint_stage2_text_break, ("stage_2",),
              optional=("stage_1a", "blocks")),
     LintSpec("stage2_span_overlap", lint_stage2_span_overlap, ("stage_2",)),
+    LintSpec("cross_entry_value", lint_cross_entry_value, ("stage_4",),
+             optional=("stage_3b",)),
 )
 
 #: The views read from the stage-6 docx.
