@@ -491,7 +491,7 @@ LINT_COPY = {
         "Check the flagged section against the source CV and add the text if it belongs."),
     "stage2_span_overlap": LintCopy(
         "The same lines read into two entries",
-        "Lines of the source CV were read into two entries, so they appear twice in the "
+        "Lines of the source CV were read into two entries, so they can appear twice in the "
         "document, often once in a section they do not belong to, and a date can pair with "
         "the wrong record.",
         "Delete the copy in the wrong section, and check the flagged entries' dates against "
