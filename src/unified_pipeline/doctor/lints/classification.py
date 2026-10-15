@@ -11,7 +11,10 @@ cross-reference line as a record, and guideline articles with a journal,
 volume and pages as non-peer-reviewed reports. The doctor had no lint for
 this shape. The RCBKFG autopsy added one more: training rows filed as degrees
 (#1415). The NECRGC autopsy added courses and meetings attended, filed as
-continuing education taught or as the owner's abstracts (#1691).
+continuing education taught or as the owner's abstracts (#1691). The YUYVIG
+autopsy added two (#1577): an award under an honors heading coded as a grant,
+which stage 6 renders as a one-year funding table, and an elected or honorific
+fellowship coded I, which renders as a membership and is missing from Honors.
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -32,6 +35,11 @@ import re
 from collections import Counter, defaultdict
 from typing import NamedTuple
 
+from unified_pipeline.stage3b.header_pin import (
+    _GRANT_CODES,
+    _GRANT_MARKER,
+    _PI_ROLE_LEAD,
+)
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     heading_names_teaching_role,
@@ -40,9 +48,17 @@ from unified_pipeline.stage6.parsing.text import (
 
 from ..shared import _finding
 
-#: Severity of every finding. Measured over the 63-run EBYSBC/s7ab/pilot farm
-#: (doctor/PRECISION.md): every hit hand-checked, at or above the 80% WARN bar.
+#: Severity of a finding whose shape SHAPE_SEVERITY does not name. Measured
+#: over the 63-run EBYSBC/s7ab/pilot farm (doctor/PRECISION.md): every hit
+#: hand-checked, at or above the 80% WARN bar.
 SECTION_CONSISTENCY_SEVERITY = "WARN"
+
+#: A shape whose severity differs from SECTION_CONSISTENCY_SEVERITY. An
+#: honorific fellowship coded I follows the stage-3b prompt's own rules 16 and
+#: 27 ("Fellow, [Society]" is I), so whether it is wrong waits on the taxonomy
+#: decision #1577 names; until then it is reported, not weighed.
+FELLOWSHIP_AS_MEMBERSHIP_SHAPE = "fellowship_as_membership"
+SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO"}
 
 #: Entries a finding names; the doctor's evidence cap elsewhere is the same 3.
 SECTION_CONSISTENCY_EVIDENCE_MAX = 3
@@ -83,6 +99,7 @@ INTERNAL_COMMITTEE_CODES = frozenset({"P", "O"})
 #: same heading is a segmentation slip, not this shape.
 NOT_GRANT_REVIEW_CODES = frozenset({"Q1", "Q2", "Q4A", "Q4B", "Q4C", "Q4D", "P", "O", "I"})
 UNCLASSIFIED_CODE = "T"
+MEMBERSHIP_CODE = "I"
 EDITORIAL_BOARD_CODE = "Q4C"
 JOURNAL_REVIEWER_CODE = "Q4D"
 #: Words that name the owner's part in a journal: an editorial board seat, an
@@ -115,6 +132,37 @@ _ATTENDANCE_HEADING_RE = re.compile(
 SUBHEADING_MAX_WORDS = 6
 _SUBHEADING_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _WORD_RE = re.compile(r"[^\W\d_]+")
+
+#: A heading that names honors or awards, and one that names funding. "Grants
+#: and Contract Awards", "Current Awards" and "Research Awards" head grants
+#: lists, so an honors heading must not name funding too (YUYVIG, #1577).
+_HONORS_HEADING_RE = re.compile(r"honou?r|\bawards?\b|\bprizes?\b|recogni[tz]|distinction",
+                                re.IGNORECASE)
+_FUNDING_HEADING_RE = re.compile(
+    r"grant|fund|support|contract|research|investigat|current|\bpast\b|pending|completed"
+    r"|ongoing|active", re.IGNORECASE)
+#: A leaf heading that names memberships or credentials: a fellowship under it
+#: is where the author put it ("Awards, Honors, and Membership in Honorary
+#: Societies", UVZNIC; "Professional Certifications", HBALTD).
+_MEMBERSHIP_HEADING_RE = re.compile(r"member|societ|organi[sz]ation|affiliation|certific|licens",
+                                    re.IGNORECASE)
+#: A line that opens, after an optional date or bullet, with an election to a
+#: fellowship: "2017: Elected Fellow of ...", "Elected to Fellowship, ...",
+#: "Named Fellow of ...", "Inducted as a Fellow in ...".
+_ELECTED_FELLOW_RE = re.compile(
+    r"^[\W\d]*(?:[A-Za-z]{3,9}\.?\s+)?(?:(?:19|20)\d{2}\W*)?(?:elected|named|inducted)\s+"
+    r"(?:(?:as|to|an?)\s+)*(?:associate\s+|distinguished\s+|honorary\s+)?fellow(?:ship)?\b",
+    re.IGNORECASE)
+#: A fellowship as a title: a line that opens with "Fellow, <body>", "Fellow
+#: of/in <body>" or "Distinguished Fellow ...", or that names a body and then
+#: "Fellow" ("<Society> Fellow", "<ACRONYM> Fellow"). A fellowship programme
+#: ("Fellowship") is training or an award, not this shape.
+_FELLOW_TITLE_RE = re.compile(
+    r"^[\W\d]*(?:(?i:present)\W*)?"
+    r"(?:(?i:distinguished|founding|honorary|associate)\s+)?(?i:fellow)\b"
+    r"(?:\s*,|\s+(?i:of|in)\b|\s*\(|\s+\d)"
+    r"|\b(?i:association|society|college|academy|institute)\s+(?i:fellow)\b"
+    r"|\b[A-Z]{2,6}\s+Fellow\b")
 
 
 class HeadingCodeRule(NamedTuple):
@@ -300,6 +348,39 @@ def _is_attended_as_teacher(entry: _ClassifiedEntry, in_attendance_context: bool
     return in_attendance_context and not names_teaching_or_authorship_role(entry.text)
 
 
+def _is_honors_heading(heading: str) -> bool:
+    return bool(_HONORS_HEADING_RE.search(heading)) and not _FUNDING_HEADING_RE.search(heading)
+
+
+def _is_honor_as_funding(entry: _ClassifiedEntry) -> bool:
+    """A grant code (M2, M2A/B/C) under a leaf heading that names honors and
+    not funding, on a line with no grant marker and no PI role at its head:
+    stage 6 renders it as a one-year funding table with no title and no PI
+    (UVZNIC 117-126, ZDOAZO 333, IXJMKS 112). The marker and role tests are
+    stage 3b's H pin's own (#1618); this reports what that pin leaves, a
+    confident grant answer or a heading stage 3a did not pin to H."""
+    leaf = entry.heading_path[-1] if entry.heading_path else ""
+    return (entry.code in _GRANT_CODES and _is_honors_heading(leaf)
+            and not _GRANT_MARKER.search(entry.text)
+            and not _PI_ROLE_LEAD.match(entry.text))
+
+
+def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
+    """An I entry that opens with an election to a fellowship, or that names
+    a fellowship as a title under a heading path naming honors whose leaf
+    names no membership (MVUREJ 44, IZIXVF 55, XNWSZN 53; NECRGC ZASOTV,
+    LWMSPJ, UAURFU). It renders as "Fellow, <body> yyyy-Present" in
+    Memberships and is missing from Honors."""
+    if entry.code != MEMBERSHIP_CODE:
+        return False
+    if _ELECTED_FELLOW_RE.search(entry.text):
+        return True
+    leaf = entry.heading_path[-1] if entry.heading_path else ""
+    return (any(_HONORS_HEADING_RE.search(h) for h in entry.heading_path)
+            and not _MEMBERSHIP_HEADING_RE.search(leaf)
+            and bool(_FELLOW_TITLE_RE.search(entry.text)))
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -314,7 +395,7 @@ def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
 
 def lint_section_consistency(stage3b: dict) -> list[dict]:
     """Stage-3b codes that contradict the entry's own heading, text or
-    siblings (EBYSBC E11/E30). One WARN per shape and heading path."""
+    siblings (EBYSBC E11/E30). One finding per shape and heading path."""
     entries = _classified_entries(stage3b)
     siblings: dict[tuple[str, ...], Counter] = defaultdict(Counter)
     for entry in entries:
@@ -334,6 +415,12 @@ def lint_section_consistency(stage3b: dict) -> list[dict]:
         if _is_attended_as_teacher(entry, in_attendance_context):
             groups[("attended_as_teacher", "B2 (attended, not taught or presented)",
                     entry.heading_path)].append(entry)
-    return [_finding("section_consistency", SECTION_CONSISTENCY_SEVERITY,
+        if _is_honor_as_funding(entry):
+            groups[("honor_as_funding", "H (an award listed under honors, no grant marker)",
+                    entry.heading_path)].append(entry)
+        if _is_fellowship_as_membership(entry):
+            groups[(FELLOWSHIP_AS_MEMBERSHIP_SHAPE, "H (an elected or honorific fellowship)",
+                    entry.heading_path)].append(entry)
+    return [_finding("section_consistency", SHAPE_SEVERITY.get(shape, SECTION_CONSISTENCY_SEVERITY),
                      *_group_message(shape, expected, path, members))
             for (shape, expected, path), members in groups.items()]
