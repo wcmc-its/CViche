@@ -175,6 +175,7 @@ from unified_pipeline.stage6.parsing.text import (
 )
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
+    PII_WITHHELD_KEY,
     WITHHELD_COMMENT_AUTHOR,
     PiiPassResult,
     relocate_withheld,
@@ -1337,15 +1338,32 @@ def _split_date_led_siblings(entry: dict[str, Any], code: str) -> None:
       newline join collapsed a grant section in the 2026-09-29 scoping;
     - a teaching entry: its renderer splits the text on its tabs, so the
       corpus render put one split K2 entry's lines into a single paragraph;
-    - records stage 4 already separated (`_holds_stage4_records`)."""
+    - records stage 4 already separated (`_holds_stage4_records`);
+    - protected data: an entry the PII pass cut, or whose text holds a
+      fragment the full Personal Data / Appendix scope withholds. A routed
+      code withholds less, and dev rendered such an entry's fields, not
+      its lines (#983 review round 2: "Children:\t2001 <name>" in an I
+      entry rendered the names once split)."""
     text = entry.get('text')
     if (code in supplementary.GRANT_CODES or code in TEACHING_CODES
-            or not isinstance(text, str) or _holds_stage4_records(entry)):
+            or not isinstance(text, str) or _holds_stage4_records(entry)
+            or entry.get(PII_WITHHELD_KEY) or _pii_fragments(text)):
         return
     split = split_date_led_records(text)
     if split != text:
         entry[DATE_LED_SOURCE_TEXT] = text
         entry['text'] = split
+
+
+def _split_date_led_groups(entries_by_code: Mapping[str, Sequence[dict[str, Any]]]) -> None:
+    """`_split_date_led_siblings` over every grouped entry. `generate()` calls
+    it AFTER the PII deny pass (#983 review round 2): that pass's bare-label
+    and continuation-cell cuts stop at a line break and run on over a tab,
+    so it must see stage 2's tabs, as on dev. An entry that pass cut is not
+    split at all, so it renders, and is recovered, as on dev."""
+    for code, entries in entries_by_code.items():
+        for entry in entries:
+            _split_date_led_siblings(entry, code)
 
 
 def d2_leadership_reroute_warnings(
@@ -1924,7 +1942,6 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
             code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
             code = _route_d2_leadership_title(entry, code, leadership_moved)
-            _split_date_led_siblings(entry, code)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
@@ -2153,9 +2170,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Group entries by taxonomy code (#843, split into
         # _group_entries_by_code / _dedup_grouped_entries so the #820
         # piece-2 PII deny pass can run between them -- see
-        # _run_pii_deny_pass's docstring for why the ordering matters).
+        # _run_pii_deny_pass's docstring for why the ordering matters). The
+        # #983 date-led split runs after that pass, on the already-cut text.
         entries_by_code = self._group_entries_by_code(entries)
         self._run_pii_deny_pass(entries_by_code)
+        _split_date_led_groups(entries_by_code)
         entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
             self._dedup_grouped_entries(entries_by_code)
 
