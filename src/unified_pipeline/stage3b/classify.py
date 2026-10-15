@@ -1175,6 +1175,39 @@ def _in_different_year_groups(first: _YearGroup | None, second: _YearGroup | Non
             and first.section == second.section and first.year != second.year)
 
 
+class _SourcePlacement(NamedTuple):
+    """Where a duplicate candidate came from: its taxonomy code and the span
+    of source elements it was cut from (None when the entry has none)."""
+
+    code: str
+    span: tuple[int, int] | None
+
+
+def _source_placement(entry: dict) -> _SourcePlacement:
+    start, end = entry.get("element_idx_start"), entry.get("element_idx_end")
+    has_span = isinstance(start, int) and isinstance(end, int)
+    return _SourcePlacement(entry.get("taxonomy_code") or "", (start, end) if has_span else None)
+
+
+def _filed_twice_by_the_cv(first: _SourcePlacement, second: _SourcePlacement) -> bool:
+    """True when two same-text entries are two records the CV itself lists
+    twice: two different codes, neither the Appendix fallback, so each
+    renders in its own table, cut from two separate source elements (#1435:
+    FVQANK listed three journals under REVIEWER FOR (Q4D) and again under
+    EDITORIAL BOARDS (Q4C), and the editorial-board rows were dropped).
+    Twins cut from overlapping source elements are one line emitted twice
+    upstream (in one corpus CV a single service line, element 168, came
+    out under both O and P, with no second copy in the source), and a
+    pair with a T copy still resolves by the M-over-T preference: both
+    stay duplicates, as does a pair with no element span to compare."""
+    if first.span is None or second.span is None:
+        return False
+    apart = first.span[1] < second.span[0] or second.span[1] < first.span[0]
+    return (apart and bool(first.code) and bool(second.code) and first.code != second.code
+            and not first.code.startswith(APPENDIX_TAXONOMY_PREFIX)
+            and not second.code.startswith(APPENDIX_TAXONOMY_PREFIX))
+
+
 def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
     """
     Detect and flag duplicate entries: entries whose text is the same once
@@ -1195,7 +1228,9 @@ def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
     in) is now kept and rendered: a visible repeat the CV owner can delete,
     instead of a silent drop they never see. For the same reason, two
     identical undated lines filed under two different years of one section
-    are not duplicates (`_undated_year_groups`, #1435).
+    are not duplicates (`_undated_year_groups`, #1435), and neither are two
+    identical lines the CV lists under two different codes that both render
+    (`_filed_twice_by_the_cv`, #1435).
 
     Args:
         entries: List of classified entries
@@ -1239,7 +1274,9 @@ def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
                 # not carry: hand it to stage 4 so each renders dated (#1435).
                 entry1[GROUP_YEAR_KEY] = year_groups[idx1].year
                 entry2[GROUP_YEAR_KEY] = year_groups[idx2].year
-            if key1 == key2 and not _in_different_year_groups(year_groups[idx1], year_groups[idx2]):
+            if (key1 == key2
+                    and not _in_different_year_groups(year_groups[idx1], year_groups[idx2])
+                    and not _filed_twice_by_the_cv(_source_placement(entry1), _source_placement(entry2))):
                 # A duplicate pair is recorded once per (idx1, idx2)
                 # comparison that matches -- the loop above only *skips* a
                 # pair when BOTH sides are already marked duplicate, so one

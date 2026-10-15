@@ -902,6 +902,74 @@ def test_no_group_year_outside_the_twins_it_keeps_apart(entries):
     assert set(_group_years(entries)) == {None}
 
 
+# #1435 (FVQANK): the same line the CV lists under two codes that both
+# render is two roles, not one record written twice.
+
+_JOURNAL = "Annals of Example Surgical Oncology"
+
+
+def _placed(code, start, end=None, hierarchy=("SERVICE",)):
+    return {"text": _JOURNAL, "taxonomy_code": code, "hierarchy": list(hierarchy),
+            "element_idx_start": start, "element_idx_end": start if end is None else end}
+
+
+def test_reviewer_and_editorial_board_twins_are_both_kept():
+    entries = [
+        _placed("Q4D", 306, hierarchy=("REVIEWER FOR",)),
+        _placed("Q4C", 320, hierarchy=("EDITORIAL BOARDS",)),
+    ]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert [bool(e.get("is_duplicate")) for e in updated] == [False, False]
+    assert pairs == []
+
+
+def test_twins_under_two_codes_are_kept_whichever_comes_first():
+    entries = [_placed("Q4C", 320), _placed("Q4D", 306)]
+    assert _flags(entries) == [False, False]
+
+
+def test_twins_under_one_code_in_two_sections_are_still_duplicates():
+    entries = [
+        _placed("Q4C", 306, hierarchy=("EDITORIAL BOARDS",)),
+        _placed("Q4C", 320, hierarchy=("EDITORIAL ACTIVITIES",)),
+    ]
+    assert _flags(entries) == [False, True]
+
+
+@pytest.mark.parametrize("first, second", [
+    # one source element emitted twice upstream
+    (_placed("O", 168), _placed("P", 168)),
+    # a merged entry whose span covers the other's element
+    (_placed("O", 166, 170), _placed("P", 170)),
+    (_placed("O", 170), _placed("P", 166, 170)),
+])
+def test_twins_cut_from_overlapping_source_elements_are_still_duplicates(first, second):
+    assert _flags([first, second]) == [False, True]
+
+
+@pytest.mark.parametrize("missing", ["element_idx_start", "element_idx_end"])
+@pytest.mark.parametrize("side", [0, 1])
+def test_twins_without_an_element_span_are_still_duplicates(missing, side):
+    entries = [_placed("Q4D", 306), _placed("Q4C", 320)]
+    del entries[side][missing]
+    assert _flags(entries) == [False, True]
+
+
+@pytest.mark.parametrize("first_code, second_code", [("", "Q4C"), ("Q4D", ""), (None, "Q4C")])
+def test_twins_with_a_missing_code_are_still_duplicates(first_code, second_code):
+    assert _flags([_placed(first_code, 306), _placed(second_code, 320)]) == [False, True]
+
+
+@pytest.mark.parametrize("first_code, second_code, expected", [
+    ("T", "M2A", [True, False]),
+    ("M2A", "T", [False, True]),
+    ("T", "Q4C", [False, True]),
+    ("Q4C", "T", [False, True]),
+])
+def test_twins_with_an_appendix_copy_are_still_duplicates(first_code, second_code, expected):
+    assert _flags([_placed(first_code, 306), _placed(second_code, 320)]) == expected
+
+
 def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():
     # #651: stage 4's membership check and stage 3b's must be ONE list.
     from unified_pipeline.stage3b.io import canonical_taxonomy_codes, load_taxonomy
