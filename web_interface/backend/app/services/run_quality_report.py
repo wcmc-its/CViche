@@ -489,6 +489,13 @@ LINT_COPY = {
         "A line in this section of the source CV was set aside instead of being read as part "
         "of an entry, and it appears nowhere in the document.",
         "Check the flagged section against the source CV and add the text if it belongs."),
+    "stage2_span_overlap": LintCopy(
+        "The same lines read into two entries",
+        "Lines of the source CV were read into two entries, so they appear twice in the "
+        "document, often once in a section they do not belong to, and a date can pair with "
+        "the wrong record.",
+        "Delete the copy in the wrong section, and check the flagged entries' dates against "
+        "the source CV."),
     "record_boundary": LintCopy(
         "A line of one entry opens the next",
         "A labelled line that belongs to one entry, such as a trainee's current position, "

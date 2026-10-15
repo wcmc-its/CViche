@@ -86,6 +86,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_segmentation_collapse,
     lint_shattered_prose,
     lint_split_child_unsourced,
+    lint_stage2_span_overlap,
     lint_stage2_text_break,
     lint_stage2_unaccounted,
     lint_stage3b_fallback_ratio,
@@ -691,6 +692,85 @@ def test_run_doctor_wires_stage2_text_break_to_stage_2_stage_1a_and_the_docx(tmp
                  {"document_uid": _UID, **stage2})
     findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_text_break"]
     assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", [f"entry 22: {_RECORD_LINE}"])]
+
+
+# --- stage2_span_overlap (#1433) -----------------------------------------------
+
+
+def _span(start, end, hierarchy=("HONORS",), etype="paragraph", text="1993\tWho's Who"):
+    return {"text": text, "element_type": etype, "element_idx_start": start,
+            "element_idx_end": end, "hierarchy": list(hierarchy)}
+
+
+def test_stage2_span_overlap_reports_two_shared_lines_across_sections():
+    # ATUVAL 867/868: one record read into a committee section and into HONORS.
+    stage2 = {"entries": [_span(867, 869, hierarchy=("COMMITTEES",)), _span(868, 869)]}
+    findings = lint_stage2_span_overlap(stage2)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("stage2_span_overlap", "WARN")]
+    assert findings[0]["message"].startswith(
+        "entry 868: sections 'COMMITTEES' and 'HONORS': 1 stage-2 entry shares source lines")
+    assert findings[0]["evidence"] == [
+        "entry 868-869 shares 2 element(s) with entry 867-869: 1993\tWho's Who"]
+
+
+def test_stage2_span_overlap_quiet_on_one_shared_line():
+    # 863-867 and 867-869 share only line 867: under SPAN_OVERLAP_MIN_ELEMENTS.
+    assert lint_stage2_span_overlap({"entries": [_span(863, 867), _span(867, 869)]}) == []
+    assert lint_stage2_span_overlap({"entries": [_span(5, 5), _span(5, 5)]}) == []
+
+
+def test_stage2_span_overlap_reads_table_row_spans_by_row_number():
+    # web172 112.x: overlapping row ranges of one table.
+    rows = {"entries": [_span("112.0", "112.2", etype="table_row"),
+                        _span("112.1", "112.13", etype="table_row")]}
+    assert [f["message"].split(":")[0] for f in lint_stage2_span_overlap(rows)] == ["entry 112.1"]
+    # Rows 1-2 and 10-20: a float-read "112.10" would be row 1.
+    apart = {"entries": [_span("112.1", "112.2", etype="table_row"),
+                         _span("112.10", "112.20", etype="table_row")]}
+    assert lint_stage2_span_overlap(apart) == []
+
+
+@pytest.mark.parametrize("start, end", [("21.0", "22.7"), ("21.0", None), (21, None), ("21.x", "21.1")])
+def test_stage2_span_overlap_reads_nothing_from_unresolvable_bounds(start, end):
+    # Two tables' rows, a missing end, a non-row key: no span to compare.
+    stage2 = {"entries": [_span(start, end, etype="table_row"),
+                          _span("21.0", "21.1", etype="table_row"), _span(21, 22)]}
+    assert lint_stage2_span_overlap(stage2) == []
+
+
+def test_stage2_span_overlap_reads_only_record_entries():
+    breaks = {"entries": [_span(10, 14, etype="break"), _span(10, 14)]}
+    headers = {"entries": [_span(10, 14, etype="header"), _span(10, 14)]}
+    # A whole-table entry's paragraph span never meets its own row keys.
+    table = {"entries": [_span(17, 18, etype="table"), _span("17.0", "17.1", etype="table_row"),
+                         _span("18.0", "18.1", etype="table_row")]}
+    for stage2 in (breaks, headers, table, {"entries": None}, {}):
+        assert lint_stage2_span_overlap(stage2) == []
+    assert len(lint_stage2_span_overlap({"entries": [_span(17, 18, etype="table"), _span(17, 18)]})) == 1
+
+
+def test_stage2_span_overlap_one_finding_per_section_pair_quoting_at_most_three():
+    # ATUVAL 598/600/602: sliding windows, each naming the first entry it overlaps.
+    windows = [_span(598 + 2 * i, 606 + 2 * i, hierarchy=("SERVICE",)) for i in range(5)]
+    other = [_span(700, 703, hierarchy=("A",)), _span(701, 703, hierarchy=("B",))]
+    findings = lint_stage2_span_overlap({"entries": [*windows, *other]})
+    assert len(findings) == 2
+    assert findings[0]["message"].startswith(
+        "entry 600: section 'SERVICE': 4 stage-2 entries share source lines with an earlier entry")
+    assert [e.split(":")[0] for e in findings[0]["evidence"]] == [
+        "entry 600-608 shares 7 element(s) with entry 598-606",
+        "entry 602-610 shares 5 element(s) with entry 598-606",
+        "entry 604-612 shares 3 element(s) with entry 598-606"]
+    assert findings[1]["message"].startswith("entry 701: sections 'A' and 'B': 1 stage-2 entry shares")
+
+
+def test_run_doctor_wires_stage2_span_overlap_to_stage_2(tmp_path):
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_span_overlap"]
+    _write_stage(root, "stage_2_entry_extraction", f"{_UID}_cv_entries.json",
+                 {"document_uid": _UID, "entries": [_span(40, 42), _span(41, 43, hierarchy=("A",))]})
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_span_overlap"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [("WARN", "entry 41")]
 
 
 def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
@@ -5331,14 +5411,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (73), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (74), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 71
+    assert len(payload["findings"]) == 72
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

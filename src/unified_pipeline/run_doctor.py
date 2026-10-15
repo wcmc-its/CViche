@@ -476,6 +476,12 @@ Lints, ranked by the severity of the failure class they catch:
                           section; with the docx, only lines that render
                           nowhere. Reads stage 2; stage 1a and the docx when
                           present
+14at. stage2_span_overlap a stage-2 record entry that shares two or more
+                          source elements (paragraphs or table rows) with an
+                          entry before it, so the shared lines render twice,
+                          often under the wrong section (#1433; ATUVAL
+                          867-869, web172 112.x). WARN, one per pair of
+                          sections. Reads stage 2 only
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -686,6 +692,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_record_date_shift,
     lint_segmentation,
     lint_segmentation_collapse,
+    lint_stage2_span_overlap,
     lint_stage2_text_break,
     lint_stage2_unaccounted,
     lint_table_lost,
@@ -855,6 +862,7 @@ KNOWN_LINTS = (
     "record_date_shift",
     "header_consumed_record",
     "stage2_text_break",
+    "stage2_span_overlap",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1139,6 +1147,12 @@ LINT_PREVALENCE = {
     # measured 2026-10-12. Same mixed-corpus caveat as above; the old farm
     # runs carry far more text breaks than current ones.
     "stage2_text_break": 0.354,
+    # stage2_span_overlap (#1433; S2-SO in doctor/PRECISION.md): 19 of 278
+    # local stage-2 runs -- the 106 under src/unified_pipeline/outputs, the
+    # 2026-09-11 and 2026-09-17 _autopsy_artifacts batches (40 and 20) and
+    # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
+    # caveat as above.
+    "stage2_span_overlap": 0.068,
 }
 
 
@@ -1745,6 +1759,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks",)),
     LintSpec("stage2_text_break", lint_stage2_text_break, ("stage_2",),
              optional=("stage_1a", "blocks")),
+    LintSpec("stage2_span_overlap", lint_stage2_span_overlap, ("stage_2",)),
 )
 
 #: The views read from the stage-6 docx.
