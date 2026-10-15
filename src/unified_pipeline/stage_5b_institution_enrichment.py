@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # name that used to live in this module is re-exported below so existing
 # imports keep working -- the surface is pinned by
 # tests/test_stage5b_import_surface.py, per the stage 6 split precedent (#500).
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.stage5b import cache
 from unified_pipeline.stage5b.cache import (  # noqa: F401  (re-exports)
     CACHE_FILE,
@@ -307,7 +308,7 @@ def run_stage5b(input_path: str, output_path: str | None = None, verbose: bool =
                 if cv_owner_location and cv_owner_location.get('inference_success') and verbose:
                     logger.info("Loaded cv_owner_location from Stage 4 output")
             except (OSError, json.JSONDecodeError) as e:
-                logger.warning("Could not load Stage 4 context from %s: %s", candidates[0], e)
+                logger.warning("Could not load Stage 4 context from %s: %s", candidates[0], redacted_error_label(e))
 
     if verbose:
         if cv_owner_location and cv_owner_location.get('inference_success'):

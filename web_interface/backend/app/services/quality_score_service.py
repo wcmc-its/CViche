@@ -34,6 +34,7 @@ _SRC = Path(__file__).resolve().parents[4] / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.quality_score import DOCTOR_REPORT_SUFFIX  # noqa: E402
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX  # noqa: E402
 
@@ -170,7 +171,8 @@ def compute_and_cache_score(run_id: str, doctor_outcome: str | None = None) -> d
         storage.put_file(run_id, CACHE_KEY, json.dumps(cached).encode("utf-8"))
         return result
     except Exception as e:  # pragma: no cover - defensive
-        logger.warning("Quality score compute failed for run %s: %s", run_id, e)
+        logger.warning("Quality score compute failed for run %s: %s", run_id, redacted_error_label(e))
+        logger.debug("Quality score compute failed for run %s: %s", run_id, e)
         return None
 
 

@@ -19,6 +19,7 @@ from unified_pipeline.core.docx_structure_extractor import extract_owner_side_ch
 from unified_pipeline.core.run_id import is_run_id
 from unified_pipeline.llm.retry import RETRYABLE_ERRORS, LLMOutageError
 from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.log_redaction import redacted_error_label
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,8 @@ def _run_owner_name_llm(
     # hiccup, silently falling back to a fabricated surname instead of
     # surfacing the actual defect.
     except (json.JSONDecodeError, KeyError, ValidationError, *RETRYABLE_ERRORS) as e:
-        logger.warning("LLM name extraction failed: %s", e)
+        logger.warning("LLM name extraction failed: %s", redacted_error_label(e))
+        logger.debug("LLM name extraction failed: %s", e)
         return None
 
     return {
@@ -187,7 +189,8 @@ def _owner_side_channel_content_lines(document_uid: str, docx_path: str) -> tupl
     try:
         channel = extract_owner_side_channel(docx_path)
     except (PackageNotFoundError, BadZipFile, OSError) as exc:
-        logger.warning("%s: owner side channel unreadable: %s", document_uid, exc)
+        logger.warning("%s: owner side channel unreadable: %s", document_uid, redacted_error_label(exc))
+        logger.debug("%s: owner side channel unreadable: %s", document_uid, exc)
         return [], ''
 
     if channel['header_lines']:
@@ -230,7 +233,8 @@ def header_footer_contact_entry(document_uid: str, docx_path: str | None) -> dic
     try:
         channel = extract_owner_side_channel(docx_path)
     except (PackageNotFoundError, BadZipFile, OSError) as exc:
-        logger.warning("%s: header/footer unreadable for owner contact: %s", document_uid, exc)
+        logger.warning("%s: header/footer unreadable for owner contact: %s", document_uid, redacted_error_label(exc))
+        logger.debug("%s: header/footer unreadable for owner contact: %s", document_uid, exc)
         return None
     # A first-page and a default header often repeat the same letterhead.
     lines = list(dict.fromkeys(channel['header_lines'] + channel['footer_lines']))
@@ -710,10 +714,12 @@ Return ONLY valid JSON, no explanation."""
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
         except json.JSONDecodeError as e:
-            logger.warning("Could not parse location inference response: %s", e)
+            logger.warning("Could not parse location inference response: %s", redacted_error_label(e))
+            logger.debug("Could not parse location inference response: %s", e)
             return False
         except Exception as e:
-            logger.warning("Location inference failed: %s", e)
+            logger.warning("Location inference failed: %s", redacted_error_label(e))
+            logger.debug("Location inference failed: %s", e)
             return False
 
         # The prompt above instructs a specific JSON shape but nothing enforces
@@ -723,7 +729,8 @@ Return ONLY valid JSON, no explanation."""
         try:
             validated = _LocationInferenceResponse.model_validate(parsed)
         except ValidationError as e:
-            logger.warning("Location inference response failed shape validation: %s", e)
+            logger.warning("Location inference response failed shape validation: %s", redacted_error_label(e))
+            logger.debug("Location inference response failed shape validation: %s", e)
             return False
 
         result['tokens'] = result.get('tokens', 0) + llm_result["total_tokens"]

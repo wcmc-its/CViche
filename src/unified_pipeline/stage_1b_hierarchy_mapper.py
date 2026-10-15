@@ -98,13 +98,23 @@ def normalize_text(text: str) -> str:
     return " ".join(text.lower().strip().split())
 
 
-# Characters a heading paragraph may open with before the heading itself: a
-# rule of asterisks or underscores typed on the same line ("***** EDUCATION:").
-# The run counted toward the strict-mode length cap, so the heading was never
-# placed (#1252, EBYSBC class E17). normalize_text already deletes '-'; it is
-# listed so the set reads as the separators a CV uses, not as what survives
-# normalization.
-_LEADING_SEPARATOR_CHARS = "*-_= "
+# Characters a heading paragraph may open or close with around the heading
+# itself: a rule of asterisks or underscores typed on the same line
+# ("***** EDUCATION:", "MEMBERSHIPS IN ... ORGANIZATIONS______"). A leading run
+# counted toward the strict-mode length cap, so the heading was never placed
+# (#1252, EBYSBC class E17). A trailing run kept the line from equalling the
+# header, and '_' is a word character, so the header's closing \b never
+# matched inside it either (#1848, BIITRL). normalize_text already deletes
+# '-'; it is listed so the set reads as the separators a CV uses, not as what
+# survives normalization.
+_SEPARATOR_CHARS = "*-_= "
+
+
+def _strip_separator_rules(line: str) -> str:
+    """A normalized line without the separator rules typed before or after
+    its text (#1252, #1848)."""
+    return line.strip(_SEPARATOR_CHARS)
+
 
 # A run-in heading shares its line with the section's first record, set apart
 # by two or more blanks in a row ("EDUCATION<tab><tab>Pharm.D., ..."; the
@@ -137,7 +147,7 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     """
     import re
 
-    para_text = para_text.lstrip(_LEADING_SEPARATOR_CHARS)
+    para_text = _strip_separator_rules(para_text)
 
     # An empty paragraph is a substring of every string, so the "contained"
     # branch below would otherwise match it against ANY header (#851). Every
@@ -146,8 +156,9 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     if not para_text:
         return False
 
-    # Exact match - always accept
-    if para_text == expected_header:
+    # Exact match - always accept. The header loses its separator rules too,
+    # so a 1a header typed "Grants__" still equals its own line (#1848).
+    if para_text == _strip_separator_rules(expected_header):
         return True
 
     # The paragraph is contained in the expected header (header might be longer)
@@ -186,7 +197,7 @@ def _is_run_in_line(expected_header: str, line_text: str) -> bool:
     """True when the line is the header, a gap of two or more blanks, then
     text the strict match finds too long for a heading: the section's first
     record (#1252). A line the strict match already accepts is not one."""
-    head = _RUN_IN_GAP.split(line_text.lstrip(_LEADING_SEPARATOR_CHARS))[0]
+    head = _RUN_IN_GAP.split(line_text.lstrip(_SEPARATOR_CHARS))[0]
     return (
         normalize_text(head) == expected_header
         and not is_header_match(expected_header, normalize_text(line_text), strict=True)
@@ -645,7 +656,9 @@ def _parent_range_end(
     that follows the parent in the hierarchy. A follower with the same text as
     the parent or one of its descendants is no stop: that line may be the
     descendant's own. With no such line the range runs to the end of the
-    document, as before (#916).
+    document, as before (#916). A line with a trailing rule
+    ("MEMBERSHIPS______") also stops at its follower, unless the line as typed
+    is the parent's or a descendant's own text (#1848).
     """
     stops = followers - own_texts
     if not stops:
@@ -654,8 +667,8 @@ def _parent_range_end(
         elem = elements[i]
         if elem.get("type") not in _HEADER_LINE_TYPES:
             continue
-        line = normalize_text(elem.get("text", "")).lstrip(_LEADING_SEPARATOR_CHARS)
-        if line in stops:
+        line = normalize_text(elem.get("text", "")).lstrip(_SEPARATOR_CHARS)
+        if line in stops or (line not in own_texts and line.rstrip(_SEPARATOR_CHARS) in stops):
             return i
     return len(elements)
 

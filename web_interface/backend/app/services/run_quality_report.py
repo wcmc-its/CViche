@@ -485,6 +485,13 @@ LINT_COPY = {
         "or details for them, or one item is shown twice: once on its own and again inside "
         "another row.",
         "Add the date or detail that tells each flagged row apart, or delete the repeated item."),
+    "session_title_missing": LintCopy(
+        "Talk or session without its title",
+        "A session the CV owner chaired or moderated is shown without the title the CV gives "
+        "it in quotes, or an invited talk's Title column repeats the whole line from the CV, "
+        "date included, because no title was found for it.",
+        "Add the session or talk title from the source CV, and remove the date and place "
+        "from the Title column."),
     "split_child_unsourced": LintCopy(
         "A split entry shows a place or dates from elsewhere",
         "A line of the CV that was split into several records shows, on one of them, an "

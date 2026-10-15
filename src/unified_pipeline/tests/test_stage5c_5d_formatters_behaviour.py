@@ -1789,8 +1789,8 @@ def test_5d_a_swallowed_batch_logs_the_exception_from_a_pool_thread(tmp_path, mo
     # inside _format_batch, which is always called with verbose=False --
     # including under workers=4, where it can land on a pool thread. A
     # print there is forbidden, but the failure must not vanish: this pins
-    # that logger.exception still carries the exception type and message
-    # into the run log, the way the pre-#881 print + traceback did.
+    # that the run log still names the exception type at ERROR, while its
+    # message and traceback go to DEBUG only (#639, CODING_STANDARDS §4.7).
     def flaky(**kwargs):
         prompt = kwargs["messages"][0]["content"]
         idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
@@ -1802,13 +1802,16 @@ def test_5d_a_swallowed_batch_logs_the_exception_from_a_pool_thread(tmp_path, mo
     input_path = _write_json(tmp_path / "in.json", input_data)
     monkeypatch.setattr(s5d, "call_llm", flaky)
 
-    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_5d_citation_formatter"):
+    with caplog.at_level(logging.DEBUG, logger="unified_pipeline.stage_5d_citation_formatter"):
         s5d.run_stage_5d(
             input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4
         )
 
-    messages = [record.getMessage() for record in caplog.records]
-    assert any("RuntimeError" in m and "simulated throttle" in m for m in messages), messages
+    errors = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(r.getMessage() == "LLM formatting failed: RuntimeError" for r in errors), errors
+    assert not any("simulated throttle" in r.getMessage() or r.exc_info for r in errors), errors
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG and r.exc_info]
+    assert any("simulated throttle" in str(r.exc_info[1]) for r in debug), debug
 
 
 def test_5d_a_malformed_llm_response_logs_the_parse_warning_from_a_pool_thread(tmp_path, monkeypatch, caplog):

@@ -197,6 +197,8 @@ REVIEW_FLAGS = {
                                  "reads \"Unknown\": check it against your CV."),
     "cross_entry_value": ("A date, amount, effort, role or name here may come from a different "
                           "entry of your CV: check this entry against the CV."),
+    "session_title_missing": ("The title of this talk or session is missing, or the whole line "
+                              "from your CV is shown in its place: add the title from your CV."),
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "
                     "your CV gives is missing, or one shown here is not in this grant's entry. "
                     "Check it against the CV."),
