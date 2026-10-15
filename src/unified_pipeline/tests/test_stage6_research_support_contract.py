@@ -2297,6 +2297,14 @@ def test_a_goal_stage4_put_in_notes_renders_once_under_its_own_label():
     ('map valley', 'Aim 1: map valley corridors', True),
     # ...one character longer, it is a copy.
     ('map valleys', 'Aim 1: map valleys and corridors', False),
+    # The source's own goals label kept whole in the note, typographic
+    # apostrophe and all, is still a copy (YDSVDB, #1879)...
+    ('The major goals of this project are: Map the valley’s corridors', "Map the valley's corridors", False),
+    # A wrapped source line the goals parse kept as a tab is still a copy.
+    ('Oversaw funding and installation at each site', 'Oversaw\tfunding and installation at each site', False),
+    # ...but not when the note says more than the goals after its label.
+    ('The major goals of this project are: Map the corridors; aim 2 is to survey', 'Map the corridors',
+     True),
 ])
 def test_a_note_is_dropped_only_when_the_rendered_goals_contain_it(notes, goals, notes_kept):
     fields = {'title': 'Example Corridor Study', 'notes': notes, 'major_goals': goals,
