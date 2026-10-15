@@ -5155,14 +5155,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (73), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (74), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 71
+    assert len(payload["findings"]) == 72
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -8424,3 +8424,28 @@ def test_glyph_field_reports_the_rendered_cell_over_the_stage_4_field():
 
 def test_glyph_field_is_silent_on_a_stage_4_value():
     assert lint_glyph_field(_glyph_table(), _glyph_stage4("Fictional Society")) == []
+
+
+def test_run_doctor_cuts_cross_entry_value_calls_in_stage_3b_order(tmp_path):
+    """#1575: run_doctor hands cross_entry_value the run's stage 3b, whose
+    order stage 4 cut its batches in. Stage 4 sorts the table entry last, so
+    without stage 3b the two grants fall in different batches."""
+    root = tmp_path / "outputs"
+    borrowed = {"element_idx_start": "table_1", "element_idx_end": "table_1",
+                "taxonomy_code": "M2B", "text": "Example Grant (MPI: Owner) 04/21/17-03/31/23",
+                "extracted_fields": {"start_date": "1997-07-01"}}
+    lender = {"element_idx_start": 1, "element_idx_end": 1, "taxonomy_code": "M2B",
+              "text": "Other Grant (PI: Owner) 07/01/1997-06/30/1999", "extracted_fields": {}}
+    fillers = [{"element_idx_start": i, "element_idx_end": i, "taxonomy_code": "Q2",
+                "text": f"Example committee {i}, 2001", "extracted_fields": {}}
+               for i in range(2, 11)]
+    _write_stage(root, "stage_3b_classified_entries", f"{_UID}_cv_classified.json",
+                 {"document_uid": _UID, "entries": [borrowed, lender, *fillers]})
+    _write_stage(root, "stage_4_field_extraction", f"{_UID}_cv_fields.json",
+                 {"document_uid": _UID, "cv_owner": _OWNER,
+                  "entries": [lender, *fillers, borrowed]})
+
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "cross_entry_value"]
+
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
+        ("WARN", "entry table_1 (M2B)")]

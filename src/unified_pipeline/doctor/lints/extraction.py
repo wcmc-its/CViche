@@ -11,7 +11,8 @@ one, grant lists cut into records at the wrong line, grants filed under a
 funding heading their own record contradicts, separate years rendered as
 one range over them, stage-3b fragments whose text no record holds, and
 grant numbers and amounts a grant's table shows that its text lacks, or
-that its text states and the document lacks.
+that its text states and the document lacks, and values stage 4 gave one
+entry from another entry of the same call.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -34,6 +35,7 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import NamedTuple
 
+from unified_pipeline.core.batch_pool import make_batches
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
@@ -70,10 +72,22 @@ from unified_pipeline.stage4.coercion import (
     IDENTIFIER_TAXONOMY_CODES,
     find_single_closed_range,
 )
+from unified_pipeline.stage4.grounding import (
+    YEAR_FIELDS,
+    TextFacts,
+    entry_holding_token,
+    text_facts,
+    tokens_not_in_own_text,
+)
+from unified_pipeline.stage4.owner_name import (
+    OWNER_CONTACT_SOURCE_HEADER_FOOTER,
+    OWNER_CONTACT_SOURCE_KEY,
+)
 from unified_pipeline.stage4.schemas import (
     FIELD_SCHEMA_CONFIG_PATH,
     FIELD_SCHEMAS,
     NUMBERED_FIELD_RE,
+    STAGE4_BATCH_SIZE,
     STAGE4_RECORDS_KEY,
 )
 from unified_pipeline.stage6.dedup import (
@@ -4611,4 +4625,230 @@ def lint_footer_in_record(stage4: dict) -> list[dict]:
             f"entry {entry.element_idx} ({entry.code}): carries a running page footer "
             f"that {FOOTER_MIN_ENTRIES} or more entries share; {outcome}",
             [" | ".join(parts[i] for i in footer)[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- cross_entry_value ---------------------------------------------------------
+#
+# Stage 4 sends each batch's entries of one taxonomy code to the model in one
+# call, and the reply can give one entry another entry's values (#1575: UVZNIC
+# 592, an active R01, came back with entry 603's dates, amount, effort and
+# role; 559 held 573's mentee as a second record). Since #1609 stage 4 removes
+# a borrowed date, amount, percent or grant number itself
+# (`stage4/grounding.py`); this lint asks the same question of a stored run,
+# with the same token checks, and adds the two kinds stage 4 leaves alone: the
+# owner's role on a grant and a person's name. A value is borrowed when its own
+# entry's text lacks it and another entry of the same call states it.
+# Report-only.
+
+# ponytail: fixed field lists, as grounding's are (the schemas carry no field
+# types). A new person or role field is unjudged until it is named here; the
+# lint then only misses a borrowed value, never reports one.
+#: Fields holding a person's name. Authors and editors are not judged: a
+#: publication call repeats the same co-authors from entry to entry.
+CROSS_ENTRY_PERSON_FIELDS = frozenset({
+    "advisor", "co_investigators", "investigator", "investigators", "mentee_name",
+    "mentor", "mentor_name", "pi_name", "trainee_name",
+})
+#: Fields holding the owner's role on a grant (UVZNIC 592: "PI" for "MPI").
+#: `role` is not judged: a committee "Member" is a role word the model
+#: supplies for an entry that names none, and its neighbours state it.
+CROSS_ENTRY_ROLE_FIELDS = frozenset({"pi_role"})
+#: The shortest name word judged, and only in Title case, so initials and
+#: degrees ("MD", "PhD", "MSW") never are.
+CROSS_ENTRY_NAME_WORD_MIN_CHARS = 4
+
+#: The most words of a role judged as one: "Principal Investigator", "Co -
+#: PI", "Site Principal Investigator".
+CROSS_ENTRY_ROLE_MAX_WORDS = 4
+
+_ROLE_WORD_RE = re.compile(r"[^\W_]+")
+
+
+class _Borrowed(NamedTuple):
+    """One value of an entry that another entry of its call states."""
+    field: str
+    value: str
+    source_idx: object
+
+
+def _entry_key(raw: Mapping) -> tuple[str, str, str]:
+    return (str(raw.get("element_idx_start")), str(raw.get("element_idx_end")),
+            str(raw.get("text") or ""))
+
+
+def _extraction_order(stage4: dict, stage3b: dict | None) -> list[_FieldsEntry]:
+    """Stage 4's extracted entries in the order its batches cut them: stage
+    3b's order, less what stage 4 did not batch (fragments and duplicates,
+    which it never received, entries too short to extract, and the
+    header/footer contact entry). Stage 4's own order sorts a table's string
+    index last, so it is the fallback only, used without stage 3b or when
+    stage 3b does not hold every extracted entry."""
+    extracted = {
+        _entry_key(raw): entry
+        for raw, entry in zip(stage4.get("entries", []), _fields_entries(stage4), strict=True)
+        if not raw.get("extraction_skipped")
+        and raw.get(OWNER_CONTACT_SOURCE_KEY) != OWNER_CONTACT_SOURCE_HEADER_FOOTER}
+    if stage3b is None:
+        return list(extracted.values())
+    ordered = [extracted[key] for key in dict.fromkeys(map(_entry_key, stage3b.get("entries", [])))
+               if key in extracted]
+    return ordered if len(ordered) == len(extracted) else list(extracted.values())
+
+
+def _call_groups(stage4: dict, stage3b: dict | None) -> list[list[_FieldsEntry]]:
+    """The entries stage 4 extracted in one call, two or more: each batch of
+    `STAGE4_BATCH_SIZE`, split by taxonomy code (`extract_fields_batch`)."""
+    groups = []
+    for batch in make_batches(_extraction_order(stage4, stage3b), STAGE4_BATCH_SIZE):
+        by_code: dict[str, list[_FieldsEntry]] = {}
+        for entry in batch:
+            by_code.setdefault(entry.code, []).append(entry)
+        groups.extend(group for group in by_code.values() if len(group) > 1)
+    return groups
+
+
+def _role_words(text: str) -> list[str]:
+    return _ROLE_WORD_RE.findall(text.upper())
+
+
+def _role_forms(text: str) -> frozenset[str]:
+    """Every way `text` can state a role of up to CROSS_ENTRY_ROLE_MAX_WORDS
+    words: the words run together, so "Co - PI", "Co-PI" and "P.I." read as
+    "COPI" and "PI", and their initials, so "Principal Investigator" states
+    "PI". A word is whole: "MPI" does not state "PI" (UVZNIC 592)."""
+    words = _role_words(text)
+    forms = set()
+    for start in range(len(words)):
+        for run in (words[start:start + n] for n in range(1, CROSS_ENTRY_ROLE_MAX_WORDS + 1)):
+            forms.add("".join(run))
+            if len(run) > 1:
+                forms.add("".join(word[0] for word in run))
+    return frozenset(forms)
+
+
+def _states_role(forms: frozenset[str], role: str, *, generous: bool) -> bool:
+    """Whether a text with role `forms` states `role` or its plural
+    ("Investigators - <name>, <name>" states "Investigator"). Read
+    `generous`ly, as an entry's own text is, initials count both ways:
+    "Principal Investigator" states "PI", and "PI" states "Principal
+    Investigator". Another entry's text is read strictly, as grounding
+    reads it: a role's initials are too short to be that entry's by chance
+    ("Co-Investigator" is "CI")."""
+    words = _role_words(role)
+    joined = "".join(words)
+    if joined in forms or f"{joined}S" in forms:
+        return True
+    return generous and len(words) > 1 and "".join(word[0] for word in words) in forms
+
+
+def _person_words(text: str) -> frozenset[str]:
+    return frozenset(_NAME_WORD_RE.findall(norm(text)))
+
+
+def _judged_person_words(value: str, owner_words: frozenset[str]) -> list[str]:
+    """The Title-case words of a name value, long enough to judge
+    (CROSS_ENTRY_NAME_WORD_MIN_CHARS), that are not the owner's."""
+    return [norm(word) for word in _NAME_WORD_RE.findall(value)
+            if len(word) >= CROSS_ENTRY_NAME_WORD_MIN_CHARS and word.istitle()
+            and norm(word) not in owner_words]
+
+
+def _states_a_year(entry: _FieldsEntry, own: TextFacts) -> bool:
+    """Whether the entry's text states any year: four digits, or two after a
+    slash, an apostrophe or "FY" ("04/21/17", "'96"). One that states none
+    ("April 29", "June 25-27,") is given a year from its context, not
+    another entry's; year_not_in_source reports that."""
+    return bool(own.years) or _TWO_DIGIT_YEAR_TOKEN_RE.search(entry.text) is not None
+
+
+def _borrowed_source(field: str, value: str, entry: _FieldsEntry,
+                     others: list[_FieldsEntry], facts: list[TextFacts],
+                     owner_words: frozenset[str]) -> _FieldsEntry | None:
+    """The other entry of the call (`others`, `facts[1:]`) that states a part
+    of `value` that `entry` (`facts[0]`) does not, or None. A person is
+    borrowed only when the entry's text names none of the value's judged
+    words and the other entry's names all of them: "P.I. (Fouad, M)" given
+    "Mona Fouad" is the entry's own person written out. A year the
+    entry's group states (#1435) is its own. A year is judged only on an
+    entry that states one (`_states_a_year`), and a role only on an entry
+    that labels one (`_ANY_ROLE_WORD_RE`): a grant that names no role is
+    given one by the model, not by another entry ("Horodyski MB. <title>")."""
+    if field in CROSS_ENTRY_ROLE_FIELDS:
+        if (not _role_words(value) or _ANY_ROLE_WORD_RE.search(norm(entry.text)) is None
+                or _states_role(_role_forms(entry.text), value, generous=True)):
+            return None
+        return next((other for other in others
+                     if _states_role(_role_forms(other.text), value, generous=False)), None)
+    if field in CROSS_ENTRY_PERSON_FIELDS:
+        judged = _judged_person_words(value, owner_words)
+        if not judged or set(judged) & _person_words(entry.text):
+            return None
+        return next((other for other in others if set(judged) <= _person_words(other.text)), None)
+    missing, _ = tokens_not_in_own_text(field, value, facts[0])
+    for token in missing:
+        if field in YEAR_FIELDS and (token == entry.group_year
+                                     or not _states_a_year(entry, facts[0])):
+            continue
+        holder = entry_holding_token(field, token, facts[1:])
+        if holder is not None:
+            return others[holder]
+    return None
+
+
+def _entry_records(fields: Mapping) -> list[Mapping]:
+    """The entry's scalar fields, then each of its `stage4_records`."""
+    records = fields.get(STAGE4_RECORDS_KEY)
+    if not isinstance(records, list):
+        return [fields]
+    return [fields, *(record for record in records if isinstance(record, Mapping))]
+
+
+def _borrowed_values(entry: _FieldsEntry, others: list[_FieldsEntry],
+                     owner_words: frozenset[str]) -> list[_Borrowed]:
+    """Each value of `entry`'s records, its scalar fields and each of its
+    `stage4_records`, that another entry of the call states and it does not.
+    A list value is read as its text ("['Laura Sample']")."""
+    facts = [text_facts(item.text) for item in (entry, *others)]
+    found: dict[tuple[str, str], _Borrowed] = {}
+    for record in _entry_records(entry.fields):
+        for field, value in record.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text or (field, text) in found:
+                continue
+            source = _borrowed_source(field, text, entry, others, facts, owner_words)
+            if source is not None:
+                found[field, text] = _Borrowed(field, text, source.element_idx)
+    return list(found.values())
+
+
+def _owner_person_words(stage4: dict) -> frozenset[str]:
+    owner = stage4.get("cv_owner")
+    name = owner.get("full_name") if isinstance(owner, Mapping) else None
+    return _person_words(name) if isinstance(name, str) else frozenset()
+
+
+def lint_cross_entry_value(stage4: dict, stage3b: dict | None = None) -> list[dict]:
+    """A stage-4 value -- a date's year, an amount, an effort, a grant
+    number, the owner's grant role or a person's name -- that its own entry's
+    text lacks and another entry of the same stage-4 call states (#1575).
+    WARN, one finding per entry, naming each value and the entry it is from.
+    Stage 3b, when present, gives the order stage 4 cut its batches in."""
+    owner_words = _owner_person_words(stage4)
+    findings = []
+    for group in _call_groups(stage4, stage3b):
+        for entry in group:
+            others = [other for other in group if other is not entry]
+            borrowed = _borrowed_values(entry, others, owner_words)
+            if not borrowed:
+                continue
+            named = "; ".join(f"{item.field}={item.value!r} (in {item.source_idx}'s text)"
+                              for item in borrowed)
+            findings.append(_finding(
+                "cross_entry_value", "WARN",
+                f"entry {entry.element_idx} ({entry.code}): {named} -- its own text does not "
+                f"state it; another entry stage 4 extracted in the same call does",
+                [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings

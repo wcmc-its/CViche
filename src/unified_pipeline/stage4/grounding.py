@@ -13,10 +13,15 @@ value that its own entry does not contain but another entry of the group does
 is borrowed. Names, roles and titles are not checked: a role word or an
 organisation legitimately repeats across entries.
 
+`text_facts`, `tokens_not_in_own_text` and `entry_holding_token` are the
+same checks, field by field, for the doctor's `cross_entry_value` lint, which
+reads the values a stored run kept (one definition, CODING_STANDARDS §1.5).
+
 Pure: takes data, returns data, imports no I/O (CODING_STANDARDS §1.2).
 """
 
 import re
+from decimal import Decimal
 from typing import Any, NamedTuple
 
 # ponytail: fixed field lists, not the schemas' field types (they have none).
@@ -40,22 +45,31 @@ IDENTIFIER_FIELDS = frozenset({"grant_number"})
 # to occur by chance inside another entry's text to call it borrowed.
 _MIN_IDENTIFIER_CHARS = 5
 
+# The fewest digits a run needs to be read as a mistyped year ("3019",
+# "20011"). A shorter run ("May 201") is a cut-off year, which could be any
+# year of its decade, so it is not read as the one the reply chose.
+_MISTYPED_YEAR_MIN_DIGITS = 4
+
 _YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d\d)(?!\d)")
 _DIGIT_RUN_RE = re.compile(r"\d+")
 # "2004-6", "2017-18": a range whose end year is written short.
 _SHORT_RANGE_RE = re.compile(r"(?<!\d)((?:19|20)\d\d)\s*[-\u2013/]\s*(\d{1,2})(?!\d)")
 _NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+# A fraction written for an effort, "0.100 FTE" or ".08FTE", which the prompt
+# asks for as a percent ("10%", "8%").
+_FRACTION_RE = re.compile(r"(?<![\d.])0?\.(\d+)")
 _NOT_ALNUM_RE = re.compile(r"[^0-9A-Z]")
 
 
-class _TextFacts(NamedTuple):
+class TextFacts(NamedTuple):
     """The checkable tokens of one entry's text."""
 
     years: frozenset[str]
     digit_runs: frozenset[str]
     numbers: frozenset[str]
     percents: frozenset[str]
+    fractions_as_percents: frozenset[str]
     alnum: str
 
 
@@ -82,12 +96,18 @@ def _short_range_ends(text: str) -> set[str]:
     return {start[:4 - len(end)] + end for start, end in _SHORT_RANGE_RE.findall(text)}
 
 
-def _text_facts(text: str) -> _TextFacts:
-    return _TextFacts(
+def _fractions_as_percents(text: str) -> frozenset[str]:
+    return frozenset(format((Decimal(f"0.{digits}") * 100).normalize(), "f")
+                     for digits in _FRACTION_RE.findall(text))
+
+
+def text_facts(text: str) -> TextFacts:
+    return TextFacts(
         years=frozenset(_YEAR_RE.findall(text)) | _short_range_ends(text),
         digit_runs=frozenset(_DIGIT_RUN_RE.findall(text)),
         numbers=_number_tokens(text),
         percents=frozenset(_PERCENT_RE.findall(text)),
+        fractions_as_percents=_fractions_as_percents(text),
         alnum=_NOT_ALNUM_RE.sub("", text.upper()),
     )
 
@@ -107,28 +127,44 @@ def _value_tokens(field: str, value: object) -> list[str]:
     return []
 
 
-def _year_in_own_text(year: str, own: _TextFacts) -> bool:
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Whether one inserted, deleted or changed character turns `a` into `b`."""
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
+    short, long_ = sorted((a, b), key=len)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def _year_in_own_text(year: str, own: TextFacts) -> bool:
     """Read generously, so a year the entry does state is never called
     borrowed: a short range end ("2004-6"), two digits ("04/21/17",
-    "3-30-00"), a mistyped first digit ("l988" reads as the run "988"), or a
-    year run into the digits beside it ("172:7512022", "202526;8(4)")."""
+    "3-30-00"), a mistyped first digit ("l988" reads as the run "988"), a
+    year run into the digits beside it ("172:7512022", "202526;8(4)"), or a
+    mistyped year one keystroke from it that is no year itself ("2009-20011",
+    "3/31/3019", "1191" for 1991; a real year such as the "2006" of
+    "2003-2006" never stands for "2004")."""
     return (year in own.years
             or year[2:] in own.digit_runs
             or year[1:] in own.digit_runs
-            or any(year in run for run in own.digit_runs))
+            or any(year in run for run in own.digit_runs)
+            or any(_one_edit_apart(year, run) for run in own.digit_runs
+                   if len(run) >= _MISTYPED_YEAR_MIN_DIGITS and not _YEAR_RE.fullmatch(run)))
 
 
-def _in_own_text(field: str, token: str, own: _TextFacts) -> bool:
+def _in_own_text(field: str, token: str, own: TextFacts) -> bool:
     """Whether the entry's own text holds `token`, read generously (see
-    `_year_in_own_text`); an amount or percent anywhere counts."""
+    `_year_in_own_text`); an amount or percent anywhere counts, and a
+    percent the text writes as a fraction ("0.100 FTE" for "10%")."""
     if field in YEAR_FIELDS:
         return _year_in_own_text(token, own)
     if field in IDENTIFIER_FIELDS:
         return token in own.alnum
+    if field in PERCENT_FIELDS and token in own.fractions_as_percents:
+        return True
     return token in own.numbers
 
 
-def _in_other_text(field: str, token: str, other: _TextFacts) -> bool:
+def _in_other_text(field: str, token: str, other: TextFacts) -> bool:
     """Whether another entry's text holds `token`, read strictly: a four-digit
     year, an amount, a number written as a percent, a whole grant number."""
     if field in YEAR_FIELDS:
@@ -140,30 +176,45 @@ def _in_other_text(field: str, token: str, other: _TextFacts) -> bool:
     return token in other.numbers
 
 
+def tokens_not_in_own_text(field: str, value: object, own: TextFacts) -> tuple[list[str], bool]:
+    """`(tokens of value its own entry's text lacks, whether any token is
+    its own)`; both empty/False for a field grounding does not check."""
+    missing = []
+    any_own = False
+    for token in _value_tokens(field, value):
+        if _in_own_text(field, token, own):
+            any_own = True
+        else:
+            missing.append(token)
+    return missing, any_own
+
+
+def entry_holding_token(field: str, token: str, others: list[TextFacts]) -> int | None:
+    """The position in `others` of the first entry whose text states `token`
+    (read strictly, `_in_other_text`), or None."""
+    return next((i for i, other in enumerate(others) if _in_other_text(field, token, other)), None)
+
+
 class _ItemCheck(NamedTuple):
     borrowed: list[str]
     any_own_token: bool
 
 
-def _check_item(item: dict[str, Any], own: _TextFacts,
-                others: list[_TextFacts]) -> _ItemCheck:
+def _check_item(item: dict[str, Any], own: TextFacts,
+                others: list[TextFacts]) -> _ItemCheck:
     """Which of `item`'s fields hold a token absent from its own entry's text
     but present in another entry's, and whether any checked token is its own."""
     borrowed = []
     any_own_token = False
     for field, value in item.items():
-        missing = []
-        for token in _value_tokens(field, value):
-            if _in_own_text(field, token, own):
-                any_own_token = True
-            else:
-                missing.append(token)
-        if any(_in_other_text(field, token, other) for token in missing for other in others):
+        missing, any_own = tokens_not_in_own_text(field, value, own)
+        any_own_token = any_own_token or any_own
+        if any(entry_holding_token(field, token, others) is not None for token in missing):
             borrowed.append(field)
     return _ItemCheck(borrowed, any_own_token)
 
 
-def _ground_entry(items: list[dict[str, Any]], own: _TextFacts, others: list[_TextFacts],
+def _ground_entry(items: list[dict[str, Any]], own: TextFacts, others: list[TextFacts],
                   ) -> tuple[list[dict[str, Any]], list[str], int]:
     """`(items, nulled fields, records dropped)` for one entry.
 
@@ -191,7 +242,7 @@ def ground_group(entry_texts: list[str], items_by_entry: dict[int, list[dict[str
     of the same group (see `_ground_entry`). `entry_texts[i]` is the text the
     prompt showed for entry i. An index outside the group is passed through
     untouched: `_extraction_map` owns those (#1243)."""
-    facts = [_text_facts(text) for text in entry_texts]
+    facts = [text_facts(text) for text in entry_texts]
     items: dict[int, list[dict[str, Any]]] = {}
     borrowed_fields: dict[int, list[str]] = {}
     dropped_records: dict[int, int] = {}
