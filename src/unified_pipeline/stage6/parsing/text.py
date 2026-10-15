@@ -894,12 +894,13 @@ ATTENDANCE_OPENING_RE = re.compile(
     re.IGNORECASE)
 # A word that names the owner teaching, leading or presenting the activity
 # (#1691). "Directors Course" and "Speakers Series" name the event, not the
-# owner's role, so only the singular forms count. "Talk(s)" names a talk the
+# owner's role, so only the singular forms count. "Talk" names a talk the
 # owner gave ("Invited talk, ..."); an attended talk opens as attendance,
-# which outranks it.
+# which outranks it. Plural "Talks" names a series in entry text, so it
+# counts in a heading only.
 TEACHING_ROLE_RE = re.compile(
     r'\b(?:lectur(?:e|er|es|ed|ing)|speaker|keynote|faculty|instructor|tutor|trainer|taught'
-    r'|talks?'
+    r'|talk'
     r'|teach(?:er|es|ing)?|(?:co-?)?director|course\s+chair'
     r'|present(?:er|ed|ing|ation)|organi[sz](?:er|ed|ing)|moderat(?:or|ed|ing)'
     r'|facilitat(?:or|ed|ing)|precept(?:or|ed|ing)|panelist)\b',
@@ -909,7 +910,7 @@ TEACHING_ROLE_RE = re.compile(
 # list is usually one the owner attended (PR #1829 review). "Invited to
 # participate / attend" is an invitation to the audience, never a role.
 _HEADING_ONLY_ROLE_RE = re.compile(
-    r'\b(?:grand\s+rounds|invited(?!\s+to\s+(?:participate|attend)))\b',
+    r'\b(?:grand\s+rounds|talks|invited(?!\s+to\s+(?:participate|attend)))\b',
     re.IGNORECASE)
 # A heading that names attendance ("CME Lectures Attended", "Grand Rounds
 # Attended") lists what the owner attended, whatever role word it also has

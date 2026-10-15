@@ -802,7 +802,7 @@ def test_attendance_opening_outranks_a_role_word_later_in_the_text():
 
 @pytest.mark.parametrize("text", [
     "Invited talk, Example Society Annual Meeting, 2019",
-    "Talks: Example Society Annual Meeting, 2019",
+    "Talk: Example Society Annual Meeting, 2019",
 ])
 def test_talk_names_a_role(text):
     assert names_teaching_or_authorship_role(text)
@@ -818,6 +818,9 @@ def test_talk_names_a_role(text):
     "Invited to participate, Example Leadership Program, 2018",
     "Invited to attend the Example Summit, 2019",
     "Invited, Example Visiting Professor Program, 2020",
+    # "Talks" in entry text names an attended series (PR #1829 review).
+    "Example Lunchtime Talks, 2019",
+    "Ethics Talks Series, Example Hospital, 2019",
 ])
 def test_grand_rounds_and_invited_name_no_role_in_entry_text(text):
     assert not names_teaching_or_authorship_role(text)
