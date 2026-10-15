@@ -254,6 +254,13 @@ _MENTEE_RECORD_CODES = frozenset({"N3A", "N3B"})
 _MENTEE_HEADING = re.compile(
     r"\b(?:students?|mentees?|trainees?|advisees?|fellows\s+mentored)\b", re.I
 )
+# The same people in the plural: a heading listing them, so its rows are theirs
+# without a mentee line above (2082_Dr_Scot "Undergraduate Honor Students'
+# Achievements", 2068_Yount_Cv "MENTORING MASTERS STUDENT TRAINEES"). The singular
+# is the owner's own student-era record ("Student/Trainee Awards", web210).
+_MENTEE_PLURAL_HEADING = re.compile(
+    r"\b(?:students|mentees|trainees|advisees|fellows\s+mentored)\b", re.I
+)
 # K and D rows are recoded only when the heading also says these are accomplishments.
 _ACCOMPLISHMENT_HEADING = re.compile(r"\b(?:accomplishments?|achievements?|awards?)\b", re.I)
 _HONOR_CODE = "H"
@@ -533,11 +540,13 @@ def mentee_pin_code(entry: dict, after_mentee: bool) -> tuple[str, str] | None:
     """(N4, why) when the row is a mentee's accomplishment, not the owner's, else None.
 
     `after_mentee` says a named-mentee line (N3A/N3B) came earlier in the same
-    hierarchy group; the heading alone never pins (#1251).
+    hierarchy group; without one, only a heading naming mentees in the plural
+    pins (#1251).
     """
     code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
     heading = _heading_text(entry)
-    if after_mentee and _is_mentee_accomplishment(code, heading):
+    lists_mentees = after_mentee or bool(_MENTEE_PLURAL_HEADING.search(heading))
+    if lists_mentees and _is_mentee_accomplishment(code, heading):
         return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
     if _is_named_trainee_work(code, heading, text):
         return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
