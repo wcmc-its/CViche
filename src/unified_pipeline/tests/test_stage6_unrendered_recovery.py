@@ -35,13 +35,15 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM, LAST_STAGE4_RECORD  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
+)
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     DATE_LED_SOURCE_TEXT,
     split_date_led_records,
 )
-from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
@@ -51,6 +53,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     segments_cover_source,
     tab_aware_record_lines,
 )
+from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
     _record_lines,
