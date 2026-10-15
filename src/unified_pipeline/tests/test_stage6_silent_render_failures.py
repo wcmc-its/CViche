@@ -65,6 +65,7 @@ from unified_pipeline.stage6.formatting import (  # noqa: E402
 )
 from unified_pipeline.stage6.sections.appendix import CODE_ORIGIN_ENTRY  # noqa: E402
 from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    AWARD_TITLE_MENTEE_CHECK,
     N1_HEADING,
     N2_HEADING,
     N2_INSTRUCTION,
@@ -404,6 +405,88 @@ def test_mentoring_real_template_body_order():
     assert len(gen.doc.tables) == template_tables - 3 + 3
     assert gen.stats['tables_populated'] == 3
     assert gen.stats['entries_inserted'] == 5
+
+
+# --- a mentee named only by an award title is refused (#1702) ------------------
+
+def test_mentee_named_only_inside_an_award_title_goes_to_the_appendix():
+    """YIXQFB 2590's shape: stage 4 took the honoree of "<program> <person>
+    Scholar Award" as the mentee. No Past Mentees table; the entry, its name
+    cleared, joins the declined entries `generate()` hands to the Appendix,
+    with a WARN naming the element, not the text. The input is untouched."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entry = _mentee('N3B', 'Dorran Pethwick', site_position='Brindlemoor Scholar Award',
+                    current_position='Assistant Professor, Northfield')
+    entry['text'] = ("Brindlemoor Dorran Pethwick Scholar Award\t"
+                     "Assistant Professor, Northfield")
+    entry['element_idx_start'] = 2590
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert gen.doc.tables == []
+    assert len(gen._declined_grant_entries) == 1
+    declined = gen._declined_grant_entries[0]
+    assert 'mentee_name' not in declined['extracted_fields']
+    assert declined['text'] == entry['text']
+    assert entry['extracted_fields']['mentee_name'] == 'Dorran Pethwick'
+    [warning] = [w for w in gen._section_failures if w['check'] == AWARD_TITLE_MENTEE_CHECK]
+    assert warning['severity'] == 'WARN'
+    assert warning['evidence'] == ['element_idx_start=2590']
+    assert 'Pethwick' not in warning['message']
+
+
+def test_mentee_whose_name_also_stands_alone_still_renders():
+    """The same award won by a real mentee, whose row names her on its own
+    as well: she is the mentee, and the award stays in her row."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entry = _mentee('N3B', 'Dorran Pethwick', start_date='2015', end_date='2019')
+    entry['text'] = ("Dorran Pethwick, PhD 2015-2019\t"
+                     "Brindlemoor Dorran Pethwick Scholar Award")
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Dorran Pethwick')]
+    assert gen._declined_grant_entries == []
+    assert not any(w['check'] == AWARD_TITLE_MENTEE_CHECK for w in gen._section_failures)
+
+
+@pytest.mark.parametrize('noun', ['Award', 'Fellowship', 'Prize', 'Lecture', 'Medal'])
+def test_a_current_mentee_named_only_inside_an_award_title_is_refused(noun):
+    """N3A takes the same refusal as N3B, for every award noun: no Current
+    Mentees table, the entry goes to the Appendix."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entry = _mentee('N3A', 'Dorran Pethwick')
+    entry['text'] = f"Brindlemoor Dorran Pethwick {noun}"
+
+    gen._fill_mentoring({'N3A': [entry]})
+
+    assert gen.doc.tables == []
+    assert len(gen._declined_grant_entries) == 1
+
+
+def test_a_mentee_the_text_never_names_still_renders():
+    """Stage 4 may reorder a name ("Pethwick, Dorran"); a name the text never
+    spells out is not refused."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entry = _mentee('N3B', 'Dorran Pethwick', start_date='2015', end_date='2019')
+    entry['text'] = "Pethwick, Dorran, PhD 2015-2019"
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Dorran Pethwick')]
+    assert gen._declined_grant_entries == []
 
 
 # --- N4: a scrambled outcome row renders from its fields (#1434) ---------------

@@ -1541,7 +1541,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
 
-        # Grant entries `_create_grant_table` declined as too sparse (#839) --
+        # Grant entries `_create_grant_table` declined as too sparse (#839),
+        # and mentee entries named only by an award title (#1702) --
         # appended to `unmapped_entries` at `generate()`'s Appendix fill so
         # they still reach the Appendix and the `renderer_declined` warning
         # instead of vanishing. Reset at the top of generate(), declared here
