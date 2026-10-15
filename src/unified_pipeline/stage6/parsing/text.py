@@ -23,8 +23,10 @@ from typing import NamedTuple
 from unified_pipeline.core.run_id import is_run_id
 
 from .dates import (
+    _MONTH_NAME_TO_NUM,
     DATE_DASH,
     MONTH_YEAR_SPAN,
+    OPEN_END,
     RANGE_END,
     YEAR,
     YEAR_OR_SPAN,
@@ -796,6 +798,79 @@ def _refold_shattered(parts: list[str]) -> list[str]:
         else:
             folded.append(part)
     return folded
+
+
+# --- date-led sibling records fused by stage 2's tab join (#983) --------------
+#
+# Stage 2 joins the paragraphs of one entry with '\t', the same character as an
+# in-line tab, so sibling records that each opened with their own date
+# ("2004-2008 Executive Board Member\t2007-2009 President, ...") reach stage 6
+# as one line and render as one row. `split_date_led_records` puts each such
+# record back on its own line. A part opens a record when it starts with a
+# date and then words; a bare date ("2015-present") is a date column, and a
+# part that starts with words is a record's continuation or a lead-in.
+#
+# Stage 6, not stage 2: stage 2 runs before classification, so it cannot leave
+# grants alone, and its text is what stages 3b and 4 read -- changing it there
+# is a behaviour change to two LLM stages. Without stage 2's paragraph
+# boundaries an in-line tab could also be split here; over the 126 stored
+# corpus artifacts every entry stage 6 splits (25, in 8 CVs) has two or more
+# date-led paragraphs in its source document (measured for #983).
+#
+# A month name or a numeric month/day before the year: "Jan 2019",
+# "04/2020", "04/22/2020".
+_RECORD_DATE_MONTH = (r'(?:(?:' + '|'.join(sorted(_MONTH_NAME_TO_NUM, key=len, reverse=True))
+                      + r')\.?,?\s+|\d{1,2}/(?:\d{1,2}/)?)?')
+# A year of this century or the last: a four-digit house number ("4401 Main
+# Street" in an address block) does not open a record.
+_RECORD_YEAR = r'(?:19|20)\d{2}'
+# A date that opens a record: a date, or a range whose end may be another
+# date, a two-digit year, an open end, or missing ("2001-   Society").
+_RECORD_DATE = (rf'{_RECORD_DATE_MONTH}{_RECORD_YEAR}'
+                rf'(?:\s*{DATE_DASH}\s*(?:{_RECORD_DATE_MONTH}{RANGE_END})?)?')
+# The date, then punctuation or a dash, then a word that is not an open end:
+# "2015-present" alone is a date column, "2015-present Editor" a record. Not a
+# semicolon: "2013-2014;" opens a list of dates that goes on in the next part,
+# whose record the first part names ("2013-2014; <award>\t2016-2021 <field>").
+_DATE_LED_RECORD_RE = re.compile(
+    rf'^{_RECORD_DATE}[.,:)]?\s*(?:[-–—|:]\s*)?(?!{OPEN_END}\b)[A-Za-z]{{2}}',
+    re.IGNORECASE)
+# Two records are the smallest run of siblings; one date-led part is one
+# record with its details, whatever else the line holds.
+DATE_LED_MIN_RECORDS = 2
+# The separators: stage 2's paragraph join, and the line break that keeps a
+# record apart for every stage-6 reader that splits an entry's text into lines.
+_STAGE2_PARAGRAPH_JOIN = '\t'
+_RECORD_LINE_BREAK = '\n'
+# The entry key that keeps stage 2's text of an entry this split, for the
+# unrendered-record pass, which reads records out of stage 2's tab parts
+# with its own rules (`tab_record_segments`, #1243).
+DATE_LED_SOURCE_TEXT = 'date_led_source_text'
+
+
+def _opens_dated_record(part: str) -> bool:
+    """`part` starts with a date and then words: it opens a record."""
+    return _DATE_LED_RECORD_RE.match(part.strip()) is not None
+
+
+def split_date_led_records(text: str) -> str:
+    """`text` with a line break in place of the tab before each part that opens
+    a dated record, when at least `DATE_LED_MIN_RECORDS` parts do; otherwise
+    `text` unchanged. The first part keeps its place, so a lead-in ("Ad Hoc
+    Reviewer:") stays on the first line, and a part that does not open a
+    record stays tab-joined to the record before it. Text that already holds
+    a line break (a table's rows) is line-structured and left alone."""
+    if _RECORD_LINE_BREAK in text or _STAGE2_PARAGRAPH_JOIN not in text:
+        return text
+    parts = text.split(_STAGE2_PARAGRAPH_JOIN)
+    opens = [_opens_dated_record(part) for part in parts]
+    if sum(opens) < DATE_LED_MIN_RECORDS:
+        return text
+    pieces = [parts[0]]
+    for part, opens_record in zip(parts[1:], opens[1:], strict=True):
+        pieces.append(_RECORD_LINE_BREAK if opens_record else _STAGE2_PARAGRAPH_JOIN)
+        pieces.append(part)
+    return ''.join(pieces)
 
 
 # --- appointment title vs. its duties (#1205) ---------------------------------

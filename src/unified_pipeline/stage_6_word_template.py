@@ -167,7 +167,12 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     names_teaching_or_authorship_role,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
-from unified_pipeline.stage6.parsing.text import ATTENDANCE_OPENING_RE, heading_names_teaching_role
+from unified_pipeline.stage6.parsing.text import (
+    ATTENDANCE_OPENING_RE,
+    DATE_LED_SOURCE_TEXT,
+    heading_names_teaching_role,
+    split_date_led_records,
+)
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -257,6 +262,7 @@ from unified_pipeline.stage6.sections.appendix import (
     other_entry_line_tokens,
     reclassified_structural_reason,
     recovery_candidates,
+    recovery_text,
     t_line_is_scaffolding,
 )
 from unified_pipeline.stage6.sections.mentoring import (
@@ -1309,6 +1315,39 @@ def _route_d2_leadership_title(entry: dict[str, Any], code: str,
     return D2_LEADERSHIP_TARGET_CODE
 
 
+def _holds_stage4_records(entry: Mapping[str, Any]) -> bool:
+    """Stage 4 already separated *entry*'s records: an extracted field holds a
+    list of records (stage 4's own `STAGE4_RECORDS_KEY` is one), or the entry
+    is one fan-out made. Their renderers and dedup read those records, not
+    the text's lines (#983: a split entry's lines made dedup drop a mentee's
+    table that its `mentees` list rendered)."""
+    fields = entry.get('extracted_fields')
+    record_lists = isinstance(fields, Mapping) and any(
+        isinstance(value, list) and any(isinstance(item, Mapping) for item in value)
+        for value in fields.values())
+    return record_lists or FANNED_OUT_FROM in entry or LAST_STAGE4_RECORD in entry
+
+
+def _split_date_led_siblings(entry: dict[str, Any], code: str) -> None:
+    """Put each date-led sibling record of *entry*'s text on its own line
+    (`split_date_led_records`, #983), so a section that renders the text
+    renders one line per record, and keep stage 2's text under
+    `DATE_LED_SOURCE_TEXT` for the unrendered-record pass. Not for:
+    - a grant: one grant's paragraphs can each open with a date, and a
+      newline join collapsed a grant section in the 2026-09-29 scoping;
+    - a teaching entry: its renderer splits the text on its tabs, so the
+      corpus render put one split K2 entry's lines into a single paragraph;
+    - records stage 4 already separated (`_holds_stage4_records`)."""
+    text = entry.get('text')
+    if (code in supplementary.GRANT_CODES or code in TEACHING_CODES
+            or not isinstance(text, str) or _holds_stage4_records(entry)):
+        return
+    split = split_date_led_records(text)
+    if split != text:
+        entry[DATE_LED_SOURCE_TEXT] = text
+        entry['text'] = split
+
+
 def d2_leadership_reroute_warnings(
         moved: list[tuple[object, tuple[int, int]]]) -> list[dict[str, Any]]:
     """One INFO render-warnings record naming every D2 record moved to L3 by
@@ -1885,6 +1924,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
             code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
             code = _route_d2_leadership_title(entry, code, leadership_moved)
+            _split_date_led_siblings(entry, code)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
@@ -4011,7 +4051,7 @@ Now analyze the text above:"""
                     fields = entry.get('extracted_fields') or {}
                     coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
-                    tab_parts = {part for text_line in str(entry.get('text') or '').split('\n')
+                    tab_parts = {part for text_line in recovery_text(entry).split('\n')
                                  for part in tab_record_segments(text_line)}
                     deferred: list[str] = []
                     for line in records:

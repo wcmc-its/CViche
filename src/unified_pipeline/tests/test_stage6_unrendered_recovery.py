@@ -36,6 +36,8 @@ from docx.oxml.ns import qn  # noqa: E402
 
 from unified_pipeline.stage6.fan_out import LAST_STAGE4_RECORD  # noqa: E402
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
+from unified_pipeline.stage6.parsing.text import DATE_LED_SOURCE_TEXT  # noqa: E402
+from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
@@ -2119,3 +2121,148 @@ def test_an_honor_whose_award_the_pii_pass_withheld_gets_no_sub_point():
     assert _subpoint_rows(gen) == []
     assert _HONOR_PROSE not in "".join(
         t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+# ------------------------------------------- date-led sibling records (#983)
+# Stage 2 joins an entry's paragraphs with tabs, so three society records that
+# each open with their own date reach stage 6 as one line. Stage 4 extracted
+# the last one only (the web228/web26 I-entry shape, synthetic names).
+
+_SOCIETY_RECORDS = [
+    "2001-    Guild of Meandering Auditors (GMA)",
+    "2004-2008  Executive Board Member, Treasurer.",
+    "2007-2009 President, Organizing Committee, 44th Annual Meeting, GMA, Crab Hollow, ZQ",
+]
+
+
+def _society_entry(code="I", **fields):
+    return {
+        "element_idx_start": 60,
+        "element_idx_end": 62,
+        "element_type": "paragraph",
+        "hierarchy": ["PROFESSIONAL MEMBERSHIPS"],
+        "taxonomy_code": code,
+        "taxonomy_confidence": 0.9,
+        "text": "\t".join(_SOCIETY_RECORDS),
+        "extracted_fields": fields or {
+            "organization": "Guild of Meandering Auditors (GMA)",
+            "start_date": "2007",
+            "end_date": "2009",
+            "membership_type": "President, Organizing Committee, 44th Annual Meeting",
+        },
+        "extraction_coverage": {"extraction_coverage_percent": 40.0},
+    }
+
+
+def _all_paragraph_texts(path):
+    """Every paragraph's w:t text, table cells and tracked insertions included."""
+    body = Document(path).element.body
+    return ["".join(t.text or "" for t in p.iter(qn("w:t"))) for p in body.iter(qn("w:p"))]
+
+
+def test_date_led_sibling_records_render_one_line_each(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "unified_pipeline.stage_6_word_template.call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "TESTUID983", "entries": [_society_entry()],
+               "cv_owner": {"full_name": "Quenby Marblegate"}}
+    input_path = tmp_path / "TESTUID983_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    texts = _all_paragraph_texts(run_stage6(str(input_path), str(tmp_path / "out.docx"),
+                                            verbose=False))
+
+    # Each record is its own paragraph, once: the 2001 membership stage 4 did
+    # not extract renders, and the Treasurer record is not recovered a second
+    # time beside it.
+    for record in _SOCIETY_RECORDS:
+        assert texts.count(record) == 1, record
+    assert not [t for t in texts if "Treasurer" in t and "President" in t]
+
+
+def _grouped_text(entry):
+    gen = _generator()
+    grouped = gen._group_entries_by_code([entry])
+    (only,) = [e for entries in grouped.values() for e in entries]
+    return only
+
+
+def test_grouping_puts_date_led_siblings_on_lines_and_keeps_stage2_text():
+    entry = _grouped_text(_society_entry())
+    assert entry["text"] == "\n".join(_SOCIETY_RECORDS)
+    assert entry[DATE_LED_SOURCE_TEXT] == "\t".join(_SOCIETY_RECORDS)
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C", "M2D"])
+def test_a_grant_keeps_its_tabs(code):
+    entry = _grouped_text(_society_entry(code=code, title="Example Grant"))
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+    assert DATE_LED_SOURCE_TEXT not in entry
+
+
+@pytest.mark.parametrize("code", ["K1", "K2", "K4"])
+def test_a_teaching_entry_keeps_its_tabs(code):
+    # The teaching renderer splits the text on its tabs itself.
+    entry = _grouped_text(_society_entry(code=code, course_title="Example Course"))
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+
+
+def test_records_stage4_separated_keep_their_tabs():
+    # A list of records under a key the I schema does not define: fan-out
+    # declines it (no schema key), and its renderer, not the text, owns them.
+    entry = _grouped_text(_society_entry(
+        organization="Guild of Meandering Auditors (GMA)",
+        offices=[{"office": "Treasurer", "start_date": "2004"},
+                 {"office": "President", "start_date": "2007"}]))
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+
+
+# The web181 Q1 shape: a long lead-in, then dated offices, most of them
+# single years. #1243's tab-part rules read it as one record (fewer than half
+# its parts give a date range); its date-led lines would read as two.
+_FORUM_PARTS = [
+    "Example Rehabilitation Forum. A not-for-profit consortium of academic departments",
+    "2005-present Founding President.",
+    "2009 Conference Director: First World Conference, Example City.",
+    "2011 Conference Director: World Congress, Example City",
+    "2012 Conference co-director, World Congress, Example City",
+    "2016-present Example Fellowship Director",
+]
+
+
+def test_recovery_reads_stage2_text_not_the_date_led_lines():
+    entry = _grouped_text({
+        "taxonomy_code": "Q1",
+        "text": "\t".join(_FORUM_PARTS),
+        "extracted_fields": {"role": "Example Fellowship Director",
+                             "organization": "Example Rehabilitation Forum",
+                             "start_date": "2016", "end_date": "present"},
+    })
+    assert "\n" in entry["text"]  # the lines render ...
+    # ... but the recovery pass reads records as it did before the split.
+    assert recovery_candidates("Q1", entry) == []
+    lines_only = {**entry}
+    del lines_only[DATE_LED_SOURCE_TEXT]
+    assert recovery_candidates("Q1", lines_only) != []
+
+
+def test_a_date_led_part_the_fields_hold_is_not_recovered_after_the_split():
+    # The mentee shape of `test_tab_part_the_extracted_fields_hold_is_not_recovered`,
+    # with both parts date-led, so grouping puts them on two lines. Stage 4
+    # holds every word of both; the pass still sees them as stage 2's tab parts.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "N3B",
+        "text": ("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)\t"
+                 "2009-2011 Marsupial Heart Association Fellowship"),
+        "extracted_fields": {"mentee_name": "Quimby Farrow", "mentee_level": "MSPH, PhD (Epidemiology)",
+                             "start_date": "2007", "end_date": "2011",
+                             "funding_source": "Marsupial Heart Association Fellowship (2009-2011)"},
+    }
+    grouped = gen._group_entries_by_code([entry])
+    assert "\n" in grouped["N3B"][0]["text"]
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records(grouped)
+
+    assert len(gen.doc.paragraphs) == before
