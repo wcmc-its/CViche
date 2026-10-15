@@ -122,13 +122,18 @@ _ROW_COPY_BY_SCORER = {
         "and for any stage the run recorded as failed.",
         "A fatal error caps the score at 40: a stage the run recorded as fatally failed, or an error "
         "message that names a program error, a traceback, or an API error code.",
-        "Rerun the CV. If the error comes back, send the run to the CViche team."),
+        # Wording approved by Paul, 2026-10-15 (#1388). Whether a rerun can
+        # help depends on the error, which only the doctor finding names.
+        "Follow the Run Doctor finding below: it says whether the error was a passing failure of "
+        "the AI service or one that will happen again the same way."),
     scorer.score_cv_owner: RowCopy(
         "Faculty name and contact",
         "Checks that the CV owner's name was found, that a location was worked out, and that some "
         "contact detail was found.",
         "No usable name caps the score at 25.",
-        "Check that the name and contact block are in the source CV, then rerun, or add them in Word."),
+        # Wording approved by Paul, 2026-10-15 (#1388).
+        "Add the name and contact details in Word. Or correct them in the source CV and rerun with "
+        "the corrected file: rerunning the same file gives the same result."),
     scorer.score_no_output: RowCopy(
         "A document was produced",
         "Checks that a Word document was written at all.",
@@ -146,8 +151,10 @@ _ROW_COPY_BY_SCORER = {
         "Scans the finished document for protected details such as date of birth, social security "
         "number, passport, visa status, home address, and DEA number.",
         "Caps the score at 25.",
-        "Remove the data in Word and rerun. Do not send the document on until it is gone. The Run "
-        "Doctor finding names the category and the section but never the value."),
+        # Wording approved by Paul, 2026-10-15 (#1388).
+        "Delete the data in Word before sending the document on. Rerunning will not help: the data "
+        "is in the source CV and CViche's filter did not catch it, so send the run to the CViche "
+        "team. The Run Doctor finding names the category and the section but never the value."),
     scorer.score_stage4_group_failures: RowCopy(
         "Field extraction ran cleanly",
         "Checks whether stage 4 failed to read a whole group of entries, even if a retry later filled "
@@ -245,7 +252,10 @@ LINT_COPY = {
     "stage6_render_warnings": LintCopy(
         "Document builder warnings",
         "The step that writes the Word document logged its own warnings or failed to write a section.",
-        "Read the message and check the named section. If a section failed to render, rerun the CV."),
+        # Wording approved by Paul, 2026-10-15 (#1388).
+        "Read the message and check the named section, filling in anything missing from the source "
+        "CV in Word. Rerunning will not help: the document is built by fixed rules, so it comes out "
+        "the same. If a section failed to render, send the run to the CViche team."),
     "dedup_drops": LintCopy(
         "Distinct entries removed as duplicates",
         "An entry removed as a duplicate was either not nearly contained in the copy kept (under 90% "
@@ -276,7 +286,10 @@ LINT_COPY = {
         "Protected personal data in document",
         "A date of birth, social security number or similar protected detail appears in the "
         "document. The finding names the category, never the value.",
-        "Remove it in Word and rerun before sending anything on."),
+        # Wording approved by Paul, 2026-10-15 (#1388).
+        "Delete it in Word before sending the document on. Rerunning will not help: the data is in "
+        "the source CV and CViche's filter did not catch it. Send the run to the CViche team so the "
+        "filter can be fixed."),
     "invented_records": LintCopy(
         "Entry not in the original CV",
         "An entry was built from the template's own placeholder text, or a licence entry came from "
@@ -333,8 +346,11 @@ LINT_COPY = {
         "A processing step failed",
         "A step of the run failed and recorded it, so what that step makes is missing. Example: the "
         "research summary when stage 4.5 fails.",
-        "Check the named part of the document. Rerun the CV, and send the run to the CViche team if "
-        "it fails again."),
+        # Wording approved by Paul, 2026-10-15 (#1388). The wording when
+        # the failure was a passing one is TEMPORARY_FAILURE_WHAT_TO_DO's.
+        "Check the named part of the document and fill it in from the source CV, and send the run "
+        "to the CViche team. Rerunning will not help: the step failed on something in CViche or in "
+        "this CV, so it fails the same way again."),
     "owner_missing_from_citation": LintCopy(
         "Owner's name missing from own citation",
         "The source CV names the faculty member on a publication (as an author, a group member or "
@@ -410,12 +426,18 @@ LINT_COPY = {
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
         "cannot be filed under anyone.",
-        "Make sure the name is clear at the top of the source CV and rerun, or add the name in Word."),
+        # Wording approved by Paul, 2026-10-15 (#1388).
+        "Add the name in Word. Or make the name clear at the top of the source CV and rerun with the "
+        "corrected file: rerunning the same file gives the same result."),
     "pipeline_errors_present": LintCopy(
         "Fatal processing error",
         "A stage recorded a fatal error (a program error, traceback or API error code), so part of "
         "the output is missing.",
-        "Rerun the CV, and send the run to the CViche team if it fails again."),
+        # Wording approved by Paul, 2026-10-15 (#1388). The wording when
+        # the failure was a passing one is TEMPORARY_FAILURE_WHAT_TO_DO's.
+        "Send the run to the CViche team, and do not deliver this document. Rerunning will not "
+        "help: the error comes from CViche's code or from the AI service rejecting this CV, so a "
+        "rerun fails the same way."),
     "no_output": LintCopy(
         "No document produced",
         "The run got as far as field extraction but wrote neither a Word document nor its render report.",
@@ -489,6 +511,19 @@ LINT_COPY = {
         "A line in this section of the source CV was set aside instead of being read as part "
         "of an entry, and it appears nowhere in the document.",
         "Check the flagged section against the source CV and add the text if it belongs."),
+    "stage2_span_overlap": LintCopy(
+        "The same lines read into two entries",
+        "Lines of the source CV were read into two entries, so they can appear twice in the "
+        "document, often once in a section they do not belong to, and a date can pair with "
+        "the wrong record.",
+        "Delete the copy in the wrong section, and check the flagged entries' dates against "
+        "the source CV."),
+    "cross_entry_value": LintCopy(
+        "Value from another entry",
+        "A date, amount, effort, grant number, role or name on this entry is not in its own "
+        "text but is in another entry of the same kind that was read with it, so it may be "
+        "that entry's value.",
+        "Check the flagged values against this entry in the source CV and correct them."),
     "record_boundary": LintCopy(
         "A line of one entry opens the next",
         "A labelled line that belongs to one entry, such as a trainee's current position, "
@@ -559,6 +594,51 @@ LINT_COPY = {
         "table cell, where a value such as an organization should be.",
         "Replace the symbol with the value from the source CV, or clear the cell."),
 }
+
+# #1388: a rerun of the same CV helps only when the failure was a passing one,
+# the two error types auto_retry.RETRYABLE_ERROR_TYPES retries: llm_timeout (a
+# call that timed out) and api_error (Bedrock throttling, overload, a 5xx, a
+# dropped connection). The doctor's error findings carry no error type, only
+# the exception name and message, so the type is read off that text. An error
+# with none of these markers fails the same way again (a program error, an
+# invalid reply, a token limit, a file error, a content-filter refusal), the
+# same fail-safe as auto_retry's: an unknown error is not a passing one.
+TEMPORARY_ERROR_RE = re.compile(
+    r"time[ds]?[\s_-]?out"  # llm_timeout: "timed out", ReadTimeoutError, ModelTimeoutException
+    r"|throttl|too many requests|rate exceeded|overloaded|service ?unavailable"
+    r"|InternalServer|ModelNotReady|ConnectionError|connection (?:reset|aborted|closed)"
+    r"|Error code: (?:429|5\d\d)",  # api_error
+    re.IGNORECASE,
+)
+
+# Wording approved by Paul, 2026-10-15 (#1388). The what-to-do for an error
+# lint when every one of its findings was a passing failure (TEMPORARY_ERROR_RE);
+# otherwise the lint's LINT_COPY wording, which says a rerun will not help.
+TEMPORARY_FAILURE_WHAT_TO_DO = {
+    "pipeline_errors_present":
+        "Rerun the CV: the AI service timed out or was too busy to answer, which usually passes. "
+        "If it fails the same way again, send the run to the CViche team.",
+    "stage_failure_recorded":
+        "Rerun the CV: the step failed because the AI service timed out or was too busy to "
+        "answer, which usually passes. If it fails again, send the run to the CViche team.",
+}
+
+
+def _is_temporary_failure(finding: dict) -> bool:
+    """Whether a finding's message or evidence names a passing failure."""
+    evidence = finding.get("evidence")
+    texts = [str(finding.get("message") or ""), *(map(str, evidence) if isinstance(evidence, list) else ())]
+    return any(TEMPORARY_ERROR_RE.search(text) for text in texts)
+
+
+def _what_to_do(lint: str, findings: list[dict], copy: LintCopy) -> str:
+    """The lint's what-to-do, or the rerun advice when it is an error lint and
+    every one of ``findings`` was a passing failure."""
+    temporary = TEMPORARY_FAILURE_WHAT_TO_DO.get(lint)
+    if temporary is not None and all(_is_temporary_failure(f) for f in findings):
+        return temporary
+    return copy.what_to_do
+
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
 # finding: that lint scans the stage 2/3b/4 JSON only, and the doctor reports
@@ -747,7 +827,7 @@ def _doctor_groups(findings: list[dict], cap_lint: str | None) -> list[DoctorFin
             lint=lint, severity=instances[0].severity,  # worst first, so the row's worst
             message=copy.explanation if copy else by_lint[lint][0].get("message") or lint,
             title=copy.title if copy else None,
-            what_to_do=copy.what_to_do if copy else None,
+            what_to_do=_what_to_do(lint, by_lint[lint], copy) if copy else None,
             count=count, prevalence=LINT_PREVALENCE.get(lint),
             caps_score=lint == cap_lint,
             instances=instances,
@@ -867,7 +947,8 @@ def _fix_list_drafts(ran: list[dict], rows: GateRows) -> tuple[list[_FixDraft], 
         if lint not in draft.problems or (_SEVERITY_RANK[finding["severity"]]
                                           < _SEVERITY_RANK[draft.problems[lint].severity]):
             draft.problems[lint] = FixListProblem(
-                severity=finding["severity"], title=copy.title, what_to_do=copy.what_to_do,
+                severity=finding["severity"], title=copy.title,
+                what_to_do=_what_to_do(lint, [finding], copy),
                 confidence=_confidence(lint, message, rows), effort=LINT_EFFORT.get(lint, EFFORT_MINUTES))
         # The detail is not shown here, so a quote it repeats is kept.
         quotes, _notes = _quotes_and_notes(finding.get("evidence"), "")

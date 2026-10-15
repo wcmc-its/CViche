@@ -77,6 +77,7 @@ from unified_pipeline.stage4.schemas import (  # noqa: F401
     FIELD_SCHEMA_CONFIG_PATH,
     FIELD_SCHEMA_VERSION,
     FIELD_SCHEMAS,
+    STAGE4_BATCH_SIZE,
     TAXONOMY_LABELS,
     get_active_schemas,
     get_field_schema,
@@ -147,7 +148,7 @@ def process_cv(
     # Extract fields
     result = extract_fields_from_mapped_entries(
         valid_entries,
-        batch_size=10,
+        batch_size=STAGE4_BATCH_SIZE,
         document_uid=document_uid,
         cancel_check=cancel_check,
         docx_path=docx_path,

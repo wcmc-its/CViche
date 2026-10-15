@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+from unified_pipeline.log_redaction import redacted_error_label
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -465,6 +467,15 @@ def friendly_model_name(model: str) -> str:
 _cached_config = None
 
 
+def _yaml_error_position(e: Exception) -> str:
+    """The "line L, column C" a YAML parse error points at, or "" for any
+    other error: the part of a parse error worth keeping once log_redaction's
+    policy keeps str(e) out of the WARNING (#639)."""
+    if isinstance(e, yaml.MarkedYAMLError) and e.problem_mark is not None:
+        return f"line {e.problem_mark.line + 1}, column {e.problem_mark.column + 1}"
+    return ""
+
+
 def _load_yaml_config() -> dict:
     """Load llm_config.yaml with caching. Returns empty dict on failure."""
     global _cached_config
@@ -480,7 +491,11 @@ def _load_yaml_config() -> dict:
         with open(config_path, encoding="utf-8") as f:
             _cached_config = yaml.safe_load(f) or {}
     except Exception as e:
-        logger.warning(f"Failed to load llm_config.yaml: {e}. Using defaults.")
+        logger.warning(
+            "Failed to load llm_config.yaml: %s. Using defaults.",
+            redacted_error_label(e, _yaml_error_position(e)),
+        )
+        logger.debug("llm_config.yaml load failure detail: %s", e)
         _cached_config = {}
 
     return _cached_config

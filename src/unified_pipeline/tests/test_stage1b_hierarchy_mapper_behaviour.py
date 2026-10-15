@@ -1663,9 +1663,23 @@ def test_synthetic_parent_anchor_does_not_send_the_child_to_another_headers_line
     assert _mapped_children(output_data, 1) == [2]
 
 
-def test_top_level_node_may_still_partial_match_another_headers_line(tmp_path, monkeypatch):
-    # The exact-line exclusion is for children only; a top-level node keeps
-    # the old partial match.
+def test_top_level_node_may_still_partial_match_a_line_no_other_header_owns(tmp_path, monkeypatch):
+    # The search-time exact-line exclusion is for children only: a top-level
+    # node keeps the old partial match onto a line no other node is on.
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "Intro",
+        "Other Papers",
+        "Paper B, 2002",
+    ], [
+        {"text": "Papers", "level": "H1", "children": []},
+    ])
+    assert output_data["hierarchy_with_indices"][0]["element_idx"] == 1
+
+
+def test_top_level_partial_is_released_from_another_headers_own_line(tmp_path, monkeypatch):
+    # web172 shape: a top-level "Papers" with no line of its own took the
+    # "Other Papers" line that is another node's own heading, and both
+    # covered the same range (#916). The owner keeps the line.
     output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
         "Intro",
         "Other Papers",
@@ -1675,7 +1689,142 @@ def test_top_level_node_may_still_partial_match_another_headers_line(tmp_path, m
         {"text": "Misc", "level": "H1", "text_metadata": {"synthetic": True},
          "children": [{"text": "Other Papers", "level": "H2"}]},
     ])
-    assert output_data["hierarchy_with_indices"][0]["element_idx"] == 1
+    assert output_data["hierarchy_with_indices"][0]["element_idx"] is None
+    assert _mapped_children(output_data, 1) == [1]
+    assert output_data["meta"]["headers_released_from_shared_lines"] == ["Papers"]
+    leaves = [(s["hierarchy"], s["element_idx_start"], s["element_idx_end"])
+              for s in output_data["section_boundaries"] if not s["has_children"]]
+    assert leaves == [(["Personal Data"], 0, 0), (["Misc", "Other Papers"], 1, 2)]
+
+
+def test_run_stage_1b_keeps_one_of_two_duplicate_headings_on_one_line(tmp_path, monkeypatch):
+    # TAUBPU/BNYLDF shape: stage 1a returned PERSONAL DATA twice and both
+    # copies sat on its one line, so stage 2 extracted that range twice.
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "Personal Data",
+        "Born 1970",
+        "Education",
+        "MD, 1995",
+    ], [
+        {"text": "PERSONAL DATA", "level": "H1", "children": []},
+        {"text": "PERSONAL DATA", "level": "H1", "children": []},
+        {"text": "EDUCATION", "level": "H1", "children": []},
+    ])
+    assert [n["element_idx"] for n in output_data["hierarchy_with_indices"]] == [0, None, 2]
+    assert output_data["meta"]["headers_released_from_shared_lines"] == ["PERSONAL DATA"]
+    bounds = [(s["hierarchy"], s["element_idx_start"], s["element_idx_end"])
+              for s in output_data["section_boundaries"]]
+    assert bounds == [(["PERSONAL DATA"], 0, 1), (["EDUCATION"], 2, 3)]
+
+
+# ------------------------------------------------- release_shared_header_lines (#916)
+
+def _mapped(text: str, idx: int | None, children: list | None = None, **extra) -> dict:
+    node = {"text": text, "level": "H1", "element_idx": idx, "synthetic": False, **extra}
+    if children is not None:
+        node["children"] = children
+    return node
+
+
+def test_release_shared_header_lines_parent_partial_yields_to_its_childs_own_line():
+    # DXAGUS ND8 shape: H1 "GRANT SUPPORT" had no line and sat on its first
+    # child's "CURRENT GRANT SUPPORT" line; the child keeps it, and a later
+    # child of the released parent stays mapped.
+    elements = [_elem(0, "CURRENT GRANT SUPPORT"), _elem(1, "Grant A"),
+                _elem(2, "PENDING GRANT SUPPORT"), _elem(3, "Grant B")]
+    hierarchy = [_mapped("GRANT SUPPORT", 0, [
+        _mapped("CURRENT GRANT SUPPORT", 0), _mapped("PENDING GRANT SUPPORT", 2)])]
+
+    released = stage1b.release_shared_header_lines(hierarchy, elements)
+
+    assert released == ["GRANT SUPPORT"]
+    assert hierarchy[0]["element_idx"] is None
+    assert [c["element_idx"] for c in hierarchy[0]["children"]] == [0, 2]
+    sections = compute_section_boundaries(hierarchy, len(elements))
+    assert [(s["hierarchy"], s["element_idx_start"], s["element_idx_end"], s["has_children"])
+            for s in sections] == [
+        (["GRANT SUPPORT", "CURRENT GRANT SUPPORT"], 0, 1, False),
+        (["GRANT SUPPORT", "PENDING GRANT SUPPORT"], 2, 3, False),
+    ]
+
+
+def test_release_shared_header_lines_first_of_two_exact_owners_keeps_the_line():
+    # KHXOUF/QTATUP shape: a stage-1a duplicate child on the one line both
+    # copies name; the first in hierarchy order keeps it.
+    elements = [_elem(0, "PUBLICATIONS"), _elem(1, "ABSTRACTS"), _elem(2, "Abstract 1")]
+    hierarchy = [_mapped("PUBLICATIONS", 0, [_mapped("ABSTRACTS", 1), _mapped("ABSTRACTS", 1)])]
+
+    released = stage1b.release_shared_header_lines(hierarchy, elements)
+
+    assert released == ["PUBLICATIONS > ABSTRACTS"]
+    assert [c["element_idx"] for c in hierarchy[0]["children"]] == [1, None]
+
+
+def test_release_shared_header_lines_parent_keeps_its_line_from_a_same_text_child():
+    # The 2001 shape: "PUBLICATIONS:" > "PUBLICATIONS:", both exact on one
+    # line. The parent comes first in hierarchy order and keeps it.
+    elements = [_elem(0, "PUBLICATIONS:"), _elem(1, "Abstracts")]
+    hierarchy = [_mapped("PUBLICATIONS:", 0, [_mapped("PUBLICATIONS:", 0, [_mapped("Abstracts", 1)])])]
+
+    released = stage1b.release_shared_header_lines(hierarchy, elements)
+
+    assert released == ["PUBLICATIONS: > PUBLICATIONS:"]
+    assert hierarchy[0]["element_idx"] == 0
+    assert hierarchy[0]["children"][0]["element_idx"] is None
+    assert hierarchy[0]["children"][0]["children"][0]["element_idx"] == 1
+
+
+def test_release_shared_header_lines_owner_wins_even_when_listed_after_a_partial():
+    # The owner is chosen by the line, not by hierarchy order: a partial
+    # listed first still yields to the node whose line it is.
+    elements = [_elem(0, "Intro"), _elem(1, "Other Papers"), _elem(2, "Paper B")]
+    hierarchy = [_mapped("Papers", 1), _mapped("Other Papers", 1)]
+
+    released = stage1b.release_shared_header_lines(hierarchy, elements)
+
+    assert released == ["Papers"]
+    assert [n["element_idx"] for n in hierarchy] == [None, 1]
+
+
+def test_release_shared_header_lines_leaves_a_fused_two_heading_line_shared():
+    # HTNNHG 25 shape: two headings fused in one paragraph. Neither owns the
+    # whole line, both are on it, so it stays shared.
+    elements = [_elem(0, "Administrative Positions:\n\nBoard Certification:"), _elem(1, "ABIM, 2006")]
+    hierarchy = [_mapped("Administrative Positions", 0), _mapped("Board Certification", 0)]
+
+    released = stage1b.release_shared_header_lines(hierarchy, elements)
+
+    assert released == []
+    assert [n["element_idx"] for n in hierarchy] == [0, 0]
+
+
+def test_release_shared_header_lines_a_run_in_line_is_its_nodes_own():
+    # A run-in heading's line also holds the first record (#1252), so its
+    # text is not the header's alone; the run-in node still owns it.
+    elements = [_elem(0, "EDUCATION  Pharm.D., Some University, 2001"), _elem(1, "MD, 2005")]
+    hierarchy = [_mapped("Pharm", 0), _mapped("EDUCATION", 0, run_in=True)]
+
+    released = stage1b.release_shared_header_lines(hierarchy, elements)
+
+    assert released == ["Pharm"]
+    assert [n["element_idx"] for n in hierarchy] == [None, 0]
+
+
+def test_release_shared_header_lines_drops_the_run_in_flag_of_a_released_node():
+    elements = [_elem(0, "EDUCATION  Pharm.D., Some University, 2001")]
+    hierarchy = [_mapped("EDUCATION", 0, run_in=True), _mapped("EDUCATION", 0, run_in=True)]
+
+    stage1b.release_shared_header_lines(hierarchy, elements)
+
+    assert hierarchy[1] == _mapped("EDUCATION", None)
+
+
+def test_release_shared_header_lines_leaves_one_node_per_line_alone():
+    elements = [_elem(0, "Education"), _elem(1, "Other Papers")]
+    hierarchy = [_mapped("Education", 0), _mapped("Papers", 1)]
+
+    assert stage1b.release_shared_header_lines(hierarchy, elements) == []
+    assert [n["element_idx"] for n in hierarchy] == [0, 1]
 
 
 # ------------------------------------------------------ drop_headers_absent_from_document
