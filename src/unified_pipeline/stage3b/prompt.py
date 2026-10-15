@@ -351,7 +351,7 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
     - The WCM CV has no clinical-trials section. A trial the CV owner
       conducts (interventional, observational/registry, or device/diagnostic)
       is research support when the entry carries a trial or funding signal:
-      * An NCT-XXXX identifier.
+      * An NCT-XXXX identifier, or a trial phase ("Phase II").
       * A named sponsor, funder or agency (NIH, a foundation, a company).
       * A grant or award number, or a dollar amount.
       * The words "trial", "funded", "grant" or "sponsored", or a grants,

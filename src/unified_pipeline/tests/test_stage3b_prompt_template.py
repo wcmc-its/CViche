@@ -359,7 +359,7 @@ def test_rule_10_needs_a_trial_or_funding_signal_for_m2_1694_1701():
     sent any study the owner conducts to M2, and rule 7 counted a bare period
     as a strong M2 signal."""
     rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
-    for signal in ("NCT-XXXX", "sponsor, funder or agency", "grant or award number",
+    for signal in ("NCT-XXXX", 'trial phase ("Phase II")', "sponsor, funder or agency", "grant or award number",
                    '"trial", "funded", "grant" or "sponsored"'):
         assert signal in rule, signal
     assert "none of these signals is M1" in rule
