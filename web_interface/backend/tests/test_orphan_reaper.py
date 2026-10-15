@@ -373,18 +373,24 @@ def test_delete_run_and_artifacts_rolls_back_on_db_failure(db):
 # lines, pinned before they move out of the route handlers (#335).
 # ---------------------------------------------------------------------------
 
-def test_admin_reap_body_and_audit_line(client, db, caplog):
+def test_admin_reap_body_and_audit_line(client, db, caplog, tmp_path):
     import logging
+
+    from app.storage.local_storage import LocalRunStorage
     user = _seed_user(db)
     _seed_run(db, "OLD005", "created", datetime.now(timezone.utc) - timedelta(hours=48), user_id=user.id)
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO), patch(
+        "app.services.run_service.get_storage", return_value=LocalRunStorage(base_dir=str(tmp_path))
+    ):
         resp = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
 
     assert resp.json() == {"candidates": 1, "reaped": 0, "objects_deleted": 0,
-                           "run_ids": ["OLD005"], "dry_run": True}
+                           "run_ids": ["OLD005"], "dry_run": True,
+                           "rowless_archives": 0, "rowless_run_ids": []}
     audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_reap_orphans")]
-    assert audit == ["admin_reap_orphans: admin=admin@example.com dry_run=True candidates=1 reaped=0 objects=0"]
+    assert audit == ["admin_reap_orphans: admin=admin@example.com dry_run=True candidates=1 "
+                     "reaped=0 objects=0 rowless=0"]
 
 
 def test_admin_reap_older_than_hours_overrides_the_default_threshold(client, db):
@@ -477,3 +483,112 @@ def test_delete_run_unlinks_the_inbox_file_it_was_submitted_from(db: Session, en
     inbox_file = db.query(InboundFile).one()
     assert inbox_file.run_id is None
     assert inbox_file.status == InboundFileStatus.SUBMITTED
+
+
+# ---------------------------------------------------------------------------
+# Rowless input archives: the storage-keyed sweep (#802)
+# ---------------------------------------------------------------------------
+
+def _archive(store, run_id, *, age_hours):
+    """An input archive like create_run_archive's, with its manifest aged."""
+    from app.storage.base import INPUT_MANIFEST_KEY
+    store.put_file_exclusive(run_id, INPUT_MANIFEST_KEY, b"{}")
+    store.put_file_exclusive(run_id, "input/cv.docx", b"x")
+    stamp = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).timestamp()
+    os.utime(store._resolve(run_id, INPUT_MANIFEST_KEY), (stamp, stamp))
+
+
+@pytest.fixture
+def local_store(tmp_path):
+    from app.storage.local_storage import LocalRunStorage
+    return LocalRunStorage(base_dir=str(tmp_path))
+
+
+def test_rowless_sweep_reports_an_old_archive_with_no_run_row(db, local_store):
+    from app.services.run_service import find_rowless_archives
+    _archive(local_store, "SBGBHZ", age_hours=3)
+    assert find_rowless_archives(db, local_store) == ["SBGBHZ"]
+
+
+def test_rowless_sweep_ignores_an_archive_that_has_a_run_row(db, local_store):
+    from app.services.run_service import find_rowless_archives
+    _archive(local_store, "HASROW", age_hours=3)
+    _archive(local_store, "NOROW1", age_hours=3)
+    _seed_run(db, "HASROW", "complete", datetime.now(timezone.utc) - timedelta(hours=3))
+    assert find_rowless_archives(db, local_store) == ["NOROW1"]
+
+
+def test_rowless_sweep_ignores_an_archive_younger_than_the_minimum_age(db, local_store):
+    """An upload writes its archive before its row, so a fresh rowless archive
+    may be an upload still in flight; the boundary is ROWLESS_ARCHIVE_MIN_AGE."""
+    from app.services.run_service import ROWLESS_ARCHIVE_MIN_AGE, find_rowless_archives
+    from app.storage.base import INPUT_MANIFEST_KEY
+    _archive(local_store, "YOUNG7", age_hours=0)
+    written = local_store.last_modified("YOUNG7", INPUT_MANIFEST_KEY)
+    assert find_rowless_archives(db, local_store) == []
+    assert find_rowless_archives(db, local_store, now=written + ROWLESS_ARCHIVE_MIN_AGE) == []
+    assert find_rowless_archives(
+        db, local_store, now=written + ROWLESS_ARCHIVE_MIN_AGE + timedelta(seconds=1)
+    ) == ["YOUNG7"]
+
+
+def test_rowless_sweep_skips_a_namespace_with_no_input_manifest(db, local_store):
+    """A partial archive (cv written, manifest missing) or a namespace with
+    some other input/ object is not counted as an upload archive."""
+    from app.services.run_service import find_rowless_archives
+    local_store.put_file("NOMANI", "input/cv.docx", b"x")
+    assert find_rowless_archives(db, local_store, now=datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+def test_rowless_sweep_of_an_empty_store_is_empty(db, local_store):
+    from app.services.run_service import find_rowless_archives
+    assert find_rowless_archives(db, local_store) == []
+
+
+def test_rowless_sweep_reads_the_configured_store_by_default(db, local_store):
+    from app.services.run_service import find_rowless_archives
+    _archive(local_store, "DEFLT1", age_hours=3)
+    with patch("app.services.run_service.get_storage", return_value=local_store):
+        assert find_rowless_archives(db) == ["DEFLT1"]
+
+
+def test_rowless_sweep_never_deletes(db, local_store):
+    """Report-only until #1216 gives the live role s3:DeleteObject."""
+    from app.services.run_service import find_rowless_archives
+    from app.storage.base import INPUT_MANIFEST_KEY
+    _archive(local_store, "KEEPME", age_hours=3)
+    find_rowless_archives(db, local_store)
+    assert local_store.exists("KEEPME", INPUT_MANIFEST_KEY)
+    assert local_store.exists("KEEPME", "input/cv.docx")
+
+
+def test_admin_reap_reports_rowless_archives(client, db, local_store):
+    """The count and ids reach the admin in the reap-orphans response."""
+    _archive(local_store, "SBGBHZ", age_hours=3)
+    _archive(local_store, "HASRO2", age_hours=3)
+    _seed_run(db, "HASRO2", "complete", datetime.now(timezone.utc) - timedelta(hours=3))
+    with patch("app.services.run_service.get_storage", return_value=local_store):
+        resp = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
+    assert resp.status_code == 200
+    assert resp.json()["rowless_archives"] == 1
+    assert resp.json()["rowless_run_ids"] == ["SBGBHZ"]
+
+
+def test_admin_reap_reports_unknown_when_storage_cannot_be_listed(client, db, caplog):
+    """A failed listing is None, not 0, logged with its traceback, and does not
+    turn the reap's own result into a 500."""
+    import logging
+
+    class _Unlistable(_FakeStorage):
+        def list_run_ids(self):
+            raise RuntimeError("AccessDenied on ListBucket")
+
+    with caplog.at_level(logging.ERROR), patch(
+        "app.services.run_service.get_storage", return_value=_Unlistable()
+    ):
+        resp = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
+    assert resp.status_code == 200
+    assert resp.json()["rowless_archives"] is None
+    assert resp.json()["rowless_run_ids"] == []
+    failures = [r for r in caplog.records if "Rowless-archive sweep failed" in r.getMessage()]
+    assert failures and failures[0].exc_info is not None

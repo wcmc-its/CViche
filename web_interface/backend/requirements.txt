@@ -63,8 +63,8 @@ pdfplumber==0.11.10
 pillow==12.3.0
 pyasn1==0.6.4
 pycparser==3.11
-pydantic==2.14.0
-pydantic_core==2.50.0
+pydantic==2.14.1
+pydantic_core==2.50.1
 PyMySQL==1.2.3
 # pyOpenSSL: pysaml2 7.5.5 requires pyopenssl>=26.0.0 with no upper cap;
 # cryptography==50.0.2 forces pyopenssl>=26.4.0. Bump the two together.
