@@ -137,6 +137,10 @@ def test_a_line_5c_rejected_is_reported_at_info():
     assert finding["severity"] == "INFO"
     assert finding["message"].startswith("entry 12 (K1): stage 5c rejected")
     assert "EC-0003:year_missing:2004" in finding["message"]
+    # #1345: a rejected line with no course title renders its raw source
+    # text, not "its stage-4 fields" as the message used to say.
+    assert finding["message"].endswith(
+        "renders unformatted, from its stage-4 course fields or else its source text")
 
 
 def _two_titled_records(formatted, dates=("2001", "2003"), text="2001 Alpha Seminar; 2003 Beta Workshop"):

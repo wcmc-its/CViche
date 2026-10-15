@@ -54,6 +54,7 @@ from unified_pipeline.stage6.normalization import (  # noqa: E402
 )
 from unified_pipeline.stage6.sections import research_support  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    NOTES_LABEL,
     ROLE_EFFORT_DIGIT_RE,
     ROLE_EFFORT_FIELD_ROW_RE,
     ROLE_EFFORT_HEADER_RE,
@@ -1998,6 +1999,71 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
     # all (it flows straight into `rest` whether or not `proj` matches it).
     (f'The major goal of this project is: {_GOAL}', _GOAL),
     (f'The major goals of this program is: {_GOAL}', _GOAL),
+    # "study" in place of "project" (GHWROW, #1678): a paragraph-form grant's
+    # goal sentence, between its title and its role.
+    ('Example Study\tThe major goals of this study are to map the corridors.\tRole: Co-I',
+     'The major goals of this study are to map the corridors.'),
+    (f'The major goal of the study is: {_GOAL}', _GOAL),
+    # A space-joined "Role:" label ends the goal too (WWSEWY, #1678)...
+    (f'The major goals of this project are: {_GOAL}. Role: Consultant', f'{_GOAL}.'),
+    (f'The major goals of this project are: {_GOAL}. Your Role : Co-I', f'{_GOAL}.'),
+    (f'The major goals of this project are: {_GOAL}.\xa0Role: Co-I', f'{_GOAL}.'),
+    # A tab-joined role ends the goal with or without a colon, "your" or not...
+    (f'The major goals of this project are: {_GOAL}\tRole Co-I', _GOAL),
+    (f'The major goals of this project are: {_GOAL}\tYour role Co-I', _GOAL),
+    # ...but a tab-joined wrapped line that starts with a longer word is goal.
+    (f'The major goals of this project are: {_GOAL}\troles of bees',
+     f'{_GOAL}\troles of bees'),
+    # Extracted text can double the space inside "Your  Role:".
+    (f'The major goals of this project are: {_GOAL}. Your  Role: Co-I', f'{_GOAL}.'),
+    # ...but "role" in the goal's own prose, with no colon, does not.
+    (f'The major goals of this project are: {_GOAL} and the role of bees',
+     f'{_GOAL} and the role of bees'),
+    # A space-joined "Role:" right after an unpunctuated goal ends it at the
+    # label, not one word earlier.
+    (f'The major goals of this project are: {_GOAL} Role: Consultant', _GOAL),
+    # Only "role" itself, as a whole word followed by a colon, ends the goal:
+    # another "<word>:" (GHWROW 398's "benefit: risk ratio"), a word that ends
+    # in "role" ("parole:", the run-together "yourrole:"), and "role" before a
+    # pipe or semicolon are all goal prose.
+    (f'The major goals of this project are: {_GOAL} for benefit: risk ratio.',
+     f'{_GOAL} for benefit: risk ratio.'),
+    (f'The major goals of this project are: {_GOAL} and track parole: outcomes',
+     f'{_GOAL} and track parole: outcomes'),
+    (f'The major goals of this project are: {_GOAL} via the yourrole: survey',
+     f'{_GOAL} via the yourrole: survey'),
+    (f'The major goals of this project are: {_GOAL} to define the role | scope',
+     f'{_GOAL} to define the role | scope'),
+    (f'The major goals of this project are: {_GOAL} to define the role; scope',
+     f'{_GOAL} to define the role; scope'),
+    # Other punctuation after "role" is prose too, as is a parenthesised or
+    # plural label; any whitespace before the colon still makes a label.
+    (f'The major goals of this project are: {_GOAL} on the role, if any, of bees',
+     f'{_GOAL} on the role, if any, of bees'),
+    (f'The major goals of this project are: {_GOAL} to define the role. Then survey',
+     f'{_GOAL} to define the role. Then survey'),
+    (f'The major goals of this project are: {_GOAL} and the role - scope',
+     f'{_GOAL} and the role - scope'),
+    (f'The major goals of this project are: {_GOAL} (Role: Co-I)', f'{_GOAL} (Role: Co-I)'),
+    (f'The major goals of this project are: {_GOAL} Roles: PI, Co-I', f'{_GOAL} Roles: PI, Co-I'),
+    (f'The major goals of this project are: {_GOAL} Your Role  : Co-I', _GOAL),
+    (f'The major goals of this project are: {_GOAL} Role\xa0: Co-I', _GOAL),
+    (f'The major goals of this project are: {_GOAL} and the youth role: outcomes',
+     f'{_GOAL} and the youth'),
+    # Two spaces before the label, or none after its colon, still end the goal;
+    # "role)" and a tab-joined "the role" are prose.
+    (f'The major goals of this project are: {_GOAL}  Role: PI', _GOAL),
+    (f'The major goals of this project are: {_GOAL} Role:PI', _GOAL),
+    (f'The major goals of this project are: {_GOAL} (and define the role) of bees',
+     f'{_GOAL} (and define the role) of bees'),
+    (f'The major goals of this project are: {_GOAL} and define\tthe role of bees',
+     f'{_GOAL} and define\tthe role of bees'),
+    # Only "are"/"is" completes the `proj` label: "were:" is not one, so the
+    # whole sentence is the goal, label included, as on dev.
+    ('The major goals of this study were: map the corridors',
+     'The major goals of this study were: map the corridors'),
+    ('The major goals of this studyare: map the corridors',
+     'The major goals of this studyare: map the corridors'),
     # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
     # not the misspelled label.
     (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
@@ -2038,6 +2104,15 @@ def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     # would be read as an unbounded whole-sentence claim.
     'Our major goals include improving efficiencies across the department.',
     'The committee highlighted major goals for the coming year during the review.',
+    # The `proj` anchor needs "of", then nothing or this/the, before the noun.
+    'The major goals of every study are reviewed by the board.',
+    'Faculty discussed the major goals with this program director.',
+    'The major goals ofthe study are reviewed by the board.',
+    # "of the <noun>" anchors only for project, program or study (#1678).
+    'The major goals of the department are listed in the annual report.',
+    'The major goals of the students are to finish the course.',
+    'The major goals of the studies are to finish the course.',
+    'The major goals of thestudy are reviewed by the board.',
     # A5IZ6Q's measured typo is the plural "gals"; the singular "gal" is not a
     # measured variant, so the anchor deliberately does not accept it.
     f'The major gal of this project is: {_GOAL}',
@@ -2186,6 +2261,59 @@ def test_section_fill_renders_the_goal_from_the_grant_own_text(code, header):
 
     assert claimed == []
     assert _cells(_tables_under(gen, header)[0])['Major project goals:'] == _GOAL
+
+
+def test_a_goal_stage4_put_in_notes_renders_once_under_its_own_label():
+    """UHBORP (#1678): stage 4 put the goal sentence in `notes` and left
+    `major_goals` empty; the text parse then filled `major_goals` with the same
+    sentence, and the block printed it under Notes and again under goals.
+    """
+    goal = 'The major goal of this study is to map the corridors.'
+    grant = _grant(236, 238, text=f'Example Study\t{goal}\tRole: Site PI', notes=goal)
+
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2B': [grant]}, as_of=TEST_AS_OF)
+
+    rows = _rows(_tables_under(gen, COMPLETED)[0])
+    assert ('Major project goals:', goal) in rows
+    assert NOTES_LABEL not in [label for label, _ in rows]
+
+
+@pytest.mark.parametrize('notes, goals, notes_kept', [
+    # Contained in the goals, case aside: the goals row already says it.
+    ('MAP THE CORRIDORS', 'Aim 1: map the corridors of the valley', False),
+    # The goals row is contained in the note, not the reverse: the note says more.
+    ('Aim 1: map the corridors of the valley; aim 2 is to survey', 'Aim 1: map the corridors',
+     True),
+    # A remark the goals do not contain stays.
+    ('0.2 calendar months', 'Aim 1: map the corridors of the valley', True),
+    # The goals text is too short to render, so the note is the only copy.
+    ('Map valley', 'Map valley', True),
+    # Goals that only repeat the title do not render either.
+    ('Corridor Study', 'Example Corridor Study', True),
+    # A note no longer than the goals' own minimum is a remark, not a copy of
+    # the goals, even when the goals contain it (#1678)...
+    ('Pending', 'Aim 1 is pending IRB approval for the cohort', True),
+    ('map valley', 'Aim 1: map valley corridors', True),
+    # ...one character longer, it is a copy.
+    ('map valleys', 'Aim 1: map valleys and corridors', False),
+])
+def test_a_note_is_dropped_only_when_the_rendered_goals_contain_it(notes, goals, notes_kept):
+    fields = {'title': 'Example Corridor Study', 'notes': notes, 'major_goals': goals,
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert (NOTES_LABEL in labels) is notes_kept
+
+
+@pytest.mark.parametrize('goals, shown', [
+    # Ten characters is not substantive however much whitespace pads it.
+    ('   Map valley   ', False),
+    ('Map valleys', True),
+])
+def test_the_goals_row_needs_more_than_ten_characters_of_text(goals, shown):
+    fields = {'title': 'Example Corridor Study', 'major_goals': goals, 'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert ('Major project goals:' in labels) is shown
 
 
 def test_a_row_claimed_by_a_declined_grant_is_not_returned():

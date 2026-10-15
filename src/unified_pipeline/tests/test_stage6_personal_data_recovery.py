@@ -1566,6 +1566,86 @@ def test_a_cell_label_at_another_number_does_not_make_this_one_a_cell(tmp_path):
     assert rows["Office address:"] == "1 Sample Way, Exampleton, ZZ 00000"
 
 
+@pytest.mark.parametrize("line, phone, home_number", [
+    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102 (home)", None, "555-555-0102"),
+    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102(home)", None, "555-555-0102"),
+    # the home number shares only its last digits with the work number
+    ("555-555-0100 (work); 555-123-0100 (home)", "555-555-0100", "555-123-0100"),
+    # "(home)" need not end the line
+    ("555-555-0100 (work); 555-555-0102 (home); email a@example.org", "555-555-0100",
+     "555-555-0102"),
+    # every home label is dropped, not just the first
+    ("555-555-0100 (work); 555-555-0101 (home); 555-555-0102 (home)", "555-555-0100",
+     "555-555-0101"),
+    # more than one blank before the label
+    ("555-555-0100 (work); 555-555-0102  (home)", "555-555-0100", "555-555-0102"),
+    # a line break before the label
+    ("555-555-0100 (work); 555-555-0102\n(home)", "555-555-0100", "555-555-0102"),
+    # the home number shares six final digits with the work number, not seven
+    ("555-555-0100 (work); 555-655-0100 (home)", "555-555-0100", "555-655-0100"),
+    # an area code in parentheses starts the home number, not the work one
+    ("555-555-0100 (555) 555-0102 (home)", "555-555-0100", "(555) 555-0102"),
+])
+def test_a_home_label_trailing_another_number_leaves_the_work_number_in_office(
+        tmp_path, line, phone, home_number):
+    """YOXXOH-05: every label trails its number, and the "(home)" after the
+    last one sent the work number to the withheld home slot as well, so
+    Office telephone was empty and the whole line, home number included,
+    went to the Appendix."""
+    entries = [_a(f"TELEPHONE\t{line}", {"phone": phone or line})]
+
+    rows = _contact_rows(tmp_path, entries)
+
+    assert rows["Office telephone:"].startswith("555-555-0100")
+    assert home_number not in _render(tmp_path, entries)
+
+
+@pytest.mark.parametrize("text, phone", [
+    # the home label is this number's own
+    ("Phone: 555-555-0102 (home)", "555-555-0102"),
+    # the value still holds the home number beside the work one
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-555-0100; 555-555-0102"),
+    # a number straight after "(home)" may be the one it labels
+    ("555-555-0101 (home) 555-555-0102", "555-555-0102"),
+    # only a bare "(home)" is that number's label alone
+    ("555-555-0101 (home office); 555-555-0102", "555-555-0102"),
+    ("555-555-0101 (homephone); 555-555-0102", "555-555-0102"),
+    # a "(home):" labels the number after it, the one the value holds
+    ("555-555-0101 (home): 555-555-0102", "555-555-0102"),
+    # the work label belongs to the number before it, not the home number
+    ("555-555-0100 (work) 555-555-0102 (home)", "555-555-0102"),
+    # two numbers read as one: the value holds the home one (#1823 review)
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "555-555-0102"),
+    # ...and with a country code or an extension on the value (#1823 review 2)
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "+1 555-555-0102"),
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "1-555-555-0102"),
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "555-555-0102 ext 7"),
+    # the line drops the home number's area code, the value keeps it
+    ("555-0100 555-0102 (home)", "+1 212-555-0102"),
+    # the value joins the home number before the work one with a space (#1823 review 3)
+    ("TELEPHONE: 555-555-0100 (work); 555-555-0102 (home)", "555-555-0102 555-555-0100"),
+    ("TELEPHONE: 555-555-0100 (work); 555-555-0102 (home)", "555.555.0102 555.555.0100"),
+    # the joined span's first number is the value's
+    ("TELEPHONE: 555-555-0102 555-555-0100 (home)", "555-555-0102"),
+    # one side drops an area code inside a joined pair
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-0102 555-555-0100"),
+    ("TELEPHONE: 555-0102 555-555-0100 (home)", "+1 212-555-0102"),
+    # a value listing the joined span's first number beside another one
+    ("TELEPHONE: 555-555-0102 555-555-0100 (home)", "555-555-0102; 555-555-0199"),
+    # the text writes the home number shorter than the value
+    ("212-555-0100 (work); 55-0102 (home)", "212-555-0102"),
+    # a value with no digits keeps every home label
+    ("555-555-0100 (work); 555-555-0102 (home)", "see cv"),
+    # the value spells the home number without its area code
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-0102"),
+    # the value lists the home number first
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-555-0102; 555-555-0100"),
+])
+def test_a_home_label_the_value_may_own_still_withholds_it(tmp_path, text, phone):
+    rows = _contact_rows(tmp_path, [_a(text, {"phone": phone})])
+    assert rows["Office telephone:"] == ""
+
+
 def test_off_schema_street_and_phone_keys_fill_the_office_rows(tmp_path):
     """YYVHNN-02: stage 4 left `address` and `phone` null and set the parts
     under keys of their own."""

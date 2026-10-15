@@ -55,6 +55,18 @@ def test_previous_fragment_is_appended_with_a_space():
     assert stats["fragments_merged"] == 1
 
 
+def test_a_fragment_without_text_adds_no_text_to_its_parent():
+    entries = [_entry("Grand Rounds: Rare Tumours"), _fragment(None, 0)]
+    merge_fragment_text(entries)
+    assert entries[0]["text"].strip() == "Grand Rounds: Rare Tumours"
+
+
+def test_a_parent_without_text_takes_the_fragment_text():
+    entries = [_entry(None), _fragment("Springfield, IL", 0)]
+    merge_fragment_text(entries)
+    assert entries[0]["text"].strip() == "Springfield, IL"
+
+
 def test_previous_fragment_after_sentence_punctuation_takes_a_new_line():
     entries = [_entry("Visiting lecture, 2015."), _fragment("Springfield, IL", 0)]
     merge_fragment_text(entries)
@@ -105,6 +117,7 @@ def test_a_label_the_reasoning_names_is_not_merged():
     assert entries[1]["text"] == "1. Invited talk"
     assert entries[0][SKIPPED_FIELD] == SKIP_LABEL
     assert stats["fragments_not_merged"] == {SKIP_LABEL: 1}
+    assert stats["fragments_merged"] == 0
 
 
 def test_header_like_is_a_hedge_not_a_label():
@@ -174,6 +187,20 @@ def test_a_parent_claimed_from_both_sides_takes_neither():
     _, stats = merge_fragment_text(entries)
     assert entries[1]["text"] == "Poster titled: An Example"
     assert stats["fragments_not_merged"] == {SKIP_BOTH_SIDES: 2}
+
+
+def test_a_fragment_already_merged_does_not_block_the_other_side():
+    """#1702: T-validation folds a mentee row's rest into the row before
+    `reconnect_fragments` tags the line above it; the merged rest has
+    settled its side, so the line above still joins the row."""
+    entries = [
+        _fragment("Example Mentoring Program", 1, "T"),
+        _entry("30.Jane Example, MD Example Scholar Award", "N3A"),
+        _fragment("Example Scholar Award", 1, "N3B") | {MERGED_FLAG: True},
+    ]
+    _, stats = merge_fragment_text(entries)
+    assert entries[1]["text"] == "Example Mentoring Program 30.Jane Example, MD Example Scholar Award"
+    assert stats["fragments_not_merged"] == {}
 
 
 def test_a_skipped_label_on_one_side_does_not_block_the_other():

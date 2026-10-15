@@ -11,6 +11,9 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from unified_pipeline.config import _normalize_model_id, calculate_cost
 from unified_pipeline.llm.retry import (
@@ -119,6 +122,44 @@ DEFAULT_MAX_TOKENS = 16000
 # gets the request shape it always had.
 NO_SAMPLING_PARAMS_MODELS = frozenset({"anthropic.claude-sonnet-5"})
 
+
+@dataclass(frozen=True)
+class BedrockModelCapabilities:
+    """What a Bedrock model accepts in a Converse request (#629).
+
+    supports_forced_tool_choice: accepts toolChoice={"tool": ...}, which the
+        #46 json_schema path needs. Bedrock supports it for some model
+        families only; a model without it gets the prompt-hint path.
+    supports_strict_tool_use: accepts toolSpec.strict=True, which makes
+        Bedrock enforce the schema on the tool input.
+    default_max_tokens: the maxTokens sent when neither the caller nor
+        llm_config.yaml sets one (#631).
+    """
+
+    supports_forced_tool_choice: bool
+    supports_strict_tool_use: bool
+    default_max_tokens: int = DEFAULT_MAX_TOKENS
+
+
+# Every model llm_config.yaml configures is Anthropic Claude, and Bedrock
+# supports a forced tool choice for every Claude model. strict is off until a
+# Bedrock A/B shows our schemas pass strict mode: it changes what Bedrock
+# rejects (#629).
+CLAUDE_MODEL_ID_PREFIX = "anthropic.claude-"
+
+# Keyed by a prefix of the bare model id (after _normalize_model_id). The
+# longest matching prefix wins, so an entry for one model id overrides the
+# family entry for that model only.
+BEDROCK_MODEL_CAPABILITIES: Mapping[str, BedrockModelCapabilities] = MappingProxyType({
+    CLAUDE_MODEL_ID_PREFIX: BedrockModelCapabilities(
+        supports_forced_tool_choice=True, supports_strict_tool_use=False),
+})
+
+# A model no prefix above matches: nothing about it is verified, so it gets
+# only the request shape every Converse model accepts.
+UNVERIFIED_MODEL_CAPABILITIES = BedrockModelCapabilities(
+    supports_forced_tool_choice=False, supports_strict_tool_use=False)
+
 _bedrock_client = None
 
 
@@ -166,7 +207,43 @@ def _wants_json(response_format):
     )
 
 
-def _schema_tool_config(response_format):
+def _bedrock_model_capabilities(model: str) -> BedrockModelCapabilities:
+    """The capabilities of the longest BEDROCK_MODEL_CAPABILITIES prefix that
+    matches the bare model id, or UNVERIFIED_MODEL_CAPABILITIES when none
+    does."""
+    bare = _normalize_model_id(model) or ""
+    matches = [prefix for prefix in BEDROCK_MODEL_CAPABILITIES if bare.startswith(prefix)]
+    if not matches:
+        return UNVERIFIED_MODEL_CAPABILITIES
+    return BEDROCK_MODEL_CAPABILITIES[max(matches, key=len)]
+
+
+def _model_schema_tool_config(model: str, response_format: dict | None) -> dict | None:
+    """The #46 forced-tool `toolConfig` for this model, or None when the call
+    takes the prompt-hint path: no json_schema was requested, the schema is
+    not an object, or the model does not support a forced tool choice (#629).
+    _call_bedrock and _dispatch_bedrock both decide through here, so the
+    request and the response handling never disagree on the path."""
+    capabilities = _bedrock_model_capabilities(model)
+    if not capabilities.supports_forced_tool_choice:
+        return None
+    return _schema_tool_config(response_format,
+                               strict=capabilities.supports_strict_tool_use)
+
+
+def _warn_if_schema_tool_unsupported(model: str, response_format: dict | None) -> None:
+    """Log that a json_schema request falls back to the prompt-hint path
+    because the model does not support a forced tool choice (#629). The
+    schema is then not enforced, so the fallback must not be silent."""
+    if (_schema_tool_config(response_format) is not None
+            and _model_schema_tool_config(model, response_format) is None):
+        logger.warning(
+            "Bedrock model %s has no verified forced-tool support "
+            "(BEDROCK_MODEL_CAPABILITIES); json_schema is sent as a prompt "
+            "hint and is not enforced.", model)
+
+
+def _schema_tool_config(response_format: dict | None, *, strict: bool = False) -> dict | None:
     """Build a Bedrock Converse `toolConfig` that FORCES the model to emit
     output matching an OpenAI-style json_schema response_format.
 
@@ -184,6 +261,9 @@ def _schema_tool_config(response_format):
     ($ref, oneOf) makes Bedrock raise ValidationException loudly rather than
     silently degrade -- see the hard-fail in call_llm's bedrock branch.
     # ponytail: no schema normalizer; add one only if a real schema needs it.
+
+    strict=True adds toolSpec.strict, so Bedrock enforces the schema on the
+    tool input. Callers pass the model's supports_strict_tool_use (#629).
     """
     if not (response_format and response_format.get("type") == "json_schema"):
         return None
@@ -202,13 +282,16 @@ def _schema_tool_config(response_format):
             f"Bedrock json_schema name {name!r} must be 1-64 characters and "
             "contain only letters, digits, '_' or '-'."
         )
+    tool_spec = {
+        "name": name,
+        "description": js.get("description")
+        or "Return the extracted record using exactly this schema.",
+        "inputSchema": {"json": schema},
+    }
+    if strict:
+        tool_spec["strict"] = True
     return {
-        "tools": [{"toolSpec": {
-            "name": name,
-            "description": js.get("description")
-            or "Return the extracted record using exactly this schema.",
-            "inputSchema": {"json": schema},
-        }}],
+        "tools": [{"toolSpec": tool_spec}],
         "toolChoice": {"tool": {"name": name}},
     }
 
@@ -471,7 +554,7 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     ):
         raise ValueError(f"Bedrock max_tokens must be a positive int, got {max_tokens!r}")
     client = _get_bedrock_client()
-    tool_config = _schema_tool_config(response_format)
+    tool_config = _model_schema_tool_config(model, response_format)
     system_prompts, converse_messages = _translate_messages(
         messages, response_format, use_schema_tool=tool_config is not None
     )
@@ -496,16 +579,20 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     if system_prompts:
         call_kwargs["system"] = system_prompts
     # Always send maxTokens. When the caller (and config) leave it None, fall
-    # back to the conservative DEFAULT_MAX_TOKENS floor instead of omitting the
-    # field -- omitting it lets Bedrock apply the model's ~64K default ceiling,
-    # which is the runaway-generation tail risk this floor exists to bound.
+    # back to the model's default_max_tokens (DEFAULT_MAX_TOKENS unless its
+    # BEDROCK_MODEL_CAPABILITIES entry says otherwise, #631) instead of
+    # omitting the field -- omitting it lets Bedrock apply the model's ~64K
+    # default ceiling, which is the runaway-generation tail risk this floor
+    # exists to bound.
     call_kwargs["inferenceConfig"]["maxTokens"] = (
-        max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
+        max_tokens if max_tokens is not None
+        else _bedrock_model_capabilities(model).default_max_tokens
     )
     # json_schema callers: force a single-tool call whose inputSchema is the
     # caller's schema, so Bedrock constrains the output the way OpenAI does
-    # server-side (#46). json_object / non-schema callers keep the prompt-hint
-    # path (no toolConfig).
+    # server-side (#46). json_object / non-schema callers, and a model without
+    # supports_forced_tool_choice (#629), keep the prompt-hint path (no
+    # toolConfig).
     if tool_config is not None:
         call_kwargs["toolConfig"] = tool_config
 
@@ -673,6 +760,7 @@ def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -
     text/json_object path (with its one-shot JSON repair retry).
     """
     model = cfg["model"]
+    _warn_if_schema_tool_unsupported(model, response_format)
     response, api_seconds = _call_with_retry(
         lambda: _call_bedrock(model, messages, cfg["temperature"], response_format,
                               cfg["max_tokens"],
@@ -685,7 +773,7 @@ def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -
     usage = response["usage"]
     cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
 
-    if _schema_tool_config(response_format) is not None:
+    if _model_schema_tool_config(model, response_format) is not None:
         return _finalize_schema_tool_response(
             response, usage, cache_read_tokens, cache_write_tokens, model, api_seconds
         ), response.get("stopReason")

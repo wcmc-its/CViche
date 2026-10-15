@@ -224,6 +224,7 @@ from ..formatting import (
     is_cviche_box,
     space_around_cviche_box,
 )
+from ..fan_out import LAST_STAGE4_RECORD
 from ..normalization import _clean_inline_tabs
 from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
 from ..render_check import (
@@ -232,6 +233,7 @@ from ..render_check import (
     _record_lines,
     _record_tokens,
     t_recovery_lines,
+    tab_aware_record_lines,
 )
 
 if TYPE_CHECKING:
@@ -1795,7 +1797,10 @@ def recovery_candidates(code: str, entry: dict) -> list[str]:
         if len(text) <= APPENDIX_MAX_CHARS:
             return []
         return t_recovery_lines(text)
-    records = _record_lines(text)
+    # An entry stage 4 split into records renders them from their own children;
+    # their tab parts are not lost, only reformatted (#1243).
+    read_lines = _record_lines if LAST_STAGE4_RECORD in entry else tab_aware_record_lines
+    records = read_lines(text)
     return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
 
 
