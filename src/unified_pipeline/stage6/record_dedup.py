@@ -32,6 +32,7 @@ from .dedup import (
     _citations_conflict,
     _decision_fields,
     _entry_signature_words,
+    _first_author,
     _is_subsequence,
     _is_word_run,
     _ordered_words,
@@ -39,7 +40,7 @@ from .dedup import (
     _rank_qualifiers,
 )
 from .fan_out import FANNED_OUT_FROM
-from .normalization.publication import resolve_publication
+from .normalization.publication import ResolvedPublication, resolve_publication
 
 # The grant codes, one record whatever its status: grant_status_corrector moves
 # a copy with an amount to M2B and leaves a copy without one in M2A (AKPQEB-04).
@@ -169,6 +170,24 @@ def _same_grant(first: dict, second: dict) -> dict | None:
     return _fuller_first(first, second)[1]
 
 
+def _lists_disagree(kind: str, first: tuple[dict, ResolvedPublication],
+                    second: tuple[dict, ResolvedPublication]) -> bool:
+    """True when two copies in two article lists that share a PMID or DOI name
+    another first author or another part number: a titled commentary under
+    the paper's DOI ("Editorial: <its title>" by another author), or a Part I
+    and Part II that share one DOI. Inside one list `dedup._citations_conflict`
+    lets a PMID or DOI match override the first author, since a CV's own
+    spelling is not a second paper (RXYBVF); across lists a lost paper costs
+    more than a duplicate, so they stay (#446 review). A shared whole 5d
+    citation already prints both."""
+    if kind == 'citation':
+        return False
+    (_first_entry, first_pub), (_second_entry, second_pub) = first, second
+    authors = _first_author(first_pub), _first_author(second_pub)
+    return ((all(authors) and authors[0] != authors[1])
+            or _part_numbers(first_pub.title) != _part_numbers(second_pub.title))
+
+
 def _same_paper(first: dict, second: dict) -> dict | None:
     """The less full copy (`dedup._citation_fullness`) when two article
     records share a PMID, a DOI or a whole 5d citation and
@@ -192,7 +211,8 @@ def _same_paper(first: dict, second: dict) -> dict | None:
     copies = (first, pubs[0]), (second, pubs[1])
     first_keys, second_keys = ({key for key in _citation_identity_keys(*copy)
                                 if key[0] in _CROSS_LIST_KEY_KINDS} for copy in copies)
-    if all(_citations_conflict(kind, *copies) for kind, _value in first_keys & second_keys):
+    if all(_citations_conflict(kind, *copies) or _lists_disagree(kind, *copies)
+           for kind, _value in first_keys & second_keys):
         return None
     return first if _citation_fullness(first, pubs[0]) < _citation_fullness(second, pubs[1]) else second
 

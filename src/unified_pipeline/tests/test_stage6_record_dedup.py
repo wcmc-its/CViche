@@ -460,9 +460,11 @@ def test_a_split_citation_coded_in_two_lists_renders_once() -> None:
     """VGHNZD-07: 3b coded the head S2 and the tail S1, with no PMID or DOI;
     5d completed both into one citation, which printed in both lists."""
     head = _split_half("S2", 1654, "(47) Quenby A, Norvale B. Widget flux in quenby cells. J Widget Res",
-                       title="Widget flux in quenby cells", journal="J Widget Res", year="2031")
+                       title="Widget flux in quenby cells", journal="J Widget Res", year="2031",
+                       authors="Quenby A, Norvale B")
     tail = _split_half("S1", 1655, "Clin 2031;12(1):1-9.", title="Widget flux in quenby cells.",
-                       journal="Clin", year="2031", volume="12", pages="1-9")
+                       journal="Clin", year="2031", volume="12", pages="1-9",
+                       authors="Clin")  # a split tail's misread author field
     grouped, decisions, _ = _run([head, tail])
     assert _indexes(grouped) == [1655]
     assert decisions[0]["metric"] == "record=paper_identifier"
@@ -483,6 +485,36 @@ def test_a_title_less_note_under_the_papers_doi_stays() -> None:
                   journal="J Widget Res", doi="10.1234/widget.5")
     grouped, decisions, _ = _run([_paper("S1", 10, doi="10.1234/widget.5"), note])
     assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_titled_commentary_under_the_papers_doi_keeps_the_paper() -> None:
+    """#446 review: an "Editorial: <the paper's title>" by another first
+    author, listed S2 under the paper's DOI and with the longer text, must
+    not drop the S1 paper."""
+    paper = _paper("S1", 10, pmid="", doi="10.1234/widget.5")
+    editorial = _entry("S2", 50, "Lee C. Editorial: Widget flux in quenby cells. J Widget Res. "
+                                 "2031;12(1):1-9. doi:10.1234/widget.5. A commentary at length.",
+                       authors="Lee C", title="Editorial: Widget flux in quenby cells",
+                       journal="J Widget Res", year="2031", volume="12", pages="1-9",
+                       doi="10.1234/widget.5")
+    grouped, decisions, _ = _run([paper, editorial])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_part_one_and_part_two_under_one_doi_both_stay() -> None:
+    first = _paper("S1", 10, pmid="", doi="10.1234/widget.5",
+                   title="Widget flux in quenby cells: Part I")
+    second = _paper("S2", 50, pmid="", doi="10.1234/widget.5",
+                    title="Widget flux in quenby cells: Part II", volume="12", pages="1-9")
+    grouped, decisions, _ = _run([first, second])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_copy_with_no_author_list_still_pairs_on_its_pmid() -> None:
+    """No first author is not another first author."""
+    sparse = _paper("S1", 10, authors="")
+    grouped, _decisions, _ = _run([sparse, _paper("S2", 50, volume="12", pages="1-9")])
+    assert _indexes(grouped) == [50]
 
 
 def test_a_paper_in_a_non_article_list_is_not_paired() -> None:
