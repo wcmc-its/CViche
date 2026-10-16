@@ -2882,9 +2882,47 @@ def test_blank_value_label_without_a_valued_twin_stays_a_table_header(tmp_path, 
 def test_is_blank_value_field_row_needs_a_colon_a_value_cell_and_a_valued_twin():
     valued = [{"text": "Percent Effort:"}, {"text": "5%"}]
     blank = [{"text": "Percent Effort:"}, {"text": ""}]
-    assert is_blank_value_field_row("Percent Effort:", blank, [blank, valued])
+    role = [{"text": "Role:"}, {"text": "PI"}]
+    assert is_blank_value_field_row("Percent Effort:", blank, [blank, role, valued])
     assert not is_blank_value_field_row("Percent Effort:", blank, [blank])
     assert not is_blank_value_field_row("Percent Effort:", valued, [blank, valued])
     assert not is_blank_value_field_row("Percent Effort", [{"text": "Percent Effort"}, {"text": ""}],
                                         [[{"text": "Percent Effort"}, {"text": "5%"}]])
     assert not is_blank_value_field_row("Percent Effort:", [{"text": "Percent Effort:"}], [valued])
+
+
+def test_blank_row_inside_a_vertically_merged_label_stays_a_table_header(tmp_path):
+    """h2446 (#1226 rework): `EDUCATION:` is one vMerge'd label cell spanning
+    the whole section, so the reader repeats it on every row, and a blank row
+    separates two degrees. Its valued "twin" is its own continuation, not a
+    periodic record, so the blank row keeps the section header it had."""
+    path = tmp_path / "merged_label.docx"
+    rows = [
+        ("CONTACT INFORMATION:", "Synthetic office"),
+        ("EDUCATION:", "Synthetic University"),
+        ("", "B.S. in Synthetic Studies"),
+        ("", ""),
+        ("", "Other Synthetic University"),
+        ("", "M.S. in Synthetic Studies"),
+    ]
+    doc = Document()
+    table = doc.add_table(rows=len(rows), cols=2)
+    for i, (label, value) in enumerate(rows):
+        table.cell(i, 0).text = label
+        table.cell(i, 1).text = value
+    table.cell(1, 0).merge(table.cell(len(rows) - 1, 0))
+    doc.save(str(path))
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["text"] for e in elements if e["type"] == "table_header"] == ["EDUCATION:"]
+
+
+def test_is_blank_value_field_row_rejects_the_merged_label_echo():
+    """A label repeated on the row just above or below is a merged cell's echo."""
+    valued = [{"text": "EDUCATION:"}, {"text": "Synthetic University"}]
+    blank = [{"text": "EDUCATION:"}, {"text": ""}]
+    other = [{"text": "Role:"}, {"text": "PI"}]
+    assert not is_blank_value_field_row("EDUCATION:", blank, [valued, blank, other])
+    assert not is_blank_value_field_row("EDUCATION:", blank, [other, blank, valued])
+    assert is_blank_value_field_row("EDUCATION:", blank, [valued, other, blank])

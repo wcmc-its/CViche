@@ -1052,15 +1052,34 @@ def is_blank_value_field_row(
     only recognises a form row by its value cell, so a blank one fell through
     to the header branch. A label that never carries a value elsewhere in the
     table (e.g. a lone `Certification:` | ``) is still a header, as before.
+
+    A label repeated on an ADJACENT row is the echo of a vertically merged
+    label cell, not a periodic record (h2446: `EDUCATION:` on every row of
+    the section, a blank row between degrees). Its valued "twin" is its own
+    continuation, so that row stays a header, as before.
     """
     label = cell_text.strip()
     if len(row) < 2 or not label.endswith(":") or row_has_nonblank_value_cells(row):
         return False
     key = label.casefold()
+    if _label_repeats_on_adjacent_row(key, row, table_rows):
+        return False
     return any(
         _row_label_key(other) == key and row_has_nonblank_value_cells(other)
         for other in table_rows
     )
+
+
+def _label_repeats_on_adjacent_row(
+    key: str, row: list[dict[str, Any]], table_rows: list[list[dict[str, Any]]]
+) -> bool:
+    """True when the row just above or below `row` in `table_rows` has the
+    same case-folded label `key` -- the vMerge echo shape (#1226, h2446)."""
+    idx = next((i for i, other in enumerate(table_rows) if other is row), None)
+    if idx is None:
+        return False
+    neighbours = table_rows[max(idx - 1, 0) : idx] + table_rows[idx + 1 : idx + 2]
+    return any(_row_label_key(other) == key for other in neighbours)
 
 
 # Minimum looks_like_section_header confidence for a colon-less, row-left label to
