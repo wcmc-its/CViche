@@ -457,3 +457,144 @@ def test_lint_reads_the_leaf_heading_only_1691():
     findings = _run(_entry("Example Sepsis Update, 2019", "S8", "Invited Talks",
                            "Professional Development"))
     assert _shapes(findings) == ["attended_as_teacher"]
+
+
+def test_award_coded_as_grant_under_an_honors_heading_is_flagged_1577():
+    """#1577 (YUYVIG UVZNIC 117-126, ZDOAZO 333): an award line under an
+    honors heading, coded M2A with no grant marker, renders as a one-year
+    Current Research Funding table with no title and no PI."""
+    findings = _run(
+        _entry("2004 Independent Investigator Award, Invented Institute of Examples", "M2A",
+               "Awards, Honors, and Membership in Honorary Societies", idx=120),
+        _entry("2009 Invented Mentoring Career Award", "M2B",
+               "Awards, Honors, and Membership in Honorary Societies", idx=122))
+    assert _shapes(findings) == ["honor_as_funding"]
+    assert findings[0]["severity"] == "WARN"
+    assert "2 entries under 'Awards, Honors, and Membership in Honorary Societies' coded M2A, M2B" \
+        in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("entry 120 (M2A): ")
+
+
+@pytest.mark.parametrize("code", ["M2", "M2C"])
+def test_every_grant_code_under_an_honors_heading_is_flagged_1577(code):
+    assert _shapes(_run(_entry("2007 Invented Consensus Group Grant, Invented Fund", code,
+                               "Post-Degree Honors and Awards"))) == ["honor_as_funding"]
+
+
+@pytest.mark.parametrize("text", [
+    "Mentored Clinical Scientist Development Award (K08), Invented Institute 1998",  # number
+    "1992-1994 Invented Career Development Award, Invented Foundation",  # two-ended period
+    "Invented Foundation $2,500 Small Grant Award",  # an amount
+    "Principal Investigator. Invented Society Research Grant. 2019.",  # PI role at the head
+])
+def test_award_with_a_grant_marker_under_an_honors_heading_is_quiet_1577(text):
+    """The markers stage 3b's #1618 H pin keeps a grant code for."""
+    assert _run(_entry(text, "M2A", "Honors and Awards")) == []
+
+
+@pytest.mark.parametrize("heading", [
+    "Grant Awards", "Funded Awards", "Other Support Awards", "Contract Awards", "Research Awards",
+    "Investigator Awards", "Current Awards", "Past awards", "Pending Awards", "Completed Awards",
+    "Ongoing Awards", "Active Awards",
+])
+def test_award_under_a_heading_that_names_funding_is_quiet_1577(heading):
+    assert _run(_entry("2015 Invented Seed Award", "M2B", heading)) == []
+
+
+@pytest.mark.parametrize("heading", ["Honors", "Awards", "Prizes", "Professional Recognition",
+                                     "Distinctions", "Honours and Awards"])
+def test_every_honors_word_names_an_honors_heading_1577(heading):
+    assert _shapes(_run(_entry("2015 Invented Seed Award", "M2B", heading))) == ["honor_as_funding"]
+
+
+def test_honors_heading_is_read_on_the_leaf_for_a_grant_code_1577():
+    """A grants list nested under an honors parent is the author's grants."""
+    assert _run(_entry("2015 Invented Seed Award", "M2B", "Honors and Awards", "Grants")) == []
+    assert _run(_entry("2015 Invented Seed Award", "H", "Honors and Awards")) == []
+    assert _run(_entry("2015 Invented Seed Award", "M2B", "Other Activities")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "2017: Elected Fellow of the Invented Society for Cell Examples",
+    "Elected to Fellowship, Invented Diseases Society - 1994",
+    "Named Fellow of the Invented Heart Association (FIHA)",
+    "2007 Inducted as a Fellow in the Invented Psychological Association.",
+    "• Elected Associate Fellow, Invented Aerospace Association: 2011",
+    "2024-\t\tElected Fellow, Invented Association for Examples",
+    "Oct. 2015 Elected Honorary Fellow, Invented Royal College of Examples",
+    "Elected Distinguished Fellow, Invented Society of Examples",
+])
+def test_elected_fellowship_coded_as_membership_is_reported_under_any_heading_1577(text):
+    """#1577 (YUYVIG IZIXVF 55, XNWSZN 53; NECRGC LWMSPJ, ZASOTV): an
+    election to a fellowship renders as 'Fellow, <body> yyyy-Present' in
+    Memberships and is missing from Honors. INFO: the stage-3b prompt codes a
+    society fellowship I, and that taxonomy call is still open."""
+    findings = _run(_entry(text, "I", "Professional Memberships"))
+    assert _shapes(findings) == ["fellowship_as_membership"]
+    assert findings[0]["severity"] == "INFO"
+
+
+@pytest.mark.parametrize("text", [
+    "2024 Fellow, Invented College of Medical Examples (ICME)",
+    "Fellow of the Invented College of Radiology, 2009",
+    "Fellow 2018-present\tInvented College of Surgeons",
+    "Fellow (2014), Invented Association",
+    "1988     Founding Fellow, Invented Informatics Association",
+    "2024 Distinguished Fellow of the Invented Psychiatric Association",
+    "2009 Invented Gastroenterological Association Fellow",
+    "2018-Present Fellow, Invented College of Examples",
+    "Honorary Fellow, Invented Royal College of Examples",
+    "Associate Fellow, Invented Aerospace Association",
+    "Fellow in the Invented Heart Association, 2002",
+    "Invented Society Fellow 2004",
+    "Invented College Fellow 2004",
+    "Invented Academy Fellow 2004",
+    "Invented Institute Fellow 2004",
+])
+def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
+    """MVUREJ 44: the honors word may sit on a parent heading."""
+    findings = _run(_entry(text, "I", "Professional Honors & Recognition", "National"))
+    assert _shapes(findings) == ["fellowship_as_membership"]
+    assert findings[0]["severity"] == "INFO"
+    assert "1 entry under 'Professional Honors & Recognition > National' coded I" \
+        in findings[0]["message"]
+
+
+@pytest.mark.parametrize("text, code, headings", [
+    # UVZNIC 131: the leaf names memberships, so the author put it there.
+    ("2017 Fellow, Invented College of Examples", "I",
+     ("Awards, Honors, and Membership in Honorary Societies",)),
+    ("2006-present Fellow of the Invented Academy of Pediatric Examples", "I",
+     ("Professional Certifications",)),
+    # No honors word on the path, and no election.
+    ("Fellow, Invented College of Examples", "I", ("Professional Societies",)),
+    # An honors parent over a leaf that names memberships or credentials.
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Honorary Societies")),
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Memberships")),
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Organizations")),
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Affiliations")),
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Certifications")),
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Licensure")),
+    ("Fellow, Invented College of Examples", "I", ("Service",)),
+    # A fellowship programme, a training title, a member.
+    ("1988-1991 Invented Society Fellowship", "I", ("Honors",)),
+    ("Research Fellow, Invented Institute", "I", ("Honors",)),
+    ("Member, Invented Society of Examples", "I", ("Honors",)),
+    # "Fellow" not followed by a comma, of/in, a bracket or a digit: an award
+    # or programme named for fellows, not a fellowship title.
+    ("2015 Fellow Travel Award, Invented Society of Examples", "I", ("Honors and Awards",)),
+    ("Fellow - Invented Leadership Programme, 2012", "I", ("Honors and Awards",)),
+    # An acronym before "Fellow": a training or funding fellowship as often
+    # as an honorific one.
+    ("NIH Fellow 1998", "I", ("Honors and Awards",)),
+    ("AHA Fellow", "I", ("Honors and Awards",)),
+    ("INVA Fellow, June 2012", "I", ("Honors and Awards",)),
+    # Already Honors, or a different code.
+    ("Elected Fellow, Invented Society of Examples", "H", ("Honors",)),
+    ("Elected Fellow, Invented Society of Examples", "Q1", ("Service",)),
+    # An election mid-line, inside a membership row (CYOFWJ 65).
+    ("Invented Academy of Examples (Active Member; elected fellow 2010)", "I",
+     ("Professional Societies",)),
+])
+def test_fellowship_shapes_that_are_quiet_1577(text, code, headings):
+    assert _run(_entry(text, code, *headings)) == []

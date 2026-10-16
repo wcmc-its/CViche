@@ -337,8 +337,66 @@ def segment_held_by_fields(segment: str, extracted_fields: dict) -> bool:
     scalar field holds is still checked, and so is a part held only by a list
     field (`additional_roles` items that stage 6 does not print)."""
     words = set(_RENDER_TOKEN_RE.findall(_norm(segment)))
-    held = set(_RENDER_TOKEN_RE.findall(_norm(" ".join(_field_strings(extracted_fields)))))
-    return bool(words) and words <= held
+    return bool(words) and words <= _scalar_field_words(extracted_fields)
+
+
+def _scalar_field_words(extracted_fields: dict) -> set[str]:
+    """The distinctive words of an entry's scalar field values (`_field_strings`)."""
+    return set(_RENDER_TOKEN_RE.findall(_norm(" ".join(_field_strings(extracted_fields)))))
+
+
+# The dates of a short tab part, with any month number: "2009-2011", "1996-97",
+# "5/2017-10/2020", "2008". What is left once they go is the part's record.
+_PART_DATE_RE = re.compile(
+    r"(?:\b\d{1,2}/)?\b(?:19|20)\d{2}\b(?:\s*[-–—]\s*(?:\d{1,2}/)?\d{2,4}\b)?")
+# A field label inside a part ("Dates: 1989-1990"): the CV's layout, not its record.
+_FIELD_LABEL_RE = re.compile(r"[^\W\d_]+:")
+# Words that state a date, not a record: a render may spell a month or an open
+# end its own way ("Aug 2001", "2013-Current").
+_DATE_WORDS = _MONTH_WORDS | {'present', 'current', 'ongoing'}
+
+
+def short_tab_part_words(part: str) -> set[str] | None:
+    """The distinctive words of a dated tab part, its dates, date words and
+    field labels left out, or None when the part cannot be checked on them.
+
+    A tab part with fewer than `RENDER_TOKEN_MIN_COUNT` distinctive words
+    ("Secretary, 2009-2011", an officer post under its society's line) is too
+    short for `_record_rendered`'s overlap test, so the recovery pass skipped it
+    whether or not it rendered (#1243). Its words plus its years identify it
+    instead (`short_tab_part_rendered`). None when nothing is left to identify
+    it by: no word, a number outside its dates (a head count, a course number,
+    a full date with its day), or every letter upper case (a heading with a year).
+    """
+    letters = "".join(ch for ch in part if ch.isalpha())
+    if not letters or letters.isupper():
+        return None
+    undated = _PART_DATE_RE.sub(" ", _FIELD_LABEL_RE.sub(" ", part))
+    if re.search(r"\d", undated):
+        return None
+    words = set(_RENDER_TOKEN_RE.findall(_norm(undated))) - _DATE_WORDS
+    return words or None
+
+
+def short_tab_part_rendered(part: str, extracted_fields: dict,
+                            output_token_sets: list[set]) -> bool | None:
+    """Whether a short dated tab part (`short_tab_part_words`) is in the output.
+
+    True when stage 4 holds all its words in a scalar field: it is the
+    extracted record, which the structured row renders cell by cell (a mentee's
+    name, with "Dates:" and the years in rows of their own). Otherwise True only
+    when one output line holds all its words and its years: `output_token_sets`
+    are `_record_tokens` of each line, and the years keep siblings apart
+    ("Secretary, 2009-2011" is not "Secretary, 2013-2015"). None when the part
+    cannot be checked, as in `_record_rendered`.
+    """
+    words = short_tab_part_words(part)
+    if words is None:
+        return None
+    if words <= _scalar_field_words(extracted_fields):
+        return True
+    tokens = words | set(_YEAR_RE.findall(part))
+    return any(tokens <= line_tokens for line_tokens in output_token_sets)
 
 
 def _record_tokens(text: str | None) -> set[str]:
