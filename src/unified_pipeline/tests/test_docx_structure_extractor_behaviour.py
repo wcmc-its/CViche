@@ -2885,7 +2885,7 @@ def test_is_blank_value_field_row_needs_a_colon_a_value_cell_and_a_valued_twin()
     role = [{"text": "Role:"}, {"text": "PI"}]
     assert is_blank_value_field_row("Percent Effort:", blank, [blank, role, valued])
     assert not is_blank_value_field_row("Percent Effort:", blank, [blank])
-    assert not is_blank_value_field_row("Percent Effort:", valued, [blank, valued])
+    assert not is_blank_value_field_row("Percent Effort:", valued, [blank, role, valued])
     assert not is_blank_value_field_row("Percent Effort", [{"text": "Percent Effort"}, {"text": ""}],
                                         [[{"text": "Percent Effort"}, {"text": "5%"}]])
     assert not is_blank_value_field_row("Percent Effort:", [{"text": "Percent Effort:"}], [valued])
