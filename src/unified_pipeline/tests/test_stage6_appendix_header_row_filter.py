@@ -1077,6 +1077,102 @@ def test_instruction_wordings_need_their_full_phrase(reasoning_sentence):
     assert _residual("presenter, etc.)", _confirmed(reasoning_sentence)) is None
 
 
+# --- #530 (IPXFBA TALVAE, CFQNVB): a template's labelled instructions -------
+# The IUPUI dossier template prints "LABEL:  <imperative sentences>", or a bare
+# imperative addressed to the author. Same two-signal rule, invented text only.
+_LABELLED_SECTION = "This is a section header with instructional text."
+_PREAMBLE = "This is instructional preamble text explaining CV conventions."
+_BARE_INSTRUCTION = "This is instructional text explaining how to format entries."
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    ("SAMPLE DEVELOPMENT:  List sample workshops attended to enhance your work.",
+     "This is a section header describing a category of content."),
+    ("SAMPLE GRANTS/FELLOWSHIPS IN TEACHING:  Organize grants by status.  Include past support.",
+     _LABELLED_SECTION),
+    ("SAMPLE CARE/CLINICAL SERVICE: List sample activities (i.e. regional, national).",
+     _LABELLED_SECTION),
+    # The first sentence need not be the imperative one.
+    ("PREAMBLE:  Preferably, sample entries should be listed first.  Omit headings that "
+     "do not apply to your career.", _PREAMBLE),
+    ("PREAMBLE: Sample entries are listed last; omit nothing. Identify each sample role.",
+     _PREAMBLE),
+    # No label: a bare imperative that addresses the author.
+    ("Distinguish between sample service and service to your discipline.", _BARE_INSTRUCTION),
+])
+def test_confirmed_labelled_instruction_is_dropped(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) == DROP_TEMPLATE_INSTRUCTION
+
+
+@pytest.mark.parametrize("verb", ["List", "Organize", "Distinguish", "Provide", "Include",
+                                  "Omit", "Identify", "Indicate", "Describe"])
+def test_each_instruction_verb_is_pinned(verb):
+    assert _residual(f"SAMPLE LABEL:  {verb} sample entries.",
+                     _confirmed(_LABELLED_SECTION)) == DROP_TEMPLATE_INSTRUCTION
+    assert _residual(f"{verb} sample entries for your record.",
+                     _confirmed(_BARE_INSTRUCTION)) == DROP_TEMPLATE_INSTRUCTION
+
+
+@pytest.mark.parametrize("text", [
+    # A digit is a record's year or count.
+    "SAMPLE TEACHING:  List of sample courses taught 2019-2021.",
+    "Distinguish between sample service and your 3 sample roles.",
+    # The label holds no sentence that opens with an instruction verb.
+    "SAMPLE AWARDS:  Listed in the sample registry for your field.",
+    "SAMPLE TEACHING:  We list sample courses; they include your seminar.",
+    "SAMPLE TEACHING:  List Sample Courses",  # a verb is followed by a lower-case word
+    # Only an ALL-CAPS label counts as one.
+    "Sample Teaching:  Taught the sample course. List sample items.",
+    "sample teaching:  List sample items.",
+    # No label: the imperative must open the line AND address the author.
+    "Organize sample events for the department.",
+    "Sample note. Distinguish sample service from your discipline.",
+    "Organized sample events for your department.",
+])
+def test_labelled_instruction_shape_needs_every_part(text):
+    # A reasoning that names no section header, so only this kind can drop it.
+    assert _residual(text, _confirmed(_BARE_INSTRUCTION)) is None
+
+
+@pytest.mark.parametrize("kind_sentence", [
+    "Personal hobby listed under interests.",
+    "Structural header line describing funding categories.",  # not a SECTION header
+    "Instructional guidance.",                                 # not text/preamble/line
+])
+def test_labelled_instruction_needs_its_reasoning_wording(kind_sentence):
+    text = "SAMPLE DEVELOPMENT:  List sample workshops attended to enhance your work."
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+def test_labelled_instruction_needs_the_t_code_and_the_confirmation():
+    text = "SAMPLE DEVELOPMENT:  List sample workshops attended to enhance your work."
+    assert _residual(text, _LABELLED_SECTION) is None
+    assert _residual(text, None) is None
+    assert _residual(text, _confirmed(_LABELLED_SECTION), "K1") is None
+
+
+@pytest.mark.parametrize("text", [
+    "SAMPLE CURRICULUM VITA FORMAT\nFOR PROMOTION AND TENURE DOSSIERS",
+    "Sample Curriculum Vitae Format",
+    "Curriculum Vitae format for sample dossiers",
+])
+def test_confirmed_template_title_is_dropped(text):
+    assert _residual(text, _confirmed("This is a document header/title.")) == DROP_CV_TITLE
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # A digit, a word other than "format", or text before the title: kept.
+    ("SAMPLE CURRICULUM VITA FORMAT\nREVISED 2019", "This is a document header/title."),
+    ("Sample Curriculum Vitae\nFor Promotion And Tenure Dossiers", "This is a document title."),
+    ("One Two Three Curriculum Vitae Format", "This is a document title."),
+    ("Sample Curriculum Vitae Formatting Notes", "This is a document title."),
+    # The reasoning must name a title.
+    ("Sample Curriculum Vitae Format", "Personal hobby listed under interests."),
+])
+def test_template_title_without_both_signals_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
 @pytest.mark.parametrize("text", ["", "   "])
 def test_blank_text_is_not_a_section_label(text):
     """Zero words would pass the word cap, so blank must be refused first."""

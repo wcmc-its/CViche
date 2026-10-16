@@ -173,6 +173,25 @@ _AFFILIATION_ROW_KEYWORDS: dict[str, tuple[str, ...]] = {
 # text, or an unknown label): never the Primary Hospital row.
 _AFFILIATION_CATCH_ALL_ROW = 'other institutional'
 
+# Where such an unlabelled entry goes instead when the CV files it under a
+# heading that names hospitals and not institutions ("Appointments/Affiliated
+# Hospitals", "HOSPITAL STAFF MEMBERSHIP"): the CV has said it is a hospital,
+# not which one is primary (#1715 TJDPJE-04). The two words are tested on the
+# nearest heading only, `_squash`ed, so "Hospitals" and "Institutional" match.
+_HOSPITAL_HEADING_ROW = 'other hospital'
+_HOSPITAL_HEADING_WORD = 'hospital'
+_INSTITUTION_HEADING_WORD = 'institution'
+
+
+def _unlabelled_affiliation_row(hierarchy: list[str]) -> str:
+    """The G template row an entry whose own label names no row goes to:
+    Other Hospital under a hospitals-only nearest heading, else the
+    catch-all Other Institutional row."""
+    nearest = _squash(hierarchy[-1]) if hierarchy else ''
+    if _HOSPITAL_HEADING_WORD in nearest and _INSTITUTION_HEADING_WORD not in nearest:
+        return _HOSPITAL_HEADING_ROW
+    return _AFFILIATION_CATCH_ALL_ROW
+
 
 def _affiliation_row_key(label: str) -> str | None:
     """Which G template row a label belongs to, or None."""
@@ -772,9 +791,11 @@ class PassthroughSection:
         """Write one G entry into the affiliation table, keeping its label rows.
 
         A "Label: value" entry whose label names a template row fills that
-        row's value cell; anything else goes into the Other Institutional
-        value cell. Each lands as its own paragraph. Only a table with no
-        Other Institutional value cell gets a new row, holding the whole text.
+        row's value cell; anything else goes into the Other Hospital value
+        cell when its nearest heading names hospitals only
+        (`_unlabelled_affiliation_row`), else into the Other Institutional
+        value cell. Each lands as its own paragraph. Only a table with
+        neither value cell gets a new row, holding the whole text.
         """
         text = entry.get('text', '').strip()
         label, sep, value = text.partition(':')
@@ -786,8 +807,11 @@ class PassthroughSection:
             if row_key is not None and cells[-1]._tc is not cells[0]._tc:
                 value_cells.setdefault(row_key, cells[-1])
         entry_key = _affiliation_row_key(label) if sep else None
+        unlabelled_key = _unlabelled_affiliation_row(entry.get('hierarchy') or [])
         if entry_key in value_cells:
             _append_cell_paragraph(value_cells[entry_key], value.strip())
+        elif unlabelled_key in value_cells:
+            _append_cell_paragraph(value_cells[unlabelled_key], text)
         elif _AFFILIATION_CATCH_ALL_ROW in value_cells:
             _append_cell_paragraph(value_cells[_AFFILIATION_CATCH_ALL_ROW], text)
         else:

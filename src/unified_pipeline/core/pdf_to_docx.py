@@ -16,6 +16,7 @@ from the rest of unified_pipeline.
 """
 
 import math
+import os
 import re
 import statistics
 import unicodedata
@@ -23,6 +24,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypedDict
 
 import pdfplumber
 from docx import Document
@@ -285,9 +287,24 @@ IMAGE_ONLY_MAX_CHARS = 20
 #: "Medium" (HelveticaNeue-Medium) is deliberately NOT bold: `-medi(?!um)`.
 BOLD_FONT_RE = re.compile(r"bold|black|heavy|demi|-medi(?!um)|(?:^|\+)cm[a-z]*bx\d")
 
+#: The docx is saved under its name plus this suffix, then renamed into place.
+PARTIAL_SUFFIX = ".partial"
 #: XML 1.0 forbids these; python-docx raises ValueError on them.
 _XML_ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _DIGITS_RE = re.compile(r"\d+")
+
+
+class _Word(TypedDict):
+    """A word from pdfplumber's `extract_words(extra_attrs=["fontname",
+    "size"])`: the keys this module reads (pdfplumber adds others, unread).
+    Coordinates are PDF points, top-left origin."""
+    text: str
+    x0: float
+    x1: float
+    top: float
+    bottom: float
+    fontname: str
+    size: float
 
 
 @dataclass(frozen=True)
@@ -315,7 +332,7 @@ class _Line:
     size: float
     runs: list[_Run]
     tabs: list[int]  # i: the gap after words[i] is a column gap
-    words: list[dict] = field(default_factory=list)  # x-sorted, for a re-layout
+    words: list[_Word] = field(default_factory=list)  # x-sorted, for a re-layout
     #: (left, right) text edges of the column this line sits in, on a
     #: two-column page; None means the document's margins.
     bounds: tuple[float, float] | None = None
@@ -360,7 +377,7 @@ def _is_bold(fontname: str) -> bool:
     return BOLD_FONT_RE.search(fontname.lower()) is not None
 
 
-def _column_gaps(words: list[dict], outlier_test: bool = False) -> list[bool]:
+def _column_gaps(words: list[_Word], outlier_test: bool = False) -> list[bool]:
     """For each pair of adjacent words: is the gap between them a column gap
     (a tab), as opposed to a word space? With `outlier_test` (a full-width
     line, which may be justified) a stretched-but-uniform gap is not one."""
@@ -371,7 +388,7 @@ def _column_gaps(words: list[dict], outlier_test: bool = False) -> list[bool]:
             for gap, a in zip(gaps, words)]
 
 
-def _word_separator(left: dict, right: dict, column_gap: bool) -> str:
+def _word_separator(left: _Word, right: _Word, column_gap: bool) -> str:
     """"\\t" across a column gap, "" across a font change inside one word,
     else a space."""
     if column_gap:
@@ -381,7 +398,7 @@ def _word_separator(left: dict, right: dict, column_gap: bool) -> str:
     return " "
 
 
-def _runs(words: list[dict], seps: list[str]) -> list[_Run]:
+def _runs(words: list[_Word], seps: list[str]) -> list[_Run]:
     """Runs split on (bold, size) change; seps[i] follows words[i] and stays
     with the run on its left."""
     runs: list[_Run] = []
@@ -397,7 +414,7 @@ def _runs(words: list[dict], seps: list[str]) -> list[_Run]:
     return runs
 
 
-def _make_line(words: list[dict], seps: list[str], tabs: list[int]) -> _Line:
+def _make_line(words: list[_Word], seps: list[str], tabs: list[int]) -> _Line:
     runs = _runs(words, seps)
     return _Line(
         top=min(w["top"] for w in words),
@@ -411,7 +428,7 @@ def _make_line(words: list[dict], seps: list[str], tabs: list[int]) -> _Line:
     )
 
 
-def _build_line(words: list[dict], outlier_test: bool = False) -> _Line:
+def _build_line(words: list[_Word], outlier_test: bool = False) -> _Line:
     """One visual line from same-line words: words joined by a space, a tab
     across a wide column gap, or nothing across a font change."""
     words = sorted(words, key=lambda w: w["x0"])
@@ -428,21 +445,21 @@ def _is_spaceless(page: Page) -> bool:
     return len(chars) >= SPACELESS_MIN_CHARS and spaces < SPACELESS_MAX_SPACE_FRAC * len(chars)
 
 
-def _page_words(page: Page) -> list[dict]:
+def _page_words(page: Page) -> list[_Word]:
     if _is_spaceless(page):
         return page.extract_words(extra_attrs=["fontname", "size"],
                                   x_tolerance_ratio=SPACELESS_X_TOLERANCE_RATIO)
     return page.extract_words(extra_attrs=["fontname", "size"])
 
 
-def _touches(word: dict, host: list[dict]) -> bool:
+def _touches(word: _Word, host: list[_Word]) -> bool:
     """`word` starts or ends within SUPERSCRIPT_ATTACH_EM of a host word's
     end or start (either way: kerning can tuck it slightly under)."""
     return any(abs(word["x0"] - h["x1"]) <= SUPERSCRIPT_ATTACH_EM * h["size"]
                or abs(h["x0"] - word["x1"]) <= SUPERSCRIPT_ATTACH_EM * h["size"] for h in host)
 
 
-def _superscript_host(clusters: list[list[dict]], index: int) -> int | None:
+def _superscript_host(clusters: list[list[_Word]], index: int) -> int | None:
     """Index of the neighbour cluster that cluster `index` is a raised
     superscript of, or None."""
     small = clusters[index]
@@ -462,11 +479,11 @@ def _superscript_host(clusters: list[list[dict]], index: int) -> int | None:
     return best
 
 
-def _is_courier_bullet(word: dict) -> bool:
+def _is_courier_bullet(word: _Word) -> bool:
     return word["text"] == COURIER_BULLET and COURIER_FONT_RE.search(word["fontname"]) is not None
 
 
-def _bullet_host(clusters: list[list[dict]], index: int) -> int | None:
+def _bullet_host(clusters: list[list[_Word]], index: int) -> int | None:
     """Index of the neighbour line that cluster `index`, nothing but bullet
     glyphs, is the marker of: it overlaps that line vertically by at least
     BULLET_MIN_OVERLAP_FRAC of its own height and ends left of the line's
@@ -489,17 +506,17 @@ def _bullet_host(clusters: list[list[dict]], index: int) -> int | None:
     return best
 
 
-def _courier_bullet_as_marker(words: list[dict]) -> list[dict]:
+def _courier_bullet_as_marker(words: list[_Word]) -> list[_Word]:
     """A line's words, left to right; a first word that is Word's Courier
     "o" bullet, with text after it, reads as WHITE_BULLET."""
     words = sorted(words, key=lambda w: w["x0"])
     if len(words) > 1 and _is_courier_bullet(words[0]):
-        words[0] = dict(words[0], text=WHITE_BULLET)
+        words[0] = {**words[0], "text": WHITE_BULLET}
     return words
 
 
-def _fold(clusters: list[list[dict]],
-          host_of: Callable[[list[list[dict]], int], int | None]) -> list[list[dict]]:
+def _fold(clusters: list[list[_Word]],
+          host_of: Callable[[list[list[_Word]], int], int | None]) -> list[list[_Word]]:
     """Fold each cluster that `host_of` finds a neighbour line for (a raised
     superscript, a bullet glyph off its item's baseline) into that line."""
     clusters = [list(c) for c in clusters]
@@ -695,7 +712,7 @@ def _cell_anchors(line: _Line) -> list[float] | None:
     return [line.words[0]["x0"]] + [line.words[i + 1]["x0"] for i in line.tabs]
 
 
-def _cell_of(word: dict, anchors: list[float]) -> int:
+def _cell_of(word: _Word, anchors: list[float]) -> int:
     """Index of the cell whose anchor range contains the word's x0."""
     return max(i for i, a in enumerate(anchors) if i == 0 or a - OUTDENT_TOLERANCE_PT <= word["x0"])
 
@@ -763,11 +780,11 @@ def _row_line(lines: list[_Line], anchors: list[float]) -> _Line:
     """One tab-separated line from a row's printed lines: each word goes to
     the cell whose anchor range contains its x0. An empty cell stays empty
     (a leading empty cell is a leading tab); nothing is guessed into it."""
-    cells: list[list[dict]] = [[] for _ in anchors]
+    cells: list[list[_Word]] = [[] for _ in anchors]
     for ln in lines:
         for w in ln.words:
             cells[_cell_of(w, anchors)].append(w)
-    words: list[dict] = []
+    words: list[_Word] = []
     seps: list[str] = []
     tabs: list[int] = []
     empty = lead = 0
@@ -1114,7 +1131,15 @@ def _write_docx(paras: list[_Para], docx_path: Path) -> None:
             r = p.add_run(_XML_ILLEGAL_RE.sub("", run.text))
             r.bold = run.bold
             r.font.size = Pt(run.size)
-    doc.save(str(docx_path))
+    # Saved beside the destination, then moved over it in one step: a save
+    # that fails part-way (disk full, interrupted) leaves any earlier file
+    # at `docx_path` as it was, never a truncated docx (#1910).
+    partial = docx_path.with_name(f"{docx_path.name}{PARTIAL_SUFFIX}")
+    try:
+        doc.save(str(partial))
+        os.replace(partial, docx_path)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def is_image_only_page(page: Page) -> bool:
@@ -1148,7 +1173,10 @@ def _read_pages(pdf_path: str | Path) -> tuple[list[list[_Line]], list[float], l
 
 def convert_pdf_to_docx(pdf_path: str | Path, docx_path: str | Path) -> ConversionReport:
     """Convert `pdf_path` to a docx at `docx_path`; raises on an unreadable
-    or encrypted PDF."""
+    or encrypted PDF, and ValueError when `docx_path` is the PDF itself
+    (writing there would replace the source with its conversion)."""
+    if Path(docx_path).resolve() == Path(pdf_path).resolve():
+        raise ValueError(f"docx_path is the source PDF itself: {pdf_path}")
     pages, heights, image_only = _read_pages(pdf_path)
     kept = _drop_furniture(pages, heights)
     # ponytail: no docx tables in v1. pdfplumber invents tables from

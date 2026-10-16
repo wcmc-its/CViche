@@ -696,13 +696,36 @@ def _plain_text(value: object) -> str:
 _MENTEE_OUTCOME_KEY = 'outcome'
 
 
+# A US visa category ("J-1 Research Scholar", "H-1B"), which stage 4 sometimes
+# files as a mentee's `funding_source` (WFOZBS, 3 mentees). It is the mentee's
+# status, not an award, so it joins Site/Position instead of printing as
+# "Awards:" (#1715 WFOZBS-09). M-1 is left out on purpose: "M-1 summer
+# externships" (web181) is a first-year medical student, not a visa.
+_VISA_CATEGORY_RE = re.compile(r'(?<!\w)(?:[JFO]-?1|H-?1B)(?!\w)', re.IGNORECASE)
+
+
+def _visa_status(fields: Mapping[str, Any]) -> str:
+    """The mentee's `funding_source` when it names a visa category, else ''."""
+    funding = _plain_text(fields.get('funding_source'))
+    return funding if _VISA_CATEGORY_RE.search(funding) else ''
+
+
+def _mentee_awards(fields: Mapping[str, Any]) -> str:
+    """What the mentee won: `awards`, else a `funding_source` that is not a
+    visa category (`_visa_status`)."""
+    if fields.get('awards'):
+        return _text(fields.get('awards')).strip()
+    return '' if _visa_status(fields) else _text(fields.get('funding_source')).strip()
+
+
 def _with_site_extras(site_position: str, fields: Mapping[str, Any]) -> str:
     """`site_position` with the mentee's institution and advisor appended
-    when stage 4 kept them under off-schema keys (`_SITE_EXTRA_KEYS`). A
-    value Site/Position already holds as whole words is not repeated."""
+    when stage 4 kept them under off-schema keys (`_SITE_EXTRA_KEYS`), then
+    a visa category stage 4 filed as funding (`_visa_status`). A value
+    Site/Position already holds as whole words is not repeated."""
     parts = [site_position] if site_position else []
-    for key, label in _SITE_EXTRA_KEYS:
-        value = _plain_text(fields.get(key))
+    extras = [(_plain_text(fields.get(key)), label) for key, label in _SITE_EXTRA_KEYS]
+    for value, label in [*extras, (_visa_status(fields), '')]:
         if value and not _contains_words(site_position, value):
             parts.append(f"{label}{value}")
     return _SITE_PART_SEPARATOR.join(parts)
@@ -745,7 +768,9 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     row reads "Optional: List publications, awards, grants ... arising
     directly from the mentoring activity", and stage 4 writes them to
     awards/funding_source, which nothing read before -- 133 corpus values
-    were extracted and then dropped. A bare N3 entry rendered as a mentee
+    were extracted and then dropped. A `funding_source` that is a visa
+    category is not one of them (`_mentee_awards`); it joins Site/Position.
+    A bare N3 entry rendered as a mentee
     (#1574) carries the N3 schema's `thesis_title` and `narrative` instead:
     the thesis is the project, and the narrative (a program or scholarship
     note) follows it, as the Appendix line it came from printed both. A past
@@ -766,7 +791,7 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     outcome = _plain_text(fields.get(_MENTEE_OUTCOME_KEY))
     if outcome and outcome.casefold() not in project.casefold():
         project = f"{project}\n{outcome}" if project else outcome
-    mentee_awards = _text(fields.get('awards') or fields.get('funding_source')).strip()
+    mentee_awards = _mentee_awards(fields)
     if mentee_awards and mentee_awards.casefold() not in project.casefold():
         project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
     narrative = _text(fields.get('narrative')).strip()

@@ -144,6 +144,16 @@ space ("*****"). A bare label that closes with a colon and holds nothing after i
 The two-signal rule kept it whenever 3b called it a "header label only" rather
 than a section header.
 
+The IUPUI dossier template adds two more two-signal shapes (#530, IPXFBA TALVAE
+and CFQNVB). Its instructions ("TEACHING ASSIGNMENTS:  List the course number,
+...", "PREAMBLE: ... Omit headings that do not apply to your career.") are
+dropped as `template-instruction` when 3b calls them a section header or
+instructional text and `_is_labelled_instruction` finds an ALL-CAPS label with
+a sentence opening on one of the template's instruction verbs, or a bare
+imperative addressed to the author, with no digit anywhere. Its title
+("<Institution> CURRICULUM VITA FORMAT ...") is a `cv-title` under the same
+document-title verdict as a CV's own title (`_CV_FORMAT_TITLE_RE`).
+
 One last pass runs under every code (#1551, EBYSBC VGHNZD) for the tail of a
 record that was split: a grant table's date cell, the date line under a
 committee, a budget line under a grant. `_drop_shown_record_tails` drops such a
@@ -516,6 +526,17 @@ _CV_TITLE_RE = re.compile(
     rf"(?:\s*\n\s*(?:{_MONTH}\.?,?\s*)?(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s*)?(?:19|20)\d{{2}})?$",
     re.IGNORECASE,
 )
+# A template's own title, naming the format it lays out (#530, IPXFBA TALVAE
+# and CFQNVB): "<Institution> CURRICULUM VITA FORMAT\nFOR PROMOTION AND TENURE
+# DOSSIERS". "Format" is what marks it as the template's; digit-free.
+_CV_FORMAT_TITLE_RE = re.compile(
+    r"^(?:[\w.\-]+\s+){0,2}curriculum\s+vit(?:ae|a)\s+format\b[^\d]{0,80}$", re.IGNORECASE)
+
+
+def _is_cv_title(text: str) -> bool:
+    """The CV's own title (`_CV_TITLE_RE`) or its template's (`_CV_FORMAT_TITLE_RE`)."""
+    return bool(_CV_TITLE_RE.match(text) or _CV_FORMAT_TITLE_RE.match(text))
+
 
 _SECTION_HEADER_MAX_WORDS = 10
 _NONE_WORD_RE = re.compile(r"\bnone\b", re.IGNORECASE)
@@ -544,6 +565,10 @@ _SECTION_HEADER_REASONING_RE = re.compile(
     r"|header/category label|subsection marker"
 )
 _TEMPLATE_INSTRUCTION_REASONING_RE = re.compile(r"instruction (?:text|line|placeholder)|broken header")
+# #530 (IPXFBA TALVAE, CFQNVB): 3b calls an IUPUI instruction a section header
+# ("a section header with instructional text") or "instructional preamble text".
+_LABELLED_INSTRUCTION_REASONING_RE = re.compile(
+    rf"{_SECTION_HEADER_REASONING_RE.pattern}|instruction(?:al)? (?:text|preamble|line)")
 # #1431: "Continuation header for Peer-Reviewed Publications section" (NDMRSO
 # UYQRUN 679), on an entry 3b moved out of T into the section it continues.
 _CONTINUATION_REASONING_RE = re.compile(r"continu(?:ation|ed) (?:header|heading)")
@@ -657,6 +682,34 @@ _LABELLED_DIRECTIVE_RE = re.compile(
 def _is_template_directive(text: str) -> bool:
     """A wrapped instruction tail (#530) or a labelled directive (#1221)."""
     return _is_wrapped_instruction_tail(text) or bool(_LABELLED_DIRECTIVE_RE.match(text.strip()))
+
+
+# The IUPUI dossier template's instructions (#530, IPXFBA TALVAE and CFQNVB): an
+# ALL-CAPS label, a colon and the template's imperative sentences ("TEACHING
+# ASSIGNMENTS:  List the course number, ...", "PREAMBLE: ... Omit headings that
+# do not apply to your career."), or a bare imperative that addresses the author
+# ("Distinguish between service to the University and service to your
+# professional discipline."). The verbs are a closed set read off that
+# template, and a sentence must open with one. A digit anywhere is a record's
+# year or count, so that line is kept.
+_INSTRUCTION_LABEL_RE = re.compile(r"^[A-Z][A-Z/&,\- ]{1,60}:\s+")
+_INSTRUCTION_VERBS = ("List", "Organize", "Distinguish", "Provide", "Include", "Omit",
+                      "Identify", "Indicate", "Describe")
+_IMPERATIVE_SENTENCE_RE = re.compile(rf"(?:^|[.;]\s+)(?:{'|'.join(_INSTRUCTION_VERBS)})\s+[a-z]")
+_AUTHOR_ADDRESS_RE = re.compile(r"\byour\b", re.IGNORECASE)
+
+
+def _is_labelled_instruction(text: str) -> bool:
+    """A digit-free template instruction (#530): an ALL-CAPS label whose text
+    holds a sentence opening with an instruction verb, or, with no label, a
+    line that opens with one and addresses the author ("your")."""
+    body = text.strip()
+    if not body or any(ch.isdigit() for ch in body):
+        return False
+    label = _INSTRUCTION_LABEL_RE.match(body)
+    if label:
+        return bool(_IMPERATIVE_SENTENCE_RE.search(body[label.end():]))
+    return bool(_IMPERATIVE_SENTENCE_RE.match(body) and _AUTHOR_ADDRESS_RE.search(body))
 
 
 class OwnerTokens(NamedTuple):
@@ -975,11 +1028,12 @@ _LONE_MONTH_YEAR_RE = re.compile(rf"^{_MONTH}\.?,?\s*(?:19|20)\d{{2}}$", re.IGNO
 
 # Checked in order; the first kind whose reasoning and shape both match wins.
 _STRUCTURAL_KINDS = (
-    _StructuralKind(DROP_CV_TITLE, _CV_TITLE_REASONING_RE, lambda t: bool(_CV_TITLE_RE.match(t))),
+    _StructuralKind(DROP_CV_TITLE, _CV_TITLE_REASONING_RE, _is_cv_title),
     _StructuralKind(DROP_DATE_STAMP, _DATE_STAMP_REASONING_RE, lambda t: bool(_DATE_STAMP_RE.match(t))),
     _StructuralKind(DROP_COLUMN_HEADER, _COLUMN_HEADER_REASONING_RE, _is_label_only_row),
     _StructuralKind(DROP_SECTION_HEADER, _SECTION_HEADER_REASONING_RE, _is_section_label_text),
     _StructuralKind(DROP_TEMPLATE_INSTRUCTION, _TEMPLATE_INSTRUCTION_REASONING_RE, _is_template_directive),
+    _StructuralKind(DROP_TEMPLATE_INSTRUCTION, _LABELLED_INSTRUCTION_REASONING_RE, _is_labelled_instruction),
     _StructuralKind(DROP_DATE_STAMP, _CV_DATE_REASONING_RE,
                     lambda t: bool(_DATE_STAMP_RE.match(t) or _LONE_MONTH_YEAR_RE.match(t))),
     _StructuralKind(DROP_PAGE_FURNITURE, _CONTINUATION_REASONING_RE, _is_continued_header),

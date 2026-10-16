@@ -30,6 +30,7 @@ from collections import Counter
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
+from unified_pipeline.core.template_boilerplate import is_template_label_line
 from unified_pipeline.core.text_norm import tab_record_segments
 
 from .normalization import _squash
@@ -522,6 +523,44 @@ def _entry_pieces(text) -> list[str]:
     return pieces
 
 
+def record_pieces(line: str) -> list[str]:
+    """`_entry_pieces` of a record line, minus every template-label fragment
+    (`is_template_label_line`): the verbatim side of `_record_rendered`.
+
+    The label cell of a "Goals/expected Outcomes | <goal>" row sits in the
+    output wherever any record's label does, so it vouched for every record
+    carrying that label. YDSVDB: one stray "Goals/expected Outcomes" fragment
+    hid the unrendered mentee goals from the doctor (#829). Scoped to record
+    lines: `_entry_pieces` itself also feeds the doctor's whole-entry checks,
+    which judge a template piece on their own (#744).
+    """
+    return [piece for frag in entry_fragments(line)
+            if not is_template_label_line(frag) for piece in _entry_pieces(frag)]
+
+
+def record_chunks(line: str) -> list[str]:
+    """The texts `_record_rendered` scores by token overlap: the whole line,
+    then each of its fragments. A line holding a template-label fragment is
+    scored on its other fragments alone.
+
+    The `record_pieces` rule, on the token side: once its verbatim piece no
+    longer vouched, the bare "Goals/expected Outcomes" cell still carried 3
+    distinctive tokens, enough to match the one stray output line that held the
+    label, so the YDSVDB goals still read as rendered (#829). The whole line
+    goes too: with the label in it, "Type of Supervision (Research, clinical,
+    teaching, leadership) | Leadership" scores 5 label tokens to the answer's
+    1 and matches any line that repeats the label; with the label out, its
+    answers belong to different labels, which a form renders as different rows
+    ("Name of Principal Investigator: | <name> | Your role* | <role>"), so no
+    one output line holds them all.
+    """
+    fragments = entry_fragments(line)
+    kept = [frag for frag in fragments if not is_template_label_line(frag)]
+    if len(kept) == len(fragments):
+        return [line] + fragments
+    return kept
+
+
 def _whole_record_rendered(line: str, haystack: str,
                            line_token_sets: list[set],
                            cut_token_sets: list[set] | None = None) -> bool | None:
@@ -595,10 +634,10 @@ def _record_rendered(line: str, haystack: str,
     dropped record). Verbatim absence alone proves nothing — stage 6
     reformats dates/fields — so False requires a token-verifiable miss; a
     line without enough distinctive tokens is None, not missing."""
-    if any(piece in haystack for piece in _entry_pieces(line)):
+    if any(piece in haystack for piece in record_pieces(line)):
         return True
     rendered = None
-    for chunk in [line] + entry_fragments(line):
+    for chunk in record_chunks(line):
         tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue

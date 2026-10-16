@@ -474,6 +474,29 @@ def test_free_form_g_entry_goes_under_other_institutional_never_primary():
     assert run.font.name == "Arial"
 
 
+@pytest.mark.parametrize("heading, row_idx", [
+    ("Appointments/Affiliated Hospitals", 1),
+    ("HOSPITAL STAFF MEMBERSHIP", 1),
+    ("Hospital or Affiliated Institution Appointments", 2),
+    ("Institutional", 2),
+], ids=["hospitals-heading", "hospital-staff", "hospital-and-institution", "institutional"])
+def test_unlabelled_g_entry_under_a_hospitals_only_heading_goes_to_other_hospital(
+        heading, row_idx):
+    """#1715 TJDPJE-04: a privilege line filed under "Appointments/Affiliated
+    Hospitals" carries no "Label:", so it went to Other Institutional and both
+    hospital rows stayed empty. Its nearest heading names hospitals and not
+    institutions, so it goes to Other Hospital -- never Primary, and a heading
+    that names institutions too keeps the catch-all."""
+    gen, table = _affiliation_generator()
+    text = "7/00- Example Hospital, Example City. Medical Staff privileges."
+    entry = {**_g_entry(text), "hierarchy": ["Earlier heading", heading]}
+
+    assert gen._fill_hospital_affiliation([entry]) == [entry]
+    assert _cell_paragraphs(table, 0) == [""]
+    assert _cell_paragraphs(table, row_idx) == [text]
+    assert _cell_paragraphs(table, 3 - row_idx) == [""]
+
+
 def test_labelled_g_entries_fill_the_row_their_label_names():
     """A known label fills its own row's value cell, a second value for the
     same row becomes a second paragraph, a bare label writes nothing, and an

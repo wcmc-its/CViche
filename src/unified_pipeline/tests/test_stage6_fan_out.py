@@ -13,6 +13,7 @@ and web228's K4 `sessions`.
     python3 -m pytest src/unified_pipeline/tests/test_stage6_fan_out.py -p no:cacheprovider
 """
 import copy
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -450,24 +451,27 @@ def _rendered_markers(tmp_path, code, extra_fields=frozenset()):
     field, and whether the entry's own (neutral) text reaches it. The text must
     not carry the markers: a section that writes the text would then "render"
     every field."""
-    import json
+    markers = {name: 'Zq' + name.replace('_', 'x') + 'Z'
+               for name in {*FIELD_SCHEMAS[code]['fields'], *extra_fields} if name != 'narrative'}
+    body = _rendered_body(tmp_path, code, markers)
+    return {name for name, marker in markers.items() if marker in body}, _NEUTRAL_TEXT in body
 
+
+def _rendered_body(tmp_path, code, fields):
+    """Every `w:t` of the .docx one entry of `code` with `fields` renders to."""
     from docx import Document
 
     from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
 
-    markers = {name: 'Zq' + name.replace('_', 'x') + 'Z'
-               for name in {*FIELD_SCHEMAS[code]['fields'], *extra_fields} if name != 'narrative'}
     entry = {'taxonomy_code': code, 'element_idx_start': 0, 'text': _NEUTRAL_TEXT,
-             'extracted_fields': dict(markers)}
+             'extracted_fields': dict(fields)}
     source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
     source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [entry]}))
     generator = WCMTemplateGenerator(verbose=False)
     generator.generate(str(source), str(target), research_summary_path=None)
     document = Document(str(target))
-    body = ' '.join(t.text or '' for t in document.element.body.iter(
+    return ' '.join(t.text or '' for t in document.element.body.iter(
         '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
-    return {name for name, marker in markers.items() if marker in body}, _NEUTRAL_TEXT in body
 
 
 @pytest.mark.parametrize('code', sorted(fan_out._RENDERED_FIELDS))
@@ -501,6 +505,28 @@ def test_offschema_date_fields_a_section_writes_are_the_ones_fan_out_counts(tmp_
     markers = {key: 'Zq' + key for key in extra}
     assert written == {key for key in extra
                        if fan_out._is_written_date(code, key, markers[key], markers)}
+
+
+# #1901: years no template text holds, one per field.
+_H_DATES = {'date': '1987', 'start_date': '1993', 'end_date': '1999'}
+
+
+@pytest.mark.parametrize('date_key', ['date', 'year'])
+@pytest.mark.parametrize('present', [
+    combo for n in range(1, 4) for combo in itertools.combinations(sorted(_H_DATES), n)],
+    ids='+'.join)
+def test_h_bounds_fan_out_counts_are_the_ones_honors_writes(tmp_path, present, date_key):
+    """H's schema names no start/end, but `honors._record_date` writes them
+    unless the `date` (or `year`) wins, so `_is_written_date` must say which
+    bound the date cell shows, or `_repeated_rows` reads two spans of one
+    award as one row (#1901, NECRGC EYTHNB 164) or two rows printed alike as
+    two."""
+    fields = {'award_name': 'Zqaward of Lanterns',
+              **{date_key if key == 'date' else key: _H_DATES[key] for key in present}}
+    body = _rendered_body(tmp_path, 'H', fields)
+    bounds = [key for key in ('start_date', 'end_date') if key in present]
+    assert [key for key in bounds if _H_DATES[key] in body] == [
+        key for key in bounds if fan_out._is_written_date('H', key, fields[key], fields)]
 
 
 @pytest.mark.parametrize('code', ['B2', 'Q4D'])
@@ -804,7 +830,8 @@ class TestStage4Records:
                        'enrichment_rejected': True, 'enrichment_source': 'llm',
                        'enrichment_status': 'ok',
                        'institution_enrichment': {'cleaned_name': 'Ashby University'},
-                       'crossref_match': {'source': 'cv_doi', 'doi': '10.1000/x'}}
+                       'crossref_match': {'source': 'cv_doi', 'doi': '10.1000/x'},
+                       'citation_note': 'This citation has no article title.'}
         parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), **annotations)
         children = _fan4(parent)
         for child in children[:-1]:
@@ -1578,7 +1605,10 @@ class TestStage4RepeatedRows:
 
     # #1556 (d), OIEPQD XAYKXA entry 134: Q4D's and B2's schema names no
     # start/end, but their sections write the range, so two spans are two rows.
-    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name')])
+    # #1901, NECRGC EYTHNB entry 164: H's section writes the range too when
+    # no `date` is set.
+    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name'),
+                                               ('H', 'award_name')])
     def test_two_spans_the_date_column_shows_keep_both_records(self, code, name_key):
         records = [{name_key: 'Zqjournal of Lanterns', 'start_date': '2009', 'end_date': 'present'},
                    {name_key: 'Zqjournal of Lanterns', 'start_date': '2016', 'end_date': '2019'}]
@@ -1587,11 +1617,20 @@ class TestStage4RepeatedRows:
         assert [(c['extracted_fields']['start_date'], c['extracted_fields']['end_date'])
                 for c in children] == [('2009', 'present'), ('2016', '2019')]
 
-    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name')])
+    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name'),
+                                               ('H', 'award_name')])
     def test_one_span_listed_twice_still_renders_once(self, code, name_key):
         records = [{name_key: 'Zqjournal of Lanterns', 'start_date': '2016', 'end_date': '2019'}] * 2
         children = _fan4(_stage4_entry(
             copy.deepcopy(records), code=code, text='Zqjournal of Lanterns 2016-2019'))
+        assert len(children) == 1
+
+    def test_two_h_spans_behind_one_shown_date_still_render_once(self):
+        """H's cell shows the `date` over a range beside a start of its own
+        (`honors._record_date`), so two such rows print alike."""
+        records = [{'award_name': 'Zqaward of Lanterns', 'date': '2016',
+                    'start_date': start, 'end_date': '2019'} for start in ('2016', '2017')]
+        children = _fan4(_stage4_entry(records, code='H', text='Zqaward of Lanterns 2016'))
         assert len(children) == 1
 
     def test_two_b1_attendance_spans_keep_both_records(self):

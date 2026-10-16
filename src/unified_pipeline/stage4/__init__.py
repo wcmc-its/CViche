@@ -17,6 +17,9 @@ surface; these modules hold the implementation it calls into.
 
 Dependencies run one way and must keep doing so. `extraction` imports from
 `schemas`, `coercion`, `owner_name`, `error_codes`, `year_groups` and
-`grounding`; those import nothing from each other. Nothing here may import `stage_4_field_extractor` -- that module imports
-these, so a back-edge is an import cycle and fails at load, not at extraction.
+`grounding`; those import nothing from each other, except that `coercion`
+reads a mistyped year the way `grounding` does (#1840), so `grounding` must
+keep importing nothing. Nothing here may import `stage_4_field_extractor`
+-- that module imports these, so a back-edge is an import cycle and fails at
+load, not at extraction.
 """
