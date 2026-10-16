@@ -188,6 +188,66 @@ def test_is_header_match_ignores_a_trailing_underscore_rule():
     assert is_header_match(header, para, strict=False) is True
 
 
+@pytest.mark.parametrize("header, para", [
+    ("research", "graduate research mentor"),
+    ("research", "role: research mentor"),
+    ("publications", "member: publications committee"),
+])
+def test_is_header_match_refuses_a_one_word_header_between_content_words(header, para):
+    # #1848 (CMTQDR 110, HVLDGS, Denckla): the word sits inside a record line,
+    # within the 3x length cap, so the line was taken as the header's own.
+    # Every 1b caller matches strictly; the loose mode is left as it was.
+    assert is_header_match(header, normalize_text(para), strict=True) is False
+    assert is_header_match(header, normalize_text(para), strict=False) is True
+
+
+@pytest.mark.parametrize("header, para", [
+    ("books", "books n/a"),            # header opens the line
+    ("mentoring", "faculty mentoring"),  # header closes the line
+    ("education", "ii education 3"),   # numbered after, as in the corpus
+    ("books", "b books n/a"),          # one-letter enumerator, "n/a" after
+    ("bibliography", "s bibliography"),
+    ("awards", "awards and honors"),
+])
+def test_is_header_match_keeps_a_one_word_header_that_opens_or_closes_the_line(header, para):
+    # The #1848 refusal is only for a word with content on BOTH sides: the
+    # header-at-an-edge and enumerated lines the corpus places today still match.
+    assert is_header_match(header, normalize_text(para), strict=True) is True
+
+
+def test_is_header_match_mid_line_refusal_leaves_multi_word_headers_alone():
+    # Only a one-word header is refused; a phrase is specific enough.
+    assert is_header_match("research support", "nih research support active", strict=True) is True
+
+
+def test_map_hierarchy_node_leaves_an_invented_one_word_heading_off_a_record_title_line():
+    # CMTQDR 110 (#1848): 1a invented a "Research" H1 that is on no line of
+    # the CV. The mapper placed it on the record title "Graduate Research
+    # Mentor", so the next records took the invented heading.
+    elements = [
+        _elem(0, "ADDITIONAL RESEARCH EXPERIENCE & TRAINING"),
+        _elem(1, "Postdoctoral Research Mentor"),
+        _elem(2, "Graduate Research Mentor"),
+        _elem(3, "Dept of Physiology, Sample University (Sampletown)"),
+    ]
+    mapped, _ = map_hierarchy_node({"text": "Research", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] is None
+
+
+def test_map_hierarchy_node_child_takes_its_exact_line_not_a_committee_line():
+    # Denckla (#1848): "Publications" took "Member: Publications Committee" in
+    # the service section; its own line is the bare heading earlier on.
+    elements = [
+        _elem(0, "Publications"),
+        _elem(1, "Original, peer-reviewed articles"),
+        _elem(2, "Member: Publications Committee"),
+    ]
+    node = {"text": "PUBLICATIONS", "level": "H1", "paragraph_index": -1,
+            "children": [{"text": "Publications", "level": "H2"}]}
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["children"][0]["element_idx"] == 0
+
+
 def test_map_hierarchy_node_places_a_heading_that_precedes_a_rule_on_its_own_line():
     # #1848: both BIITRL headings named in the issue, each followed by its rule.
     elements = [
