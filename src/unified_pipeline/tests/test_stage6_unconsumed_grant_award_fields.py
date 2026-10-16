@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 import docx
+import pytest
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -179,6 +180,28 @@ def test_funding_source_is_the_fallback_when_stage_4_used_that_key():
     rows = _mentee(research_focus="Sepsis outcomes",
                    funding_source="Pillsbury Award")
     assert rows["Project/Accomplishments:"] == "Sepsis outcomes\nAwards: Pillsbury Award"
+
+
+@pytest.mark.parametrize("visa", ["J-1 Research Scholar", "J1 research scholar", "H-1B", "F-1"])
+def test_a_visa_category_in_funding_source_is_no_award_and_joins_site_position(visa):
+    # #1715 WFOZBS-09: stage 4 filed "(J-1 Research Scholar)" as funding_source,
+    # and it printed as "Awards: J-1 Research Scholar".
+    rows = _mentee(research_focus="Melioidosis vaccines", site_position="Member (co-advisor)",
+                   funding_source=visa)
+    assert rows["Project/Accomplishments:"] == "Melioidosis vaccines"
+    assert rows["Site/Position:"] == f"Member (co-advisor), {visa}"
+
+
+def test_a_visa_category_site_position_already_holds_is_not_repeated():
+    rows = _mentee(site_position="Bogor University, Member, J-1 Research scholar",
+                   funding_source="J-1 Research Scholar")
+    assert rows["Site/Position:"] == "Bogor University, Member, J-1 Research scholar"
+    assert "Awards" not in rows["Project/Accomplishments:"]
+
+
+@pytest.mark.parametrize("funding", ["M-1 summer externships", "NIH F31", "K01", "T32 Fellowship"])
+def test_a_funding_source_that_only_looks_like_a_visa_is_still_an_award(funding):
+    assert _mentee(funding_source=funding)["Project/Accomplishments:"] == f"Awards: {funding}"
 
 
 def test_mentee_award_stands_alone_when_no_project_was_extracted():
