@@ -275,6 +275,11 @@ CROSSREF_BUDGET_SECONDS = 300.0
 CROSSREF_MATCH_KEY = 'crossref_match'
 CROSSREF_MATCH_BY_CV_DOI = 'cv_doi'
 CROSSREF_MATCH_BY_TITLE = 'title_search'
+# Crossref's bibliographic search is built for whole reference strings: on
+# a title alone it can rank another paper of similar wording above the right
+# one (MNZ7IA's West J Emerg Med 2010 case report never reached the top 3).
+# The query adds the CV's first authors and year (#1870).
+CROSSREF_QUERY_AUTHORS = 3
 # The sources that found a record by title, with no identifier from the CV.
 TITLE_SEARCH_SOURCES = frozenset({TITLE_SEARCH_SOURCE, CROSSREF_TITLE_SOURCE})
 # A doi.org link in an entry's text. The DOI ends at whitespace or a quote: a
@@ -658,6 +663,14 @@ def _parse_crossref_items(response: requests.Response) -> list[dict[str, Any]]:
 
 def _parse_crossref_work(response: requests.Response) -> dict[str, Any]:
     return response.json().get('message') or {}
+
+
+def crossref_query(title: str, fields: dict) -> str:
+    """The bibliographic query for an entry: its title, then its first
+    CROSSREF_QUERY_AUTHORS authors as the CV writes them, then its year."""
+    authors = _cv_author_names(fields.get('authors'))[:CROSSREF_QUERY_AUTHORS]
+    year = cv_publication_year(fields.get('year'))
+    return ' '.join([title, *authors, *([str(year)] if year else [])])
 
 
 def crossref_record(item: dict[str, Any]) -> dict[str, Any]:
@@ -1371,7 +1384,8 @@ class PubMedEnricher:
 
     def _look_up_crossref_doi(self, entry: dict, title: str) -> None:
         self.stats['crossref_searches'] += 1
-        params = {'query.bibliographic': title, 'rows': TITLE_SEARCH_MAX_HITS,
+        params = {'query.bibliographic': crossref_query(title, entry.get('extracted_fields') or {}),
+                  'rows': TITLE_SEARCH_MAX_HITS,
                   'select': 'DOI,type,title,subtitle,author,issued,container-title,volume,issue,page'}
         try:
             items = self._get_with_retry(CROSSREF_WORKS_URL, params, _parse_crossref_items)
