@@ -5290,7 +5290,8 @@ def test_footer_in_record_is_silent_on_entries_without_text():
 #   onto another), naming each value and the entry it is from: WARN;
 # - fires on 559's shape: a second record that is another entry's mentee;
 # - silent on a value its own text states in another form (two-digit years,
-#   "Principal Investigator" for PI, "Co - PI", "P.I.", a plural label);
+#   "Principal Investigator" for PI, "Co - PI", "P.I.", a plural label, an
+#   FTE fraction, a year mistyped by one keystroke: #1840);
 # - silent across call groups: another taxonomy code, or another batch;
 # - stage 3b's order, not stage 4's element order, cuts the batches; a stage
 #   3b missing an extracted entry falls back to stage 4's order;
@@ -5363,10 +5364,14 @@ def test_cross_entry_value_reads_a_second_record_that_is_another_entrys_mentee()
     ("Example Grant 1987-1990. P.I. Owner", {"pi_role": "PI"}),
     ("Example Grant 1987-1990 (PI: Other) Role: co- investigator", {"pi_role": "co-investigator"}),
     ("Example Grant 1991-2018 Investigators - Owner, Other", {"pi_role": "Investigator"}),
+    # #1840: the shared grounding reads an FTE fraction and a mistyped year.
+    ("Example Grant (PI: Owner) Percent Effort: 4 hours a week/0.100 FTE 07/01/15-07/01/16",
+     {"percent_effort": "10%"}),
+    ("2009-20011 | Example Image Retrieval", {"start_date": "2009", "end_date": "2011"}),
 ])
 def test_cross_entry_value_is_silent_on_a_value_its_own_text_states(own_text, fields):
     other = ("Other Grant (PI: Owner; Co-PI: Other; co-investigator: Owner; Investigator: Owner) "
-             "$30,000/year 30% 1997-1999 2017-2023 MPI")
+             "$30,000/year 30% 10% 1997-1999 2017-2023 2009-2011 MPI")
     assert lint_cross_entry_value(_cev_run(_cev_entry(1, own_text, fields),
                                            _cev_entry(2, other, {}))) == []
 
