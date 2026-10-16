@@ -5,7 +5,9 @@ Stage 3b codes a bare sub-heading such as "University of Michigan:" or
 trace of it, so stage 4 extracts each child with no institution / role /
 audience that only the heading carried. `stamp_context_headings` copies the
 governing heading onto the children as `context_heading`; the prompt builder
-(`extraction.build_extraction_prompt`) then shows it to the LLM.
+(`extraction.build_extraction_prompt`) then shows it to the LLM. A sub-heading
+stage 1b made a hierarchy level instead ("IV. VISITING PROFESSOR",
+"Teaching Assistant Positions:") reaches stage 4 the same way, from the leaf.
 
 Pure and offline: no LLM, no I/O. Never touches hierarchy, taxonomy_code or
 text, and never mutates its input.
@@ -14,6 +16,11 @@ text, and never mutates its input.
 import re
 from collections import Counter
 from typing import Any
+
+from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
+    code_matches_expected,
+    get_expected_codes_from_hierarchy,
+)
 
 #: Taxonomy code stage 3b gives an unclassifiable / heading-like entry.
 HEADING_TAXONOMY_CODE = "T"
@@ -277,6 +284,90 @@ def _heading_runs(entries: list[dict[str, Any]]) -> list[_Run]:
     return runs
 
 
+#: Fewest hierarchy levels before a leaf counts as a sub-heading. A depth-1
+#: leaf is the section title itself ("TEACHING EXPERIENCE"), which the taxonomy
+#: code already says; a deeper leaf is a sub-heading stage 1b nested under it
+#: ("Teaching Assistant Positions:", "IV. VISITING PROFESSOR"), and stage 4
+#: never sees the hierarchy, so the role / level it names was lost (#985:
+#: web07, pilot JFBPNC 15 K1 rows with no role).
+MIN_LEAF_HEADING_DEPTH = 2
+
+
+def _leaf_heading(hierarchy: tuple[str, ...], flat: set[tuple[str, ...]]) -> str | None:
+    """The stamp a hierarchy's leaf gives the entries under it, or None when
+    the leaf is a section title, a flat (mis-hierarchied) leaf, not strongly
+    heading-shaped, over MAX_LABEL_WORDS words, or generic (including a
+    repeat of its parent).
+
+    Strong shape only (trailing colon or ALL CAPS): a bare Title-Case leaf
+    ("Board Certification", "Doctoral Chair") is stage 1b's commonest leaf
+    (8,880 entries over 341 stored 3b artifacts, about three times what the
+    strong shapes stamp), so it waits on the paid stage-4 A/B (#985). That is a
+    staging choice, not a claim the strong shapes are better: both include
+    section titles that only restate the record's kind ("HOSPITAL
+    APPOINTMENTS"), which repeat the taxonomy code rather than contradict it.
+    The word cap drops a form instruction leaf ("Licenses (Include State,
+    Date, Status, ...):").
+    """
+    if len(hierarchy) < MIN_LEAF_HEADING_DEPTH or hierarchy in flat:
+        return None
+    leaf = hierarchy[-1]
+    if not _is_heading_shaped(leaf, strong_only=True):
+        return None
+    heading = _strip_heading(leaf)
+    if len(heading.split()) > MAX_LABEL_WORDS:
+        return None
+    return None if _is_generic(heading, list(hierarchy[:-1])) else heading
+
+
+#: A parenthetical qualifies a section name, it does not name one:
+#: "PUBLICATIONS (excluding papers submitted ...)" is a publications section,
+#: not the pending grants its "submitted" would read as. An unclosed "(" (a
+#: truncated hierarchy level) runs to the end.
+_PARENTHETICAL_RE = re.compile(r"\([^)]*\)?")
+
+
+def _expected_codes(hierarchy: tuple[str, ...]) -> list[str]:
+    """The codes stage 3b's mismatch flagger expects under `hierarchy`,
+    with each level's parentheticals dropped."""
+    return get_expected_codes_from_hierarchy([_PARENTHETICAL_RE.sub(" ", level) for level in hierarchy])
+
+
+def _contradicts_leaf(code: str, hierarchy: tuple[str, ...]) -> bool:
+    """True when the leaf names a kind of record (by the section-word map stage
+    3b's mismatch flagger uses) and `code` fits nothing its hierarchy names.
+
+    1b can leave a stale leaf over records of another kind (#985: "Past
+    Grants:" over H awards, "UNIVERSITY SERVICE" over N3B mentees), and the
+    stamp would tell stage 4 the wrong kind. A leaf that names no kind
+    ("NATIONAL", "MENTORSHIP") cannot, so it is never checked; the ancestors
+    widen what fits ("GRANT REVIEWING" under "SERVICE" holds Q3). Recomputed
+    here, not read from the stored hierarchy_mismatch_flag, which older 3b
+    artifacts lack."""
+    if not _expected_codes(hierarchy[-1:]):
+        return False
+    return not code_matches_expected(code, _expected_codes(hierarchy))
+
+
+def _leaf_stamps(entries: list[dict[str, Any]]) -> dict[int, str]:
+    """Entry index -> its hierarchy leaf, for every extractable (non-T, not
+    dropped) entry whose leaf is a usable sub-heading governing at most
+    MAX_STAMPED_RUN such entries and whose code the leaf does not contradict."""
+    groups: dict[tuple[str, ...], list[int]] = {}
+    for idx, entry in enumerate(entries):
+        if not _is_dropped(entry) and entry.get("taxonomy_code") != HEADING_TAXONOMY_CODE:
+            groups.setdefault(tuple(entry.get("hierarchy") or []), []).append(idx)
+    flat = _flat_hierarchies(entries)
+    stamps: dict[int, str] = {}
+    for hierarchy, indices in groups.items():
+        heading = _leaf_heading(hierarchy, flat)
+        if heading is None or len(indices) > MAX_STAMPED_RUN:
+            continue
+        stamps.update((idx, heading) for idx in indices
+                      if not _contradicts_leaf(entries[idx].get("taxonomy_code") or "", hierarchy))
+    return stamps
+
+
 def stamp_context_headings(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return copies of `entries` with `context_heading` set on the entries
     that follow a heading under the same hierarchy.
@@ -290,8 +381,14 @@ def stamp_context_headings(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     entry, a change of taxonomy family among the children of a flat leaf, or
     MAX_FOREIGN_LETTER_STREAK children of a letter other than the run's own.
     A heading that would govern more than MAX_STAMPED_RUN entries stamps nothing.
+
+    An entry no T heading stamps takes its hierarchy leaf instead, when stage
+    1b nested that leaf under a section as a sub-heading (`_leaf_stamps`). A T
+    heading wins: it sits inside the leaf, so it is the narrower context.
     """
     out = [dict(entry) for entry in entries]
+    for idx, heading in _leaf_stamps(entries).items():
+        out[idx]["context_heading"] = heading
     for run in _heading_runs(entries):
         if len(run.indices) > MAX_STAMPED_RUN:
             continue

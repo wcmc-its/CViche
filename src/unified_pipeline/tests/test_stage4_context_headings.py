@@ -260,3 +260,85 @@ def test_a_bare_label_whose_next_entry_is_t_governs_nothing():
     entries = [_e("Alpha Journal", "T"), _e("A long list item, with a comma", "T"), _e("child")]
     assert set(_stamps(entries)) == {None}
     assert _stamps([_e("Alpha Journal", "T")]) == [None]
+
+
+# --- a sub-heading stage 1b put in the hierarchy (#985: web07, pilot JFBPNC) ---
+
+_TEACHING = "TEACHING EXPERIENCE"
+
+
+@pytest.mark.parametrize("leaf, expected", [
+    ("Teaching Assistant Positions:", "Teaching Assistant Positions"),  # colon leaf
+    ("IV. VISITING PROFESSOR", "VISITING PROFESSOR"),                   # enumerated caps leaf
+])
+def test_a_strong_hierarchy_leaf_stamps_the_entries_under_it(leaf, expected):
+    entries = [_e("Intro to Statistics, Fall 2019", "K1", [_TEACHING, leaf]),
+               _e("Northgate University, 2018", "K1", [_TEACHING, leaf])]
+    assert _stamps(entries) == [expected, expected]
+
+
+def test_a_top_level_leaf_never_stamps():
+    assert _stamps([_e("Intro to Statistics", "K1", ["TEACHING ASSISTANT POSITIONS:"])]) == [None]
+
+
+@pytest.mark.parametrize("leaf", [
+    "Teaching Assistant Positions",                    # bare Title-Case leaf: not strong
+    "Licenses (Include State, Date, Status, and Number):",  # over MAX_LABEL_WORDS
+    "PUBLICATIONS:",                                   # generic
+    "TEACHING EXPERIENCE:",                            # repeats its parent
+    "Courses Taught in 2019:",                         # digit
+])
+def test_a_weak_long_or_generic_leaf_stamps_nothing(leaf):
+    assert _stamps([_e("Intro to Statistics", "K1", [_TEACHING, leaf])]) == [None]
+
+
+def test_a_t_heading_inside_the_leaf_wins_and_t_or_dropped_entries_get_no_leaf_stamp():
+    h = [_TEACHING, "Course Roles:"]
+    entries = [_e("first course", "K1", h), _e("Alpha University:", "T", h), _e("second course", "K1", h),
+               _dropped("a fragment", "K1", is_fragment=True) | {"hierarchy": h}]
+    assert _stamps(entries) == ["Course Roles", None, "Alpha University", None]
+
+
+def test_a_leaf_over_the_run_cap_stamps_nothing():
+    h = [_TEACHING, "Course Roles:"]
+    assert set(_stamps([_e(f"c{i}", "K1", h) for i in range(ch.MAX_STAMPED_RUN + 1)])) == {None}
+    assert set(_stamps([_e(f"c{i}", "K1", h) for i in range(ch.MAX_STAMPED_RUN)])) == {"Course Roles"}
+
+
+def test_a_flat_leaf_stamps_nothing():
+    h = ["Personal", "OTHER DETAILS:"]
+    n = ch.FLAT_LETTER_MIN_ENTRIES
+    entries = [_e(f"{code} {i}", code, h) for code in ("A", "D1", "P") for i in range(n)]
+    assert set(_stamps(entries)) == {None}
+
+
+# --- a leaf whose words name another kind of record (#985 round 2) ---
+
+def test_a_leaf_naming_another_kind_does_not_stamp_the_misfit_entries():
+    h = ["TEACHING", "MASTERS STUDENT TRAINEES"]
+    entries = [_e("Jane Roe, MPH 2019", "N3B", h), _e("Received the Alpha Award", "H", h)]
+    assert _stamps(entries) == ["MASTERS STUDENT TRAINEES", None]
+
+
+def test_a_stale_leaf_over_records_of_another_kind_stamps_none_of_them():
+    h = ["RESEARCH:", "Past Grants:"]
+    assert _stamps([_e("2012: First Prize, Alpha Day", "H", h), _e("2016: Best Poster", "H", h)]) == [None, None]
+    assert _stamps([_e("NIH R01, Alpha Study, 2010-2015", "M2B", h)]) == ["Past Grants"]
+
+
+def test_a_leaf_naming_no_kind_is_never_checked_against_the_code():
+    # "TEACHING" alone expects K, but "MENTORSHIP" names no kind, so it stamps.
+    assert _stamps([_e("Jane Roe, MD, 2015-2018", "N3B", ["TEACHING", "MENTORSHIP"])]) == ["MENTORSHIP"]
+
+
+def test_an_ancestor_widens_what_a_leaf_admits():
+    # "GRANT" alone expects M2; under "SERVICE" a Q3 study section fits.
+    assert _stamps([_e("NIH Study Section, 2020", "Q3", ["SERVICE", "GRANT REVIEWING"])]) == ["GRANT REVIEWING"]
+    assert _stamps([_e("NIH Study Section, 2020", "Q3", ["RESEARCH", "GRANT REVIEWING"])]) == [None]
+
+
+def test_a_parenthetical_in_the_hierarchy_names_no_kind():
+    # "submitted" in the aside would read as pending grants (M2C) and admit M2A.
+    h = ["PUBLICATIONS (excluding papers submitted", "Refereed Articles in Journals:"]
+    assert _stamps([_e("Alpha Safe Schools Program, State Dept, 2019", "M2A", h)]) == [None]
+    assert _stamps([_e("Roe J. Alpha study. J Beta. 2019;1:1-2.", "S1", h)]) == ["Refereed Articles in Journals"]
