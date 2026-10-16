@@ -149,3 +149,53 @@ def test_bump_last_active_does_not_dirty_the_request_session(client, db):
     # and the write really landed, via the side session
     db.expire_all()
     assert (datetime.now(timezone.utc) - db.query(User).get(user.id).last_active_at).total_seconds() < 5
+
+
+def test_get_current_user_ends_the_read_snapshot_after_a_side_write(db, monkeypatch):
+    """After _bump_last_active commits through its own session, the request
+    session must not keep the snapshot its auth SELECT opened: a route that then
+    writes the same users row (POST /api/consent) is rejected by MariaDB 11.6+
+    with 1020 (#1917, 2026-10-16). SQLite can't raise 1020, so assert the cause:
+    no open transaction on the request session."""
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from app import auth
+
+    user = _make_user(db)
+    user.last_active_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    db.commit()
+
+    def _authenticate(cookie, session, touch_idle):
+        return session.get(User, user.id), None  # opens the snapshot
+
+    monkeypatch.setattr(auth, "authenticate_session_cookie", _authenticate)
+    monkeypatch.setattr(auth, "_recheck_ed_membership", lambda u, s: False)
+    monkeypatch.setattr(auth, "_best_effort_persist", lambda *a, **k: True)
+
+    auth.get_current_user(SimpleNamespace(cookies={}), db)
+
+    assert not db.in_transaction()
+
+
+def test_get_current_user_keeps_the_snapshot_when_nothing_was_written(db, monkeypatch):
+    """No side write (inside the 60s debounce) -> no rollback, so pending work
+    and loaded state on the request session are untouched."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app import auth
+
+    user = _make_user(db)
+    user.last_active_at = datetime.now(timezone.utc)
+    db.commit()
+
+    def _authenticate(cookie, session, touch_idle):
+        return session.get(User, user.id), None
+
+    monkeypatch.setattr(auth, "authenticate_session_cookie", _authenticate)
+    monkeypatch.setattr(auth, "_recheck_ed_membership", lambda u, s: False)
+
+    auth.get_current_user(SimpleNamespace(cookies={}), db)
+
+    assert db.in_transaction()
