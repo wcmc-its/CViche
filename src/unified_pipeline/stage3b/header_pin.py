@@ -326,6 +326,12 @@ _TEACHING_LEVEL = re.compile(r"\b(?:teach\w*|courses?|class(?:es)?|lectures?|cur
 _ACCOMPLISHMENT_HEADING = re.compile(r"\b(?:accomplishments?|achievements?|awards?)\b", re.I)
 _HONOR_CODE = "H"
 _MENTEE_ACTIVITY_FAMILIES = ("K", "D")
+# An education row under a level listing students in the plural is the student's
+# degree or school, not the owner's (farm 2082 621, B1 "<Student>. 2020.
+# Graduated cum Laude ... Attending John Marshall Law School" rendered in the
+# owner's EDUCATION table, #1573). Only the plural level pins it: a named-mentee
+# line above is not enough evidence on its own.
+_EDUCATION_FAMILY = "B"
 # A row that opens with another person's name and degree, under a research or
 # residency heading, is that person's work (KDAZOM, "Medical Residency Research":
 # "<Name>, M.D., Dermatology: <title>, 2nd place"). An honors heading keeps it:
@@ -624,12 +630,15 @@ def mentee_pin_code(entry: dict, after_mentee: bool) -> tuple[str, str] | None:
 
     `after_mentee` says a named-mentee line (N3A/N3B) came earlier in the same
     hierarchy group; without one, only the row's own heading level or its parent
-    naming mentees in the plural pins (#1251).
+    naming mentees in the plural pins (#1251). An education (B) row pins only on
+    that plural level (#1573).
     """
     code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
     heading = _heading_text(entry)
-    lists_mentees = after_mentee or _level_lists_mentees(entry)
-    if lists_mentees and _is_mentee_accomplishment(code, heading):
+    level_lists_mentees = _level_lists_mentees(entry)
+    if (after_mentee or level_lists_mentees) and _is_mentee_accomplishment(code, heading):
+        return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
+    if level_lists_mentees and code.startswith(_EDUCATION_FAMILY):
         return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
     if _is_named_trainee_work(code, heading, text):
         return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY

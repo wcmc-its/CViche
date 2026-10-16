@@ -491,3 +491,35 @@ def test_m1_record_rendered_rejects_unaligned_line_sets():
     record = "Amber Birch Cedar Delta Ember Flint"
     with pytest.raises(ValueError):
         m1_record_rendered(record, _haystack("x"), _letter_token_sets("x", record), [set()])
+
+
+def test_long_low_coverage_m1_record_renders_whole_in_the_appendix_not_split_into_sections(tmp_path):
+    """#1572 WWRSAL-03: a long M1 record stage 4 barely covered took the
+    low-coverage overflow, so its Appendix line was cut mid-word and the
+    reconsider pass split it and routed its sentences as bullets under
+    unrelated headings. An M1 record now renders whole in the Appendix only."""
+    tail = "Kelvaron patent on gear lubrication"
+    record = {"text": "2007-2010: Postdoctoral fellow, Quorvex Widget Institute. "
+                      + "We studied gear lubrication kinetics in turbine housings. " * 20
+                      + f"I was awarded a Zentrix career grant. I co-authored the {tail}.",
+              "taxonomy_code": "M1", "element_idx_start": 64,
+              "extracted_fields": {"narrative": "Postdoctoral fellow", "start_date": "2007",
+                                   "end_date": "2010"},
+              "extraction_coverage": {"extraction_coverage_percent": 2.0}}
+    gen = WCMTemplateGenerator(verbose=False)
+    split_calls = []
+
+    def split(text, code):
+        split_calls.append(code)
+        return [("I was awarded a Zentrix career grant.", "M2A"), (f"I co-authored the {tail}.", "L2")]
+    gen._reclassify_entry_segments = split
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    entries = _record_entries(record)
+    ip, op, sp = tmp_path / "in.json", tmp_path / "out.docx", tmp_path / "summary.json"
+    ip.write_text(json.dumps({"document_uid": "TESTAA", "entries": entries}))
+    sp.write_text(json.dumps({"research_summary": summary}))
+    gen.generate(str(ip), str(op), research_summary_path=str(sp))
+    text = _output_text(op)
+    assert split_calls == [], "the M1 record was handed to the reconsider pass"
+    assert text.count(tail) == 1, "the M1 record's tail was cut or routed elsewhere"
