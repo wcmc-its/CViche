@@ -197,6 +197,18 @@ def _place_vocabulary(cleaned: str, enrichment: Mapping[str, object]) -> _PlaceV
     return _PlaceVocabulary(known=known, region=region)
 
 
+def words_beyond_location(raw: str, cleaned: str,
+                          enrichment: Mapping[str, object]) -> list[str]:
+    """The words of the CV's `raw` institution that name something besides
+    `cleaned` and 5b's own city, state and country, in order: the
+    non-location remainder `_restore_dropped_qualifiers` tests for, word by
+    word. The doctor's `institution_cleaned_name` lint reads it (#1257), so
+    the lint and stage 6 agree on what counts as location."""
+    vocab = _place_vocabulary(cleaned, enrichment)
+    return [token for token in _NAME_TOKEN_RE.findall(_fold(raw))
+            if not _names_nothing_new(token, vocab.known)]
+
+
 def _restore_dropped_qualifiers(entry: InstitutionEnrichmentEntry,
                                 enrichment: Mapping[str, object],
                                 cleaned: str) -> str:

@@ -448,6 +448,27 @@ Of 39,204 rendered citations on the 303 runs, 644 have a group credit in their b
 
 Recall on labelled runs: all 10 labelled entries of the NECRGC autopsy's group shape are WARN hits (AOJEQD 928, 944, 1004, 1154, 1168, 1170, 1176, 1186 and 1202; QVAQGQ 221). The 181 hits on the 40 NECRGC/JAFPFP runs (61 WARN) are mostly group drops the autopsy did not label: it listed the 9 AOJEQD citations that never name the owner, and AOJEQD has 38 hits. JEFZWH-01's 36 citations ("<group> Investigators (<owner>)") stay `owner_missing_from_citation`'s, so this lint is silent on them. One more hit matches a label by index for another reason: UAURFU 557, where UAURFU-08 records two dropped co-authors and the lint reports the dropped "LIFE Investigators". Not reached: UAURFU-08's longer CV byline with no group credit (790), and a group the source writes with no collective word. All of it is in-sample: the rules were written from these runs.
 
+| INST-1 | 2026-10-15 | `feat/1257-doctor-5b-name-lint` on origin/dev `6190ab29` (`lint_institution_cleaned_name` alone, per run, over a fresh `scripts/render_gate.py` render of the same SHA with each run's source document) | 177 distinct runs: the 111 under `analysis/<uid>` with stage-4 and stage-5b JSON, the 63-run EBYSBC/s7ab/pilot farm (`~/worktrees/eb-farm/outputs`; 50 uids also under `analysis/`, so 124 distinct between the two), and, held out, the 14 OIEPQD runs (`analysis/OIEPQD/<uid>/outputs`) and the 39 YUYVIG runs (`~/worktrees/cviche-autopsy-b13/analysis`) | the YUYVIG v2 labels (`_labels_yuyvig_v2`) | #1257 |
+
+INST-1 adds `institution_cleaned_name`, #1257's doctor half: an institution name stage 5b's lookup gave (`cleaned_name`, else `official_name`) that loses the CV's own text in the document. It reads the stage-5b JSON and the rendered rows, so it sees the document as stage 6 left it: since #1516, stage 6 puts back a qualifier `cleaned_name` dropped when `cleaned_name` is a substring of the raw value, and the lint stays quiet on those rows (the pilot TXTATQ, WIANVH and JFBPNC rows #1257 cites, and YYVHNN 31, now render the qualifier). A row is the entry's when it shows every word of the name; when several do, only the rows sharing the most years with the entry's text (a "07/21" date cell read as 2021) count, and the qualifier must be missing from all of them. Four shapes, each named in the message:
+
+- `qualifier_dropped`: the name drops words of stage 4's `institution` that are not 5b's city, state or country (`stage6/normalization/institutions.py` `words_beyond_location`, the predicate stage 6 restores by), not a street address, and not a shortening, acronym or corrected spelling of the name's own words ("Dept.", "HSC", "Calrian") or a kind word renamed ("School" for the official "College").
+- `source_place_replaced`: the same, where every lost word is a city the CV writes before its state or country; the row prints 5b's place instead.
+- `placeholder_name`: the name is "Unknown" (or another placeholder) and the entry's row prints it.
+- `address_in_cell`: the CV's institution carries a street address the name dropped, and the row prints it anyway, because stage 6's restore reads a street as a qualifier.
+
+In sample (124 runs): 26 findings on 11 runs, every one read against the entry's source text and the rendered row: 23 true, 3 partial, 0 false.
+
+- `qualifier_dropped` (11): true are CMTQDR 37, 65 and 76 (each department's "Primary academic appointment", "Joint appointment" and "Member" lost), the Douglas-Bell brain bank's "(neurodegenerative diseases)" on four runs of one CV (IEUPKK, KUUKNJ, RBHRFR, ZCTARO 103), RBHRFR 69 (the first of two hospitals dropped) and VYNARH 66 (fifteen hospitals rendered with no town each). Partial: GINAAP and JJUQDF 24 (one CV), where stage 2 cut the line at "Duke Smoking" and 5b rendered "Duke University".
+- `source_place_replaced` (7): true are HJPBEM 39, 42, 47, 95 and 100 (the CV's "Palo Alto, CA" rendered "Stanford, CA") and UYQRUN 35 ("West Lafayette" rendered "Indianapolis"). Partial: RNKYST 23, a West Haven hospital the CV places in New Haven, which renders West Haven: the place is right for the hospital and the CV's city is lost.
+- `placeholder_name` (8): UYQRUN 600-630, the eight B2 rows "Unknown, <city>" the NDMRSO autopsy named (its ND11). All true.
+
+Held out (53 runs): 6 findings on 5 runs, all true. `qualifier_dropped`: IZIXVF 13 ("MRC Cell Biophysics Unit" and "University of London" lost) and TVQZIP 103 (the brain bank again). `source_place_replaced`: VECUUM 249 (a three-hospital residency rendered under one city, OIEPQD's VECUUM row on #1257) and XVSQFF 6 ("Orange, CA" lost; the row shows no place). `address_in_cell`: SXPHOG 56 and 64, the Manchester rows of YUYVIG SXPHOG-17. The labels carry no entry index for SXPHOG-17, so it is matched by reading, not by index.
+
+Overall 29 of 32 true (91%), 3 partial, 0 false. The shapes were written from the in-sample runs; the held-out 6 of 6 is the first out-of-sample check.
+
+Not caught, and why: a 5b city where the source names none (YUYVIG DYLJXC-02, the generic-hospital residencies): nothing is dropped, and #1791 now withholds those in stage 5b. A name 5b expanded wrongly (ECXGAT-10, "LUMC" read as Leiden): the lint reads words lost, not words added. A doubled location (SPINJC-11, LTTYWI-17): stage 6's location join, not the name. A fan-out child that keeps its parent's name (XELRLZ 23): the name is right for the first record. CULCSV entry 7 (two hospitals in two cities) renders both cities on the current code. A D3 `organization` with a street address and no 5b lookup (SXPHOG Meijer rows, IEUPKK 362): no stage-5b name to compare.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -475,6 +496,10 @@ Recall on labelled runs: all 10 labelled entries of the NECRGC autopsy's group s
 | `group_header_context`: `role_without_holder` | 8 | 8 | none | 29 / 33 hand-checked on the `analysis` runs (88%) | 5 / 8 (63%) | 5 | X6-header |
 | `group_header_context`: `header_coded_unlike_list` | 9 | 0 | none | 19 / 22 hand-checked on the `analysis` runs (86%) | 4 / 9 (44%) | 3 | X6-header |
 | `group_header_context`: `parent_dates_lost` | 6 | 0 | none | 21 / 21 hand-checked on the `analysis` runs (100%) | 5 / 6 (83%) | 3 | X6-header |
+| `institution_cleaned_name`: `qualifier_dropped` | 13 | 13 | none | 11 / 13 hand-checked (85%), 2 partial: held out 2 / 2, in-sample 9 / 11 | not matched (labels name no entry) | 0 by index | INST-1 |
+| `institution_cleaned_name`: `source_place_replaced` | 9 | 9 | none | 8 / 9 hand-checked (89%), 1 partial: held out 2 / 2, in-sample 6 / 7 | not matched | 0 by index | INST-1 |
+| `institution_cleaned_name`: `placeholder_name` | 8 | 8 | none | 8 / 8 hand-checked (100%), in-sample | not matched | 0 by index | INST-1 |
+| `institution_cleaned_name`: `address_in_cell` | 2 | 2 | none | 2 / 2 hand-checked (100%), held out | not matched (SXPHOG-17 by reading) | 0 by index | INST-1 |
 | `identical_rendered_rows` | 11 | 11 | none | 21 / 21 hand-checked (100%) | 1 / 11 (9%) | 1 | IDR |
 | `record_boundary` | 5 | 5 | none | 23 / 23 hand-checked (100%) | 4 / 5 (80%) | 1 | X6-grant |
 | `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
