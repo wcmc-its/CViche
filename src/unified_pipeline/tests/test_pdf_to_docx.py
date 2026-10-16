@@ -1662,3 +1662,124 @@ def test_running_header_drift_within_the_window_is_furniture(tmp_path, drift, re
              for n, t in enumerate(tops)]
     _, doc = _convert(tmp_path, pages)
     assert " ".join(_texts(doc)).count("Running Name Header") == (1 if removed else 3)
+
+
+# --- #1910: golden paragraph stream, content preservation, safe output ----
+
+def _golden_cv_pages():
+    """Two pages: a name block, date-led entries, a numbered list with a
+    wrapped item, a table row with a wrapped cell, running page numbers."""
+    first = ([(True, 12, 72, 740, "Jane Q Example"),
+              (True, 11, 72, 700, "EDUCATION"),
+              (False, 10, 72, 684, "2015-2019 Doctor of Medicine, Example University"),
+              (False, 10, 72, 672, "2011-2015 Bachelor of Science, Example College"),
+              (True, 11, 72, 640, "PUBLICATIONS"),
+              (False, 10, 72, 624, "1. " + _LONG), (False, 10, 72, 612, _LONG_TAIL),
+              (False, 10, 72, 600, "2. Second paper title."),
+              (True, 11, 72, 560, "APPOINTMENTS")]
+             + _table_row(544, [(72, "2019"), (150, "Assistant Professor of"), (400, "Boston")])
+             + _table_row(532, [(150, "Medicine")])
+             + [(False, 9, 280, 25, "Page 1 of 2")])
+    second = [(False, 10, 72, 700, "Continued text on page two."), (False, 9, 280, 25, "Page 2 of 2")]
+    return [first, second]
+
+
+def test_golden_paragraph_stream(tmp_path):
+    """The readers index the paragraph stream by position, so pin all of
+    it -- count, boundaries and every blank -- for one representative CV:
+    a boundary gained or lost anywhere shifts every index after it."""
+    report, doc = _convert(tmp_path, _golden_cv_pages())
+    assert _texts(doc) == [
+        "Jane Q Example",
+        "",
+        "EDUCATION",
+        "2015-2019 Doctor of Medicine, Example University",
+        "2011-2015 Bachelor of Science, Example College",
+        "",
+        "PUBLICATIONS",
+        f"1. {_LONG} {_LONG_TAIL}",
+        "2. Second paper title.",
+        "",
+        "APPOINTMENTS",
+        "2019\tAssistant Professor of Medicine\tBoston",
+        "Continued text on page two.",
+    ]
+    assert (report.pages, report.paragraphs, report.blank_paragraphs) == (2, 13, 3)
+
+
+def _sidebar(tmp_path):
+    return _two_column_page(right_offset=5)
+
+
+def _date_column(tmp_path):
+    return _two_column_page(right_offset=0, n_side=10, n_main=10)
+
+
+def _label_column(tmp_path):
+    return _two_column_page(right_offset=5, n_side=5)
+
+
+def _regions_split_by_a_full_width_line(tmp_path):
+    label_end = 72 + _width(tmp_path, "2019")
+    heading = [(False, 10, 72, 520, "2019"),
+               (False, 10, label_end + 16, 520, "Fullwidthheadingthatcrossesthegutter"),
+               (False, 10, 450, 520, "2020")]
+    below = ([(False, 10, 72, 500 - 14 * i, f"Low {i}") for i in range(6)]
+             + [(False, 10, 260, 495 - 14 * i, f"Deep {i}") for i in range(6)])
+    return _two_column_page(right_offset=5) + heading + below
+
+
+def _sidebar_above_a_table(tmp_path):
+    rows = (_table_row(500, [(72, "2019"), (150, "Title of"), (400, "Boston")])
+            + _table_row(488, [(150, "the award")])
+            + _table_row(476, [(72, "2020"), (150, "Next title"), (400, "Paris")]))
+    return _two_column_page(right_offset=5) + rows
+
+
+@pytest.mark.parametrize("layout", [_sidebar, _date_column, _label_column,
+                                    _regions_split_by_a_full_width_line, _sidebar_above_a_table])
+def test_column_and_table_reconstruction_keeps_every_word_once(tmp_path, layout):
+    """Reading order may be re-arranged; content may not: every printed
+    word of a mixed layout comes out exactly once."""
+    page = layout(tmp_path)
+    _, doc = _convert(tmp_path, [page])
+    printed = sorted(w for *_, text in page for w in text.split())
+    assert sorted(" ".join(_texts(doc)).split()) == printed
+
+
+def test_destination_that_is_the_source_pdf_is_refused(tmp_path):
+    pdf = tmp_path / "cv.pdf"
+    pdf.write_bytes(_make_pdf([_cv_page()]))
+    original = pdf.read_bytes()
+    (tmp_path / "sub").mkdir()
+    for same in (pdf, tmp_path / "sub" / ".." / "cv.pdf"):
+        with pytest.raises(ValueError, match="source PDF itself"):
+            convert_pdf_to_docx(pdf, same)
+    assert pdf.read_bytes() == original
+
+
+def test_failed_save_leaves_the_previous_docx_untouched(tmp_path, monkeypatch):
+    """A save that dies part-way (disk full) must not truncate the docx a
+    previous conversion left at the destination, nor leave a partial file."""
+    pdf, docx = tmp_path / "cv.pdf", tmp_path / "cv.docx"
+    pdf.write_bytes(_make_pdf([_cv_page()]))
+    docx.write_bytes(b"previous conversion")
+
+    def save_half_then_fail(self, path):
+        Path(path).write_bytes(b"trunc")
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(type(Document()), "save", save_half_then_fail)
+    with pytest.raises(OSError, match="No space"):
+        convert_pdf_to_docx(pdf, docx)
+    assert docx.read_bytes() == b"previous conversion"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["cv.docx", "cv.pdf"]
+
+
+def test_successful_conversion_replaces_the_destination_and_leaves_no_partial(tmp_path):
+    pdf, docx = tmp_path / "cv.pdf", tmp_path / "cv.docx"
+    pdf.write_bytes(_make_pdf([_cv_page()]))
+    docx.write_bytes(b"previous conversion")
+    convert_pdf_to_docx(pdf, docx)
+    assert _texts(Document(str(docx)))[0] == "EDUCATION"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["cv.docx", "cv.pdf"]
