@@ -8,6 +8,7 @@ import re
 from typing import Any, TypedDict
 
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
+from unified_pipeline.stage4.grounding import text_facts
 
 
 class ExtractedFields(TypedDict, total=False):
@@ -919,9 +920,12 @@ def _year_not_in_source_repair(value: str, original_text: str) -> tuple[str | No
     text does not contain, or None to leave it alone.
 
     Left alone: a year the text writes in full or as its two digits (see
-    `_source_writes_year`), a value whose month the text gives no date for
-    -- an entry split across elements can carry its year in a neighbour, and
-    nothing here can tell that from a wrong year -- and a value whose month
+    `_source_writes_year`) or mistypes by one keystroke in a date shape
+    ("in NCE to 3/31/3019" for 2019, #1840: read by grounding.py's
+    `_mistyped_years`, so the two stage-4 year checks agree), a value whose
+    month the text gives no date for -- an entry split across elements can
+    carry its year in a neighbour, and nothing here can tell that from a
+    wrong year -- and a value whose month
     the text gives a date with an unreadable year for ("05/01/202"): the
     stored year may be the LLM's reading of it. Re-derived when the text's
     dates in that month (and on that day) all give one year; cleared when
@@ -933,7 +937,7 @@ def _year_not_in_source_repair(value: str, original_text: str) -> tuple[str | No
     if dated is None:
         return _implausible_year_repair(value.strip(), original_text)
     year, month, day = dated.groups()
-    if _source_writes_year(year, original_text):
+    if _source_writes_year(year, original_text) or year in text_facts(original_text).mistyped_years:
         return None
     source_years = _source_years_for_month(
         int(month), int(day) if day else None, original_text)

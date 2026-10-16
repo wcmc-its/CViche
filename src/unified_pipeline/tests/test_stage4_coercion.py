@@ -754,6 +754,19 @@ _YEAR_NOT_IN_SOURCE_NULLED_REASON = (
         ("Example keynote 7/18, March 2013", {"date": "1807"}, {"date": None}),
         # the floor is _MIN_PLAUSIBLE_YEAR itself: the year below it is repaired
         ("7/18 Example keynote", {"date": "1899"}, {"date": "2018"}),
+        # a one-keystroke mistyped year vouches only for the year it reads as,
+        # and only in a date shape (#1840): "3019" is 2019, not 2017, and the
+        # "3019" of a grant number is no date at all
+        (
+            "Example grant (4/1/2016-3/31/2018 in NCE to 3/31/3019)",
+            {"end_date": "2017-03-31"},
+            {"end_date": None},
+        ),
+        (
+            "Example grant 3/31/2018, award R01CA3019",
+            {"end_date": "2019-03-31"},
+            {"end_date": "2018-03-31"},
+        ),
     ],
 )
 def test_year_not_in_source_is_re_derived_from_the_text(text, fields, expected):
@@ -846,6 +859,10 @@ def test_year_not_in_source_clearing_records_an_empty_string():
         ("Example lecture 7/18", {"year": 1807}),
         # no text to check against (an earlier record of a multi-record entry)
         ("", {"start_date": "1968-06"}),
+        # the text mistypes the year by one keystroke in a date shape, read
+        # as stage4/grounding.py reads it (#1840; 2068 591, SPIHVQ 678)
+        ("Example grant (4/1/2016-3/31/2018 in NCE to 3/31/3019)", {"end_date": "2019-03-31"}),
+        ("Example M, Example L. (2/1018). Example session.", {"year": "2018-02"}),
     ],
 )
 def test_year_not_in_source_repair_leaves_these_alone(text, fields):
