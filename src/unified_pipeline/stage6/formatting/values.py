@@ -121,7 +121,38 @@ def _book_trailer_parts(pub: ResolvedPublication) -> list[str]:
         year_pages = f"{year_pages}:{pub.pages}" if year_pages else pub.pages
     if year_pages:
         trailer = f"{trailer}; {year_pages}"
-    return [trailer + "."]
+    return [trailer.rstrip('.') + "."]
+
+
+def _is_meeting(pub: ResolvedPublication) -> bool:
+    """True for a record that names a meeting or its place and no journal or
+    book: an S8 talk or abstract, the only stage-4 schema that writes
+    `conference_name` or `location` (#1570).
+
+    A journal still wins (an abstract PubMed matched to a supplement is cited
+    as the article), and so does a book. A publisher is not checked here
+    because `_format_citation` gives a record with one the book trailer
+    first. So this shape takes only records that before #1570 rendered their
+    title and year and nothing of where they were given.
+    """
+    if pub.journal or pub.book_title:
+        return False
+    return bool(pub.conference_name or pub.location)
+
+
+def _meeting_trailer_parts(pub: ResolvedPublication) -> list[str]:
+    """`Meeting; Year; Place.` -- the S8 trailer (#1570), in the order and
+    with the separators stage 5d's own S8 format uses, so a meeting line reads
+    the same whichever path rendered it.
+
+    No volume, issue or pages: the S8 schema has none, and a record carrying
+    them with a journal takes the journal trailer instead. The closing period
+    is the renderer's, so a last part that already ends in one ("Washington,
+    D.C.") keeps a single period, as the title does.
+    """
+    trailer = "; ".join(part for part in (pub.conference_name, pub.year, pub.location)
+                        if part)
+    return [trailer.rstrip('.') + "."]
 
 
 def _identifier_parts(pub: ResolvedPublication) -> list[str]:
@@ -158,8 +189,9 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     pipeline key appears below.
 
     One decision is left, and it is a rendering decision: a record that names
-    a publisher and no journal ends in the book trailer, everything else in
-    the journal trailer. It is deliberately not two whole-citation "shape"
+    a publisher and no journal ends in the book trailer, a meeting with no
+    journal, book or publisher in the meeting trailer (#1570), everything else
+    in the journal trailer. It is deliberately not two whole-citation "shape"
     renderers, because the source line and the trailer are not chosen by the
     same predicate -- a chapter with no publisher takes the book source line
     and the journal trailer -- and a shape split would have to either
@@ -187,6 +219,8 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     parts.extend(_source_parts(pub))
     if pub.publisher and not pub.journal:
         parts.extend(_book_trailer_parts(pub))
+    elif _is_meeting(pub):
+        parts.extend(_meeting_trailer_parts(pub))
     else:
         parts.extend(_journal_trailer_parts(pub))
     parts.extend(_identifier_parts(pub))

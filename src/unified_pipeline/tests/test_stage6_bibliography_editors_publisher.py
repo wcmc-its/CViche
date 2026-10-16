@@ -332,6 +332,120 @@ def test_title_terminal_punctuation_table(title, expected):
 
 
 # ---------------------------------------------------------------------------
+# #1570: the non-stage-5d fallback for an S8 meeting keeps its meeting and place
+# ---------------------------------------------------------------------------
+
+#: An S8 talk as stage 4 writes it: the S8 schema has `conference_name` and
+#: `location` and no journal, volume or pages (YUYVIG SIJYJZ 732's shape).
+_S8_MEETING_FIELDS = {
+    'year': '2004',
+    'title': 'A Talk on Larks',
+    'conference_name': 'Annual Meeting of the Quillfern Society',
+    'location': 'Larchmere, ZZ',
+}
+
+
+def test_fallback_s8_entry_renders_its_meeting_and_place():
+    """Before #1570 this rendered "A Talk on Larks. 2004." -- the meeting and
+    the place were dropped, so stage 5d could not reject a citation without
+    the line losing them. Same order as stage 5d's own S8 format."""
+    citation, _, _ = _format_citation(_entry(dict(_S8_MEETING_FIELDS)), 3)
+
+    assert citation == ('3. A Talk on Larks. Annual Meeting of the Quillfern '
+                        'Society; 2004; Larchmere, ZZ.')
+
+
+def test_fallback_s8_entry_with_authors_keeps_them_first():
+    fields = dict(_S8_MEETING_FIELDS, authors='Rook J, Sable M')
+
+    citation, _, _ = _format_citation(_entry(fields), 4)
+
+    assert citation == ('4. Rook J, Sable M. A Talk on Larks. Annual Meeting of '
+                        'the Quillfern Society; 2004; Larchmere, ZZ.')
+
+
+@pytest.mark.parametrize('dropped,expected', [
+    ('location', '5. A Talk on Larks. Annual Meeting of the Quillfern Society; 2004.'),
+    ('conference_name', '5. A Talk on Larks. 2004; Larchmere, ZZ.'),
+    ('year', '5. A Talk on Larks. Annual Meeting of the Quillfern Society; Larchmere, ZZ.'),
+])
+def test_fallback_s8_entry_omits_only_the_part_it_lacks(dropped, expected):
+    fields = dict(_S8_MEETING_FIELDS)
+    del fields[dropped]
+
+    citation, _, _ = _format_citation(_entry(fields), 5)
+
+    assert citation == expected
+
+
+@pytest.mark.parametrize('field,value,expected', [
+    ('location', 'Washington, D.C.',
+     '9. A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; '
+     'Washington, D.C.'),
+    ('location', 'Johns Hopkins Univ.',
+     '9. A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; '
+     'Johns Hopkins Univ.'),
+    ('location', 'Larchmere, ZZ...',
+     '9. A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; '
+     'Larchmere, ZZ.'),
+])
+def test_fallback_s8_trailer_ending_in_a_period_does_not_double_it(
+        field, value, expected):
+    """The renderer owns the trailer's closing period, as it owns the
+    title's: a place that already ends in one must not render "D.C..".
+    The verifier's $0 A/B over the 895 stored 5d artifacts found 17 S-code
+    fallback lines ending in ".." (IEUPKK 321 "Washington D.C..")."""
+    fields = dict(_S8_MEETING_FIELDS, **{field: value})
+
+    citation, _, _ = _format_citation(_entry(fields), 9)
+
+    assert citation == expected
+
+
+def test_fallback_s8_trailer_without_location_ending_in_a_period():
+    """With no place, the meeting name is the last part and gets the same
+    single period."""
+    fields = dict(_S8_MEETING_FIELDS, conference_name='Larks Soc.')
+    del fields['location']
+    del fields['year']
+
+    citation, _, _ = _format_citation(_entry(fields), 10)
+
+    assert citation == '10. A Talk on Larks. Larks Soc.'
+
+
+def test_fallback_meeting_with_a_journal_keeps_the_journal_shape():
+    """An abstract PubMed matched to a journal supplement renders as the
+    article it is: the journal owns the source line, unchanged by #1570."""
+    citation, _, _ = _format_citation(_entry(
+        dict(_S8_MEETING_FIELDS, volume='12', pages='S3'),
+        enrichment={'pubmed_journal': 'Biol Larks'}), 6)
+
+    assert citation == '6. A Talk on Larks. Biol Larks. 2004;12:S3.'
+
+
+def test_fallback_meeting_with_a_book_title_keeps_the_in_clause_alone():
+    """A proceedings volume stage 4 named as a book renders its `In:` clause
+    and the plain trailer, as before #1570, never a second source after it."""
+    citation, _, _ = _format_citation(_entry(
+        dict(_S8_MEETING_FIELDS, book_title='Proceedings of Larks')), 8)
+
+    assert citation == '8. A Talk on Larks. In: Proceedings of Larks. 2004.'
+
+
+def test_fallback_record_with_a_publisher_keeps_the_book_trailer():
+    """A record naming a publisher takes the book trailer even when it also
+    carries a place: #1570 adds the meeting shape for a record with no
+    journal, book or publisher only."""
+    fields = {'title': 'My Book', 'publisher': 'Acme Press', 'year': '2019',
+              'location': 'Larchmere, ZZ'}
+
+    citation, _, _ = _format_citation(_entry(fields), 7)
+
+    assert citation == '7. My Book. Acme Press; 2019.'
+
+
+# ---------------------------------------------------------------------------
 # #481: the stage-5d safety net (the HU4DXA "GNYHA" case)
 # ---------------------------------------------------------------------------
 

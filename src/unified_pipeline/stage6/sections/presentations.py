@@ -173,8 +173,17 @@ def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
 
 # The field names a talk's date arrives under, most specific first.
 _TALK_DATE_KEYS = ('year', 'date', 'start_date')
+# The field names the meeting that hosted a talk arrives under: R's own, then
+# S8's, for an abstract a hierarchy mismatch moved here (#1570, YUYVIG
+# SQMWHM 1047 rendered without its meeting).
+_TALK_EVENT_KEYS = ('event_name', 'conference_name')
 _TALK_END_DATE_KEY = 'end_date'
 _NONE_STRING = 'none'
+
+
+def _talk_event_value(fields: Mapping) -> object:
+    """The first filled `_TALK_EVENT_KEYS` value, as stored, else ''."""
+    return next((fields[key] for key in _TALK_EVENT_KEYS if fields.get(key)), '')
 
 
 def _date_field(fields: dict, key: str) -> str | Mapping:
@@ -318,7 +327,7 @@ class PresentationsSection:
                 if not title:
                     title = _untitled_talk_title(
                         source_line, role,
-                        str(fields.get('event_name') or ''), institution, formatted_date)
+                        str(_talk_event_value(fields)), institution, formatted_date)
                 # "(postponed due to COVID-19)" has no field, so stage 4 drops
                 # it and the talk would read as delivered (#1436).
                 title = with_event_status(title, source_line, institution)
@@ -329,7 +338,7 @@ class PresentationsSection:
                 # Dallas, TX". event_name was read nowhere in this file, so
                 # 2,194 of 2,956 extracted values across 79 CVs reached no part
                 # of the rendered document.
-                event_name = (fields.get('event_name') or '').strip()
+                event_name = (_talk_event_value(fields) or '').strip()
                 if event_name and event_name.casefold() not in f"{institution} {title}".casefold():
                     institution = f"{event_name}, {institution}" if institution else event_name
 

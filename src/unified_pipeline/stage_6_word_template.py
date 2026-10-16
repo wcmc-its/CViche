@@ -274,7 +274,7 @@ from unified_pipeline.stage6.sections.mentoring import (
     outcome_mentee_warnings,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
-from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS
+from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
 from unified_pipeline.stage6.sections.service import EXTRAMURAL_ORGANIZATION_FIELDS
 from unified_pipeline.stage6.sorting import (  # noqa: F401
     element_idx_sort_key,
@@ -932,9 +932,10 @@ _TEACHING_ROLE_REQUIRED_PAIRS = frozenset({('B2', 'K4')})
 # Fields a target's renderer also reads under another schema's name
 # (`_RENDERED_FIELDS` is probed with the target's own schema only): R takes a
 # talk's date from `year` or `start_date`, Q1 its organization from a
-# `journal_name` or `program_name`. A rerouted record keeps these.
+# `journal_name` or `program_name`. A rerouted record keeps these. R also
+# takes an S8 abstract's meeting from `conference_name` (#1570).
 _RENDERED_FIELD_ALIASES: Mapping[str, frozenset[str]] = MappingProxyType({
-    'R': frozenset(_TALK_DATE_KEYS),
+    'R': frozenset((*_TALK_DATE_KEYS, *_TALK_EVENT_KEYS)),
     'Q1': frozenset(EXTRAMURAL_ORGANIZATION_FIELDS),
 })
 # Fields a target states without writing them: R lists the owner's own talks,
