@@ -22,7 +22,6 @@ from types import MappingProxyType
 from typing import NamedTuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
-from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
     is_foreign_template_instruction,
     is_source_boilerplate,
@@ -46,6 +45,8 @@ from unified_pipeline.stage6.pii_pass import run_pii_pass
 from unified_pipeline.stage6.render_check import (
     _record_tokens,
     _whole_record_rendered,
+    record_chunks,
+    record_pieces,
     segment_already_rendered,
     segment_held_by_fields,
 )
@@ -72,7 +73,6 @@ from ..shared import (
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
     SubpointText,
-    _entry_pieces,
     _fields_entries,
     _FieldsEntry,
     _finding,
@@ -600,11 +600,11 @@ def _record_rendered(line: str, haystack: str,
     contradict the record's. Verbatim absence alone proves nothing (stage 6
     reformats dates/fields), so False requires a token-verifiable miss; a
     line without enough distinctive tokens is None, not missing."""
-    if any(piece in haystack for piece in _entry_pieces(line)):
+    if any(piece in haystack for piece in record_pieces(line)):
         return True
     record_years = set(_YEAR_RE.findall(line))
     rendered = None
-    for chunk in [line] + entry_fragments(line):
+    for chunk in record_chunks(line):
         tokens = _long_word_tokens(chunk) - output.ubiquitous
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
