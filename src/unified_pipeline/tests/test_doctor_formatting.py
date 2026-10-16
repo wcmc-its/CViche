@@ -143,6 +143,35 @@ def test_a_line_5c_rejected_is_reported_at_info():
         "renders unformatted, from its stage-4 course fields or else its source text")
 
 
+def test_a_rejected_line_written_from_its_fields_says_so():
+    # #1345: stage 5c wrote the entry from its stage-4 fields instead.
+    meta = {"entries_rejected": [{"element_idx_start": 197, "taxonomy_code": "K4",
+                                  "reason": "EC-0028:role_invented:attendee",
+                                  "renders": "stage_4_fields"},
+                                 {"element_idx_start": 198, "taxonomy_code": "K4",
+                                  "reason": "EC-0029:role_invented:attendee",
+                                  "renders": "unformatted"}]}
+    fields_finding, raw_finding = _run(meta=meta)
+    assert fields_finding["severity"] == "INFO"
+    assert fields_finding["message"].endswith(
+        "stage 5c rejected its formatted line (EC-0028:role_invented:attendee); "
+        "the entry renders from its stage-4 fields instead")
+    assert raw_finding["message"].endswith(
+        "renders unformatted, from its stage-4 course fields or else its source text")
+
+
+def test_a_line_written_from_the_fields_is_not_linted_as_a_5c_line():
+    # A line that does not show the record's year: the lint would warn on it
+    # as a 5c line, but the fields line is not one.
+    entry = _k(197, "Annual Kite Rounds 2011 - current",
+               {"activity_title": "Annual Kite Rounds", "start_date": "2011"},
+               "**2013-Present** - Annual Kite Rounds")
+    entry["extracted_fields"]["formatting_source"] = "stage_4_fields"
+    assert _run(entry) == []
+    entry["extracted_fields"]["formatting_source"] = "stage_5c_llm"
+    assert [f["severity"] for f in _run(entry)] == ["WARN"]
+
+
 def _two_titled_records(formatted, dates=("2001", "2003"), text="2001 Alpha Seminar; 2003 Beta Workshop"):
     records = [{"activity_title": "Alpha Seminar", "date": dates[0]},
                {"activity_title": "Beta Workshop", "date": dates[1]}]

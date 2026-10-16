@@ -365,8 +365,9 @@ def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str,
 
 # ---------------------------------------------------------------------------
 # Post-check (E20): a formatted line that misstates its record is not used.
-# The entry then renders as it would without stage 5c (stage 6's raw-line or
-# field rendering), which is the stage-4 content unrewritten.
+# The entry is then written from its stage-4 fields (`fields_text`) or, when
+# they do not carry its text, renders as it would without stage 5c (stage 6's
+# raw-line or field rendering), which is the stage-4 content unrewritten.
 # ---------------------------------------------------------------------------
 
 # The fields a record's dates are kept in, across the K schemas.
@@ -573,6 +574,121 @@ def restore_missing_date(line: str, record: Mapping[str, Any], entry_text: str) 
     return restored if postcheck_line(restored, record, entry_text) is None else None
 
 
+# ---------------------------------------------------------------------------
+# Fields line (#1345): an entry whose line the post-check rejected, and that
+# no date restore saves, is written from its stage-4 fields instead of falling
+# back to its raw source line (UXBHHF K4 89/196/197: an invented 'Attendee' or
+# 'Participant'; DPEHSZ-style dates gathered away from their titles). The
+# line takes the prompt's Template D shape, so it reads like the entries the
+# model formatted around it.
+# ---------------------------------------------------------------------------
+
+# A record's title: K1's course, K3's program, K4/K5's activity. K2 has no
+# title field, so a K2 record is never written from its fields.
+_FIELDS_TITLE_KEYS = ('course_title', 'program_name', 'activity_title')
+_FIELDS_CODE_KEY = 'course_code'
+_FIELDS_ROLE_KEY = 'role'
+# What goes in the parentheses, in the prompt's order: institution, then
+# audience, then place.
+_FIELDS_PLACE_KEYS = ('institution', 'audience', 'target_audience', 'location')
+# How the open end of a range is written; the source's own word varies.
+_OPEN_END_WORDS = frozenset({'present', 'current', 'ongoing'})
+_OPEN_END = 'Present'
+_FIELDS_LINE = '{head} ({places})'
+_FIELDS_PLACE_SEPARATOR = '; '
+_FIELDS_HEAD_SEPARATOR = ', '
+# A plural in the source ("seminars") is carried by its singular in a field.
+_PLURAL_SUFFIX = 's'
+# Source words that are part of a date ("May 20, 2015", "2009-current"). The
+# fields line writes the date as stage 4 read it ("2015-05-20", "2009-Present"),
+# and the post-check already holds the line to the record's years.
+_MONTH_NAMES = frozenset({'january', 'february', 'march', 'april', 'june', 'july', 'august',
+                          'september', 'october', 'november', 'december'})
+_DATE_WORDS = _MONTH_NAMES | _OPEN_END_WORDS
+FIELDS_SOURCE = 'stage_4_fields'
+
+
+def _fields_date(record: Mapping[str, Any]) -> str:
+    """The record's date as its fields line writes it: `start-end` with an
+    open end written `Present`, else its one-off `date`."""
+    start = str(record.get('start_date') or '').strip()
+    end = str(record.get('end_date') or '').strip()
+    if end.lower() in _OPEN_END_WORDS:
+        end = _OPEN_END
+    if start or end:
+        return '-'.join(part for part in (start, end) if part)
+    return _first_text(record, _RECORD_DATE_KEYS).strip()
+
+
+def _fields_title(record: Mapping[str, Any]) -> str:
+    """`code: title` for a K1 course, else the record's first title field."""
+    title = _first_text(record, _FIELDS_TITLE_KEYS).strip()
+    code = _first_text(record, (_FIELDS_CODE_KEY,)).strip()
+    if title and code and record.get('course_title') == title:
+        return f'{code}: {title}'
+    return title
+
+
+def fields_line(record: Mapping[str, Any], entry_text: str) -> str | None:
+    """One record's line written from its stage-4 fields, or None when it
+    has no title or a date with no year. The role is written only when the entry's own text holds
+    it, the prompt's role rule: stage 4 sometimes supplies one too
+    (BMYYOX's 'Lecturer', KHXOUF's 'Presenter'). A place the title already
+    names ('LPCHS' in 'LPCHS ... Journal Club') is not repeated."""
+    title = _fields_title(record)
+    if not title:
+        return None
+    role = _first_text(record, (_FIELDS_ROLE_KEY,)).strip()
+    if role and _normalized(role) not in _normalized(entry_text):
+        role = ''
+    head = _FIELDS_HEAD_SEPARATOR.join(part for part in (role, title) if part)
+    places = [place for place in dict.fromkeys(_first_text(record, (key,)).strip()
+                                               for key in _FIELDS_PLACE_KEYS)
+              if place and _normalized(place) not in _normalized(head)]
+    if places:
+        head = _FIELDS_LINE.format(head=head, places=_FIELDS_PLACE_SEPARATOR.join(places))
+    date = _fields_date(record)
+    if not date:
+        return head
+    if not _YEAR.search(date):
+        return None  # "11-18" from a source "11/18": no year to write it by
+    return _RESTORED_DATE_LINE.format(date=date, line=head)
+
+
+def _source_words_missing(text: str, entry_text: str) -> list[str]:
+    """The entry text's words (of `_OVERLAP_WORD_MIN_CHARS`+ letters, date
+    words aside) that `text` does not hold, a plural counting as its singular."""
+    shown = _normalized(text)
+    words = dict.fromkeys(_OVERLAP_WORD.findall(_normalized(entry_text)))
+    return [word for word in words
+            if word not in _DATE_WORDS and word not in shown
+            and word.removesuffix(_PLURAL_SUFFIX) not in shown]
+
+
+def fields_text(entry: Mapping[str, Any]) -> str | None:
+    """The entry written from its stage-4 fields, one line per record
+    (`fields_line`), or None.
+
+    None unless every record has a line that passes `postcheck_line`, the
+    lines show no year the source text does not (stage 4 reads "2013-5" as
+    2015 and "11/19" as 2019), and they hold every word of the source text:
+    a word only the source holds (a description stage 4 left out, a label it
+    misread) would be lost, and the raw line, which keeps it, is rendered
+    instead.
+    """
+    entry_text = entry.get('text', '') or ''
+    lines = []
+    for record in entry_records(entry):
+        line = fields_line(record, entry_text)
+        if line is None or postcheck_line(line, record, entry_text) is not None:
+            return None
+        lines.append(line)
+    text = '\n'.join(lines)
+    if not _years_shown(_normalized(text)) <= _years_shown(_normalized(entry_text)):
+        return None
+    return None if _source_words_missing(text, entry_text) else text
+
+
 # `accepted_formatted_text`'s reason prefix for an id the reply did not hold:
 # not a rejection, the entry was simply not formatted (as before E20).
 _MISSING = 'missing:'
@@ -636,6 +752,11 @@ def accepted_formatted_text(entry: Mapping[str, Any], entry_ids: list[str],
 _FORMATTED_TEXT_KEY = 'formatted_text'
 _FORMATTING_SOURCE_KEY = 'formatting_source'
 _STAGE_5C_SOURCE = 'stage_5c_llm'
+# What a rejected entry's `entries_rejected` item says it renders as: its
+# fields line (`fields_text`, stored as its formatted text), or stage 6's own
+# rendering of the unformatted entry (its source text, or its course fields).
+REJECTED_RENDERS_KEY = 'renders'
+RENDERS_UNFORMATTED = 'unformatted'
 
 
 def _entry_ref(entry: Mapping[str, Any], **extra: object) -> dict[str, Any]:
@@ -644,12 +765,21 @@ def _entry_ref(entry: Mapping[str, Any], **extra: object) -> dict[str, Any]:
             'taxonomy_code': entry.get('taxonomy_code'), **extra}
 
 
+def _set_formatted_text(entry: dict, text: str, source: str) -> None:
+    """Store `text` as the entry's formatted text, written by `source`."""
+    fields = entry.setdefault('extracted_fields', {})
+    fields[_FORMATTED_TEXT_KEY] = text
+    fields[_FORMATTING_SOURCE_KEY] = source
+
+
 def _store_formatted_text(id_to_entry: dict[str, dict], id_to_formatted: Mapping[str, str]
                           ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
     """Write each accepted entry's formatted text onto it, in place.
 
     Returns (entries formatted, entries the post-check rejected, entries
     formatted after a date restore). An entry the reply left out is neither.
+    A rejected entry `fields_text` can write gets that text, marked as
+    `FIELDS_SOURCE`; it is still a rejection, not a formatted entry.
     """
     formatted_count = 0
     rejected: list[dict[str, Any]] = []
@@ -658,11 +788,14 @@ def _store_formatted_text(id_to_entry: dict[str, dict], id_to_formatted: Mapping
         acceptance = accepted_formatted_text(entry, entry_ids, id_to_formatted)
         if acceptance.text is None:
             if not acceptance.reason.startswith(_MISSING):
-                rejected.append(_entry_ref(entry, reason=acceptance.reason))
+                text = fields_text(entry)
+                if text is not None:
+                    _set_formatted_text(entry, text, FIELDS_SOURCE)
+                rejected.append(_entry_ref(
+                    entry, reason=acceptance.reason,
+                    **{REJECTED_RENDERS_KEY: RENDERS_UNFORMATTED if text is None else FIELDS_SOURCE}))
             continue
-        fields = entry.setdefault('extracted_fields', {})
-        fields[_FORMATTED_TEXT_KEY] = acceptance.text
-        fields[_FORMATTING_SOURCE_KEY] = _STAGE_5C_SOURCE
+        _set_formatted_text(entry, acceptance.text, _STAGE_5C_SOURCE)
         formatted_count += 1
         if acceptance.restored_ids:
             restored.append(_entry_ref(entry, ids=list(acceptance.restored_ids)))
@@ -798,8 +931,9 @@ def run_stage_5c(input_path: str, output_path: str | None = None,
         entries_formatted_count, rejected, date_restored = _store_formatted_text(
             id_to_entry, id_to_formatted)
         for item in rejected:
-            logger.warning("stage 5c line rejected, entry renders unformatted: %s %s (%s)",
-                           item['taxonomy_code'], item['element_idx_start'], item['reason'])
+            logger.warning("stage 5c line rejected, entry renders %s: %s %s (%s)",
+                           item[REJECTED_RENDERS_KEY], item['taxonomy_code'],
+                           item['element_idx_start'], item['reason'])
     else:
         if verbose:
             print("  LLM formatting not available, keeping original text")
@@ -811,9 +945,10 @@ def run_stage_5c(input_path: str, output_path: str | None = None,
         'input_file': input_path,
         'k_entries_processed': total_k_entries,
         'entries_formatted': entries_formatted_count,
-        # Entries whose formatted line failed `postcheck_line` (E20); each
-        # renders unformatted, from its stage-4 course fields or else its
-        # source text.
+        # Entries whose formatted line failed `postcheck_line` (E20). Each
+        # renders from its stage-4 fields (`fields_text`, #1345) or, when
+        # they cannot carry it, unformatted: from its stage-4 course fields
+        # or else its source text. `renders` says which.
         'entries_rejected': rejected,
         # Entries stored formatted after a line that left out its record's
         # date got it back (`restore_missing_date`, #1345).
