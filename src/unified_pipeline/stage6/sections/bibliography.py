@@ -159,6 +159,7 @@ class _CitationEnrichment:
     text: str = ''
     in_press_note: str = ''
     in_press_superseded: bool = False
+    citation_note: str = ''
 
     @classmethod
     def from_raw(cls, raw) -> _CitationEnrichment:
@@ -171,6 +172,7 @@ class _CitationEnrichment:
             text=_enrichment_field_text(raw.get('text')),
             in_press_note=_enrichment_field_text(raw.get('in_press_note')),
             in_press_superseded=raw.get('in_press_superseded') is True,
+            citation_note=_enrichment_field_text(raw.get('citation_note')),
         )
 
 
@@ -728,6 +730,11 @@ class BibliographySection:
                 # not a pipeline comment, so it ignores `emit_comments`.
                 if enrichment.in_press_note:
                     self._add_word_comment(para, enrichment.in_press_note,
+                                           author="PubMed Enrichment", always=True)
+                # A stub stage 5 could not look up (#1870); for the faculty
+                # member too, so it also ignores `emit_comments`.
+                if enrichment.citation_note:
+                    self._add_word_comment(para, enrichment.citation_note,
                                            author="PubMed Enrichment", always=True)
 
                 # Add comments from upstream pipeline processes
