@@ -15,12 +15,25 @@ The known-phrase sets are generated from the tracked WCM template by
 ``template_boilerplate_phrases.json`` (loaded once at import). Top-level section
 headers are deliberately kept OUT of the drop set: dropping a genuine section
 header could disturb downstream structure.
+
+Normalization differs by classifier, on purpose (#1911). The phrase-list
+classifiers (``is_template_instruction``, ``is_near_template_instruction``,
+``is_unanswered_prompt``, ``is_template_label_line``) compare ``_normalize``d
+text, because the phrase list is normalized the same way. The shape
+classifiers do not: ``is_foreign_template_instruction`` only collapses
+whitespace, since its outline markers ("C.", "1)") and punctuation ("): N/A")
+are the signal ``_normalize`` would strip; ``is_source_boilerplate`` only
+strips, since its patterns are anchored on the original line's separators.
+A new rule picks the policy of the family it belongs to.
 """
 
 import difflib
 import json
+import logging
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Resolve the JSON relative to THIS file so it works regardless of cwd.
 _JSON_PATH = Path(__file__).resolve().parent / "template_boilerplate_phrases.json"
@@ -83,27 +96,44 @@ def _normalize(text: str) -> str:
     return s
 
 
-def _load_phrases():
+def _phrase_list(data: object, key: str) -> list[str]:
+    """``data[key]`` as a list of strings; ValueError for any other shape.
+
+    A string where a list belongs would otherwise be iterated character by
+    character into one-letter "phrases" (#1911)."""
+    if not isinstance(data, dict):
+        raise ValueError(f"top level is {type(data).__name__}, not an object")
+    value = data.get(key) or []
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        raise ValueError(f"{key!r} is not a list of strings")
+    return value
+
+
+def _load_phrases(path: Path = _JSON_PATH) -> tuple[frozenset[str], frozenset[str]]:
     """Load and normalize the phrase sets.
 
     Returns ``(instruction_set, section_header_set)``. The instruction set is
     DROP-eligible; the section-header set is a precision GUARD (entries matching
     a top-level section header are never dropped, even if they collide with a
     short field label such as the "Research" column label).
+
+    Frozen: read-only for the life of the process (#1911).
     """
     try:
-        with open(_JSON_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        instructions = _phrase_list(data, "instructions")
+        section_headers = _phrase_list(data, "section_headers")
+    except (OSError, ValueError) as exc:  # json.JSONDecodeError is a ValueError
         # Fail safe: empty sets -> detector returns False for everything
         # (precision bias: never drop real content if the data is missing).
-        return set(), set()
+        # Logged, not silent: every template line then reaches the output.
+        logger.warning("Template boilerplate phrases unavailable (%s): %s; "
+                       "no template instruction will be detected", path, exc)
+        return frozenset(), frozenset()
 
-    instructions = data.get("instructions", []) or []
-    section_headers = data.get("section_headers", []) or []
-
-    instruction_set = {n for n in (_normalize(p) for p in instructions) if n}
-    section_header_set = {n for n in (_normalize(h) for h in section_headers) if n}
+    instruction_set = frozenset(n for n in (_normalize(p) for p in instructions) if n)
+    section_header_set = frozenset(n for n in (_normalize(h) for h in section_headers) if n)
     return instruction_set, section_header_set
 
 
@@ -112,19 +142,48 @@ _INSTRUCTION_SET, _SECTION_HEADER_SET = _load_phrases()
 
 # Protected terms are never dropped and take precedence over instruction
 # matching: top-level section headers plus bibliography category labels.
-_PROTECTED = _SECTION_HEADER_SET | {
+_PROTECTED = _SECTION_HEADER_SET | frozenset(
     n for n in (_normalize(c) for c in _BIBLIOGRAPHY_CATEGORIES) if n
-}
+)
 
 
 def template_section_headers() -> frozenset[str]:
     """The WCM template's top-level section headings, normalized for matching."""
-    return frozenset(_SECTION_HEADER_SET)
+    return _SECTION_HEADER_SET
 
 
 def normalize_template_text(text: str) -> str:
     """*text* as this module compares it: case, bullets, numbering, colons stripped."""
     return _normalize(text)
+
+
+def _pipe_row_verdict(text: str) -> bool | None:
+    """Rule (b) of `is_template_instruction`, for a table row ("cell | cell").
+
+    True: every non-empty cell is recognized scaffolding (a known instruction
+    or a protected header/label) AND at least one is a distinctive
+    (>= _MIN_EXACT_LEN), non-protected instruction -- a pure header/label row.
+    False: some cell is unrecognized. That cell is faculty data, so the row is
+    kept and the verdict is final: rules (c)/(d) see only the joined string,
+    and a filled row whose LABEL is a long template phrase ("Is your
+    eligibility to work in the U.S. based on an employment visa?: | No") would
+    otherwise drop with its answer by containment (#897). Precision over
+    recall on purpose: a template row that slips through is caught by the
+    Stage 6 appendix backstop.
+    None: no verdict (no "|", no non-empty cell, or only recognized cells with
+    none distinctive) -- the remaining rules decide.
+    """
+    if "|" not in text:
+        return None
+    cells = [c for c in (_normalize(c) for c in text.split("|")) if c]
+    if not cells:
+        return None
+    if not all(c in _INSTRUCTION_SET or c in _PROTECTED for c in cells):
+        return False
+    if any(c not in _PROTECTED and len(c) >= _MIN_EXACT_LEN and c in _INSTRUCTION_SET
+           for c in cells):
+        return True
+    return None
 
 
 def is_template_instruction(text: str) -> bool:
@@ -166,32 +225,10 @@ def is_template_instruction(text: str) -> bool:
     if len(normalized) >= _MIN_EXACT_LEN and normalized in _INSTRUCTION_SET:
         return True
 
-    # Rule (b): pipe-split. Real table rows arrive as "cell | cell | cell".
-    # Drop the row ONLY if EVERY non-empty cell is recognized scaffolding (a
-    # known instruction or a protected header/label) AND at least one cell is a
-    # distinctive instruction. A single unrecognized cell means real faculty
-    # data, so the whole row is kept -- e.g. a filled board-cert row that still
-    # carries a leftover "(indicate if board eligible)" cell. Pure header/label
-    # concatenations still drop; anything that slips through is caught by the
-    # Stage 6 appendix backstop.
-    if "|" in text:
-        cells = [c for c in (_normalize(c) for c in text.split("|")) if c]
-        if cells and all(c in _INSTRUCTION_SET or c in _PROTECTED for c in cells):
-            if any(
-                c not in _PROTECTED
-                and len(c) >= _MIN_EXACT_LEN
-                and c in _INSTRUCTION_SET
-                for c in cells
-            ):
-                return True
-        elif cells:
-            # A cell nobody recognises is faculty data, and this rule's
-            # verdict is final: rules (c)/(d) below see only the joined
-            # string, so a filled row whose LABEL is a long template phrase
-            # ("Is your eligibility to work in the U.S. based on an
-            # employment visa?: | No") would otherwise drop with its answer
-            # by containment (#897).
-            return False
+    # Rule (b): pipe-split; see _pipe_row_verdict.
+    verdict = _pipe_row_verdict(text)
+    if verdict is not None:
+        return verdict
 
     # Rule (c): containment of a long known instruction inside the entry
     # (a template sentence left in with extra faculty text appended).
@@ -242,12 +279,17 @@ def is_near_template_instruction(text: str) -> bool:
     normalized = _normalize(text)
     if len(normalized) < _CONTAINMENT_MIN_LEN or normalized in _PROTECTED:
         return False
+    length = len(normalized)
     for known in _INSTRUCTION_SET:
-        # The two cheap upper bounds reject almost every candidate (a short
-        # label, a paragraph of a different length) before ratio() runs.
+        # SequenceMatcher.real_quick_ratio()'s length bound, computed before a
+        # matcher is built: building one per phrase cost ~6.5 ms per line over
+        # the 411-phrase set, nearly all of it on phrases of the wrong length
+        # (#1911). Then quick_ratio() bounds by shared characters before the
+        # full ratio() runs.
+        if 2 * min(length, len(known)) / (length + len(known)) < _NEAR_MATCH_MIN_RATIO:
+            continue
         matcher = difflib.SequenceMatcher(None, normalized, known, autojunk=False)
-        if (matcher.real_quick_ratio() >= _NEAR_MATCH_MIN_RATIO
-                and matcher.quick_ratio() >= _NEAR_MATCH_MIN_RATIO
+        if (matcher.quick_ratio() >= _NEAR_MATCH_MIN_RATIO
                 and matcher.ratio() >= _NEAR_MATCH_MIN_RATIO):
             return True
     return False
