@@ -2545,7 +2545,7 @@ def test_pubmed_title_miss_takes_the_pubmed_record_of_crossrefs_doi(tmp_path, mo
         tmp_path, monkeypatch, [_crossref_items(_crossref_hit())],
         [_hits(PAPER_PMID), _article_set(_article(PAPER_PMID, SHARED_TITLE))])
     assert session.calls[1] == (stage5.CROSSREF_WORKS_URL, {
-        'query.bibliographic': SHARED_TITLE, 'rows': 3,
+        'query.bibliographic': f'{SHARED_TITLE} Garcia M 2025', 'rows': 3,
         'select': 'DOI,type,title,subtitle,author,issued,container-title,volume,issue,page'})
     assert session.calls[2][1]['term'] == f'"{CROSSREF_DOI}"[doi]'
     assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'crossref_title_search')
@@ -2785,3 +2785,17 @@ def test_stage5_run_notes_a_stub(tmp_path, monkeypatch):
     [result], session, _ = _run_entries(tmp_path, monkeypatch, [_stub()], [])
     assert session.calls == []
     assert result[stage5.CITATION_NOTE_KEY] == stage5.INCOMPLETE_CITATION_NOTE
+
+
+@pytest.mark.parametrize('fields, query', [
+    ({'authors': 'Waseem M, Perry C, Bomann JS, et al.', 'year': '2010'},
+     'Cholinergic crisis Waseem M Perry C Bomann JS 2010'),
+    ({'authors': ['Li AW', 'Weed JG', 'Stamey CR', 'Subtil A'], 'year': 'Dec 2017'},
+     'Cholinergic crisis Li AW Weed JG Stamey CR 2017'),
+    ({'authors': 'Waseem M', 'year': 'in press'}, 'Cholinergic crisis Waseem M'),
+    ({}, 'Cholinergic crisis'),
+], ids=['string-list-capped', 'list-and-month', 'no-year', 'nothing-but-title'])
+def test_crossref_query_adds_the_first_authors_and_year(fields, query):
+    # #1870: on its title alone, MNZ7IA's West J Emerg Med case report never
+    # reached Crossref's top three.
+    assert stage5.crossref_query('Cholinergic crisis', fields) == query
