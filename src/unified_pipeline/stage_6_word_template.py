@@ -214,6 +214,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     segment_already_rendered,
     segment_held_by_fields,
     segments_cover_source,
+    short_tab_part_rendered,
     t_recovery_lines,
     tab_aware_record_lines,
     token_pairs,
@@ -4135,6 +4136,10 @@ Now analyze the text above:"""
                         else:
                             rendered = _record_rendered(
                                 line, haystack, line_token_sets)
+                        if rendered is None and line in tab_parts:
+                            # Too few words for the overlap test (#1243).
+                            rendered = short_tab_part_rendered(
+                                line, fields, t_line_token_sets)
                         if rendered is not False:
                             # Rendered (possibly reformatted), or too short to
                             # verify either way — never re-insert.

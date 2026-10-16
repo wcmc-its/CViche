@@ -4862,7 +4862,8 @@ def lint_cross_entry_value(stage4: dict, stage3b: dict | None = None) -> list[di
     number, the owner's grant role or a person's name -- that its own entry's
     text lacks and another entry of the same stage-4 call states (#1575).
     INFO, one finding per entry, naming each value and the entry it is from:
-    46% hand-checked precision (CEV-1) is under the 50% a WARN needs.
+    54% hand-checked precision (CEV-1, after #1840) is over the 50% a WARN
+    needs, but in-sample.
     Stage 3b, when present, gives the order stage 4 cut its batches in."""
     owner_words = _owner_person_words(stage4)
     findings = []

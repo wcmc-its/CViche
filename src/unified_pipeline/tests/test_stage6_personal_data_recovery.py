@@ -1311,6 +1311,60 @@ def test_1426_a_current_address_naming_its_department_stays_the_office_address(t
     assert "12 Sample Lane" in rows["Office address:"]
 
 
+def _under(entry, *hierarchy):
+    return {**entry, "hierarchy": list(hierarchy)}
+
+
+_TOWN_AND_PHONE = ("Exampleton, ZZ  00000\t(555) 555-0198",
+                   {"address": "Exampleton, ZZ 00000", "phone": "(555) 555-0198"})
+
+
+@pytest.mark.parametrize("hierarchy", [
+    ("Home Address",),
+    ("HOME",),
+    ("Residence",),
+    ("Personal Data", "Home Address"),
+])
+def test_1222_an_entry_under_a_home_heading_never_fills_the_office_rows(tmp_path, hierarchy):
+    """#1222 (NECRGC WYNUCX-01): stage 1b made the "Home Address:" label a
+    heading, so the entry's own text held only a town, ZIP and phone. Read
+    as unlabelled, they filled Office address and Office telephone. The
+    nearest heading is now a label: both values go to the withheld home
+    slots, with the notice."""
+    rows = _contact_rows(tmp_path, [_under(_a(*_TOWN_AND_PHONE), *hierarchy)])
+    text = _all_text(tmp_path / "out.docx")
+    assert rows["Office address:"] == ""
+    assert rows["Office telephone:"] == ""
+    assert "555-0198" not in text
+    assert "00000" not in text
+    assert CAT_HOME_CONTACT in _withheld_comment(tmp_path)
+
+
+@pytest.mark.parametrize("hierarchy, text", [
+    pytest.param(("Personal Data",), _TOWN_AND_PHONE[0], id="no-home-heading"),
+    pytest.param(("Homepage",), _TOWN_AND_PHONE[0], id="home-not-a-whole-word"),
+    pytest.param(("Home Address", "Office"), _TOWN_AND_PHONE[0], id="nearer-heading-is-office"),
+    pytest.param(("Home Address",), "Office: " + _TOWN_AND_PHONE[0], id="own-office-label"),
+    pytest.param(("Home Address",), "Work\t" + _TOWN_AND_PHONE[0], id="own-work-label"),
+    pytest.param(("Home Address",), "Business\t" + _TOWN_AND_PHONE[0], id="own-business-label"),
+])
+def test_1222_a_home_heading_yields_to_a_nearer_or_own_workplace_label(tmp_path, hierarchy, text):
+    """The negative controls: a heading that names no home, a nearer
+    heading naming the office, or a workplace word in the entry's own text
+    keeps the values in the Office rows, as before."""
+    rows = _contact_rows(tmp_path, [_under(_a(text, _TOWN_AND_PHONE[1]), *hierarchy)])
+    assert "00000" in rows["Office address:"]
+    assert "555-0198" in rows["Office telephone:"]
+
+
+def test_1222_a_cell_number_under_a_home_heading_still_fills_the_cell_row(tmp_path):
+    """A cell label in the entry's own text outranks the home heading: the
+    owner's cell number keeps its row."""
+    rows = _contact_rows(tmp_path, [
+        _under(_a("Cell: 555-0100", {"phone": "555-0100"}), "Home Address")])
+    assert rows["Cell phone:"] == "555-0100"
+
+
 def test_an_address_beside_an_unlabelled_or_work_number_still_fills_the_office_row(tmp_path):
     """Only a HOME label moves the address: a banner with a plain or a
     work-labelled number keeps its address in Office address, as before."""

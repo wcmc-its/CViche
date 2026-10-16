@@ -28,6 +28,7 @@ from docx import Document  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
+    GROUP_CREDIT_MAX_WORDS,
     IDENTICAL_ROW_EVIDENCE_RECORDS,
     IDENTICAL_ROW_FUSED_MIN_CHARS,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
@@ -62,6 +63,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_enrichment_pubtype_mismatch,
     lint_etal_added,
     lint_glyph_field,
+    lint_group_credit_dropped,
     lint_group_header_context,
     lint_header_consumed_record,
     lint_identical_rendered_rows,
@@ -3585,6 +3587,170 @@ def test_citation_field_dropped_is_a_registered_lint():
                and spec.inputs == ("stage_4", "blocks") for spec in LINT_REGISTRY)
 
 
+# ------------------------- lint 14ax: group_credit_dropped (#1661)
+
+_GROUP_PEOPLE = "Ashdown A, Brimley B, Corwen C"
+_GROUP_CREDIT = "HVTN 505 Protocol Team"
+#: AOJEQD 1004's shape: the byline ends in a team, and the CV never names the
+#: owner, so the team is the owner's credit.
+_GROUP_SOURCE = _source(authors=f"{_GROUP_PEOPLE}, {_GROUP_CREDIT}")
+_GROUP_DROPPED_LINE = f"{_GROUP_PEOPLE}. {_CITE_TITLE}. {_CITE_TRAILER}"
+
+
+def _group_findings(entry, line):
+    return [(f["severity"], f["message"])
+            for f in lint_group_credit_dropped(_cite_run(entry), _bibliography(line))]
+
+
+def test_group_credit_dropped_warns_when_the_group_was_the_owners_only_credit():
+    entry = _cited(1004, _GROUP_SOURCE, authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    findings = lint_group_credit_dropped(_cite_run(entry), _bibliography(_GROUP_DROPPED_LINE))
+    assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [(
+        "group_credit_dropped", "WARN",
+        "entry 1004 (S1): the source byline credits 'hvtn 505 protocol team', and the "
+        "rendered citation does not, so nothing in it credits the CV owner")]
+    assert findings[0]["evidence"] == [_GROUP_DROPPED_LINE[:CITATION_EVIDENCE_CHARS]]
+
+
+def test_group_credit_dropped_is_info_when_the_line_still_names_the_owner():
+    people = f"{_GROUP_PEOPLE}, Thornquist R"
+    entry = _cited(7, _source(authors=f"{people}; for the {_GROUP_CREDIT}"),
+                   authors=people, title=_CITE_TITLE)
+    assert _group_findings(entry, f"{people}. {_CITE_TITLE}. {_CITE_TRAILER}") == [(
+        "INFO", "entry 7 (S1): the source byline credits 'hvtn 505 protocol team', and the "
+        "rendered citation does not")]
+
+
+@pytest.mark.parametrize("line", [
+    # A PubMed rebuild moves the group after the title (AOJEQD 864).
+    f"{_GROUP_PEOPLE}. {_CITE_TITLE}. The HVTN 505 Protocol Team. {_CITE_TRAILER}",
+    # The plural and the singular are one credit.
+    f"{_GROUP_PEOPLE}, HVTN 505 Protocol Teams. {_CITE_TITLE}. {_CITE_TRAILER}",
+])
+def test_group_credit_dropped_quiet_when_the_line_keeps_the_group(line):
+    assert _group_findings(_cited(1, _GROUP_SOURCE, authors=_GROUP_PEOPLE, title=_CITE_TITLE), line) == []
+
+
+def test_group_credit_dropped_fires_on_a_group_garbled_into_initials():
+    # RBPXCD 326: "TODAY Study Group." rendered as PubMed's "Group TS.".
+    entry = _cited(326, _source(authors="TODAY Study Group"), authors="Group TS", title=_CITE_TITLE)
+    assert _group_findings(entry, f"Group TS. {_CITE_TITLE}. {_CITE_TRAILER}") == [(
+        "WARN", "entry 326 (S1): the source byline credits 'today study group', and the "
+        "rendered citation does not, so nothing in it credits the CV owner")]
+
+
+def test_group_credit_dropped_reads_past_a_word_field_code():
+    # RBPXCD 320: a pasted link's field code between the group and the title.
+    # Its "https:" and dots must not cut the byline into credits of their own.
+    # YIXQFB 3026's link names the group again in its query string.
+    source = (f"{_GROUP_PEOPLE}; TODAY Study Group. HYPERLINK \"https://pubmed.ncbi.nlm.nih.gov/"
+              f"?term=TODAY+Study+Group\" {_CITE_TITLE}. {_CITE_TRAILER}")
+    entry = _cited(320, source, authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    kept = f"{_GROUP_PEOPLE}; TODAY Study Group. {_CITE_TITLE}. {_CITE_TRAILER}"
+    assert _group_findings(entry, kept) == []
+    assert [severity for severity, _ in _group_findings(entry, _GROUP_DROPPED_LINE)] == ["WARN"]
+
+
+@pytest.mark.parametrize("source, line", [
+    # A talk led by its date (WWSEWY 387): a year before the title.
+    (f"December 3, 2011 Baltimore, MD Special Interest Group titled {_CITE_TITLE}. "
+     f"{_CITE_TRAILER}", _GROUP_DROPPED_LINE),
+    # The source does not hold the title, so there is no telling where its byline ends.
+    # (No year in it, which would skip it for another reason.)
+    (f"{_GROUP_PEOPLE}, {_GROUP_CREDIT}. Tidal patterns differ. J Synth Geol.",
+     f"{_GROUP_PEOPLE}. Tidal patterns differ. J Synth Geol."),
+    # A group word after the title is the venue's, not the byline's.
+    (f"{_GROUP_PEOPLE}. {_CITE_TITLE}. J Synth Geol Network Open. 2019;12:45-67.",
+     _GROUP_DROPPED_LINE),
+    # A long lead before the title is not a byline credit.
+    (f"{_GROUP_PEOPLE}, a commentary for clinicians who sit on a hospital review board. "
+     f"{_CITE_TITLE}. {_CITE_TRAILER}", _GROUP_DROPPED_LINE),
+])
+def test_group_credit_dropped_judges_only_a_byline_before_the_title(source, line):
+    entry = _cited(2, source, authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    assert _group_findings(entry, line) == []
+
+
+def test_group_credit_dropped_reads_a_credit_without_its_parenthesis():
+    # "<group> Investigators (<site>)": the line that keeps the group keeps the credit.
+    people = f"{_GROUP_PEOPLE}, Thornquist R"
+    entry = _cited(5, _source(authors=f"{people}; LIFE Investigators (Weill site, 2nd arm)"),
+                   authors=people, title=_CITE_TITLE)
+    line = f"{people}; LIFE Investigators. {_CITE_TITLE}. {_CITE_TRAILER}"
+    assert _group_findings(entry, line) == []
+
+
+def test_group_credit_dropped_leaves_a_lost_owner_to_owner_missing():
+    # JEFZWH's shape: "<group> Investigators (<owner>)". The owner's loss is
+    # owner_missing_from_citation's WARN; the group is not reported again.
+    entry = _cited(9, _source(authors=f"{_GROUP_PEOPLE}; LIFE Investigators (Thornquist R)"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    stage4, blocks = _cite_run(entry), _bibliography(_GROUP_DROPPED_LINE)
+    assert [f["lint"] for f in lint_owner_missing_from_citation(stage4, blocks)] == [
+        "owner_missing_from_citation"]
+    assert lint_group_credit_dropped(stage4, blocks) == []
+
+
+def test_group_credit_dropped_is_info_when_the_run_has_no_known_owner():
+    # No cv_owner surname: nothing says the group was the owner's only credit.
+    entry = _cited(11, _GROUP_SOURCE, authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    findings = lint_group_credit_dropped(_cite_run(entry, owner={"first_name": "", "last_name": ""}),
+                                         _bibliography(_GROUP_DROPPED_LINE))
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "INFO", "entry 11 (S1): the source byline credits 'hvtn 505 protocol team', and the "
+        "rendered citation does not")]
+
+
+def test_group_credit_dropped_ignores_a_stopword_the_line_rewords():
+    # "Task Force on Aging Research" rendered as "Aging Research Task Force":
+    # every word but the stopword "on" is kept, so the group is.
+    entry = _cited(12, _source(authors=f"{_GROUP_PEOPLE}, Task Force on Aging Research"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    line = f"{_GROUP_PEOPLE}, Aging Research Task Force. {_CITE_TITLE}. {_CITE_TRAILER}"
+    assert _group_findings(entry, line) == []
+
+
+@pytest.mark.parametrize("credit", [
+    "LIFE Investigators", "Tidal Genomics Consortium", "Tidal Genomics Consortia",
+    "Data Safety Monitoring Board",
+])
+def test_group_credit_dropped_fires_on_each_collective_word(credit):
+    entry = _cited(13, _source(authors=f"{_GROUP_PEOPLE}, {credit}"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    assert _group_findings(entry, _GROUP_DROPPED_LINE) == [(
+        "WARN", f"entry 13 (S1): the source byline credits {credit.lower()!r}, and the "
+        "rendered citation does not, so nothing in it credits the CV owner")]
+
+
+@pytest.mark.parametrize("lead", ["and the", "on behalf of the", "et al"])
+def test_group_credit_dropped_starts_the_credit_after_its_lead(lead):
+    # "Corwen C <lead> HVTN 505 Protocol Team" is one credit: the group starts after the lead.
+    entry = _cited(14, _source(authors=f"Ashdown A, Brimley B, Corwen C {lead} {_GROUP_CREDIT}"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    assert _group_findings(entry, _GROUP_DROPPED_LINE) == [(
+        "WARN", "entry 14 (S1): the source byline credits 'hvtn 505 protocol team', and the "
+        "rendered citation does not, so nothing in it credits the CV owner")]
+
+
+@pytest.mark.parametrize("credit, fires", [
+    ("Tidal Estuary Sediment Core Analysis Study Protocol Team", True),  # 8 words
+    ("Synthetic Tidal Estuary Sediment Core Analysis Study Protocol Team", False),  # 9 words
+])
+def test_group_credit_dropped_caps_a_credit_at_max_words(credit, fires):
+    assert len(credit.split()) == GROUP_CREDIT_MAX_WORDS + (0 if fires else 1)
+    entry = _cited(15, _source(authors=f"{_GROUP_PEOPLE}, {credit}"),
+                   authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    assert [s for s, _ in _group_findings(entry, _GROUP_DROPPED_LINE)] == (["WARN"] if fires else [])
+
+
+def test_group_credit_dropped_is_a_registered_lint():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    assert "group_credit_dropped" in KNOWN_LINTS
+    assert any(spec.lint_id == "group_credit_dropped"
+               and spec.rule is lint_group_credit_dropped
+               and spec.inputs == ("stage_4", "blocks") for spec in LINT_REGISTRY)
+
+
 def test_owner_lints_are_registered_lints():
     from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
     for lint_id, rule in (("owner_missing_from_citation", lint_owner_missing_from_citation),
@@ -5519,14 +5685,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (77), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (78), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 75
+    assert len(payload["findings"]) == 76
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
