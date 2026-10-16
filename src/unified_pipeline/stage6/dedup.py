@@ -196,26 +196,39 @@ def _part_numbers(text: str) -> set[str]:
 # cannot either ("i" is a stop word): EBYSBC OIYKZE-01, and OIEPQD YYVITM 425,
 # a "Compounding I" section-lead row dropped beside its "Compounding II" row.
 # Upper case only, and V and X never alone: a citation's author initials are
-# single capitals. A lone "I" counts only where a title segment ends after it
-# or a date follows it ("Compounding I November 2017"), never before a
-# lower-case word ("I taught"). A numeral after "Part" or "Phase" is left to
-# those readers, which also read a listing ("Parts I and II") as a whole.
-# Shared with the doctor's `dedup_drops` lint, which reads a drop the same way.
+# single capitals. A lone "I" counts where a title segment ends after it or a
+# date follows it ("Compounding I November 2017"), and, after a capitalised
+# word, where a dash, an open parenthesis or another capitalised word follows
+# ("Pharmacology I - Section Lead", "Pharmacology I (Fall 2019)",
+# "Pharmacology I Lecturer"); never before a lower-case word ("I taught"), and
+# never after one ("where I Lectured"). A byline of two or more "Surname
+# INITIALS" authors is blanked first, so an author's lone initial is not read
+# as one ("Kim I, Lee J." beside "Kim IS, Lee J."). A numeral after "Part" or
+# "Phase" is left to those readers, which also read a listing ("Parts I and
+# II") as a whole. Shared with the doctor's `dedup_drops` lint, which reads a
+# drop the same way.
 _NUMERAL_DATE_FOLLOWS = (
     r'\s+(?:(?:19|20)\d{2}\b|\d{1,2}/|(?:'
     + '|'.join(sorted((month.capitalize() for month in _MONTH_NAME_TO_NUM),
                       key=len, reverse=True))
     + r')\b)')
+_MULTI_LETTER_NUMERALS = r'II|III|IV|VI|VII|VIII|IX'
 _STANDALONE_NUMERAL_RE = re.compile(
-    r'\b(?:II|III|IV|VI|VII|VIII|IX)\b'
+    rf'\b(?:{_MULTI_LETTER_NUMERALS})\b'
     rf'|\bI(?=\s*(?:$|[\t,.;:)"”’])|{_NUMERAL_DATE_FOLLOWS})')
+_TITLE_WORD_LONE_I_RE = re.compile(
+    r"\b[A-Z][\w'’-]*\s+(I)(?=\s*[(\-–—]|\s+[A-Z][a-z])")
+_BYLINE_AUTHOR = rf"[A-Z][\w'’-]+\s+(?!(?:{_MULTI_LETTER_NUMERALS})\b)[A-Z]{{1,3}}\b"
+_BYLINE_RE = re.compile(
+    rf"{_BYLINE_AUTHOR}(?:\s*,\s*(?:(?:and|&)\s+)?{_BYLINE_AUTHOR})+")
 
 
 def _standalone_numerals(text: str) -> set[str]:
-    """Every Roman numeral `text` names on its own (`_STANDALONE_NUMERAL_RE`),
-    outside a part or phase listing."""
-    bare = _TRIAL_PHASE_RE.sub(' ', _PART_NUMBER_RE.sub(' ', text))
-    return set(_STANDALONE_NUMERAL_RE.findall(bare))
+    """Every Roman numeral `text` names on its own (`_STANDALONE_NUMERAL_RE`,
+    `_TITLE_WORD_LONE_I_RE`), outside a byline and a part or phase listing."""
+    bare = _BYLINE_RE.sub(' ', _TRIAL_PHASE_RE.sub(' ', _PART_NUMBER_RE.sub(' ', text)))
+    return (set(_STANDALONE_NUMERAL_RE.findall(bare))
+            | set(_TITLE_WORD_LONE_I_RE.findall(bare)))
 
 
 # #666 (EBYSBC): a date stated to the month, or the day, tells two records

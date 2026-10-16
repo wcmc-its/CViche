@@ -1699,6 +1699,21 @@ def test_a_copy_of_the_same_numbered_course_still_drops():
     assert not _kept_both("K1", dropped, kept)
 
 
+def test_a_course_whose_lone_numeral_a_dash_follows_is_kept():
+    # The verifier's under-match: a lone "I" before " - Section Lead".
+    kept = _entry("K1", "Widget Compounding II - Section Lead, Example School, 2031")
+    dropped = _entry("K1", "Widget Compounding I - Section Lead, Example School, 2031")
+    assert not _drop_is_safe(dropped, kept, "K1", [kept, dropped])
+
+
+def test_a_citation_whose_author_initial_is_a_lone_i_still_drops():
+    # "Sprocket I" beside "Sprocket IS" is one author: the initial is no numeral.
+    citation = ("Sprocket {}, Gizmo J. Widget outcomes in adults with chronic "
+                "widget disease. J Widg. 2031;12:100-110.")
+    kept, dropped = {"text": citation.format("IS")}, {"text": citation.format("I")}
+    assert deduplicate_entries([kept, dropped]) == [kept]
+
+
 @pytest.mark.parametrize("text, numerals", [
     ("Widget Compounding I November 2031 - present", {"I"}),   # a month follows
     ("Widget Compounding I 2031-2033", {"I"}),                 # a year follows
@@ -1711,6 +1726,14 @@ def test_a_copy_of_the_same_numbered_course_still_drops():
     ("Widget Care Parts I and II", set()),                     # a part listing is `_part_numbers`'
     ("Example trial, Phase II", set()),                        # and a phase is `_trial_phases`'
     ("Sprocket V, Gizmo X. Widget study.", set()),             # initials, never V or X alone
+    ("Widget Compounding I - Section Lead, 2031", {"I"}),      # a dash follows
+    ("Widget Compounding I \u2013 2031", {"I"}),               # an en dash follows
+    ("Widget Compounding I (Fall 2031)", {"I"}),               # a parenthesis follows
+    ("Widget Compounding I Lecturer, 2031", {"I"}),            # a capitalised word follows
+    ("where I Lectured on widgets", set()),                    # a pronoun after a lower-case word
+    ("Sprocket I, Gizmo J. Widget study.", set()),             # a byline's lone initial
+    ("Gizmo J, Sprocket I. Widget study.", set()),             # last in the byline
+    ("Widget Seminar II, Section A", {"II"}),                  # "Seminar II" is no author
 ])
 def test_standalone_numerals(text, numerals):
     assert _standalone_numerals(text) == numerals
