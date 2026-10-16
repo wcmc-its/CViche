@@ -227,6 +227,13 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         max_tokens=cfg["max_tokens"],
         context={"provider": cfg["provider"]},
         caller_file="llm_client.py",
+        # Everything else the handler sends or acts on, so the log is the whole
+        # invocation (#1911). cancel_check is a callable, not a call option.
+        extra_parameters={
+            "enable_prompt_caching": cfg["enable_prompt_caching"],
+            "retry_count": cfg["retry_count"],
+            **cfg["extra_kwargs"],
+        },
     )
 
     result = handler(messages, response_format, cfg)
