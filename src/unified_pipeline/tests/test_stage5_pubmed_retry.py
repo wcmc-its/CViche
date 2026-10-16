@@ -93,7 +93,8 @@ class FakeResponse:
 class FakeSession:
     """Queue of responses; an Exception instance in the queue is raised.
     Crossref requests take theirs from `crossref`, and find nothing once it
-    is empty, so a test of a PubMed miss need not queue Crossref's answer."""
+    is empty (no search hits; a 404 for a DOI), so a test of a PubMed miss
+    need not queue Crossref's answer."""
 
     def __init__(self, responses, crossref=()):
         self.responses = list(responses)
@@ -104,6 +105,8 @@ class FakeSession:
         self.calls.append((url, dict(params or {})))
         if url == stage5.CROSSREF_WORKS_URL:
             queue = self.crossref or [_crossref_items()]
+        elif url.startswith(stage5.CROSSREF_WORKS_URL):
+            queue = self.crossref or [FakeResponse(404, url=url)]
         else:
             queue = self.responses
         result = queue.pop(0)
@@ -2542,7 +2545,8 @@ def test_pubmed_title_miss_takes_the_pubmed_record_of_crossrefs_doi(tmp_path, mo
         tmp_path, monkeypatch, [_crossref_items(_crossref_hit())],
         [_hits(PAPER_PMID), _article_set(_article(PAPER_PMID, SHARED_TITLE))])
     assert session.calls[1] == (stage5.CROSSREF_WORKS_URL, {
-        'query.bibliographic': SHARED_TITLE, 'rows': 3, 'select': 'DOI,type,title,subtitle'})
+        'query.bibliographic': SHARED_TITLE, 'rows': 3,
+        'select': 'DOI,type,title,subtitle,author,issued,container-title,volume,issue,page'})
     assert session.calls[2][1]['term'] == f'"{CROSSREF_DOI}"[doi]'
     assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'crossref_title_search')
     assert result['extracted_fields']['pmid'] == PAPER_PMID
@@ -2617,3 +2621,129 @@ def test_crossref_lookups_count_against_the_budget(monkeypatch):
     monkeypatch.setattr(stage5.time, 'monotonic', lambda: next(clock))
     enricher._enrich_by_crossref_doi(_article_entry(10), SHARED_TITLE)
     assert enricher._crossref_seconds == 2.5
+
+
+# --------------- #1872: Crossref's record of an article PubMed does not index
+
+def _crossref_work(title=SHARED_TITLE, issued=2025, volume='12', family='Garcia'):
+    return {'DOI': DOI, 'type': 'journal-article', 'title': [title],
+            'container-title': ['Journal of Coastal Birds'], 'volume': volume, 'issue': '3',
+            'page': '100-109', 'issued': {'date-parts': [[issued, 5]]},
+            'author': [{'family': family, 'given': 'Maria'}]}
+
+
+def _work_reply(work):
+    return FakeResponse(200, json_data={'message': work}, url=f'{stage5.CROSSREF_WORKS_URL}/{DOI}')
+
+
+def test_cv_doi_pubmed_does_not_index_keeps_crossrefs_record(tmp_path, monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [_hits(), _hits()],
+                                 crossref=[_crossref_items(), _work_reply(_crossref_work())])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_paper_entry(SHARED_TITLE, 10)]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    assert session.calls[-1][0] == f'{stage5.CROSSREF_WORKS_URL}/{DOI}'
+    assert result['enrichment_status'] == 'doi_not_in_pubmed'
+    assert 'enrichment_data' not in result
+    assert result[stage5.CROSSREF_MATCH_KEY] == {
+        'source': 'cv_doi', 'doi': DOI, 'type': 'journal-article', 'title': SHARED_TITLE,
+        'journal': 'Journal of Coastal Birds', 'year': 2025, 'volume': '12', 'issue': '3',
+        'pages': '100-109', 'authors': ['Garcia M']}
+    assert enricher.stats['crossref_matches'] == 1
+
+
+def _doi_miss_match(tmp_path, monkeypatch, work_reply, fields=None):
+    """Crossref's match for one S1 entry whose DOI PubMed does not know and
+    whose title neither PubMed nor Crossref's search finds; `work_reply`
+    answers the lookup of the entry's own DOI."""
+    enricher, _, _ = _make(monkeypatch, [_hits(), _hits()], crossref=[_crossref_items(), work_reply])
+    entry = _paper_entry(SHARED_TITLE, 10)
+    entry['extracted_fields'].update(fields or {})
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [entry]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    return result.get(stage5.CROSSREF_MATCH_KEY), enricher
+
+
+def test_cv_doi_whose_crossref_title_is_another_paper_keeps_no_match(tmp_path, monkeypatch):
+    match, _ = _doi_miss_match(tmp_path, monkeypatch, _work_reply(_crossref_work(title='Soil carbon in alpine meadows')))
+    assert match is None
+
+
+def test_cv_doi_whose_year_and_volume_contradict_crossref_keeps_no_match(tmp_path, monkeypatch):
+    # The #1696 UAURFU shape: 0.71 against the shorter title, another paper.
+    work = _crossref_work(title=SHORT_RECORD_TITLE, issued=2020, volume='19')
+    match, _ = _doi_miss_match(tmp_path, monkeypatch, _work_reply(work),
+                               {'title': LONG_CV_TITLE, 'year': '2021', 'volume': '20'})
+    assert match is None
+
+
+def test_cv_doi_crossref_does_not_know_is_not_an_error(tmp_path, monkeypatch):
+    match, enricher = _doi_miss_match(
+        tmp_path, monkeypatch, FakeResponse(404, url=f'{stage5.CROSSREF_WORKS_URL}/{DOI}'))
+    assert match is None
+    assert enricher.stats['api_errors'] == 0
+
+
+def test_cv_doi_lookup_failure_is_counted(tmp_path, monkeypatch):
+    match, enricher = _doi_miss_match(
+        tmp_path, monkeypatch, FakeResponse(400, url=f'{stage5.CROSSREF_WORKS_URL}/{DOI}'))
+    assert match is None
+    assert enricher.stats['api_errors'] == 1
+
+
+def test_cv_doi_lookup_is_skipped_once_the_budget_is_spent(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [])
+    enricher._crossref_seconds = stage5.CROSSREF_BUDGET_SECONDS
+    entry = _paper_entry(SHARED_TITLE, 10)
+    entry['enrichment_status'] = 'doi_not_in_pubmed'
+    enricher._match_doi_misses_in_crossref([entry])
+    assert session.calls == []
+    assert enricher.stats['crossref_skipped'] == 1
+
+
+def test_title_search_hit_pubmed_does_not_index_keeps_crossrefs_record(tmp_path, monkeypatch):
+    work = _crossref_work()
+    result, _, enricher = _run_crossref(tmp_path, monkeypatch, [_crossref_items(work)], [_hits()])
+    assert result['enrichment_status'] == 'no_identifier'
+    assert result[stage5.CROSSREF_MATCH_KEY]['source'] == 'title_search'
+    assert result[stage5.CROSSREF_MATCH_KEY]['volume'] == '12'
+    assert enricher.stats['crossref_matches'] == 1
+
+
+def test_unindexed_title_search_hit_keeps_the_author_guard(tmp_path, monkeypatch):
+    work = _crossref_work(family='Okonkwo')
+    result, _, _ = _run_crossref(tmp_path, monkeypatch, [_crossref_items(work)], [_hits()])
+    assert stage5.CROSSREF_MATCH_KEY not in result
+
+
+def test_crossref_record_joins_the_subtitle_and_reads_initials():
+    record = stage5.crossref_record({'DOI': DOI, 'title': ['Herons'], 'subtitle': ['a coastal survey'],
+                                     'author': [{'family': 'Garcia', 'given': 'Maria-Luz'},
+                                                {'name': 'Coastal Bird Group'}]})
+    assert record['title'] == 'Herons a coastal survey'
+    assert record['authors'] == ['Garcia ML', 'Coastal Bird Group']
+    assert record['year'] is None
+
+
+def test_doi_matched_by_the_title_search_is_not_looked_up_again(tmp_path, monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [_hits(), _hits(), _hits()],
+                                 crossref=[_crossref_items(_crossref_work())])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_paper_entry(SHARED_TITLE, 10)]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    assert result[stage5.CROSSREF_MATCH_KEY]['source'] == 'title_search'
+    assert f'{stage5.CROSSREF_WORKS_URL}/{DOI}' not in [url for url, _ in session.calls]
+
+
+def test_an_empty_crossref_work_is_no_match(tmp_path, monkeypatch):
+    match, _ = _doi_miss_match(tmp_path, monkeypatch, _work_reply({}))
+    assert match is None
+
+
+def test_a_crossref_work_reply_does_not_mark_ncbi_answering(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [], crossref=[_work_reply(_crossref_work())])
+    entry = _paper_entry(SHARED_TITLE, 10)
+    enricher._look_up_crossref_work(entry)
+    assert entry[stage5.CROSSREF_MATCH_KEY]['doi'] == DOI
+    assert enricher._ncbi_answered is False

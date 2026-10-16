@@ -32,6 +32,8 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from datetime import datetime
+from functools import partial
+from http import HTTPStatus
 from itertools import combinations
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
@@ -260,6 +262,19 @@ CROSSREF_ARTICLE_TYPE = 'journal-article'
 # 200-entry replay (2026-10-15), so the budget covers ~270 entries: every CV
 # but the largest (p90 104 unmatched; BCTOGR ~1,500).
 CROSSREF_BUDGET_SECONDS = 300.0
+# An article Crossref knows but PubMed does not index is a real publication
+# that stage 5 cannot enrich: a non-MEDLINE journal, most often. The entry
+# keeps its status and gains this key, Crossref's record of it, so a check
+# for unverified citations can tell it from one nobody can find (#1870). Its
+# `source` says how it was matched: the CV's own DOI, or a title search.
+# Nothing renders it. On the 2026-10-15 stage-5 farm: 164 of 192
+# `doi_not_in_pubmed` DOIs matched (40 of 40 sampled the right item), and 59
+# of the 803 entries with no record, identifier, volume or pages matched by
+# title (52 right, 4 wrong, 3 unsure: each wrong one names another venue).
+# The title path's other 324 of those 803 found a PubMed record instead.
+CROSSREF_MATCH_KEY = 'crossref_match'
+CROSSREF_MATCH_BY_CV_DOI = 'cv_doi'
+CROSSREF_MATCH_BY_TITLE = 'title_search'
 # The sources that found a record by title, with no identifier from the CV.
 TITLE_SEARCH_SOURCES = frozenset({TITLE_SEARCH_SOURCE, CROSSREF_TITLE_SOURCE})
 # A doi.org link in an entry's text. The DOI ends at whitespace or a quote: a
@@ -641,6 +656,36 @@ def _parse_crossref_items(response: requests.Response) -> list[dict[str, Any]]:
     return (response.json().get('message') or {}).get('items') or []
 
 
+def _parse_crossref_work(response: requests.Response) -> dict[str, Any]:
+    return response.json().get('message') or {}
+
+
+def crossref_record(item: dict[str, Any]) -> dict[str, Any]:
+    """A Crossref work in the shape the title guards read from a PubMed
+    record: authors as "Surname Initials", the year it was issued, and the
+    title with its subtitle joined on (Crossref keeps them apart)."""
+    authors = []
+    for author in item.get('author') or []:
+        surname = author.get('family') or author.get('name') or ''
+        initials = ''.join(w[0] for w in (author.get('given') or '').replace('-', ' ').split())
+        if surname:
+            authors.append(f'{surname} {initials}'.strip())
+    titles = item.get('title') or []
+    issued = ((item.get('issued') or {}).get('date-parts') or [[None]])[0]
+    return {
+        'doi': item.get('DOI'),
+        'type': item.get('type'),
+        'title': ' '.join(titles + (item.get('subtitle') or [])),
+        'vernacular_title': titles[0] if titles else None,
+        'journal': next(iter(item.get('container-title') or []), None),
+        'year': issued[0] if issued else None,
+        'volume': item.get('volume'),
+        'issue': item.get('issue'),
+        'pages': item.get('page'),
+        'authors': authors,
+    }
+
+
 class _PmcidConversion(NamedTuple):
     """idconv's answer for a set of PMCIDs: the PMID of each PMCID it mapped,
     and the PMCIDs whose request failed (so their absence from `pmids` is an
@@ -746,6 +791,8 @@ class PubMedEnricher:
             'title_searches': 0,
             'crossref_searches': 0,
             'crossref_skipped': 0,
+            'crossref_doi_lookups': 0,
+            'crossref_matches': 0,
             'in_press_resolved': 0,
             'in_press_duplicates': 0,
             'in_press_promoted': 0,
@@ -885,6 +932,9 @@ class PubMedEnricher:
         # 4b. Articles still without a record: guarded title search (#1598).
         # Before 4c, so a title match that shares a PMID is weighed there too.
         self._enrich_articles_by_title(pub_entries)
+
+        # 4b'. A DOI PubMed does not index, asked of Crossref (#1872).
+        self._match_doi_misses_in_crossref(pub_entries)
 
         # 4c. One PMID accepted for two entries: only the paper it names keeps it.
         # Before step 5, whose duplicate check reads the PMIDs entries hold.
@@ -1259,21 +1309,70 @@ class PubMedEnricher:
         """Ask Crossref for the DOI of the journal article `title` names and
         accept the PubMed record of that DOI under the title search's guards
         (#1872). The PubMed record, not Crossref's, decides: Crossref only
-        finds the DOI. A Crossref failure, or a spent budget, leaves the entry
-        as it was."""
+        finds the DOI. When the DOI is not in PubMed, Crossref's record is kept
+        under CROSSREF_MATCH_KEY instead, under the same guards. A Crossref
+        failure, or a spent budget, leaves the entry as it was."""
+        self._within_crossref_budget(partial(self._look_up_crossref_doi, entry, title))
+
+    def _match_doi_misses_in_crossref(self, pub_entries: list[dict]) -> None:
+        """Ask Crossref for the work of every article DOI PubMed did not know
+        (`doi_not_in_pubmed`) and the title search did not resolve, and keep
+        its record under CROSSREF_MATCH_KEY (#1872)."""
+        for entry in pub_entries:
+            if (entry.get('taxonomy_code') in TITLE_SEARCH_CODES
+                    and entry.get('enrichment_status') == 'doi_not_in_pubmed'
+                    and CROSSREF_MATCH_KEY not in entry):
+                self._within_crossref_budget(partial(self._look_up_crossref_work, entry))
+
+    def _within_crossref_budget(self, lookup: Callable[[], None]) -> None:
+        """Run one Crossref lookup unless this run has spent
+        CROSSREF_BUDGET_SECONDS on them; its time counts against the budget."""
         if self._crossref_seconds >= CROSSREF_BUDGET_SECONDS:
             self.stats['crossref_skipped'] += 1
             return
         started = time.monotonic()
         try:
-            self._look_up_crossref_doi(entry, title)
+            lookup()
         finally:
             self._crossref_seconds += time.monotonic() - started
+
+    def _look_up_crossref_work(self, entry: dict) -> None:
+        """Keep Crossref's record of the entry's own DOI when its title is the
+        CV's under the identifier paths' guard: MIN_TITLE_WORD_OVERLAP, and no
+        year-and-volume contradiction (#1696). A DOI Crossref does not know
+        (404) is not an error."""
+        fields = entry.get('extracted_fields') or {}
+        doi = self._clean_doi(fields.get('doi'))
+        self.stats['crossref_doi_lookups'] += 1
+        try:
+            item = self._get_with_retry(f'{CROSSREF_WORKS_URL}/{doi}', {}, _parse_crossref_work)
+        except requests.HTTPError as e:
+            if e.response is None or e.response.status_code != HTTPStatus.NOT_FOUND:
+                self.stats['api_errors'] += 1
+                self._log_api_failure('crossref_work', e)
+            return
+        except (requests.RequestException, ValueError) as e:
+            self.stats['api_errors'] += 1
+            self._log_api_failure('crossref_work', e)
+            return
+        finally:
+            time.sleep(RATE_LIMIT_DELAY)
+        record = crossref_record(item)
+        overlap = title_word_overlap(cv_title(fields), [record['title'], record['vernacular_title'] or ''])
+        if not record['doi'] or overlap is not None and (overlap < MIN_TITLE_WORD_OVERLAP
+                                    or self._contradicted_on_an_id_path(fields, record, CROSSREF_MATCH_BY_CV_DOI)):
+            return
+        self._keep_crossref_match(entry, record, CROSSREF_MATCH_BY_CV_DOI)
+
+    def _keep_crossref_match(self, entry: dict, record: dict, source: str) -> None:
+        entry[CROSSREF_MATCH_KEY] = {'source': source,
+                                     **{k: v for k, v in record.items() if k != 'vernacular_title'}}
+        self.stats['crossref_matches'] += 1
 
     def _look_up_crossref_doi(self, entry: dict, title: str) -> None:
         self.stats['crossref_searches'] += 1
         params = {'query.bibliographic': title, 'rows': TITLE_SEARCH_MAX_HITS,
-                  'select': 'DOI,type,title,subtitle'}
+                  'select': 'DOI,type,title,subtitle,author,issued,container-title,volume,issue,page'}
         try:
             items = self._get_with_retry(CROSSREF_WORKS_URL, params, _parse_crossref_items)
         except (requests.RequestException, ValueError) as e:
@@ -1282,11 +1381,12 @@ class PubMedEnricher:
             return
         finally:
             time.sleep(RATE_LIMIT_DELAY)
+        unindexed = None  # the first guarded hit PubMed does not index
         for item in items:
-            titles = item.get('title') or []
-            item_titles = [*titles, ' '.join(titles + (item.get('subtitle') or []))]
+            crossref = crossref_record(item)
+            crossref_overlap = title_word_overlap(title, [crossref['title'], crossref['vernacular_title'] or '']) or 0
             if (item.get('type') != CROSSREF_ARTICLE_TYPE or not item.get('DOI')
-                    or (title_word_overlap(title, item_titles) or 0) < MIN_TITLE_SEARCH_OVERLAP):
+                    or crossref_overlap < MIN_TITLE_SEARCH_OVERLAP):
                 continue
             try:
                 pmid = self._search_pmid_by_doi(item['DOI'])
@@ -1296,13 +1396,19 @@ class PubMedEnricher:
                 return
             finally:
                 time.sleep(RATE_LIMIT_DELAY)
-            record = (self._fetch_pubmed_batch([pmid]) or {}).get(pmid) if pmid else None
+            if not pmid:
+                if unindexed is None and self._title_hit_passes(entry, crossref_overlap, crossref):
+                    unindexed = crossref
+                continue
+            record = (self._fetch_pubmed_batch([pmid]) or {}).get(pmid)
             if record is None or TITLE_SEARCH_EXCLUDED_PUBTYPES.intersection(record['publication_types']):
                 continue
             overlap = title_word_overlap(title, [record['title'], record['vernacular_title']]) or 0
             if self._title_hit_passes(entry, overlap, record):
                 self._accept_record(entry, record, CROSSREF_TITLE_SOURCE)
                 return
+        if unindexed is not None:
+            self._keep_crossref_match(entry, unindexed, CROSSREF_MATCH_BY_TITLE)
 
     @staticmethod
     def _title_hit_passes(entry: dict, overlap: float, record: dict) -> bool:
@@ -1456,7 +1562,7 @@ class PubMedEnricher:
             outcome = self._attempt_get(url, params, parse)
             if outcome.error is None:
                 # A Crossref reply says nothing about whether NCBI is up.
-                if url != CROSSREF_WORKS_URL:
+                if not url.startswith(CROSSREF_WORKS_URL):
                     self._ncbi_answered = True
                 return outcome.value
             last_error = outcome.error

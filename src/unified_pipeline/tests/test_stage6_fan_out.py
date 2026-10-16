@@ -788,7 +788,8 @@ class TestStage4Records:
         annotations = {'enriched_fields': ['city'], 'enrichment_data': {'pmid': '1'},
                        'enrichment_rejected': True, 'enrichment_source': 'llm',
                        'enrichment_status': 'ok',
-                       'institution_enrichment': {'cleaned_name': 'Ashby University'}}
+                       'institution_enrichment': {'cleaned_name': 'Ashby University'},
+                       'crossref_match': {'source': 'cv_doi', 'doi': '10.1000/x'}}
         parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), **annotations)
         children = _fan4(parent)
         for child in children[:-1]:
