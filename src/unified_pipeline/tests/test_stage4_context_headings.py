@@ -310,3 +310,35 @@ def test_a_flat_leaf_stamps_nothing():
     n = ch.FLAT_LETTER_MIN_ENTRIES
     entries = [_e(f"{code} {i}", code, h) for code in ("A", "D1", "P") for i in range(n)]
     assert set(_stamps(entries)) == {None}
+
+
+# --- a leaf whose words name another kind of record (#985 round 2) ---
+
+def test_a_leaf_naming_another_kind_does_not_stamp_the_misfit_entries():
+    h = ["TEACHING", "MASTERS STUDENT TRAINEES"]
+    entries = [_e("Jane Roe, MPH 2019", "N3B", h), _e("Received the Alpha Award", "H", h)]
+    assert _stamps(entries) == ["MASTERS STUDENT TRAINEES", None]
+
+
+def test_a_stale_leaf_over_records_of_another_kind_stamps_none_of_them():
+    h = ["RESEARCH:", "Past Grants:"]
+    assert _stamps([_e("2012: First Prize, Alpha Day", "H", h), _e("2016: Best Poster", "H", h)]) == [None, None]
+    assert _stamps([_e("NIH R01, Alpha Study, 2010-2015", "M2B", h)]) == ["Past Grants"]
+
+
+def test_a_leaf_naming_no_kind_is_never_checked_against_the_code():
+    # "TEACHING" alone expects K, but "MENTORSHIP" names no kind, so it stamps.
+    assert _stamps([_e("Jane Roe, MD, 2015-2018", "N3B", ["TEACHING", "MENTORSHIP"])]) == ["MENTORSHIP"]
+
+
+def test_an_ancestor_widens_what_a_leaf_admits():
+    # "GRANT" alone expects M2; under "SERVICE" a Q3 study section fits.
+    assert _stamps([_e("NIH Study Section, 2020", "Q3", ["SERVICE", "GRANT REVIEWING"])]) == ["GRANT REVIEWING"]
+    assert _stamps([_e("NIH Study Section, 2020", "Q3", ["RESEARCH", "GRANT REVIEWING"])]) == [None]
+
+
+def test_a_parenthetical_in_the_hierarchy_names_no_kind():
+    # "submitted" in the aside would read as pending grants (M2C) and admit M2A.
+    h = ["PUBLICATIONS (excluding papers submitted", "Refereed Articles in Journals:"]
+    assert _stamps([_e("Alpha Safe Schools Program, State Dept, 2019", "M2A", h)]) == [None]
+    assert _stamps([_e("Roe J. Alpha study. J Beta. 2019;1:1-2.", "S1", h)]) == ["Refereed Articles in Journals"]

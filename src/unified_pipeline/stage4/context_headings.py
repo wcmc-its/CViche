@@ -17,6 +17,11 @@ import re
 from collections import Counter
 from typing import Any
 
+from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
+    code_matches_expected,
+    get_expected_codes_from_hierarchy,
+)
+
 #: Taxonomy code stage 3b gives an unclassifiable / heading-like entry.
 HEADING_TAXONOMY_CODE = "T"
 
@@ -296,10 +301,13 @@ def _leaf_heading(hierarchy: tuple[str, ...], flat: set[tuple[str, ...]]) -> str
 
     Strong shape only (trailing colon or ALL CAPS): a bare Title-Case leaf
     ("Board Certification", "Doctoral Chair") is stage 1b's commonest leaf
-    (8,880 entries over 341 stored 3b artifacts, against 3,359 newly stamped
-    by the strong shapes), and most of it is a template's section title that
-    names only the kind of record; it waits on a paid stage-4 A/B (#985). The word cap drops
-    a form instruction leaf ("Licenses (Include State, Date, Status, ...):").
+    (8,880 entries over 341 stored 3b artifacts, about three times what the
+    strong shapes stamp), so it waits on the paid stage-4 A/B (#985). That is a
+    staging choice, not a claim the strong shapes are better: both include
+    section titles that only restate the record's kind ("HOSPITAL
+    APPOINTMENTS"), which repeat the taxonomy code rather than contradict it.
+    The word cap drops a form instruction leaf ("Licenses (Include State,
+    Date, Status, ...):").
     """
     if len(hierarchy) < MIN_LEAF_HEADING_DEPTH or hierarchy in flat:
         return None
@@ -312,10 +320,39 @@ def _leaf_heading(hierarchy: tuple[str, ...], flat: set[tuple[str, ...]]) -> str
     return None if _is_generic(heading, list(hierarchy[:-1])) else heading
 
 
+#: A parenthetical qualifies a section name, it does not name one:
+#: "PUBLICATIONS (excluding papers submitted ...)" is a publications section,
+#: not the pending grants its "submitted" would read as. An unclosed "(" (a
+#: truncated hierarchy level) runs to the end.
+_PARENTHETICAL_RE = re.compile(r"\([^)]*\)?")
+
+
+def _expected_codes(hierarchy: tuple[str, ...]) -> list[str]:
+    """The codes stage 3b's mismatch flagger expects under `hierarchy`,
+    with each level's parentheticals dropped."""
+    return get_expected_codes_from_hierarchy([_PARENTHETICAL_RE.sub(" ", level) for level in hierarchy])
+
+
+def _contradicts_leaf(code: str, hierarchy: tuple[str, ...]) -> bool:
+    """True when the leaf names a kind of record (by the section-word map stage
+    3b's mismatch flagger uses) and `code` fits nothing its hierarchy names.
+
+    1b can leave a stale leaf over records of another kind (#985: "Past
+    Grants:" over H awards, "UNIVERSITY SERVICE" over N3B mentees), and the
+    stamp would tell stage 4 the wrong kind. A leaf that names no kind
+    ("NATIONAL", "MENTORSHIP") cannot, so it is never checked; the ancestors
+    widen what fits ("GRANT REVIEWING" under "SERVICE" holds Q3). Recomputed
+    here, not read from the stored hierarchy_mismatch_flag, which older 3b
+    artifacts lack."""
+    if not _expected_codes(hierarchy[-1:]):
+        return False
+    return not code_matches_expected(code, _expected_codes(hierarchy))
+
+
 def _leaf_stamps(entries: list[dict[str, Any]]) -> dict[int, str]:
     """Entry index -> its hierarchy leaf, for every extractable (non-T, not
     dropped) entry whose leaf is a usable sub-heading governing at most
-    MAX_STAMPED_RUN such entries."""
+    MAX_STAMPED_RUN such entries and whose code the leaf does not contradict."""
     groups: dict[tuple[str, ...], list[int]] = {}
     for idx, entry in enumerate(entries):
         if not _is_dropped(entry) and entry.get("taxonomy_code") != HEADING_TAXONOMY_CODE:
@@ -324,8 +361,10 @@ def _leaf_stamps(entries: list[dict[str, Any]]) -> dict[int, str]:
     stamps: dict[int, str] = {}
     for hierarchy, indices in groups.items():
         heading = _leaf_heading(hierarchy, flat)
-        if heading is not None and len(indices) <= MAX_STAMPED_RUN:
-            stamps.update(dict.fromkeys(indices, heading))
+        if heading is None or len(indices) > MAX_STAMPED_RUN:
+            continue
+        stamps.update((idx, heading) for idx in indices
+                      if not _contradicts_leaf(entries[idx].get("taxonomy_code") or "", hierarchy))
     return stamps
 
 
