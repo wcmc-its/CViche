@@ -1031,6 +1031,38 @@ def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _row_label_key(row: list[dict[str, Any]]) -> str:
+    """Case-folded, stripped text of a row's first cell (its label)."""
+    if not row:
+        return ""
+    first = row[0]
+    return (first.get("text", "") if isinstance(first, dict) else str(first)).strip().casefold()
+
+
+def is_blank_value_field_row(
+    cell_text: str, row: list[dict[str, Any]], table_rows: list[list[dict[str, Any]]]
+) -> bool:
+    """Return True for a colon-terminated label row whose value cells are all
+    blank, when the SAME label carries a value on another row of the table.
+
+    That row is an empty field of a label|value record, not a sub-header
+    (#1226, ASRNQM: a 444-row grant table where `Percent Effort:` | `` was
+    emitted as a `table_header` twice, cutting the table into three elements
+    and two grants in half). The #811 guard (`row_has_nonblank_value_cells`)
+    only recognises a form row by its value cell, so a blank one fell through
+    to the header branch. A label that never carries a value elsewhere in the
+    table (e.g. a lone `Certification:` | ``) is still a header, as before.
+    """
+    label = cell_text.strip()
+    if len(row) < 2 or not label.endswith(":") or row_has_nonblank_value_cells(row):
+        return False
+    key = label.casefold()
+    return any(
+        _row_label_key(other) == key and row_has_nonblank_value_cells(other)
+        for other in table_rows
+    )
+
+
 # Minimum looks_like_section_header confidence for a colon-less, row-left label to
 # be treated as a REAL section header (rather than a form-style label) when it also
 # has distinct right-hand content -- the "header-left / content-right" table layout
@@ -1125,13 +1157,18 @@ def flatten_table_to_text(table_data: dict[str, Any], skip_first_row: bool = Fal
 
 
 def _classify_subheader_row_content(
-    cell_text: str, row_header_conf: float, row: list[dict[str, Any]]
+    cell_text: str,
+    row_header_conf: float,
+    row: list[dict[str, Any]],
+    table_rows: list[list[dict[str, Any]]],
 ) -> tuple[bool, bool]:
-    """Return `(has_value_cells, header_left_content_right)` for a table row
+    """Return `(is_form_row, header_left_content_right)` for a table row
     whose first cell looks like a section header (#811 round 1/2): whether
-    it carries a non-blank, non-label trailing value at all, and whether
-    that value additionally qualifies for the header-left/content-right
-    layout (real header, no colon, distinct content -- web064).
+    it is a label|value form row -- a non-blank, non-label trailing value,
+    or a blank value under a label that carries a value elsewhere in
+    `table_rows` (#1226) -- and whether the value additionally qualifies
+    for the header-left/content-right layout (real header, no colon,
+    distinct content -- web064).
 
     Pure move out of `extract_unified_elements` (#811 round 3, finding 2).
     """
@@ -1139,7 +1176,8 @@ def _classify_subheader_row_content(
     header_left_content_right = has_value_cells and is_header_left_content_right_row(
         cell_text, row_header_conf
     )
-    return has_value_cells, header_left_content_right
+    is_form_row = has_value_cells or is_blank_value_field_row(cell_text, row, table_rows)
+    return is_form_row, header_left_content_right
 
 
 def _table_header_element(
@@ -1201,9 +1239,9 @@ def _handle_table_row_zero(
     """
     data = table_data.get("data", [])
     row_0 = data[0] if data else []
-    row0_is_form_label = (
-        first_cell_text.rstrip().endswith(":")
-        and row_has_nonblank_value_cells(row_0)
+    row0_is_form_label = first_cell_text.rstrip().endswith(":") and (
+        row_has_nonblank_value_cells(row_0)
+        or is_blank_value_field_row(first_cell_text, row_0, data)  # #1226
     )
 
     new_elements: list[dict[str, Any]] = []
@@ -1733,14 +1771,14 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                         # colon, high confidence) keeps its header AND recovers the
                         # content, instead of being demoted to content-only (#811 round 2,
                         # web064: "WORK ADDRESS | <address>").
-                        has_value_cells, header_left_content_right = _classify_subheader_row_content(
-                            cell_text, row_score.confidence, row
+                        is_form_row, header_left_content_right = _classify_subheader_row_content(
+                            cell_text, row_score.confidence, row, table_data["data"]
                         )
 
-                        # A non-blank trailing cell means "Name:" is a form label, not a
-                        # header (#811 round 1) -- UNLESS the row is header-left/content-right
+                        # A form row ("Name: | x", or a blank value under a label valued elsewhere,
+                        # #1226) is content, not a header (#811 round 1) -- UNLESS the row is header-left/content-right
                         # (#811 round 2), in which case the header signal is kept too.
-                        if row_score.is_header and cell_text and (not has_value_cells or header_left_content_right):
+                        if row_score.is_header and cell_text and (not is_form_row or header_left_content_right):
                             # Emit accumulated content rows first
                             if current_content_rows:
                                 content_text = _flatten_table_content_text(current_content_rows)

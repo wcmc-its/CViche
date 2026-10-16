@@ -59,6 +59,7 @@ from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     get_cell_text,
     get_paragraph_text,
     get_table_first_cell_text,
+    is_blank_value_field_row,
     looks_like_section_header,
     normalize_style_name,
     open_source_docx,
@@ -2799,3 +2800,91 @@ def test_two_body_content_controls_each_report_their_own_span():
     spans = unwrap_body_content_controls(doc)
     assert [p.text for p in doc.paragraphs] == ["Top", "First A", "First B", "Middle", "Second A", "End"]
     assert spans == [range(1, 3), range(4, 5)]
+
+
+# --------------------------------------------------------------------------
+# #1226: a label|value row with a blank value cell is a blank field, not a
+# sub-header, when the same label carries a value on another row
+# --------------------------------------------------------------------------
+
+GRANT_LABELS = ("Funding Agency:", "Title of Grant:", "Role:", "Percent Effort:", "Total Direct Costs:")
+
+
+def _label_value_table_docx(path, rows):
+    """One 2-column table, one `(label, value)` pair per row."""
+    doc = Document()
+    table = doc.add_table(rows=len(rows), cols=2)
+    for i, (label, value) in enumerate(rows):
+        table.cell(i, 0).text = label
+        table.cell(i, 1).text = value
+    doc.save(str(path))
+
+
+def _grant_rows(effort_values):
+    """One 5-row grant per entry of `effort_values` (ASRNQM's layout)."""
+    rows = []
+    for n, effort in enumerate(effort_values, start=1):
+        values = (f"Agency {n}", f"Synthetic grant title {n}", "PI", effort, f"${n},000")
+        rows.extend(zip(GRANT_LABELS, values, strict=True))
+    return rows
+
+
+def test_blank_percent_effort_row_does_not_split_a_label_value_table(tmp_path):
+    """ASRNQM (#1226): `Percent Effort:` | `` between two valued rows was a
+    `table_header`, cutting the table and the grant around it in two."""
+    path = tmp_path / "grants.docx"
+    _label_value_table_docx(path, _grant_rows(["10%", "", "5%"]))
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["type"] for e in elements] == ["table_content"]
+    lines = elements[0]["text"].split("\n")
+    assert len(lines) == 15
+    assert lines[5:10] == [
+        "Funding Agency: | Agency 2",
+        "Title of Grant: | Synthetic grant title 2",
+        "Role: | PI",
+        "Percent Effort: |",
+        "Total Direct Costs: | $2,000",
+    ]
+
+
+def test_blank_value_row_zero_is_content_when_its_label_is_valued_below(tmp_path):
+    """Row 0 goes through `_handle_table_row_zero`, not the per-row walk."""
+    path = tmp_path / "grants_row0.docx"
+    _label_value_table_docx(path, [("Percent Effort:", ""), ("Role:", "PI"), ("Percent Effort:", "5%")])
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["type"] for e in elements] == ["table_content"]
+    assert elements[0]["text"] == "Percent Effort: |\nRole: | PI\nPercent Effort: | 5%"
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # the label never carries a value in this table: a genuine sub-header
+        [("Name:", "Synthetic Person"), ("Certification:", ""), ("Board:", "Synthetic Board")],
+        # the label recurs, but blank every time
+        [("Name:", "Synthetic Person"), ("Certification:", ""), ("Certification:", "")],
+    ],
+)
+def test_blank_value_label_without_a_valued_twin_stays_a_table_header(tmp_path, rows):
+    path = tmp_path / "form.docx"
+    _label_value_table_docx(path, rows)
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert "table_header" in [e["type"] for e in elements]
+    assert "Certification:" in [e["text"] for e in elements if e["type"] == "table_header"]
+
+
+def test_is_blank_value_field_row_needs_a_colon_a_value_cell_and_a_valued_twin():
+    valued = [{"text": "Percent Effort:"}, {"text": "5%"}]
+    blank = [{"text": "Percent Effort:"}, {"text": ""}]
+    assert is_blank_value_field_row("Percent Effort:", blank, [blank, valued])
+    assert not is_blank_value_field_row("Percent Effort:", blank, [blank])
+    assert not is_blank_value_field_row("Percent Effort:", valued, [blank, valued])
+    assert not is_blank_value_field_row("Percent Effort", [{"text": "Percent Effort"}, {"text": ""}],
+                                        [[{"text": "Percent Effort"}, {"text": "5%"}]])
+    assert not is_blank_value_field_row("Percent Effort:", [{"text": "Percent Effort:"}], [valued])
