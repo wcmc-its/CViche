@@ -514,7 +514,14 @@ Lints, ranked by the severity of the failure class they catch:
                           and is the entry's whole source line or opens with
                           the year (RNKYST 259). INFO, one per entry or
                           cell. Reads stage 4; the docx when present
-14aw. group_credit_dropped a publication whose source byline credits a
+14aw. journal_name_joined a Q4C/Q4D journal_name holding a tab, a role or
+                          section word ("Editorial Board", "Ad hoc") or two
+                          journals joined by a semicolon, a double space or
+                          a comma between two title-cased runs, so they
+                          render as one journal row (#1414; IEUPKK 190,
+                          RINASX 438). WARN, one per entry. Reads stage 4
+                          only
+14ax. group_credit_dropped a publication whose source byline credits a
                           group, consortium or study team ("...; HVTN 505
                           Protocol Team.") and whose rendered bibliography
                           line holds no such credit, or garbles it into
@@ -637,6 +644,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_grant_facts,
     lint_implausible_year,
     lint_invented_records,
+    lint_journal_name_joined,
     lint_multi_record_coverage,
     lint_offschema_fields,
     lint_orphaned_fragments,
@@ -909,6 +917,7 @@ KNOWN_LINTS = (
     "stage2_span_overlap",
     "cross_entry_value",
     "session_title_missing",
+    "journal_name_joined",
     "group_credit_dropped",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -1201,17 +1210,23 @@ LINT_PREVALENCE = {
     # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
     # caveat as above.
     "stage2_span_overlap": 0.068,
-    # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 22 of 400
-    # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15.
-    # Most predate #1609, which now removes a borrowed date, amount, percent or
-    # grant number in stage 4 itself, so current runs should hit it less.
-    "cross_entry_value": 0.055,
+    # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 19 of 400
+    # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15,
+    # re-measured after #1840 (22 before it). Most predate #1609, which now
+    # removes a borrowed date, amount, percent or grant number in stage 4
+    # itself, so current runs should hit it less.
+    "cross_entry_value": 0.048,
     # session_title_missing (#1346; STM-1 in doctor/PRECISION.md): 8 of the
     # 63 EBYSBC/s7ab/pilot farm runs (dev-242 stage 4), 2 of the 40
     # NECRGC/JAFPFP runs (dev-264/267) and 3 of the 37 YUYVIG runs (dev-259),
     # each rendered on origin/dev 7e41cd29, so 13 of 140, measured
     # 2026-10-15. Same mixed-corpus caveat as above.
     "session_title_missing": 0.093,
+    # journal_name_joined (#1414; JNJ-1 in doctor/PRECISION.md): 72 of 292
+    # distinct stored stage-4 outputs (284 uids) on this machine, 2026-10-15.
+    # Most predate #1808, which now splits a name joined from separate tab
+    # cells in stage 4 itself, so current runs should hit it less.
+    "journal_name_joined": 0.247,
     # group_credit_dropped (#1661; GCD-1 in doctor/PRECISION.md): 42 of 303
     # stored runs with a stage-4 JSON and a rendered docx, one per uid,
     # measured 2026-10-15. Same mixed-corpus caveat as above.
@@ -1829,6 +1844,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `table_rows` and `blocks` read the same docx; neither gates the row.
     LintSpec("session_title_missing", lint_session_title_missing, ("stage_4",),
              optional=("table_rows", "blocks")),
+    LintSpec("journal_name_joined", lint_journal_name_joined, ("stage_4",)),
     LintSpec("group_credit_dropped", lint_group_credit_dropped, ("stage_4", "blocks")),
 )
 

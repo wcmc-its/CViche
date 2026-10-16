@@ -1121,6 +1121,57 @@ class TestBoardCellCarriesTheSpecialty:
         ])
         assert _rows_after_board(gen) == [("American Board of Internal Medicine", "123456", "2010")]
 
+    # #1245 (pilot WIANVH 103/106): stage 4 kept each exam part and its date
+    # under the off-schema `notes`, and the two rows rendered as the same
+    # board with a blank date. Invented values.
+    def test_off_schema_notes_follow_the_board_in_parentheses(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Sample Surgery - Part 1- Pass    7/1998",
+             "extracted_fields": {"certifying_board": "American Board of Sample Surgery",
+                                  "specialty": "Sample Surgery", "year_certified": None,
+                                  "notes": "Part 1 - Pass, 1998-07"}},
+            {"text": "American Board of Sample Surgery - Part 2- Pass    7/2002",
+             "extracted_fields": {"certifying_board": "American Board of Sample Surgery",
+                                  "specialty": "Sample Surgery", "year_certified": None,
+                                  "notes": "Part 2 - Pass, 2002-07"}},
+        ])
+        assert sorted(_rows_after_board(gen)) == [
+            ("American Board of Sample Surgery (Part 1 - Pass, 1998-07)", "", ""),
+            ("American Board of Sample Surgery (Part 2 - Pass, 2002-07)", "", ""),
+        ]
+
+    def test_notes_the_cell_already_holds_are_not_repeated(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Sample Medicine (Sample Subspecialty) | 123456 | 2010",
+             "extracted_fields": {"certifying_board": "American Board of Sample Medicine (Sample Subspecialty)",
+                                  "certificate_number": "123456", "year_certified": "2010",
+                                  "notes": "sample subspecialty"}},
+        ])
+        assert _rows_after_board(gen) == [
+            ("American Board of Sample Medicine (Sample Subspecialty)", "123456", "2010")]
+
+    def test_notes_fill_a_board_cell_stage_4_left_blank(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Sample Exam Part 1 | 123456 | 2010",
+             "extracted_fields": {"certificate_number": "123456", "year_certified": "2010",
+                                  "notes": "Sample Exam Part 1"}},
+        ])
+        assert _rows_after_board(gen) == [("Sample Exam Part 1", "123456", "2010")]
+
+    @pytest.mark.parametrize("notes", [None, "", "   ", ["Part 1"], {"part": "1"}])
+    def test_blank_or_non_text_notes_change_nothing(self, notes):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Sample Medicine | 123456 | 2010",
+             "extracted_fields": {"certifying_board": "American Board of Sample Medicine",
+                                  "certificate_number": "123456", "year_certified": "2010",
+                                  "notes": notes}},
+        ])
+        assert _rows_after_board(gen) == [("American Board of Sample Medicine", "123456", "2010")]
+
 
 class TestCertificateNumberSeparatorHeuristic:
     """#569: the comma/semicolon split that decides whether an entry is fused.
@@ -1395,6 +1446,17 @@ class TestRecertificationIsNeverTheRangeEnd:
     def test_the_expiry_boundary_is_the_year_after_the_current_one(self):
         assert _with_recertification("2008", "2027", current_year=2026) == "2008-2027"
         assert _with_recertification("2008", "2026", current_year=2026) == "2008 (recertified 2026)"
+
+    def test_a_stated_expiry_ends_the_range_over_an_end_date_of_present(self):
+        # TXTATQ 364/365 (#1245): end_date "present" returned "2008-Present"
+        # before recertification_date was read, losing the 2028 expiry.
+        fields = {"year_certified": "2008", "end_date": "present", "recertification_date": "2028"}
+        assert _format_certification_date_str(fields, current_year=2026) == "2008-2028"
+
+    def test_a_past_recertification_year_leaves_an_end_date_of_present(self):
+        for recert in ("2026", "2015", "not required", ""):
+            fields = {"year_certified": "2008", "end_date": "present", "recertification_date": recert}
+            assert _format_certification_date_str(fields, current_year=2026) == "2008-Present", recert
 
     def test_the_current_year_is_a_recertification_not_an_expiry(self):
         this_year = str(datetime.now().year)
