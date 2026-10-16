@@ -2747,3 +2747,41 @@ def test_a_crossref_work_reply_does_not_mark_ncbi_answering(monkeypatch):
     enricher._look_up_crossref_work(entry)
     assert entry[stage5.CROSSREF_MATCH_KEY]['doi'] == DOI
     assert enricher._ncbi_answered is False
+
+
+# ------------------- #1870: a titleless article stub gets an incomplete-citation note
+
+def _stub(code='S1', **fields):
+    return {'taxonomy_code': code, 'enrichment_status': 'no_identifier',
+            'text': 'Rodd et al. (2004a) Alcoholism: Clinical and Experimental Research JIF: 2.716',
+            'extracted_fields': {'authors': 'Rodd et al.', 'year': '2004',
+                                 'journal': 'Alcoholism: Clinical and Experimental Research', **fields}}
+
+
+@pytest.mark.parametrize('code', ['S1', 'S2', 'S6'])
+def test_titleless_article_stub_gets_the_incomplete_citation_note(code):
+    enricher = PubMedEnricher(verbose=False)
+    entry = _stub(code)
+    enricher._note_incomplete_citations([entry])
+    assert entry[stage5.CITATION_NOTE_KEY] == stage5.INCOMPLETE_CITATION_NOTE
+    assert enricher.stats['incomplete_citations'] == 1
+
+
+@pytest.mark.parametrize('entry', [
+    _stub(title='A titled paper'),                                   # has a title
+    _stub(year=None),                                                # "1993"-style rows need both
+    _stub(journal=None),                                             # a header or split row
+    _stub(code='S8'),                                                # not a journal article
+    {**_stub(), 'enrichment_status': 'enriched'},
+    {**_stub(), stage5.CROSSREF_MATCH_KEY: {'doi': DOI}},
+    {**_stub(), 'in_press_note': 'The CV lists this as in press.'},
+], ids=['titled', 'no-year', 'no-journal', 'S8', 'enriched', 'crossref-matched', 'in-press-noted'])
+def test_only_an_unmatched_titleless_article_with_year_and_journal_is_noted(entry):
+    PubMedEnricher(verbose=False)._note_incomplete_citations([entry])
+    assert stage5.CITATION_NOTE_KEY not in entry
+
+
+def test_stage5_run_notes_a_stub(tmp_path, monkeypatch):
+    [result], session, _ = _run_entries(tmp_path, monkeypatch, [_stub()], [])
+    assert session.calls == []
+    assert result[stage5.CITATION_NOTE_KEY] == stage5.INCOMPLETE_CITATION_NOTE

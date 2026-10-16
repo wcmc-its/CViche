@@ -1418,3 +1418,19 @@ def test_a_fused_multi_line_s8_source_is_left_as_the_citation_reads():
               "Doe J. Gadget tuning. Gadget Meeting, 2020. Postponed due to COVID-19.")
     body = "Doe J. Widget calibration. Widget Society Conference; 2020."
     assert _abstract_paragraphs("S8", source, body) == [f"1. {body}"]
+
+
+def test_citation_note_is_a_comment_on_a_stub_citation_even_with_comments_off():
+    # #1870: a titleless article stub stage 5 could not look up.
+    gen = _generator()
+    assert gen.emit_comments is False
+    note = "This citation has no article title, so CViche could not look it up in PubMed or Crossref."
+    entry = _citation_entry("Rodd ZA et al. Alcohol Clin Exp Res. 2004.", "Rodd ZA", 2004)
+    entry.update(enrichment_status="no_identifier", citation_note=note)
+
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="")
+
+    header_idx = gen._find_paragraph_with_text("Peer-reviewed Research Articles:")
+    para = next(p for p in gen.doc.paragraphs[header_idx:header_idx + 4] if "Rodd" in p.text)
+    assert para._p.find(qn("w:commentRangeStart")) is not None
+    assert [c["text"] for c in gen._comments] == [note]

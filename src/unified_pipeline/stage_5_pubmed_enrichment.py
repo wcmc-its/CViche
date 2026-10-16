@@ -275,6 +275,16 @@ CROSSREF_BUDGET_SECONDS = 300.0
 CROSSREF_MATCH_KEY = 'crossref_match'
 CROSSREF_MATCH_BY_CV_DOI = 'cv_doi'
 CROSSREF_MATCH_BY_TITLE = 'title_search'
+# An article line with a year and a journal but no title is a stub
+# ("Rodd et al. (2004a) Alcoholism: Clinical and Experimental Research JIF:
+# 2.716 cited 58 times"): nothing can be looked up and the citation is
+# unusable as printed. It carries this Word comment, which stage 6 attaches
+# like `in_press_note` (#1870). On the 2026-10-15 stage-5 farm, 127 entries in
+# 8 CVs (LFFKVV 117); a titleless line with no journal is a header or a split
+# row ("1993", "~ Published"), not a stub, and is left alone.
+CITATION_NOTE_KEY = 'citation_note'
+INCOMPLETE_CITATION_NOTE = ("This citation has no article title, so CViche could not look it up in "
+                            "PubMed or Crossref. Add the title, volume and pages.")
 # The sources that found a record by title, with no identifier from the CV.
 TITLE_SEARCH_SOURCES = frozenset({TITLE_SEARCH_SOURCE, CROSSREF_TITLE_SOURCE})
 # A doi.org link in an entry's text. The DOI ends at whitespace or a quote: a
@@ -793,6 +803,7 @@ class PubMedEnricher:
             'crossref_skipped': 0,
             'crossref_doi_lookups': 0,
             'crossref_matches': 0,
+            'incomplete_citations': 0,
             'in_press_resolved': 0,
             'in_press_duplicates': 0,
             'in_press_promoted': 0,
@@ -942,6 +953,9 @@ class PubMedEnricher:
 
         # 5. "In press" entries: title search, then record what PubMed shows
         self._resolve_in_press(pub_entries)
+
+        # 6. Article stubs with no title to look up (#1870).
+        self._note_incomplete_citations(pub_entries)
 
         # Build output
         output = {
@@ -1433,6 +1447,19 @@ class PubMedEnricher:
         if self.api_key:
             params['api_key'] = self.api_key
         return self._get_with_retry(ESEARCH_URL, params, _parse_esearch_idlist)
+
+    def _note_incomplete_citations(self, pub_entries: list[dict]) -> None:
+        """Give INCOMPLETE_CITATION_NOTE to every unenriched article with a
+        year and a journal but no title, unless Crossref matched it or it
+        already carries an in-press note."""
+        for entry in pub_entries:
+            fields = entry.get('extracted_fields') or {}
+            if (entry.get('taxonomy_code') in PUBLISHED_ARTICLE_CODES
+                    and entry.get('enrichment_status') != 'enriched'
+                    and not cv_title(fields) and fields.get('year') and fields.get('journal')
+                    and CROSSREF_MATCH_KEY not in entry and not entry.get('in_press_note')):
+                entry[CITATION_NOTE_KEY] = INCOMPLETE_CITATION_NOTE
+                self.stats['incomplete_citations'] += 1
 
     def _record_in_press_resolution(self, entry: dict, phrase: str) -> None:
         enrichment = entry.get('enrichment_data') or {}
