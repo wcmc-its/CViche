@@ -875,6 +875,8 @@ def test_dedup_drops_quiet_when_the_kept_entry_carries_the_date():
     ("Example Series Part I, noon talk", "Example Series Part II, noon talk", "part 1"),
     ("Example Program II", "Example Program III", "numeral II"),
     ("Example Course I\tExample Society", "Example Course II\tExample Society", "numeral I"),
+    # OIEPQD YYVITM 425: a date, not a segment end, follows the lone "I"
+    ("Example Course I November 2031", "Example Course II November 2031", "numeral I"),
     ("Example trial, Phase II", "Example trial, Phase III", "phase 2"),
 ])
 def test_occasion_apart_reads_parts_and_numerals(dropped, kept, reason):

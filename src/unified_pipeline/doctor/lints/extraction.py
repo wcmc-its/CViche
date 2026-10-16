@@ -92,12 +92,11 @@ from unified_pipeline.stage4.schemas import (
     STAGE4_RECORDS_KEY,
 )
 from unified_pipeline.stage6.dedup import (
-    _PART_NUMBER_RE,
-    _TRIAL_PHASE_RE,
     _citation_identity_text,
     _dates_compatible,
     _different_rank,
     _part_numbers,
+    _standalone_numerals,
     _trial_phases,
 )
 from unified_pipeline.stage6.fan_out import (
@@ -875,24 +874,6 @@ def _unrendered_identity(decision: Mapping, rendered_items: set[str]) -> str | N
         if value not in rendered_items:
             return value
     return None
-
-
-# A Roman numeral standing on its own tells two records of one series apart
-# ("Example Seminar II" beside "Example Seminar III", "Sample Course I"
-# beside "Sample Course II")
-# where no "Part" or "Phase" word precedes it, so stage 6's `_part_numbers`
-# and `_trial_phases` cannot read it (EBYSBC E4: OIYKZE-01). Upper case only,
-# and V and X never alone: a citation's author initials are single capitals.
-# A lone "I" counts only where a title segment ends after it, never before a
-# lower-case word ("I taught"). A numeral after "Part" or "Phase" is left to
-# those readers, which also read a listing ("Parts I and II") as a whole.
-_STANDALONE_NUMERAL_RE = re.compile(
-    r"\b(?:II|III|IV|VI|VII|VIII|IX)\b|\bI(?=\s*(?:$|[\t,.;:)\"\u201d\u2019]))")
-
-
-def _standalone_numerals(text: str) -> set[str]:
-    bare = _TRIAL_PHASE_RE.sub(" ", _PART_NUMBER_RE.sub(" ", text))
-    return set(_STANDALONE_NUMERAL_RE.findall(bare))
 
 
 # What tells two occasions of one record apart, each read the way stage 6's

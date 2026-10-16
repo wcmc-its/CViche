@@ -46,6 +46,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _record_name,
     _row_residue,
     _split_record_family,
+    _standalone_numerals,
     _title_only_fragment,
     _undated_split_record_absorbs_date,
     _verbatim_contained,
@@ -1672,6 +1673,70 @@ def test_two_parts_of_one_talk_are_both_kept():
 def test_a_listing_of_both_parts_still_covers_a_copy_of_one():
     listing, dropped = {"text": _SERIES_TALK.format("I and II")}, {"text": _SERIES_TALK.format("I")}
     assert deduplicate_entries([listing, dropped]) == [listing]
+
+
+# #666 (OIEPQD YYVITM 425): a bare trailing Roman numeral names the course in
+# a series as a part number does, with no "Part" word before it. "i" is a stop
+# word, so every word of the "I" row is in the "II" row.
+_SECTION_LEAD_ROW = ("Section Lead: Widget Compounding {} November 2031 - present\t"
+                     "32 students daily; Contact time: 15 hours annually")
+
+
+def test_two_courses_of_a_series_told_apart_by_a_bare_numeral_are_both_kept():
+    kept = _entry("K1", _SECTION_LEAD_ROW.format("II"),
+                  course_title="Widget Compounding II", role="Section Lead")
+    dropped = _entry("K1", _SECTION_LEAD_ROW.format("I"),
+                     course_title="Widget Compounding I", role="Section Lead")
+    assert _kept_both("K1", dropped, kept)
+    assert not _drop_is_safe(dropped, kept, "K1", [kept, dropped])
+
+
+def test_a_copy_of_the_same_numbered_course_still_drops():
+    kept = _entry("K1", _SECTION_LEAD_ROW.format("II") + ", Example School",
+                  course_title="Widget Compounding II", role="Section Lead")
+    dropped = _entry("K1", _SECTION_LEAD_ROW.format("II"),
+                     course_title="Widget Compounding II", role="Section Lead")
+    assert not _kept_both("K1", dropped, kept)
+
+
+def test_a_course_whose_lone_numeral_a_dash_follows_is_kept():
+    # The verifier's under-match: a lone "I" before " - Section Lead".
+    kept = _entry("K1", "Widget Compounding II - Section Lead, Example School, 2031")
+    dropped = _entry("K1", "Widget Compounding I - Section Lead, Example School, 2031")
+    assert not _drop_is_safe(dropped, kept, "K1", [kept, dropped])
+
+
+def test_a_citation_whose_author_initial_is_a_lone_i_still_drops():
+    # "Sprocket I" beside "Sprocket IS" is one author: the initial is no numeral.
+    citation = ("Sprocket {}, Gizmo J. Widget outcomes in adults with chronic "
+                "widget disease. J Widg. 2031;12:100-110.")
+    kept, dropped = {"text": citation.format("IS")}, {"text": citation.format("I")}
+    assert deduplicate_entries([kept, dropped]) == [kept]
+
+
+@pytest.mark.parametrize("text, numerals", [
+    ("Widget Compounding I November 2031 - present", {"I"}),   # a month follows
+    ("Widget Compounding I 2031-2033", {"I"}),                 # a year follows
+    ("Widget Compounding I 3/2031", {"I"}),                    # a numeric date follows
+    ("Widget Compounding I\tExample Society", {"I"}),          # the segment ends
+    ("Widget Compounding I", {"I"}),
+    ("Widget Seminar III, spring", {"III"}),
+    ("I taught Widget Compounding", set()),                    # a pronoun
+    ("I may 2031 teach", set()),                               # lower case is a word, not a month
+    ("Widget Care Parts I and II", set()),                     # a part listing is `_part_numbers`'
+    ("Example trial, Phase II", set()),                        # and a phase is `_trial_phases`'
+    ("Sprocket V, Gizmo X. Widget study.", set()),             # initials, never V or X alone
+    ("Widget Compounding I - Section Lead, 2031", {"I"}),      # a dash follows
+    ("Widget Compounding I \u2013 2031", {"I"}),               # an en dash follows
+    ("Widget Compounding I (Fall 2031)", {"I"}),               # a parenthesis follows
+    ("Widget Compounding I Lecturer, 2031", {"I"}),            # a capitalised word follows
+    ("where I Lectured on widgets", set()),                    # a pronoun after a lower-case word
+    ("Sprocket I, Gizmo J. Widget study.", set()),             # a byline's lone initial
+    ("Gizmo J, Sprocket I. Widget study.", set()),             # last in the byline
+    ("Widget Seminar II, Section A", {"II"}),                  # "Seminar II" is no author
+])
+def test_standalone_numerals(text, numerals):
+    assert _standalone_numerals(text) == numerals
 
 
 def test_one_lecture_given_in_two_months_is_two_records():
