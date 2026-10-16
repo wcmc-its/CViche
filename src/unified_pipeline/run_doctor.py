@@ -529,6 +529,16 @@ Lints, ranked by the severity of the failure class they catch:
                           QVAQGQ-10). WARN when the source names the CV
                           owner nowhere else, so nothing in the line credits
                           them; INFO otherwise. Reads stage 4 and the docx
+14ay. institution_cleaned_name an institution name stage 5b's lookup gave
+                          that loses the CV's own text in the document
+                          (#1257): it drops a department, platform, parent
+                          institution, second hospital or the CV's own city
+                          that no row showing the name prints, it is a
+                          placeholder ("Unknown", UYQRUN 600) a row prints,
+                          or the row prints a street address the name
+                          dropped (SXPHOG 56). WARN, one per entry. Reads
+                          stage 5b and the docx's table rows; its paragraphs
+                          when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -611,6 +621,7 @@ from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_GATE,
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
+    lint_institution_cleaned_name,
     lint_owner_contact_missing,
     lint_pubmed_title_truncated,
 )
@@ -919,6 +930,7 @@ KNOWN_LINTS = (
     "session_title_missing",
     "journal_name_joined",
     "group_credit_dropped",
+    "institution_cleaned_name",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1231,6 +1243,11 @@ LINT_PREVALENCE = {
     # stored runs with a stage-4 JSON and a rendered docx, one per uid,
     # measured 2026-10-15. Same mixed-corpus caveat as above.
     "group_credit_dropped": 0.139,
+    # institution_cleaned_name (#1257; INST-1 in doctor/PRECISION.md): 16 of
+    # 177 distinct runs rendered from origin/dev 6190ab29 (the analysis/
+    # runs, the EBYSBC/s7ab/pilot farm, OIEPQD and YUYVIG), 2026-10-15. The
+    # 5b artifacts predate #1791, so source_place_replaced should fall.
+    "institution_cleaned_name": 0.09,
 }
 
 
@@ -1846,6 +1863,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("table_rows", "blocks")),
     LintSpec("journal_name_joined", lint_journal_name_joined, ("stage_4",)),
     LintSpec("group_credit_dropped", lint_group_credit_dropped, ("stage_4", "blocks")),
+    # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
+    LintSpec("institution_cleaned_name", lint_institution_cleaned_name,
+             ("stage_5b", "table_rows"), optional=("blocks",)),
 )
 
 #: The views read from the stage-6 docx.

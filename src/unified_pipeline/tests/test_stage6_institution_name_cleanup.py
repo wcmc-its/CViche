@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.normalization.institutions import (  # noqa: E402
     _get_cleaned_institution_name,
     _strip_org_tail,
+    words_beyond_location,
 )
 
 # --------------------------------------------------------------------------
@@ -281,6 +282,23 @@ def test_trailing_stray_punctuation_after_the_org_is_absorbed() -> None:
     assert _strip_org_tail(
         "Award, Indiana University, .", "Indiana University"
     ) == "Award"
+
+
+def test_words_beyond_location_are_the_remainder_stage_6_restores() -> None:
+    """The doctor's institution_cleaned_name lint reads these words (#1257):
+    the department is beyond the location, 5b's own city and state code are
+    not, and a raw value holding only the location has none."""
+    enrichment = {"city": "Imaginary Falls", "state": "Ohio", "country": "United States"}
+    raw = "Imaginary University, Department of Tidal Studies, Imaginary Falls, OH"
+    assert words_beyond_location(raw, "Imaginary University", enrichment) == [
+        "Department", "Tidal", "Studies"]
+    assert words_beyond_location("Imaginary University, Imaginary Falls, OH",
+                                 "Imaginary University", enrichment) == []
+    # Stage 6 agrees: the same remainder is what it puts back.
+    entry = {"extracted_fields": {"institution": raw},
+             "institution_enrichment": {"cleaned_name": "Imaginary University", **enrichment}}
+    assert _get_cleaned_institution_name(entry) == (
+        "Imaginary University, Department of Tidal Studies")
 
 
 if __name__ == "__main__":

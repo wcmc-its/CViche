@@ -67,6 +67,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_group_header_context,
     lint_header_consumed_record,
     lint_identical_rendered_rows,
+    lint_institution_cleaned_name,
     lint_junk_or_header_row,
     lint_licensure_fallback_truncated,
     lint_llm_fallback_served,
@@ -2305,6 +2306,195 @@ def test_enrichment_lints_run_from_the_stage_5_artifact(tmp_path):
     lints = [f["lint"] for f in run_doctor(root, _UID)["findings"]
              if f["lint"] in ("pubmed_title_truncated", "enrichment_pubtype_mismatch")]
     assert sorted(lints) == ["enrichment_pubtype_mismatch", "pubmed_title_truncated"]
+
+
+# ---------------------------- lint 14ay: stage-5b institution names (#1257)
+
+
+def _looked_up(idx, raw, cleaned, city="Brackenridge", state="Ohio", country="United States",
+               code="D1", text=None):
+    """A stage-5b entry with a lookup result; every name is invented."""
+    return {"element_idx_start": idx, "taxonomy_code": code,
+            "text": text or f"2014-2018 Assistant Professor, {raw}",
+            "extracted_fields": {"institution": raw},
+            "institution_enrichment": {"official_name": cleaned, "cleaned_name": cleaned,
+                                       "city": city, "state": state, "country": country}}
+
+
+def _institution_rows(*rows):
+    return [[["Title", "Institution", "Dates"], *[list(row) for row in rows]]]
+
+
+def test_institution_cleaned_name_warns_on_a_qualifier_no_row_prints():
+    """The lookup drops a parenthesised descriptor, cleaned_name is not a
+    substring of the raw value, so stage 6 renders the name without it."""
+    entry = _looked_up(103, "Quillfeather Brain Bank (neurodegenerative diseases), "
+                       "Quillfeather Mental Health Institute/Hospital, Brackenridge, OH",
+                       "Quillfeather Brain Bank, Quillfeather Mental Health Institute/Hospital")
+    rows = _institution_rows(("Consultant", "Quillfeather Brain Bank, Quillfeather Mental Health "
+                              "Institute/Hospital, Brackenridge, OH", "2014-2018"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert (finding["lint"], finding["severity"]) == ("institution_cleaned_name", "WARN")
+    assert finding["message"] == (
+        "entry 103 (D1): qualifier_dropped: stage 5b's name drops 'neurodegenerative', "
+        "'diseases' from the CV's institution, and the row lacks it")
+    assert finding["evidence"][2].startswith("rendered: 'Consultant | Quillfeather Brain Bank")
+
+
+def test_institution_cleaned_name_quiet_when_the_row_prints_the_qualifier():
+    """Stage 6 restores a qualifier when cleaned_name is a substring of the
+    raw value (#1516); the lint reads the document, so it stays quiet."""
+    entry = _looked_up(9, "Quillfeather University, Department of Tidal Studies, Brackenridge, OH",
+                       "Quillfeather University")
+    rows = _institution_rows(("Instructor", "Quillfeather University, Department of Tidal "
+                              "Studies, Brackenridge, OH", "2014-2018"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
+
+
+@pytest.mark.parametrize("raw, cleaned", [
+    ("Dept. of Tidal Studies, Quillfeather Univ.", "Department of Tidal Studies, Quillfeather University"),
+    ("Quillfeather HSC Brackenridge", "Quillfeather Health Science Center Brackenridge"),
+    ("Calrian Quillfeather Hospital", "Clarian Quillfeather Hospital"),
+    ("The Quillfeather School of Medicine", "Quillfeather College of Medicine"),
+    ("Quillfeather Children’s Hospital", "Quillfeather Children's Hospital"),
+])
+def test_institution_cleaned_name_quiet_on_a_shortening_spelling_or_renamed_kind(raw, cleaned):
+    rows = _institution_rows(("Fellow", f"{cleaned}, Brackenridge, OH", "2014-2018"))
+    assert lint_institution_cleaned_name({"entries": [_looked_up(5, raw, cleaned)]}, rows) == []
+
+
+def test_institution_cleaned_name_names_a_source_city_the_row_replaced():
+    entry = _looked_up(35, "Quillfeather School of Medicine, West Marrowby, OH",
+                       "Quillfeather School of Medicine", city="Brackenridge")
+    rows = _institution_rows(("Adjunct", "Quillfeather School of Medicine, Brackenridge, OH",
+                              "2017-Present"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert finding["message"] == (
+        "entry 35 (D1): source_place_replaced: stage 5b's name drops 'west', 'marrowby' "
+        "from the CV's institution, and the row lacks it")
+
+
+def test_institution_cleaned_name_warns_on_a_placeholder_name_a_row_prints():
+    entry = _looked_up(600, "Brackenridge, OH", "Unknown", code="B2",
+                       text="Tidal Self-Care Institute. Brackenridge, OH. June 16-19, 2011")
+    rows = _institution_rows(("Another Workshop", "Unknown, Marrowby, OH", "05/08"),
+                             ("Tidal Self-Care Institute", "Unknown, Brackenridge, OH", "06/11"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert finding["message"] == ("entry 600 (B2): placeholder_name: stage 5b named the "
+                                  "institution 'Unknown', and a row prints it")
+    assert finding["evidence"][1] == (
+        "rendered: 'Tidal Self-Care Institute | Unknown, Brackenridge, OH | 06/11'")
+
+
+def test_institution_cleaned_name_names_a_street_address_the_row_prints():
+    """The lookup drops the address, and stage 6 puts it back because a
+    street names something besides 5b's location (SXPHOG 56 shape)."""
+    raw = "Quillfeather College of Pharmacy, 10627 Marrow Rd., Brackenridge, OH 46845"
+    entry = _looked_up(56, raw, "Quillfeather College of Pharmacy")
+    rows = _institution_rows(("Professor", "Quillfeather College of Pharmacy, 10627 Marrow Rd., "
+                              "Brackenridge, OH", "2014-2018"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert finding["message"] == (
+        "entry 56 (D1): address_in_cell: the row prints the street address '10627 Marrow Rd.' "
+        "in the institution stage 5b named 'Quillfeather College of Pharmacy'")
+    clean = _institution_rows(("Professor", "Quillfeather College of Pharmacy, Brackenridge, OH",
+                               "2014-2018"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, clean) == []
+
+
+def test_institution_cleaned_name_quiet_when_the_name_renders_nowhere():
+    """A record that does not render is unrendered_records' business."""
+    entry = _looked_up(103, "Quillfeather Brain Bank (neurodegenerative diseases)",
+                       "Quillfeather Brain Bank")
+    rows = _institution_rows(("Consultant", "Marrowby Hospital", "2014-2018"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
+
+
+def test_institution_cleaned_name_reads_the_row_with_the_entrys_year():
+    """One school heads many rows: a row of another year that prints the
+    qualifier does not vouch for this entry's row."""
+    entry = _looked_up(13, "Quillfeather University (Primary appointment)",
+                       "Quillfeather University", text="2014-2018 Professor, Quillfeather "
+                       "University (Primary appointment)")
+    rows = _institution_rows(("Professor", "Quillfeather University", "2014-2018"),
+                             ("Lecturer", "Quillfeather University, Primary appointment",
+                              "2001-2005"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert "'primary', 'appointment'" in finding["message"]
+
+
+def test_institution_cleaned_name_quiet_when_the_cv_itself_says_unknown():
+    """The CV wrote "Unknown" as the institution: the row prints the CV's
+    own text, so the placeholder is not stage 5b's."""
+    entry = _looked_up(600, "Unknown", "Unknown", code="B2",
+                       text="Tidal Self-Care Institute. Unknown. 2011")
+    rows = _institution_rows(("Tidal Self-Care Institute", "Unknown", "06/11"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
+
+
+def test_institution_cleaned_name_reads_a_month_and_two_digit_year_cell():
+    """Stage 6 prints a date cell "07/21": it is 2021, so of two rows that
+    otherwise tie, the one dated 07/21 is the entry's July 2021 row."""
+    entry = _looked_up(600, "", "Unknown", code="B2",
+                       text="Tidal Workshop, Brackenridge, OH, July 2021")
+    rows = _institution_rows(("Tidal Workshop", "Unknown, Brackenridge, OH", "05/08"),
+                             ("Tidal Workshop", "Unknown, Brackenridge, OH", "07/21"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert finding["evidence"][1] == (
+        "rendered: 'Tidal Workshop | Unknown, Brackenridge, OH | 07/21'")
+
+
+def test_institution_cleaned_name_does_not_blame_another_entrys_unknown_row():
+    """Only another entry's row prints "Unknown": it shares no word with
+    this entry's text, so this entry gets no finding."""
+    entry = _looked_up(600, "Brackenridge, OH", "Unknown", code="B2",
+                       text="Tidal Self-Care Institute. Brackenridge, OH. 2011")
+    rows = _institution_rows(("Another Workshop", "Unknown, Marrowby, KY", "05/08"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
+
+
+def test_institution_cleaned_name_gives_a_placeholder_entry_one_finding():
+    """A placeholder name also drops the CV's department; the entry still
+    gets one finding, the placeholder."""
+    entry = _looked_up(600, "Department of Tidal Studies, Brackenridge, OH", "Unknown",
+                       code="B2", text="Tidal Seminar. Department of Tidal Studies. 2011")
+    rows = _institution_rows(("Tidal Seminar", "Unknown, Brackenridge, OH", "06/11"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert "placeholder_name" in finding["message"]
+
+
+def test_institution_cleaned_name_quiet_when_the_name_is_only_filler_words():
+    """A name of filler words only ("The") has no word to look for, so it
+    matches no row, rather than every row."""
+    entry = _looked_up(7, "Quillfeather University of the Tides", "The")
+    rows = _institution_rows(("Lecturer", "Marrowby Hospital", "2014-2018"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
+
+
+def test_institution_cleaned_name_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-15 (INST-1) over 177 fresh renders of origin/dev
+    6190ab29; a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["institution_cleaned_name"] == round(16 / 177, 2)
+
+
+def test_institution_cleaned_name_runs_from_the_stage_5b_artifact(tmp_path):
+    """Wired through LINT_REGISTRY: run_doctor reads stage 5b and the docx."""
+    root = _build_clean_run(tmp_path)
+    path = next((root / "stage_5b_institution_enrichment").glob("*.json"))
+    payload = json.loads(path.read_text())
+    payload["entries"] = [_looked_up(600, "Brackenridge, OH", "Unknown", code="B2",
+                                     text="Tidal Self-Care Institute. Brackenridge, OH. 2011")]
+    path.write_text(json.dumps(payload))
+    docx_path = next((root / "stage_6_wcm_documents").glob("*.docx"))
+    output = Document(str(docx_path))
+    table = output.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Tidal Self-Care Institute"
+    table.rows[0].cells[1].text = "Unknown, Brackenridge, OH"
+    output.save(str(docx_path))
+    lints = [f["lint"] for f in run_doctor(root, _UID)["findings"]
+             if f["lint"] == "institution_cleaned_name" and f["status"] == "ran"]
+    assert lints == ["institution_cleaned_name"]
 
 
 # ------------------------------------------------- lint 10: stage-6 warnings
@@ -5685,14 +5875,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (78), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (79), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 76
+    assert len(payload["findings"]) == 77
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

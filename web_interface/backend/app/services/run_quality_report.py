@@ -525,6 +525,12 @@ LINT_COPY = {
         "the wrong record.",
         "Delete the copy in the wrong section, and check the flagged entries' dates against "
         "the source CV."),
+    "institution_cleaned_name": LintCopy(
+        "Institution name shortened or missing",
+        "The institution name shown on this row leaves out part of the name the source CV "
+        "gives, such as a department, a platform, a parent university or a second hospital, "
+        "or it reads \"Unknown\" where the CV names a place.",
+        "Copy the full institution name from the source CV into the flagged row."),
     "cross_entry_value": LintCopy(
         "Value from another entry",
         "A date, amount, effort, grant number, role or name on this entry is not in its own "
