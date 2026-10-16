@@ -206,6 +206,7 @@ def test_is_placeholder_title_reads_the_source_by_whole_phrase():
     """#1916: the source vouches for a bracketed title as written, or for its
     words without the brackets as a whole phrase."""
     assert text_norm.is_placeholder_title("[AUC]", "An auction of quokka art.")
+    assert text_norm.is_placeholder_title("[AUC]", "Bauc quokka art.")
     assert not text_norm.is_placeholder_title("[AUC]", "28.[AUC]")
     assert not text_norm.is_placeholder_title("[AUC]", "Quill A. AUC. J Imag Stud.")
     assert not text_norm.is_placeholder_title("[Erratum]", "Quill A. Erratum: wombats. J Imag Stud.")
