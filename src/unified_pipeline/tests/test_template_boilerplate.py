@@ -426,6 +426,12 @@ FOREIGN_NEGATIVES = [
     "1. Technical Title: Sample Study Name of Funding Agency: Sample Foundation Grant Number: N/A",
     "2019 Sample Award (include in annual report): N/A",
     "1. Sample 2019 Study: N/A",
+    # Rule 3 ("...label): N/A") needs the whole line to end in the placeholder,
+    # with no digit or colon before the parenthesis (#1911).
+    "Sample Society (Fellow): Active",
+    "Sample Role (Principal Investigator): N/A, see Research Support",
+    "Sample Committee (Chair, 2019): N/A",
+    "Sample Board (member): Sample Hospital: N/A",
     # An author's own note addresses no one.
     "NOTE: This section includes only work done at the Example Institute",
     # A table row is left to the WCM detector's per-cell rule.
@@ -459,3 +465,97 @@ def test_template_section_headers_are_normalized_and_cover_the_template():
     headers = template_section_headers()
     assert normalize_template_text("1. EMPLOYMENT STATUS:") in headers
     assert normalize_template_text("A heading no template has") not in headers
+
+
+# --- #1911: phrase-file validation and frozen phrase sets ---
+
+def test_the_shipped_phrase_file_loads():
+    """Startup validation in CI: an empty set here means every template line
+    reaches the output, with only a log warning at runtime."""
+    from unified_pipeline.core import template_boilerplate as tb
+
+    instructions, headers = tb._load_phrases()
+    assert len(instructions) > 100 and len(headers) > 10
+
+
+def test_phrase_sets_are_frozen():
+    from unified_pipeline.core import template_boilerplate as tb
+
+    for phrases in (tb._INSTRUCTION_SET, tb._SECTION_HEADER_SET, tb._PROTECTED,
+                    tb.template_section_headers()):
+        assert isinstance(phrases, frozenset)
+
+
+@pytest.mark.parametrize("content", [
+    '{"instructions": "Duplicate table below as needed", "section_headers": []}',
+    '{"instructions": [1, 2], "section_headers": []}',
+    '{"instructions": [], "section_headers": {"a": 1}}',
+    '["Duplicate table below as needed"]',
+    '{"instructions": [',
+])
+def test_a_malformed_phrase_file_loads_nothing_and_says_so(tmp_path, caplog, content):
+    """A string where a list belongs used to load one-character "phrases"."""
+    from unified_pipeline.core import template_boilerplate as tb
+
+    path = tmp_path / "phrases.json"
+    path.write_text(content, encoding="utf-8")
+    with caplog.at_level("WARNING", logger=tb.__name__):
+        assert tb._load_phrases(path) == (frozenset(), frozenset())
+    assert "phrases unavailable" in caplog.text
+
+
+def test_a_missing_phrase_file_loads_nothing_and_says_so(tmp_path, caplog):
+    from unified_pipeline.core import template_boilerplate as tb
+
+    with caplog.at_level("WARNING", logger=tb.__name__):
+        assert tb._load_phrases(tmp_path / "absent.json") == (frozenset(), frozenset())
+    assert "phrases unavailable" in caplog.text
+
+
+def test_null_phrase_lists_load_as_empty(tmp_path, caplog):
+    from unified_pipeline.core import template_boilerplate as tb
+
+    path = tmp_path / "phrases.json"
+    path.write_text('{"instructions": ["A long enough template instruction"], '
+                    '"section_headers": null}', encoding="utf-8")
+    with caplog.at_level("WARNING", logger=tb.__name__):
+        assert tb._load_phrases(path) == (
+            frozenset({"a long enough template instruction"}), frozenset())
+    assert caplog.text == ""
+
+
+@pytest.mark.parametrize(("row", "verdict"), [
+    ("no pipe here", None),
+    (" | ", None),
+    ("Name of Committee | Role (i.e., member, secretary, etc.)", True),
+    ("Name of Committee | Role (i.e., member, secretary, etc.) | Chair", False),
+    ("M.D. | Harvard | 2001", False),
+    # recognized but nothing distinctive: no verdict, later rules decide
+    ("Teaching | Books", None),
+])
+def test_pipe_row_verdict_contract(row, verdict):
+    from unified_pipeline.core import template_boilerplate as tb
+
+    assert tb._pipe_row_verdict(row) is verdict
+
+
+def test_near_match_builds_no_matcher_for_a_phrase_of_the_wrong_length(monkeypatch):
+    """#1911: the length bound runs before a SequenceMatcher is built, so a line
+    is compared in full only against phrases of a compatible length."""
+    from unified_pipeline.core import template_boilerplate as tb
+
+    built = []
+    real = tb.difflib.SequenceMatcher
+
+    def counting(*args, **kwargs):
+        built.append(args[2])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tb.difflib, "SequenceMatcher", counting)
+    line = "A faculty member's own sentence about a research program in cardiology"
+    assert not is_near_template_instruction(line)
+    n = len(tb._normalize(line))
+    compatible = [k for k in tb._INSTRUCTION_SET
+                  if 2 * min(n, len(k)) / (n + len(k)) >= tb._NEAR_MATCH_MIN_RATIO]
+    assert sorted(built) == sorted(compatible)
+    assert len(built) < len(tb._INSTRUCTION_SET) // 4
