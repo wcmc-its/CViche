@@ -279,14 +279,18 @@ _LABEL_PIECE_SPLIT_RE = re.compile(r"[|\t\n]")
 def is_template_label_line(text: str) -> bool:
     """True if every non-empty piece of *text* is a known template label.
 
-    FOR THE APPENDIX ONLY. `is_template_instruction` refuses short labels
-    ("Signature:", "If no license:", "Site/Position |") so a faculty member's
-    own one-word line ("Teaching") is never dropped before classification.
-    A line on its way to the Appendix has already been judged non-content,
-    and one made of nothing but template labels -- an unfilled field, a
-    column-header row -- carries nothing to show there, so the length floor
-    does not apply. Any piece that is not a known label ("Your role* |
-    oversight") keeps the line (#829).
+    NOT A DROP TEST BEFORE CLASSIFICATION. `is_template_instruction` refuses
+    short labels ("Signature:", "If no license:", "Site/Position |") so a
+    faculty member's own one-word line ("Teaching") is never dropped before
+    classification. Two later callers need no length floor:
+      - the Appendix: a line on its way there has already been judged
+        non-content, and one made of nothing but template labels -- an
+        unfilled field, a column-header row -- carries nothing to show. Any
+        piece that is not a known label ("Your role* | oversight") keeps the
+        line (#829).
+      - render_check's verbatim pieces and token chunks: a label cell
+        ("Goals/expected Outcomes") sits in the output wherever any record's
+        label does, so it cannot vouch that THIS record rendered (#829).
     """
     pieces = [p for p in (_normalize(x) for x in _LABEL_PIECE_SPLIT_RE.split(text or ""))
               if p]

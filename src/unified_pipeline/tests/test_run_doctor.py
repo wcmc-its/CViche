@@ -1928,6 +1928,31 @@ def test_unrendered_records_counts_generic_lines_unverifiable_not_missing():
     assert lint_unrendered_records(stage4, blocks) == []
 
 
+def test_unrendered_records_a_stray_template_label_vouches_for_no_record():
+    # #829 (YDSVDB): the revised template's mentee rows are "<label> | <answer>".
+    # A stray fragment of ANOTHER mentee's goal carried the "Goals/expected
+    # Outcomes" label onto the page, and the label alone vouched for this
+    # mentee's unrendered goal. The supervision answer renders in its own cell;
+    # its line is too thin to verify once the label's tokens are out.
+    # Labels are the template's own text; names and answers are invented.
+    mentee = ("Name | Quorra Vellacott\n"
+              "Site/Position | Marbleton Institute / Head, Quartzite Archives\n"
+              "Project/Accomplishments** | Relocated the obsidian manuscript collection offsite\n"
+              "Goals/expected Outcomes | Searchable feldspar finding aids for researchers\n"
+              "Type of Supervision (Research, clinical, teaching, leadership) | Leadership")
+    stage4 = {"entries": [_entry(mentee, etype="table_row", start=306, taxonomy_code="N3A")]}
+    blocks = [("table", "Name: | Quorra Vellacott\n"
+                        "Marbleton Institute / Head, Quartzite Archives\n"
+                        "Relocated the obsidian manuscript collection offsite\n"
+                        "Type of Supervision: | Leadership"),
+              ("p", "Type of Supervision (Research, clinical, teaching, leadership) — Lead"),
+              ("p", "Goals/expected Outcomes — Improved hyacinth reading room environments")]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert len(findings) == 1
+    assert findings[0]["evidence"] == [
+        "Goals/expected Outcomes | Searchable feldspar finding aids for researchers"]
+
+
 # ------------------------------------------------------ lint 8b: section lost
 
 # Synthetic leadership records: every token distinct from the rest of the page.

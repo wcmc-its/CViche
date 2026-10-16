@@ -46,9 +46,12 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
 )
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
+    _entry_pieces,
     _norm,
     _record_rendered,
     _whole_record_rendered,
+    record_chunks,
+    record_pieces,
     segment_held_by_fields,
     segments_cover_source,
     short_tab_part_rendered,
@@ -1532,6 +1535,63 @@ def test_whole_record_rendered_cut_line_vouches_only_for_a_record_it_carries_who
     assert _whole_record_rendered(carried, "", [], cut) is True
     longer = carried + " | with a tail the cut line lost entirely"
     assert _whole_record_rendered(longer, "", [], cut) is False
+
+
+# #829 (YDSVDB): the revised template's mentee rows are "<label> | <answer>".
+# One stray "Goals/expected Outcomes — ..." line on the page vouched, through
+# its label, for every mentee's goal line. Labels are the template's own text;
+# the answers are invented.
+_GOALS_LABEL = "Goals/expected Outcomes"
+_SUPERVISION_LABEL = "Type of Supervision (Research, clinical, teaching, leadership)"
+_STRAY_GOAL = f"{_GOALS_LABEL} — Catalogued the marigold quartzite herbarium"
+
+
+def _output_line_tokens(*lines):
+    return [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in lines]
+
+
+def test_a_template_label_cell_is_no_verbatim_piece():
+    line = f"{_GOALS_LABEL} | Shorter zeolite clinic waits"
+    assert record_pieces(line) == [_squash_text(" Shorter zeolite clinic waits")]
+    assert len(_entry_pieces(line)) == 2  # whole-entry checks keep the label piece (#744)
+
+
+def test_a_template_label_cell_does_not_vouch_for_an_unrendered_record():
+    line = f"{_GOALS_LABEL} | Shorter zeolite clinic waits for nasturtium patients"
+    assert _record_rendered(line, _squash_text(_STRAY_GOAL),
+                            _output_line_tokens(_STRAY_GOAL)) is False
+    rendered = "Goals: Shorter zeolite clinic waits for nasturtium patients"
+    assert _record_rendered(line, _squash_text(rendered),
+                            _output_line_tokens(rendered)) is True
+
+
+def test_a_short_answer_under_a_template_label_is_unverifiable():
+    """The label's 5 tokens no longer outvote the answer's 1, so the line
+    matches no stray copy of the label and is None, not rendered."""
+    line = f"{_SUPERVISION_LABEL} | Leadership"
+    stray = f"{_SUPERVISION_LABEL} — Lead"
+    assert _record_rendered(line, _squash_text(stray), _output_line_tokens(stray)) is None
+
+
+def test_record_chunks_drop_only_template_label_cells():
+    plain = "Basalt Obsidian Feldspar | Hyacinth Delphinium"
+    assert record_chunks(plain) == [plain, "Basalt Obsidian Feldspar ", " Hyacinth Delphinium"]
+    labelled = f"{_GOALS_LABEL} | Hyacinth Delphinium"
+    assert record_chunks(labelled) == [" Hyacinth Delphinium"]
+    assert record_chunks(f"{_GOALS_LABEL} | {_SUPERVISION_LABEL}") == []
+
+
+def test_answers_to_different_labels_need_not_share_one_output_line():
+    """A5IZ6Q shape: a grant form row carries the PI name and the role, each
+    under its own label; stage 6 renders them as two table rows. Once the
+    labels stop vouching, the answers are judged one by one (each too thin to
+    verify), not as one joined line that no single output row holds."""
+    line = ("Name of Principal Investigator: | Quillon Marbury\tYour role*\toversight"
+            "\tYour percent (%) effort:\t1%")
+    page = ["Name of Principal Investigator: | Quillon Marbury", "Your role: | oversight",
+            "Your percent (%) effort: | 1%"]
+    haystack = _squash_text("\n".join(page))
+    assert _record_rendered(line, haystack, _output_line_tokens(*page)) is None
 
 
 def _squash_text(text):
