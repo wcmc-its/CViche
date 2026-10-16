@@ -531,6 +531,14 @@ LINT_COPY = {
         "gives, such as a department, a platform, a parent university or a second hospital, "
         "or it reads \"Unknown\" where the CV names a place.",
         "Copy the full institution name from the source CV into the flagged row."),
+    # Proposed with #534, not yet approved: the wording of the section_lost
+    # and classified_unrendered rows above, narrowed to one section's table.
+    "renderer_row_missing": LintCopy(
+        "Entries missing from a table",
+        "Entries that belong in one of this CV's tables (honors, memberships, mentees or "
+        "extramural service) were given to that table but have no row in the finished "
+        "document, and are not in the Appendix either.",
+        "Copy the listed entries from the source CV into the named section."),
     "cross_entry_value": LintCopy(
         "Value from another entry",
         "A date, amount, effort, grant number, role or name on this entry is not in its own "

@@ -49,6 +49,7 @@ from unified_pipeline.stage6.render_check import (
     segment_already_rendered,
     segment_held_by_fields,
 )
+from unified_pipeline.stage6.row_receipts import LOST_TEXT_CHARS
 from unified_pipeline.stage6.sections.appendix import (
     _TRUNCATION_MARKER,
     other_entry_line_tokens,
@@ -874,6 +875,46 @@ def lint_stage6_warnings(report: dict) -> list[dict]:
             "stage6_render_warnings", severity,
             f"stage 6 self-check: {w.get('message', '')}",
             [str(e)[:100] for e in (w.get("evidence") or [])[:3]]))
+    return findings
+
+
+def _dedup_dropped_texts(report: dict) -> set[str]:
+    """The whitespace-normalised text of every entry stage 6's dedup dropped,
+    cut to the length a row receipt keeps (`LOST_TEXT_CHARS`)."""
+    return {" ".join(str(d.get("dropped_text") or "").split())[:LOST_TEXT_CHARS]
+            for d in report.get("dedup_decisions", [])}
+
+
+def lint_renderer_row_receipts(report: dict) -> list[dict]:
+    """One WARN per section that was handed an entry it wrote no row for
+    (#534): the entry has no row or paragraph left in the document, is not
+    in the Appendix, and no dedup decision dropped it. Reads the
+    render-warnings sidecar's `row_receipts`, which stage 6 builds by
+    bookkeeping (`stage6/row_receipts.py`), not by searching the docx --
+    so a row written and later wiped (#454, GNONHA) counts as lost, and a
+    tracked-change or reformatted row still counts as written.
+
+    Only receipts stage 6 marks `linted` are read: the other sections do not
+    record every row they write yet, so their `lost` lists are not evidence.
+    A sidecar from a build that predates receipts has no key and yields
+    nothing."""
+    dropped = _dedup_dropped_texts(report)
+    findings = []
+    for receipt in report.get("row_receipts", []):
+        if not receipt.get("linted"):
+            continue
+        lost = [e for e in receipt.get("lost", [])
+                if " ".join(str(e.get("text") or "").split()) not in dropped]
+        if not lost:
+            continue
+        section = receipt.get("section", "?")
+        findings.append(_finding(
+            "renderer_row_missing", "WARN",
+            f"{section}: {len(lost)} of {receipt.get('given', '?')} entries handed to the "
+            f"renderer have no row in the document, the Appendix or a dedup decision "
+            f"(#534)",
+            [f"{e.get('code', '')} {e.get('element_idx_start')}: {str(e.get('text', ''))[:80]}"
+             for e in lost[:5]]))
     return findings
 
 

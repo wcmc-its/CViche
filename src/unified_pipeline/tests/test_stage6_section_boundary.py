@@ -317,6 +317,7 @@ def test_write_render_warnings_sidecar_writes_expected_json(tmp_path):
         "document_uid": "TESTAA",
         "warnings": [{"check": "x"}],
         "dedup_decisions": [{"code": "A"}],
+        "row_receipts": [],
     }
 
 
@@ -598,3 +599,43 @@ def test_each_dispatched_section_logs_a_progress_bar_line(tmp_path, caplog, prog
     total = seen[0][1]
     assert total > 1
     assert seen == [(n, total) for n in range(1, total + 1)]
+
+
+def test_534_a_section_never_leaves_its_receipt_cursor_behind():
+    """A renderer marks the entry it is on (`begin_entry`) and never ends it;
+    `_render_section` ends it, so a row written after the section -- by
+    another section's writer that records against the cursor -- is not
+    credited to that entry. Holds on the raise path too."""
+    entry = {"taxonomy_code": "H", "element_idx_start": 1, "text": "Pretend Award"}
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    table = gen.doc.add_table(rows=1, cols=1)
+
+    def _raise_after_marking():
+        gen._row_receipts.begin_entry(entry)
+        raise RuntimeError("boom")
+
+    gen._render_section("honors", lambda: gen._row_receipts.begin_entry(entry))
+    gen._row_receipts.wrote(table.add_row()._tr)
+    gen._render_section("honors", _raise_after_marking)
+    gen._row_receipts.wrote(table.add_row()._tr)
+    receipt, = gen._row_receipts.receipts({"honors": [entry]})
+    assert [lost.element_idx_start for lost in receipt.lost] == [1]
+
+
+def test_534_an_entry_the_appendix_holds_is_not_lost_on_the_receipt(tmp_path):
+    """A failed section's entry falls to the Appendix (#842): the honors
+    receipt counts it given, not written, and not lost."""
+    gen = _new_generator()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    gen._fill_honors = _boom
+    entries = [_personal_data_entry(),
+               {"text": "HONORS_TOKEN_534 Some Award", "taxonomy_code": "H",
+                "extracted_fields": {}, "element_idx_start": 1}]
+    _render(gen, tmp_path, entries)
+    receipt, = [r for r in _sidecar(tmp_path)["row_receipts"] if r["section"] == "honors"]
+    assert (receipt["given"], receipt["written"], receipt["elsewhere"], receipt["lost"]) == (
+        1, 0, 1, [])

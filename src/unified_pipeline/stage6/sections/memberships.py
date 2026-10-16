@@ -702,6 +702,7 @@ class MembershipsSection:
             # Skip table header entries
             if _is_source_header_row(fields, original_text):
                 self._section_failures.append(_header_skip_warning(entry, fields))
+                self._row_receipts.set_aside(entry)
                 if self.verbose:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
@@ -712,6 +713,7 @@ class MembershipsSection:
                 # its organization (a congregation). A type or dates left in
                 # the fields would still describe the withheld item, so no row
                 # renders; the withheld-data notice says why.
+                self._row_receipts.set_aside(entry)
                 continue
 
             # Check if this entry contains multiple memberships (newline- or,
@@ -771,6 +773,7 @@ class MembershipsSection:
                     "date; no row rendered",
                     entry.get('element_idx_start', '?'),
                 )
+                self._row_receipts.set_aside(entry)
                 continue
 
             if fallback_fired:

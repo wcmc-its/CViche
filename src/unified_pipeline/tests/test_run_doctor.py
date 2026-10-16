@@ -83,6 +83,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_pubmed_title_truncated,
     lint_python_repr_in_output,
     lint_record_date_shift,
+    lint_renderer_row_receipts,
     lint_research_summary_call_failed,
     lint_section_lost,
     lint_segmentation,
@@ -2522,6 +2523,40 @@ def test_stage6_warnings_reemitted_as_warn():
 
 def test_stage6_warnings_quiet_on_clean_sidecar():
     assert lint_stage6_warnings({"warnings": [], "dedup_decisions": []}) == []
+
+
+def _receipt(section, lost, linted=True, given=9):
+    return {"section": section, "linted": linted, "given": given,
+            "written": given - len(lost), "lost": lost}
+
+
+def _lost(idx, text, code="Q1"):
+    return {"code": code, "element_idx_start": idx, "text": text}
+
+
+def test_534_row_receipt_lint_warns_per_section_with_lost_entries():
+    """GNONHA's Q1 table (#534): 9 given, the rows wiped -- one WARN naming
+    the section and the count, with each lost entry as evidence."""
+    report = {"warnings": [], "dedup_decisions": [], "row_receipts": [
+        _receipt("service", [_lost(241, "Imaginary Society, Treasurer"),
+                             _lost(263, "Fictional Board, Chair")]),
+        _receipt("honors", []),
+    ]}
+    finding, = lint_renderer_row_receipts(report)
+    assert finding["lint"] == "renderer_row_missing"
+    assert finding["severity"] == "WARN"
+    assert finding["message"].startswith("service: 2 of 9 entries")
+    assert finding["evidence"] == ["Q1 241: Imaginary Society, Treasurer",
+                                   "Q1 263: Fictional Board, Chair"]
+
+
+def test_534_row_receipt_lint_skips_unlinted_sections_dedup_drops_and_old_sidecars():
+    report = {"warnings": [], "row_receipts": [
+        _receipt("presentations", [_lost(1, "A talk", "R")], linted=False),
+        _receipt("honors", [_lost(2, "Pretend   Award,  2014", "H")]),
+    ], "dedup_decisions": [{"dropped_text": "Pretend Award, 2014", "code": "H"}]}
+    assert lint_renderer_row_receipts(report) == []
+    assert lint_renderer_row_receipts({"warnings": [], "dedup_decisions": []}) == []
 
 
 def test_stage6_warnings_reemits_appendix_diversion_with_code_and_count():
@@ -5875,14 +5910,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (79), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (80), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 77
+    assert len(payload["findings"]) == 78
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
