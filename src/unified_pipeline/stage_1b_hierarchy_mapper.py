@@ -18,6 +18,7 @@ Output: Hierarchy with element indices (the "fenceposts" for sections)
 import bisect
 import json
 import re
+import string
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -125,10 +126,16 @@ def _strip_separator_rules(line: str) -> str:
 _RUN_IN_GAP = re.compile(r"\s\s")
 
 
-# A word that carries content: two or more letters in a row. A one-letter
-# or numeric enumerator ("3", "b", "a)", "n/a") is not one, so "b education 3"
-# keeps its match (#1848).
+# A word that carries content: two or more letters in a row. A one-letter,
+# numeric or Roman-numeral enumerator ("3", "b", "a)", "n/a", "iv.") is not
+# one, so "b education 3" and "iv. research support" keep their match (#1848).
 _CONTENT_WORD = re.compile(r"[a-z]{2,}")
+_ROMAN_NUMERAL = re.compile(r"[ivxl]+")
+
+
+def _is_content_word(word: str) -> bool:
+    core = word.strip(string.punctuation)
+    return bool(_CONTENT_WORD.search(core)) and not _ROMAN_NUMERAL.fullmatch(core)
 
 
 def _is_mid_line_word(expected_header: str, para_text: str) -> bool:
@@ -142,8 +149,8 @@ def _is_mid_line_word(expected_header: str, para_text: str) -> bool:
     words = para_text.split()
     return any(
         word == expected_header
-        and any(_CONTENT_WORD.search(w) for w in words[:pos])
-        and any(_CONTENT_WORD.search(w) for w in words[pos + 1:])
+        and any(map(_is_content_word, words[:pos]))
+        and any(map(_is_content_word, words[pos + 1:]))
         for pos, word in enumerate(words)
     )
 

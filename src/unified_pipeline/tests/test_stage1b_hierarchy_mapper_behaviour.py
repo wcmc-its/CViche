@@ -192,6 +192,8 @@ def test_is_header_match_ignores_a_trailing_underscore_rule():
     ("research", "graduate research mentor"),
     ("research", "role: research mentor"),
     ("publications", "member: publications committee"),
+    ("research", "(grad) research mentor"),          # punctuation on the earlier word
+    ("research", "fellow's research mentor"),
 ])
 def test_is_header_match_refuses_a_one_word_header_between_content_words(header, para):
     # #1848 (CMTQDR 110, HVLDGS, Denckla): the word sits inside a record line,
@@ -208,6 +210,11 @@ def test_is_header_match_refuses_a_one_word_header_between_content_words(header,
     ("books", "b books n/a"),          # one-letter enumerator, "n/a" after
     ("bibliography", "s bibliography"),
     ("awards", "awards and honors"),
+    ("education", "10 education 12"),   # multi-digit numbers are not content
+    ("research", "2010 research award"),
+    ("teaching", "ii. teaching activities"),  # a Roman-numeral enumerator
+    ("research", "iv. research support"),
+    ("research", "(iv) research support"),
 ])
 def test_is_header_match_keeps_a_one_word_header_that_opens_or_closes_the_line(header, para):
     # The #1848 refusal is only for a word with content on BOTH sides: the
