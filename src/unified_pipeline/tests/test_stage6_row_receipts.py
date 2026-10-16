@@ -140,3 +140,15 @@ def test_a_table_row_index_matches_a_derived_copy_too():
     ledger.wrote(table.add_row()._tr, {**source, "taxonomy_code": "Q3"})
     assert _counts(_only(ledger.receipts({"service": [source]}))) == (1, 1, 0, 0)
     assert ledger.receipts({"service": [_entry("96.4")]})[0].lost[0].element_idx_start == "96.4"
+
+
+def test_534_end_entry_stops_crediting_the_marked_entry():
+    """After `end_entry`, a row written without an entry belongs to no one,
+    so the entry whose own row is gone stays lost."""
+    entry, table = _entry(1), _table()
+    ledger = _ledger()
+    ledger.begin_entry(entry)
+    ledger.end_entry()
+    ledger.wrote(table.add_row()._tr)
+    receipt = _only(ledger.receipts({"honors": [entry]}))
+    assert [lost.element_idx_start for lost in receipt.lost] == [1]

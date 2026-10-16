@@ -1079,6 +1079,7 @@ class ServiceSection:
                 else:
                     # Single entry without extracted fields - use raw text
                     self._add_extramural_row(table, original_text, '', '')
+        self._row_receipts.end_entry()  # a later extramural row is not the last entry's (#534)
 
     def _parse_extramural_leadership_lines(self, table, lines: list[str]) -> None:
         """Parse multiple extramural leadership lines and add rows.

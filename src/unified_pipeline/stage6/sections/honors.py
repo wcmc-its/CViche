@@ -1462,6 +1462,7 @@ class HonorsSection:
                 self._row_receipts.set_aside(entry)
             for record in records:
                 self._add_honors_row(table, record)
+        self._row_receipts.end_entry()  # a later honors row is not the last entry's (#534)
 
     def _add_honors_row(self, table: Table, record: HonorRecord) -> None:
         """Add a single row to the honors table.

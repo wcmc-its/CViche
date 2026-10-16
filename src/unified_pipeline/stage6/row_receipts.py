@@ -20,9 +20,10 @@ Recording happens in two places. `_add_entry_comments` is the shared hook
 that most renderers already call with the entry for the row they just wrote,
 so it records with the entry in hand. Renderers that write rows without that
 hook (honors, the Q service tables) mark the entry they are on with
-`begin_entry`, and their row writers record against it. The generator ends
-the cursor after every section, so a row written outside an entry loop is
-never attributed to a stale entry.
+`begin_entry`, and their row writers record against it. Each such renderer
+calls `end_entry` when its loop ends, and the generator also ends the cursor
+after every section, so a row written outside an entry loop is never
+attributed to a stale entry.
 
 The lint over these receipts lives in the doctor (`doctor/lints/render.py`,
 `lint_renderer_row_receipts`); this module only produces them. No docx
@@ -165,6 +166,12 @@ class RowReceiptLedger:
     def begin_entry(self, entry: Mapping[str, object]) -> None:
         """Rows written from here on belong to `entry`."""
         self._cursor = entry
+
+    def end_entry(self) -> None:
+        """Rows written from here on belong to no entry, until the next
+        `begin_entry`: a renderer calls it when its entry loop ends, so a
+        later row in the same section is not credited to the last entry."""
+        self._cursor = None
 
     def wrote(self, element: _Element, entry: Mapping[str, object] | None = None) -> None:
         """Record that `element` (a `w:tr` or `w:p`) renders `entry`, or the

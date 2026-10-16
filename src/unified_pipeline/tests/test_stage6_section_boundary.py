@@ -623,6 +623,22 @@ def test_534_a_section_never_leaves_its_receipt_cursor_behind():
     assert [lost.element_idx_start for lost in receipt.lost] == [1]
 
 
+def test_534_a_dedup_dropped_twin_is_never_on_a_receipt(tmp_path):
+    """Dedup runs before `generate` snapshots what each section is given, so
+    of two identical honors entries only the kept one is given -- which is
+    why no dedup decision may excuse a lost entry in the doctor lint."""
+    gen = _new_generator()
+    twin = {"text": "2014 Pretend Award, Imaginary Society", "taxonomy_code": "H",
+            "extracted_fields": {"award_name": "Pretend Award",
+                                 "granting_body": "Imaginary Society", "date": "2014"}}
+    _render(gen, tmp_path, [_personal_data_entry(), {**twin, "element_idx_start": 1},
+                            {**twin, "element_idx_start": 2}])
+    sidecar = _sidecar(tmp_path)
+    assert [d["code"] for d in sidecar["dedup_decisions"]] == ["H"]
+    receipt, = [r for r in sidecar["row_receipts"] if r["section"] == "honors"]
+    assert (receipt["given"], receipt["written"], receipt["lost"]) == (1, 1, [])
+
+
 def test_534_an_entry_the_appendix_holds_is_not_lost_on_the_receipt(tmp_path):
     """A failed section's entry falls to the Appendix (#842): the honors
     receipt counts it given, not written, and not lost."""

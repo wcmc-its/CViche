@@ -842,3 +842,25 @@ def test_534_an_entry_the_header_check_skips_is_lost_on_the_receipt():
     receipt, = gen._row_receipts.receipts({"honors": [skipped, written, empty, withheld]})
     assert (receipt.given, receipt.written) == (4, 1)
     assert [lost.element_idx_start for lost in receipt.lost] == [90]
+
+
+def test_534_a_row_written_after_the_honors_loop_is_not_the_last_entrys():
+    """The honors loop ends its receipt cursor: a row added after it is not
+    credited to the last entry, so when that entry's own row is removed the
+    entry is lost, not vouched for by a row that is not its own."""
+    from unified_pipeline.stage6.sections.honors import HonorRecord
+
+    entry = _h_entry("2018 Teaching Award, Example University", award_name="Teaching Award",
+                     granting_body="Example University", date="2018")
+    entry["element_idx_start"] = 5
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("H. HONORS AND AWARDS")
+    table = gen.doc.add_table(rows=1, cols=3)
+    gen._row_receipts.begin_section("honors")
+    gen._fill_honors([entry])
+    gen._add_honors_row(table, HonorRecord(award="Later Row", organization="", date=""))
+    entry_row = table.rows[1]._tr
+    entry_row.getparent().remove(entry_row)
+    receipt, = gen._row_receipts.receipts({"honors": [entry]})
+    assert [lost.element_idx_start for lost in receipt.lost] == [5]

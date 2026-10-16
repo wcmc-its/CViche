@@ -2575,13 +2575,25 @@ def test_534_row_receipt_lint_warns_per_section_with_lost_entries():
                                    "Q1 263: Fictional Board, Chair"]
 
 
-def test_534_row_receipt_lint_skips_unlinted_sections_dedup_drops_and_old_sidecars():
-    report = {"warnings": [], "row_receipts": [
+def test_534_row_receipt_lint_skips_unlinted_sections_and_old_sidecars():
+    report = {"warnings": [], "dedup_decisions": [], "row_receipts": [
         _receipt("presentations", [_lost(1, "A talk", "R")], linted=False),
-        _receipt("honors", [_lost(2, "Pretend   Award,  2014", "H")]),
-    ], "dedup_decisions": [{"dropped_text": "Pretend Award, 2014", "code": "H"}]}
+    ]}
     assert lint_renderer_row_receipts(report) == []
     assert lint_renderer_row_receipts({"warnings": [], "dedup_decisions": []}) == []
+
+
+def test_534_row_receipt_lint_reports_a_lost_kept_twin_whose_text_dedup_dropped():
+    """Dedup runs before stage 6 snapshots what a section is given, so the
+    dropped twin is never on a receipt. A lost entry whose text equals a
+    decision's `dropped_text` is the twin dedup KEPT (CKDDEG N3B's shape),
+    and its loss is real: the decision does not excuse it."""
+    report = {"warnings": [], "row_receipts": [
+        _receipt("mentoring", [_lost(7, "Pretend Mentee M.D.", "N3B")]),
+    ], "dedup_decisions": [{"dropped_text": "Pretend Mentee M.D.",
+                            "kept_text": "Pretend Mentee M.D.", "code": "N3B"}]}
+    finding, = lint_renderer_row_receipts(report)
+    assert finding["evidence"] == ["N3B 7: Pretend Mentee M.D."]
 
 
 def test_stage6_warnings_reemits_appendix_diversion_with_code_and_count():

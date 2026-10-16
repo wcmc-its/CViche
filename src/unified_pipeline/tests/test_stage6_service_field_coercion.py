@@ -1368,3 +1368,25 @@ def test_534_a_table_cleared_after_it_was_filled_is_reported_lost(tmp_path):
     finding, = [f for f in lint_renderer_row_receipts(sidecar)
                 if f["message"].startswith("service:")]
     assert finding["severity"] == "WARN"
+
+
+def test_534_a_row_written_after_the_extramural_loop_is_not_the_last_entrys():
+    """The Q1 loop ends its receipt cursor: a row added after it is not
+    credited to the last entry, so when that entry's own row is removed the
+    entry is lost, not vouched for by a row that is not its own."""
+    entry = {"text": "2010-2012 Imaginary Society, Treasurer", "taxonomy_code": "Q1",
+             "element_idx_start": 5,
+             "extracted_fields": {"organization": "Imaginary Society", "role": "Treasurer",
+                                  "start_date": "2010", "end_date": "2012"}}
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph().add_run("Leadership in Extramural Organizations").bold = True
+    table = gen.doc.add_table(rows=1, cols=3)
+    gen._row_receipts.begin_section("service")
+    gen._fill_extramural_leadership([entry])
+    assert [r.cells[0].text for r in table.rows[1:]] == ["Imaginary Society"]
+    gen._add_extramural_row(table, "Later Row", "", "")
+    entry_row = table.rows[1]._tr
+    entry_row.getparent().remove(entry_row)
+    receipt, = gen._row_receipts.receipts({"service": [entry]})
+    assert [lost.element_idx_start for lost in receipt.lost] == [5]
