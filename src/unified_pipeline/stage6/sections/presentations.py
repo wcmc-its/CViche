@@ -177,13 +177,13 @@ _TALK_DATE_KEYS = ('year', 'date', 'start_date')
 # S8's, for an abstract a hierarchy mismatch moved here (#1570, YUYVIG
 # SQMWHM 1047 rendered without its meeting).
 _TALK_EVENT_KEYS = ('event_name', 'conference_name')
+_TALK_END_DATE_KEY = 'end_date'
+_NONE_STRING = 'none'
 
 
 def _talk_event_value(fields: Mapping) -> object:
     """The first filled `_TALK_EVENT_KEYS` value, as stored, else ''."""
     return next((fields[key] for key in _TALK_EVENT_KEYS if fields.get(key)), '')
-_TALK_END_DATE_KEY = 'end_date'
-_NONE_STRING = 'none'
 
 
 def _date_field(fields: dict, key: str) -> str | Mapping:

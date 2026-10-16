@@ -121,7 +121,7 @@ def _book_trailer_parts(pub: ResolvedPublication) -> list[str]:
         year_pages = f"{year_pages}:{pub.pages}" if year_pages else pub.pages
     if year_pages:
         trailer = f"{trailer}; {year_pages}"
-    return [trailer + "."]
+    return [trailer.rstrip('.') + "."]
 
 
 def _is_meeting(pub: ResolvedPublication) -> bool:
@@ -146,10 +146,13 @@ def _meeting_trailer_parts(pub: ResolvedPublication) -> list[str]:
     the same whichever path rendered it.
 
     No volume, issue or pages: the S8 schema has none, and a record carrying
-    them with a journal takes the journal trailer instead.
+    them with a journal takes the journal trailer instead. The closing period
+    is the renderer's, so a last part that already ends in one ("Washington,
+    D.C.") keeps a single period, as the title does.
     """
-    return ["; ".join(part for part in (pub.conference_name, pub.year, pub.location)
-                      if part) + "."]
+    trailer = "; ".join(part for part in (pub.conference_name, pub.year, pub.location)
+                        if part)
+    return [trailer.rstrip('.') + "."]
 
 
 def _identifier_parts(pub: ResolvedPublication) -> list[str]:

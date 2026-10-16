@@ -378,6 +378,42 @@ def test_fallback_s8_entry_omits_only_the_part_it_lacks(dropped, expected):
     assert citation == expected
 
 
+@pytest.mark.parametrize('field,value,expected', [
+    ('location', 'Washington, D.C.',
+     '9. A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; '
+     'Washington, D.C.'),
+    ('location', 'Johns Hopkins Univ.',
+     '9. A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; '
+     'Johns Hopkins Univ.'),
+    ('location', 'Larchmere, ZZ...',
+     '9. A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; '
+     'Larchmere, ZZ.'),
+])
+def test_fallback_s8_trailer_ending_in_a_period_does_not_double_it(
+        field, value, expected):
+    """The renderer owns the trailer's closing period, as it owns the
+    title's: a place that already ends in one must not render "D.C..".
+    The verifier's $0 A/B over the 895 stored 5d artifacts found 17 S-code
+    fallback lines ending in ".." (IEUPKK 321 "Washington D.C..")."""
+    fields = dict(_S8_MEETING_FIELDS, **{field: value})
+
+    citation, _, _ = _format_citation(_entry(fields), 9)
+
+    assert citation == expected
+
+
+def test_fallback_s8_trailer_without_location_ending_in_a_period():
+    """With no place, the meeting name is the last part and gets the same
+    single period."""
+    fields = dict(_S8_MEETING_FIELDS, conference_name='Larks Soc.')
+    del fields['location']
+    del fields['year']
+
+    citation, _, _ = _format_citation(_entry(fields), 10)
+
+    assert citation == '10. A Talk on Larks. Larks Soc.'
+
+
 def test_fallback_meeting_with_a_journal_keeps_the_journal_shape():
     """An abstract PubMed matched to a journal supplement renders as the
     article it is: the journal owns the source line, unchanged by #1570."""
