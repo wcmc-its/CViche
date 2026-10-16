@@ -383,7 +383,7 @@ _NESTED_DATES_CODE = 'B1'
 _STAGE5_ENTRY_KEYS = frozenset({
     'enriched_fields', 'enrichment_data', 'enrichment_rejected',
     'enrichment_source', 'enrichment_status', 'institution_enrichment',
-    'in_press_note', 'in_press_superseded'})
+    'in_press_note', 'in_press_superseded', 'crossref_match'})
 
 # Render-warning record for a record list that was not fanned out (#1187).
 REJECTED_LIST_CHECK = 'fan_out_record_list_rejected'
