@@ -2686,6 +2686,119 @@ def lint_citation_field_dropped(stage4: dict,
     return findings
 
 
+# Lint 14aw, group_credit_dropped (#1661; NECRGC AOJEQD-01, QVAQGQ-10): a
+# source byline that credits a group, a consortium or a study team, and a
+# rendered citation that prints no such credit. owner_missing_from_citation
+# cannot see it when the CV never names the owner, because the group is the
+# credit: AOJEQD 1004 ("..., Hammer S, HVTN 505 Protocol Team.") rendered
+# with the eleven people and no team, and QVAQGQ 221 ("..., Kunisaki K et al.
+# COPDGene Investigators:") rendered as "et al.". The byline is read off the
+# source text, not stage 4's `authors`, so a group stage 4 garbled ("Team
+# H5P") or dropped is still judged.
+
+#: A word naming a collective author. "Study" and "Trial" are not: a byline
+#: credit carries one of these after them ("ACTG 285 Study Team").
+_GROUP_AUTHOR_WORD_RE = re.compile(
+    r"\b(?:groups?|teams?|investigators?|consorti(?:um|a)|networks?|collaborators?"
+    r"|collaborati(?:ve|on)|boards?|committees?|task\s+force|alliance)\b", re.IGNORECASE)
+
+#: Punctuation between two credits of a byline. A parenthesis is removed
+#: before the split: "<group> Investigators (<owner>, site PI)" is one credit,
+#: and the owner in it is owner_missing_from_citation's to judge.
+_BYLINE_CREDIT_SPLIT_RE = re.compile(r"[,;:.]")
+_PARENTHESIS_RE = re.compile(r"\([^)]*\)")
+#: A Word field code the source text keeps from a pasted link ('TODAY Study
+#: Group. HYPERLINK "https://..." Title'), with its switches ('\\l "..."'):
+#: removed before the split, since the link's own punctuation would cut it
+#: into pieces that read as credits.
+_FIELD_CODE_RE = re.compile(r'\bhyperlink\b(?:\s*(?:\\[a-z]\s*)?"[^"]*")*', re.IGNORECASE)
+#: A year before the title: the text is not one citation's byline. It is a
+#: talk led by its date, or several citations stage 4 kept as one entry.
+_BYLINE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+#: The words that lead from the last person into a group inside one credit
+#: ("Schooley RT and the ACTG 285 Study Team", "on behalf of the DUET-2 study
+#: group", "for the ..."): the group starts after the last of them.
+_GROUP_LEAD_RE = re.compile(
+    r"^.*\b(?:and\s+the|on\s+behalf\s+of(?:\s+the)?|for\s+the|et\s+al)\b\s*", re.IGNORECASE)
+
+#: A credit word: letters or digits, so "ACTG 184" keeps its number.
+_GROUP_CREDIT_WORD_RE = re.compile(r"[^\W_]+")
+#: Words a rendered credit may drop or reword without losing the group.
+_GROUP_CREDIT_STOPWORDS = frozenset({"and", "the", "of", "for", "on", "behalf", "in"})
+
+#: The most words a group credit has. A longer piece of text before the
+#: title is not a byline credit: a lead sentence, or a title the source
+#: wrote before the stage-4 title's own words.
+GROUP_CREDIT_MAX_WORDS = 8
+
+
+def _credit_words(text: str) -> frozenset[str]:
+    """The words of `text` a group credit is matched by, lowercased, without
+    stopwords, a word over three letters without a final "s" ("Study Teams"
+    and "Study Team" are one credit)."""
+    words = _GROUP_CREDIT_WORD_RE.findall(norm(text))
+    return frozenset(word[:-1] if len(word) > 3 and word.endswith("s") else word
+                     for word in words if word not in _GROUP_CREDIT_STOPWORDS)
+
+
+def _source_byline(citation: RenderedCitation) -> str | None:
+    """The source text before stage 4's title, or None when the source does
+    not hold the title's first CITATION_TITLE_LEAD_WORDS words: there is no
+    telling where its byline ends."""
+    source = norm(citation.source)
+    lead = " ".join(norm(citation.title).split()[:CITATION_TITLE_LEAD_WORDS])
+    title_at = source.find(lead) if lead else -1
+    return source[:title_at] if title_at > 0 else None
+
+
+def _group_credits(citation: RenderedCitation) -> list[str]:
+    """The group credits in the source byline: each credit (`_BYLINE_CREDIT_
+    SPLIT_RE`) naming a collective author, from the words that lead into it
+    on, of at most GROUP_CREDIT_MAX_WORDS words. A byline holding a year
+    (`_BYLINE_YEAR_RE`) is not judged."""
+    byline = _source_byline(citation)
+    if byline is None or _BYLINE_YEAR_RE.search(byline):
+        return []
+    byline = _PARENTHESIS_RE.sub(" ", _FIELD_CODE_RE.sub(" ", byline))
+    credits = []
+    for piece in _BYLINE_CREDIT_SPLIT_RE.split(byline):
+        credit = _GROUP_LEAD_RE.sub("", piece).strip()
+        if (_GROUP_AUTHOR_WORD_RE.search(credit)
+                and len(credit.split()) <= GROUP_CREDIT_MAX_WORDS):
+            credits.append(credit)
+    return credits
+
+
+def lint_group_credit_dropped(stage4: dict,
+                              blocks: list[tuple[str, str]]) -> list[dict]:
+    """One finding per rendered citation whose source byline credits a group
+    (`_group_credits`) and whose own bibliography line does not hold every
+    word of that credit (`_credit_words`), wherever in the line: a PubMed
+    rebuild moves the group after the title ("... zidovudine. The ACTG 184
+    Protocol Team."). A citation that also lost the owner is
+    owner_missing_from_citation's WARN, not reported again here. WARN when
+    the source names the CV owner nowhere (`_owner_credit`), so the group was
+    their only credit; INFO when it does, or the run has no owner surname."""
+    owner = _owner_surname_words(stage4)
+    findings = []
+    for citation in _rendered_citations(stage4, blocks):
+        line_words = _credit_words(citation.line)
+        dropped = [credit for credit in _group_credits(citation)
+                   if not _credit_words(credit) <= line_words]
+        if not dropped or (owner and _owner_missing_message(citation, owner)):
+            continue
+        sole = bool(owner) and _owner_credit(citation, owner) is None
+        findings.append(_finding(
+            "group_credit_dropped", "WARN" if sole else "INFO",
+            f"entry {citation.element_idx} ({citation.code}): the source byline "
+            f"credits {', '.join(repr(credit) for credit in dropped)}, and the "
+            f"rendered citation does not"
+            + (", so nothing in it credits the CV owner" if sole else ""),
+            [citation.line[:CITATION_EVIDENCE_CHARS]]))
+    return findings
+
+
 # --------------------------------------------------------------------------
 # Lint 14p: a rendered date that reads wrong (EBYSBC E9/E21).
 #

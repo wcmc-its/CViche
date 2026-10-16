@@ -529,6 +529,20 @@ def _address_is_home(text: str, pii_fragments: list[str], phone: _JsonValue) -> 
             and not any(word in text for word in _WORK_PLACE_WORDS))
 
 
+def _heading_names_home(entry: dict, text: str) -> bool:
+    """Whether the entry's nearest stage-1b heading names home ("Home
+    Address", "Residence") and its own text names no workplace
+    (`_WORK_PLACE_WORDS`). Stage 1b can lift a "Home Address:" label out of
+    the text into the hierarchy, leaving the entry with only a town, ZIP and
+    phone; read as unlabelled, they filled Office address and Office
+    telephone (#1222, NECRGC WYNUCX-01). The entry's own workplace word
+    outranks the heading."""
+    hierarchy = entry.get('hierarchy') or []
+    if not hierarchy or not _HOME_LABEL.search(str(hierarchy[-1]).lower()):
+        return False
+    return not any(word in text for word in _WORK_PLACE_WORDS)
+
+
 #: A birth word in an entry's text or its withheld fragments: "Born",
 #: "Date of Birth", "Birthplace", "DOB".
 _BIRTH_WORD_RE = re.compile(r'\b(?:born\b|birth|dob\b)', re.IGNORECASE)
@@ -634,7 +648,8 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     forcing the whole thing into whichever one the raw text happened to label
     (#442); a dict that names no slot is one address and is routed by the
     raw text, same as a string. A "Current Address" naming no workplace is
-    the home address (`_is_unlabelled_home_address`, #1426). A place of
+    the home address (`_is_unlabelled_home_address`, #1426), and so is an
+    entry under a home heading (`_heading_names_home`, #1222). A place of
     birth fills no slot: it is recorded on `withheld`, and SET_ASIDE makes
     the caller count the entry consumed, since the recovery pass would render its residual,
     the place (#1223, EBYSBC EQADVR-02). A value with no street, number or
@@ -649,6 +664,7 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
         return (home_address or _address_cell_text(address, 'home'),
                 office_address or _address_cell_text(address, 'office'), _AddressFate.ROUTED)
     if (_address_is_home(ctx.text, ctx.pii_fragments, ctx.phone)
+            or _heading_names_home(ctx.entry, ctx.text)
             or _is_unlabelled_home_address(ctx.text, _address_cell_text(address, 'office'))):
         return home_address or _address_cell_text(address, 'home'), office_address, _AddressFate.ROUTED
     if _address_is_birthplace(ctx.text, ctx.pii_fragments):
@@ -736,6 +752,7 @@ def _route_phone(phone: _JsonValue, text: str, pii_fragments: list[str], entry: 
     # Check if text contains multiple phone type labels
     has_mobile, has_home = _cell_and_home_signals(phone, routing_text, pii_fragments)
     has_work = 'office' in routing_text or 'work' in routing_text
+    has_home = has_home or _heading_names_home(entry, routing_text)
 
     if _labels_its_own_phone_slots(phone):
         # A structured phone names its own halves, so trust those

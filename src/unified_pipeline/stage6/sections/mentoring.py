@@ -689,6 +689,13 @@ def _plain_text(value: object) -> str:
     return ''
 
 
+# Off-schema key stage 4 puts a past mentee's accomplishment under ("First
+# authored an abstract"). No row read it, so the Project/Accomplishments cell
+# of 8 of the pilot JNATFN CV's 12 N3B entries was blank (#1245). It joins that
+# cell after the project, as its own line.
+_MENTEE_OUTCOME_KEY = 'outcome'
+
+
 def _with_site_extras(site_position: str, fields: Mapping[str, Any]) -> str:
     """`site_position` with the mentee's institution and advisor appended
     when stage 4 kept them under off-schema keys (`_SITE_EXTRA_KEYS`). A
@@ -741,7 +748,8 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     were extracted and then dropped. A bare N3 entry rendered as a mentee
     (#1574) carries the N3 schema's `thesis_title` and `narrative` instead:
     the thesis is the project, and the narrative (a program or scholarship
-    note) follows it, as the Appendix line it came from printed both.
+    note) follows it, as the Appendix line it came from printed both. A past
+    mentee's off-schema `outcome` (`_MENTEE_OUTCOME_KEY`) follows the project.
     """
     fields = entry.get('extracted_fields') or {}
 
@@ -755,6 +763,9 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
 
     project = _text(fields.get('research_focus') or fields.get('dissertation_title')
                     or fields.get('thesis_title'))
+    outcome = _plain_text(fields.get(_MENTEE_OUTCOME_KEY))
+    if outcome and outcome.casefold() not in project.casefold():
+        project = f"{project}\n{outcome}" if project else outcome
     mentee_awards = _text(fields.get('awards') or fields.get('funding_source')).strip()
     if mentee_awards and mentee_awards.casefold() not in project.casefold():
         project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"

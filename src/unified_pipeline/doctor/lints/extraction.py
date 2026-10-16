@@ -70,6 +70,7 @@ from unified_pipeline.stage4.coercion import (
     DATE_RANGE_TAXONOMY_CODES,
     GRANT_EFFORT_TAXONOMY_PREFIX,
     IDENTIFIER_TAXONOMY_CODES,
+    JOURNAL_LIST_TAXONOMY_CODES,
     find_single_closed_range,
 )
 from unified_pipeline.stage4.grounding import (
@@ -2680,12 +2681,18 @@ def _year_span(years: frozenset[str]) -> YearSpan | None:
     return YearSpan(int(min(years)), int(max(years))) if years else None
 
 
+def _split_records(fields: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """Each `stage4_records` child that is a mapping, or the record itself
+    when stage 4 did not split it."""
+    children = fields.get(STAGE4_RECORDS_KEY)
+    if isinstance(children, list) and children:
+        return [child for child in children if isinstance(child, Mapping)]
+    return [fields]
+
+
 def _record_spans(fields: Mapping[str, object]) -> tuple[YearSpan, ...]:
     """The record's year span, or each `stage4_records` child's."""
-    children = fields.get(STAGE4_RECORDS_KEY)
-    records = ([child for child in children if isinstance(child, Mapping)]
-               if isinstance(children, list) and children else [fields])
-    return tuple(span for span in map(_year_span, map(_years_of, records)) if span)
+    return tuple(span for span in map(_year_span, map(_years_of, _split_records(fields))) if span)
 
 
 def _record_words(fields: Mapping[str, object]) -> RecordWords:
@@ -4836,7 +4843,8 @@ def lint_cross_entry_value(stage4: dict, stage3b: dict | None = None) -> list[di
     number, the owner's grant role or a person's name -- that its own entry's
     text lacks and another entry of the same stage-4 call states (#1575).
     INFO, one finding per entry, naming each value and the entry it is from:
-    46% hand-checked precision (CEV-1) is under the 50% a WARN needs.
+    54% hand-checked precision (CEV-1, after #1840) is over the 50% a WARN
+    needs, but in-sample.
     Stage 3b, when present, gives the order stage 4 cut its batches in."""
     owner_words = _owner_person_words(stage4)
     findings = []
@@ -4853,4 +4861,128 @@ def lint_cross_entry_value(stage4: dict, stage3b: dict | None = None) -> list[di
                 f"entry {entry.element_idx} ({entry.code}): {named} -- its own text does not "
                 f"state it; another entry stage 4 extracted in the same call does",
                 [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- journal_name_joined -------------------------------------------------------
+#
+# A Q4C/Q4D record renders one row per `journal_name`, so a name that holds
+# two journals, or a journal and the owner's role on it, prints as one
+# journal. #1808 splits a name joined from separate tab cells inside stage 4;
+# what it cannot split still reaches the render: two journals whose column
+# separator was lost at ingest (#1414: IEUPKK/KUUKNJ 168-191, "A, B" in one
+# row), a comma list written in one source cell (RINASX 438, fifteen reviewed
+# journals in one row), and a role or section stage 4 left in the name
+# ("Journal of Clinical Pharmacology, Editorial Board"). Report-only.
+
+#: Words that name the owner's part on a journal, or a part of the journal,
+#: not a journal: "Editorial Board", "Associate Editor", "Board of Reviewing
+#: Editors", "(Elite Reviewer)", "Ad hoc", "Consultant Panel", "(... section)".
+#: Searched for, unlike stage 4's whole-cell `_ROLE_CELL_PATTERN`; a bare
+#: "Board" or "Review" is left out, since journal titles carry both
+#: ("American Board of ...", "Obesity Reviews"), and so is "Section" followed
+#: by a capital letter or a numeral, which is part of the title ("Acta
+#: Crystallographica Section E", "... Section IV").
+_JOURNAL_NAME_ROLE_RE = re.compile(
+    r"\b(?:(?:editorial|advisory|review)(?:\s+review)?\s+board|editors?|reviewers?"
+    r"|referees?|ad\s+hoc|section(?!\s+(?-i:[A-Z]|[IVXLC]+)\b|\s+\d+\b)|panel)\b",
+    re.IGNORECASE)
+#: Separators no single journal title holds: a semicolon, or a run of two or
+#: more spaces where a lost column separator left them.
+_JOURNAL_LIST_SEPARATOR_RE = re.compile(r"\s*;\s*|\s{2,}")
+#: A comma can sit inside one title ("Annals of Otology, Rhinology, and
+#: Laryngology"), so a comma joins two journals only between two title-cased
+#: runs of at least this many words: a one-word piece ("..., Biology,
+#: Physics", "..., USA", "JACC, ...") reads as part of one title.
+JOURNAL_RUN_MIN_WORDS = 2
+#: After a single title, a last comma piece that opens with "The" continues
+#: it ("Child Abuse and Neglect, The International Journal"). After two or
+#: more, it is the list's last journal ("..., Chemistry, The Journal of
+#: Immunology").
+_JOURNAL_TITLE_CONTINUATION_RE = re.compile(r"the\b", re.IGNORECASE)
+#: A comma piece that opens with "Official" is a title's subtitle ("Revista
+#: ..., Official Journal of the Spanish Society of Psychiatry"), never a
+#: second journal.
+_JOURNAL_SUBTITLE_RE = re.compile(r"official\b", re.IGNORECASE)
+#: A last comma piece naming the publisher is not a second journal
+#: ("Advances in Medicine, Hindawi Publishing", "..., Elsevier").
+_JOURNAL_PUBLISHER_RE = re.compile(r"\b(?:publishing|publishers?|press|elsevier)\b", re.IGNORECASE)
+#: A "X, Y and Z" whose last piece is at most this many words, after one
+#: title, is that title's subject list ("Journal of Neurology, Neurosurgery and
+#: Psychiatry", "Global Health, Epidemiology & Genomics").
+JOURNAL_SUBJECT_LIST_MAX_WORDS = 4
+_JOURNAL_SUBJECT_AND_RE = re.compile(r"\s(?:and|&)\s", re.IGNORECASE)
+
+
+def _title_cased(piece: str) -> bool:
+    return piece[:1].isupper()
+
+
+def _journal_title_run(piece: str) -> bool:
+    return _title_cased(piece) and len(piece.split()) >= JOURNAL_RUN_MIN_WORDS
+
+
+def _comma_joins_journals(name: str) -> bool:
+    """Whether a comma in `name` joins two title-cased journal-name runs,
+    not the parts of one title that has commas in it."""
+    pieces = [piece.strip() for piece in name.split(",")]
+    *head, last = [piece for piece in pieces
+                   if piece and not _JOURNAL_SUBTITLE_RE.match(piece)] or [""]
+    runs_before_last = sum(map(_journal_title_run, head))
+    if runs_before_last >= 2:
+        return True  # already a list, whatever its last piece is
+    if runs_before_last == 0 or not _journal_title_run(last):
+        return False
+    # One title, then one more title-cased run: a second journal, unless the
+    # run goes on with the first title or names its publisher.
+    if _JOURNAL_TITLE_CONTINUATION_RE.match(last) or _JOURNAL_PUBLISHER_RE.search(last):
+        return False
+    return not (_JOURNAL_SUBJECT_AND_RE.search(last)
+                and len(last.split()) <= JOURNAL_SUBJECT_LIST_MAX_WORDS)
+
+
+def journal_name_shapes(name: str) -> list[str]:
+    """What makes `name` more than one journal's name, each shape once:
+    'tab', 'role word' (the matched words) or 'joined' (two journals)."""
+    shapes = []
+    if _ENTRY_PART_SEPARATOR in name:
+        shapes.append("tab")
+    role = _JOURNAL_NAME_ROLE_RE.search(name)
+    if role:
+        shapes.append(f"role word '{role.group(0)}'")
+    # The separators are read on the name as written, since cutting out a
+    # parenthetical ("Bio Medical Central (BMC) Psychiatry") leaves two spaces.
+    listed = [piece for piece in _JOURNAL_LIST_SEPARATOR_RE.split(name.strip()) if piece.strip()]
+    if (sum(map(_title_cased, listed)) >= 2
+            or _comma_joins_journals(_PARENTHETICAL_RE.sub(" ", name))):
+        shapes.append("joined")
+    return shapes
+
+
+def _journal_names(fields: Mapping[str, object]) -> list[str]:
+    """The `journal_name` of the record, or of each `stage4_records` child."""
+    return [name for record in _split_records(fields)
+            if isinstance(name := record.get(_BARE_NAME_FIELD), str) and name.strip()]
+
+
+def lint_journal_name_joined(stage4: dict) -> list[dict]:
+    """A Q4C/Q4D `journal_name` that holds a tab, a role or section word, or
+    two journals joined by a semicolon, a double space or a comma between two
+    title-cased runs (#1414). Each renders as one journal row. WARN, one
+    finding per entry, naming each offending name and its shapes."""
+    findings = []
+    for entry in _fields_entries(stage4):
+        if entry.code not in JOURNAL_LIST_TAXONOMY_CODES:
+            continue
+        flagged = [(name, shapes) for name in _journal_names(entry.fields)
+                   if (shapes := journal_name_shapes(name))]
+        if not flagged:
+            continue
+        named = "; ".join(f"'{name[:FIELD_EVIDENCE_VALUE_CHARS]}' ({', '.join(shapes)})"
+                          for name, shapes in flagged)
+        findings.append(_finding(
+            "journal_name_joined", "WARN",
+            f"entry {entry.element_idx} ({entry.code}): journal_name {named} -- "
+            f"renders as one journal row",
+            [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
