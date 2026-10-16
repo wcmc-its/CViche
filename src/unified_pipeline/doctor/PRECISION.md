@@ -491,6 +491,14 @@ Overall 29 of 32 true (91%), 3 partial, 0 false. The shapes were written from th
 
 Not caught, and why: a 5b city where the source names none (YUYVIG DYLJXC-02, the generic-hospital residencies): nothing is dropped, and #1791 now withholds those in stage 5b. A name 5b expanded wrongly (ECXGAT-10, "LUMC" read as Leiden): the lint reads words lost, not words added. A doubled location (SPINJC-11, LTTYWI-17): stage 6's location join, not the name. A fan-out child that keeps its parent's name (XELRLZ 23): the name is right for the first record. CULCSV entry 7 (two hospitals in two cities) renders both cities on the current code. A D3 `organization` with a street address and no 5b lookup (SXPHOG Meijer rows, IEUPKK 362): no stage-5b name to compare.
 
+| RRR-1 | 2026-10-16 | `fix/534-renderer-row-receipts` on origin/dev `1c388a65` (`lint_renderer_row_receipts` over each run's render-warnings sidecar, from a fresh `scripts/render_gate.py` render of the branch with no source document) | 166 runs: the 126-run wave-1 farm (`~/worktrees/wave1-corpus/farm`, 82 to 110 distinct CVs) and the 40 NECRGC runs (`~/worktrees/cviche-autopsy-necrgc/analysis`, 40 distinct) | the NECRGC autopsy's two #534 rows (GNONHA Q1, CKDDEG H 90) | #534 |
+
+RRR-1 adds `renderer_row_missing`, #534's doctor half. Stage 6 now keeps a row receipt (`stage6/row_receipts.py`): each row or paragraph a section writes is recorded against the entry it renders, and an entry counts as written only when a row a body section wrote for it is still in the document when the render ends. The lint reads the receipts in the sidecar and warns, once per section, about each entry handed to that section that nothing in the document renders, that was not set aside on purpose, and that no dedup decision dropped. Only the sections whose every write path records a receipt are linted: Honors, Memberships, Mentoring and Service (Q1 to Q4D). The other sections still write their receipt to the sidecar, marked `linted: false`.
+
+On the 166 runs, the four linted sections were given 10,215 entries. The lint fires once: CKDDEG, Honors, H 90 ("2014 Earl Benditt Award, North American Vascular Biology Organization"). It is true, checked against the docx's raw `document.xml` (with `w:ins`): no Honors row holds the award, and the only other mention is a different record, an R talk titled "Earl Benditt Award Lecture". The cause is #1930: the honors header check reads the space-separated line as a column-header row. So the lint is 1 / 1 true, and it catches the autopsy's CKDDEG row. GNONHA's Q1 wipe (#454) is fixed on dev, so it no longer fires on the stored GNONHA run. Its shape is pinned by `test_534_a_table_cleared_after_it_was_filled_is_reported_lost`, which bypasses the #454 backstop and sees the lint fire.
+
+A lost entry is matched by identity or by `element_idx_start`: an int, or for a table row the string stage 2 writes ("96.3"). Before the string form was read, 58 Service entries on 16 runs (Opresko, Bostwick and web207 table rows that `_route_q2_entries` copies) read as lost. They render; the copy carries the source's index.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -524,6 +532,7 @@ Not caught, and why: a 5b city where the source names none (YUYVIG DYLJXC-02, th
 | `institution_cleaned_name`: `address_in_cell` | 2 | 2 | none | 2 / 2 hand-checked (100%), held out | not matched (SXPHOG-17 by reading) | 0 by index | INST-1 |
 | `identical_rendered_rows` | 11 | 11 | none | 21 / 21 hand-checked (100%) | 1 / 11 (9%) | 1 | IDR |
 | `record_boundary` | 5 | 5 | none | 23 / 23 hand-checked (100%) | 4 / 5 (80%) | 1 | X6-grant |
+| `renderer_row_missing` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | RRR-1 |
 | `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
 | `owner_attribution`: `mentee_under_non_mentee_heading` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (0%) | 0 | YUY-OA |
 | `owner_attribution`: `citation_without_owner` | 54 | 1 | none | 13 / 54 hand-checked (24%): WARN 1 / 1, INFO 12 / 53 | 4 / 37 on labelled runs (11%) | 4 | YUY-OA |

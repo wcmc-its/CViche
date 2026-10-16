@@ -185,6 +185,7 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     withheld_comment_text,
 )
 from unified_pipeline.stage6.record_dedup import deduplicate_record_groups
+from unified_pipeline.stage6.row_receipts import DiscardingLedger, RowReceiptLedger, SectionReceipt
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     _COLUMN_HEADER_WORDS,
     _IDENTIFYING_FIELDS,
@@ -1542,6 +1543,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     Generates WCM Word documents from enriched CV data.
     """
 
+    # Which entry each written row renders (#534). `__init__` and every
+    # `generate` set a fresh one; this default only serves an instance built
+    # without `__init__`, and records nothing.
+    _row_receipts: RowReceiptLedger = DiscardingLedger()
+
     def __init__(self, template_path: str | None = None, verbose: bool = True,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
@@ -1654,6 +1660,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # anchor must never resolve to one of them (#548): an ALL-CAPS bullet
         # (the writer does not bold, but the shape test accepts bold too) would pass `_find_header_paragraph`'s shape test.
         self._bullet_paras = set()
+        # Which entry each written row renders (#534); fresh per render.
+        self._row_receipts = RowReceiptLedger()
         self.stats = {
             'sections_filled': 0,
             'entries_inserted': 0,
@@ -2183,6 +2191,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # instance can render more than once, and a failure from a prior
         # render must never leak into this one's sidecar.
         self._section_failures, self._failed_section_codes, self._declined_grant_entries = [], set(), []
+        self._row_receipts = RowReceiptLedger()
         # An A entry's ORCID iD for the S0 renderer, set by _fill_personal_data (#817).
         self._a_researcher_profiles = []
 
@@ -2270,6 +2279,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('presentations', frozenset({'R'}), lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
             ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
+        # What each section is handed, snapshotted before any renders (#534).
+        given_by_section = {label: [e for code in sorted(codes) for e in entries_by_code.get(code, [])]
+                            for label, codes, _ in section_dispatch}
         # In dispatch order; research_support returns the T goals rows it placed in a grant table (#958).
         section_results = {label: self._render_section(label, fn, codes, progress=(done, len(section_dispatch)))
                            for done, (label, codes, fn) in enumerate(section_dispatch, 1)}
@@ -2366,26 +2378,32 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         all_warnings = self._section_failures + validation_issues + self._llm_fallback_warnings()
         _log_validation_warnings(all_warnings)
 
-        self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
+        self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions,
+                                            self._row_receipts.receipts(given_by_section))
 
         if self.verbose:
-            logger.info(f"\n{'='*60}")
-            logger.info("Generation Summary")
-            logger.info(f"{'='*60}")
-            logger.info(f"  Entries inserted: {self.stats['entries_inserted']}")
-            logger.info(f"  Tables populated: {self.stats['tables_populated']}")
-            logger.info(f"  Target names bolded: {self.stats['target_names_bolded']}")
-            logger.info(f"  Track changes added: {self.stats['track_changes_added']}")
-            logger.info(f"  Comments added: {self.stats['comments_added']}")
-            if self.stats.get('overflow_bullets_added', 0) > 0:
-                logger.info(f"  Overflow bullets added: {self.stats['overflow_bullets_added']}")
-            if self.stats.get('overflow_to_appendix', 0) > 0:
-                logger.info(f"  Overflow to appendix: {self.stats['overflow_to_appendix']}")
-            if self.stats.get('appendix_segments_reconsidered', 0) > 0:
-                logger.info(f"  Appendix segments reconsidered: {self.stats['appendix_segments_reconsidered']}")
-            logger.info(f"\nSaved to: {output_path}")
+            self._log_generation_summary(output_path)
 
         return output_path
+
+    def _log_generation_summary(self, output_path: str) -> None:
+        """The verbose end-of-render stats block, lifted out of `generate`
+        unchanged (#534, to hold §3.2a's excess-lines ratchet)."""
+        logger.info(f"\n{'='*60}")
+        logger.info("Generation Summary")
+        logger.info(f"{'='*60}")
+        logger.info(f"  Entries inserted: {self.stats['entries_inserted']}")
+        logger.info(f"  Tables populated: {self.stats['tables_populated']}")
+        logger.info(f"  Target names bolded: {self.stats['target_names_bolded']}")
+        logger.info(f"  Track changes added: {self.stats['track_changes_added']}")
+        logger.info(f"  Comments added: {self.stats['comments_added']}")
+        if self.stats.get('overflow_bullets_added', 0) > 0:
+            logger.info(f"  Overflow bullets added: {self.stats['overflow_bullets_added']}")
+        if self.stats.get('overflow_to_appendix', 0) > 0:
+            logger.info(f"  Overflow to appendix: {self.stats['overflow_to_appendix']}")
+        if self.stats.get('appendix_segments_reconsidered', 0) > 0:
+            logger.info(f"  Appendix segments reconsidered: {self.stats['appendix_segments_reconsidered']}")
+        logger.info(f"\nSaved to: {output_path}")
 
     def _geo_scope_failure_warnings(self) -> list[dict[str, Any]]:
         """One sidecar WARN when any geographic-scope classification failed
@@ -2450,6 +2468,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         once the section finishes, failed or not -- the parsed progress-bar
         contract (orchestrator PROGRESS_PATTERNS).
         """
+        self._row_receipts.begin_section(label)  # rows written now are this section's (#534)
         try:
             return fn()
         except Exception as exc:
@@ -2467,17 +2486,20 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             self._failed_section_codes |= codes
             return None
         finally:
+            self._row_receipts.end_section()  # nor does its entry cursor (#534)
             if progress is not None:
                 logger.info("[%d/%d] sections rendered", *progress)
 
     def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
-                                        warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]]) -> None:
+                                        warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]],
+                                        row_receipts: Sequence[SectionReceipt] = ()) -> None:
         """Persist the self-check + section-failure warnings and dedup
         decision trail next to the docx so the run doctor can re-emit them
         (#227/#228) — until now they only ever reached the pod log. Written
         even when empty, so the doctor can tell a clean run from a
         pre-sidecar build. Fail-soft: a sidecar failure must never fail the
-        render.
+        render. `row_receipts` is each section's given/written count (#534),
+        which `lint_renderer_row_receipts` reads.
         """
         try:
             report_path = Path(output_path).with_name(
@@ -2486,6 +2508,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "document_uid": document_uid,
                 "warnings": warnings,
                 "dedup_decisions": dedup_decisions,
+                "row_receipts": [receipt.to_json() for receipt in row_receipts],
             }, indent=2))
         except Exception:
             logger.exception("could not write render-warnings sidecar")
@@ -4353,7 +4376,11 @@ Now analyze the text above:"""
         below reads it; comments themselves still go on `para`. Left None by
         every caller that renders an entry as a single paragraph, and the
         check then measures `para` exactly as it always did.
+
+        Every caller passes the entry `para` renders, so this is also where
+        that row's receipt is recorded (#534).
         """
+        self._row_receipts.wrote(para._p, entry)
         comments_to_add = []
 
         # Classification reasoning from Stage 2/3

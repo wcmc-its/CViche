@@ -877,6 +877,41 @@ def lint_stage6_warnings(report: dict) -> list[dict]:
     return findings
 
 
+def lint_renderer_row_receipts(report: dict) -> list[dict]:
+    """One WARN per section that was handed an entry it wrote no row for
+    (#534): the entry has no row or paragraph left in the document and is
+    not in the Appendix. Reads the
+    render-warnings sidecar's `row_receipts`, which stage 6 builds by
+    bookkeeping (`stage6/row_receipts.py`), not by searching the docx --
+    so a row written and later wiped (#454, GNONHA) counts as lost, and a
+    tracked-change or reformatted row still counts as written.
+
+    Only receipts stage 6 marks `linted` are read: the other sections do not
+    record every row they write yet, so their `lost` lists are not evidence.
+    A sidecar from a build that predates receipts has no key and yields
+    nothing.
+
+    No dedup decision can excuse a lost entry: stage 6 dedups before it
+    snapshots what each section is given, so a dropped twin is never in a
+    receipt. The only given entry a decision's `dropped_text` can match is
+    the twin dedup KEPT, and that one's loss is real."""
+    findings = []
+    for receipt in report.get("row_receipts", []):
+        if not receipt.get("linted"):
+            continue
+        lost = receipt.get("lost", [])
+        if not lost:
+            continue
+        section = receipt.get("section", "?")
+        findings.append(_finding(
+            "renderer_row_missing", "WARN",
+            f"{section}: {len(lost)} of {receipt.get('given', '?')} entries handed to the "
+            f"renderer have no row in the document or the Appendix (#534)",
+            [f"{e.get('code', '')} {e.get('element_idx_start')}: {str(e.get('text', ''))[:80]}"
+             for e in lost[:5]]))
+    return findings
+
+
 # One legitimate pipe can appear in a title; a cluster of single-pipe bullets
 # under one section is the fused-cell fallback shape (19 under K4 on 2Q1_ZQ).
 PIPE_LEAK_MIN_SEPS = 2
