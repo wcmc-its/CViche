@@ -143,6 +143,9 @@ UNIVERSAL_CODES = {"T", "A"}  # T (misc) and A (personal info)
 POSITION_CODE_PREFIX = "D"
 FUNDING_CODE_PREFIX = "M2"
 
+# Sub-type letters an expected code drops to reach its stem ("M2A" -> "M2").
+SUBTYPE_SUFFIXES = "ABC"
+
 
 def is_position_code(code: str) -> bool:
     """True for the position family (D, D1, D2, D3)."""
@@ -200,8 +203,10 @@ def code_matches_expected(
         # Prefix match (e.g., "S" matches "S1")
         if len(expected) == 1 and taxonomy_code.startswith(expected):
             return True
-        # taxonomy_code is prefix of expected (e.g., "M2" matches "M2A")
-        if taxonomy_code.startswith(expected.rstrip('ABC')):
+        # taxonomy_code is prefix of expected (e.g., "M2" matches "M2A"). A
+        # one-letter "C" strips to '', which every code starts with (#1912).
+        expected_stem = expected.rstrip(SUBTYPE_SUFFIXES)
+        if expected_stem and taxonomy_code.startswith(expected_stem):
             return True
         # Handle M2/M2A/M2B/M2C family
         if expected in ("M2", "M2A", "M2B", "M2C") and taxonomy_code.startswith("M2"):
