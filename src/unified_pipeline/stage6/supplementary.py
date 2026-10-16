@@ -19,8 +19,8 @@ Where it goes, by what the entry's rendered line is:
   empty bullet;
 - a table row (an appointment, a grant table, a service row): a row
   spanning the table, marked as a deleted row, after the entry's row -- or,
-  for a label/value table holding one grant, at the table's end. Accepting
-  removes the row.
+  for a label/value table holding one grant or one mentee, at the table's
+  end. Accepting removes the row.
 
 Only a fragment `_record_rendered` verifies absent is written, never one
 that is merely reformatted, so a section that already prints its entry's
@@ -50,7 +50,8 @@ D1-D3 duties (owner decision 2026-10-08, lifting the D exclusion for this
 variant). Then one code family at a time, each the one a stage-6 replay
 measured losing the most prose of those left: Q1-Q2 extramural service next
 (the remit, the meeting or the session title behind a committee or panel
-row), then H honors (an award's criteria, or the paper it was for). The
+row), then H honors (an award's criteria, or the paper it was for), then
+N3A-N3B mentees (the mentee's awards and outputs, the owner's part). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -113,10 +114,21 @@ SERVICE_CODES = frozenset({'Q1', 'Q2'})
 #: row. An entry rerouted to another code before rendering is grouped under
 #: that code and follows its rule; one rerouted into H follows this one.
 HONOR_CODES = frozenset({'H'})
+#: Mentees, current (N3A) and past (N3B): the owner's part in the mentoring,
+#: the mentee's programme, awards and outputs. The mentoring section writes
+#: each named mentee as a six-row "Label:" table of its own, so a sub-point
+#: is a deleted row at the end of that table (`_insert_row_after`), and only
+#: that table's rows can anchor it (`_own_mentee_rows`): an entry naming no
+#: mentee renders as a line of its whole text and gets none. The section
+#: files a mentee under either heading by its dates, not its code, so both
+#: codes are placed over both headings' spans. An entry rerouted to another
+#: code before rendering is grouped under that code and follows its rule (N1
+#: is excluded); one rerouted into N3A or N3B follows this one.
+MENTEE_CODES = frozenset({'N3A', 'N3B'})
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
-                  | HONOR_CODES)
+                  | HONOR_CODES | MENTEE_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -150,6 +162,13 @@ _FRAGMENT_SEPARATORS = ('\t', '\n', '|')
 #: A table whose every first cell ends with this is a label/value table (one
 #: grant): its sub-point goes at the table's end, not after the anchor row.
 _LABEL_SUFFIX = ':'
+
+#: A mentee table's name row label (`mentoring._mentee_table_rows`), and the
+#: field keys its value is read from, in `_normalize_mentee`'s order. Two
+#: mentees' tables often share every other row's words ("Site/Position: PhD
+#: student"), so the name row is what says whose table a row is.
+_MENTEE_NAME_LABEL = 'Name:'
+_MENTEE_NAME_FIELDS = ('name', 'mentee_name')
 
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
@@ -310,6 +329,31 @@ def _in_tables(anchor: AnchorCandidate, tables: Collection[BaseOxmlElement]) -> 
                for table in tables)
 
 
+def _section_candidates(code: str, candidates: list[AnchorCandidate],
+                        spans: Mapping[str, SectionSpan]) -> list[AnchorCandidate]:
+    """The candidates in `code`'s section, or for a mentee code in either
+    mentee heading's: the section files a mentee by its dates, not its code."""
+    codes = MENTEE_CODES if code in MENTEE_CODES else {code}
+    held = [spans[c] for c in codes if c in spans]
+    return [c for c in candidates if any(span.holds(c) for span in held)]
+
+
+def _own_mentee_rows(entry: Mapping, candidates: list[AnchorCandidate]) -> list[AnchorCandidate]:
+    """The candidates that are rows of a table whose name row names the
+    entry's mentee (`_MENTEE_NAME_LABEL`): none when the entry names no
+    mentee or no table names it."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return []
+    name = next((fields[key] for key in _MENTEE_NAME_FIELDS if fields.get(key)), '')
+    if not name:
+        return []
+    name_row = ' '.join(f'{_MENTEE_NAME_LABEL} {name}'.split()).casefold()
+    tables = [table for c in candidates if c.text.casefold() == name_row
+              for table in c.paragraph._p.iterancestors(qn('w:tbl'))]
+    return [c for c in candidates if _in_tables(c, tables)]
+
+
 def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Haystack,
                    candidates: list[AnchorCandidate],
                    spans: Mapping[str, SectionSpan],
@@ -318,7 +362,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
     the first entry that carries it (fan-out children and dedup survivors
-    share their parent's text).
+    share their parent's text). A mentee's line must be a row of its own
+    table (`_own_mentee_rows`), under either mentee heading.
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -333,7 +378,7 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     for code in sorted(entries_by_code):
         if code not in SUBPOINT_CODES or code not in spans:
             continue
-        in_section = [c for c in candidates if spans[code].holds(c)]
+        in_section = _section_candidates(code, candidates, spans)
         for entry in entries_by_code[code]:
             if entry.get(PII_DROPPED_FIELDS_KEY):
                 continue
@@ -342,7 +387,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
                 continue
             anchor_tokens = _value_tokens(entry, code) or (
                 _tokens(entry.get('text') or '') - set().union(*(_tokens(f) for f in fragments)))
-            anchor = best_anchor(anchor_tokens, in_section)
+            in_scope = _own_mentee_rows(entry, in_section) if code in MENTEE_CODES else in_section
+            anchor = best_anchor(anchor_tokens, in_scope)
             if anchor is None:
                 continue
             offered.update(fragments)

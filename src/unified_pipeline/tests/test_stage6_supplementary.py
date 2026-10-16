@@ -63,9 +63,9 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_extramural_service_and_honors_only():
+def test_the_codes_are_teaching_grants_appointments_service_honors_and_mentees_only():
     assert sorted(sp.SUBPOINT_CODES) == ["D1", "D2", "D3", "H", "K1", "K2", "K3", "K4", "K5",
-                                         "M2A", "M2B", "M2C", "M2D", "Q1", "Q2"]
+                                         "M2A", "M2B", "M2C", "M2D", "N3A", "N3B", "Q1", "Q2"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -228,6 +228,58 @@ def test_plan_skips_an_entry_whose_line_is_a_row_of_an_excluded_table():
     assert sp.plan_subpoints(*args, excluded_tables=[excluded._tbl]) == []
     (planned,) = sp.plan_subpoints(*args, excluded_tables=[other._tbl])
     assert planned.anchor is in_excluded
+
+
+def _mentee_tables(*names):
+    """Anchor candidates of one two-row mentee table per name, each table at
+    the same level."""
+    doc = Document()
+    for name in names:
+        table = doc.add_table(rows=2, cols=2)
+        for row, (label, value) in zip(table.rows, [("Name:", name),
+                                                    ("Site/Position:", "Postdoctoral Associate")],
+                                       strict=True):
+            row.cells[0].text, row.cells[1].text = label, value
+    return list(sp.anchor_candidates(doc))
+
+
+def _postdoc(name="Ana Li"):
+    return _entry(f"{name}, Postdoctoral Associate\t{PROSE}", code="N3B", mentee_name=name,
+                  mentee_level="Postdoctoral Associate")
+
+
+def test_plan_places_a_mentee_only_in_the_table_naming_it():
+    # The first table's level row holds every token the entry renders: only
+    # its Name: row says it is another mentee's.
+    lines = _mentee_tables("Casey Sample", "Ana Li")
+    spans = {"N3B": sp.SectionSpan(0, None)}
+    (planned,) = sp.plan_subpoints({"N3B": [_postdoc()]}, _haystack(), lines, spans)
+    assert planned.anchor is lines[3]
+    # Stage 4's spacing is not the cell's: the row is read with its spaces collapsed.
+    (planned,) = sp.plan_subpoints({"N3B": [_postdoc(" Ana \n Li ")]}, _haystack(), lines, spans)
+    assert planned.anchor is lines[3]
+    for nobody in (_postdoc("Jordan Example"), {**_postdoc(), "extracted_fields": None}):
+        assert sp.plan_subpoints({"N3B": [nobody]}, _haystack(), lines, spans) == []
+
+
+def test_plan_places_a_mentee_naming_no_one_in_no_table():
+    # Not even one whose Name: row is blank.
+    lines = _mentee_tables("")
+    nameless = _postdoc()
+    del nameless["extracted_fields"]["mentee_name"]
+    assert sp.plan_subpoints({"N3B": [nameless]}, _haystack(), lines,
+                             {"N3B": sp.SectionSpan(0, None)}) == []
+
+
+def test_only_a_mentee_code_is_placed_over_both_mentee_headings():
+    # The section files a past mentee whose range is open under Current Mentees.
+    lines = _mentee_tables("Ana Li")
+    planned = sp.plan_subpoints({"N3B": [_postdoc()]}, _haystack(), lines,
+                                {"N3A": sp.SectionSpan(0, 5), "N3B": sp.SectionSpan(5, None)})
+    assert [p.anchor for p in planned] == [lines[1]]
+    line = _candidate("Associate Professor | Example University | 2010-2015", position=0)
+    assert sp.plan_subpoints({"D1": [_appointment()]}, _haystack(line.text), [line],
+                             {"N3A": sp.SectionSpan(0, 5), "D1": sp.SectionSpan(5, None)}) == []
 
 
 def test_section_span_bounds():
