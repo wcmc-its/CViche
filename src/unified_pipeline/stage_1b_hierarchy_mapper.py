@@ -18,6 +18,7 @@ Output: Hierarchy with element indices (the "fenceposts" for sections)
 import bisect
 import json
 import re
+import string
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -125,6 +126,35 @@ def _strip_separator_rules(line: str) -> str:
 _RUN_IN_GAP = re.compile(r"\s\s")
 
 
+# A word that carries content: two or more letters in a row. A one-letter,
+# numeric or Roman-numeral enumerator ("3", "b", "a)", "n/a", "iv.") is not
+# one, so "b education 3" and "iv. research support" keep their match (#1848).
+_CONTENT_WORD = re.compile(r"[a-z]{2,}")
+_ROMAN_NUMERAL = re.compile(r"[ivxl]+")
+
+
+def _is_content_word(word: str) -> bool:
+    core = word.strip(string.punctuation)
+    return bool(_CONTENT_WORD.search(core)) and not _ROMAN_NUMERAL.fullmatch(core)
+
+
+def _is_mid_line_word(expected_header: str, para_text: str) -> bool:
+    """True when a one-word header sits inside the line with a content word
+    on each side ("graduate research mentor" for "Research"). That is a
+    content line that happens to use the word, not the header's line: at
+    CMTQDR 110, 1a's invented "Research" H1 was placed on a D3 title line
+    and the next record inherited it (#1848). A header that opens or closes
+    the line ("books n/a", "faculty mentoring") is left to the length cap.
+    A header of several words never equals one word, so it is never refused."""
+    words = para_text.split()
+    return any(
+        word == expected_header
+        and any(map(_is_content_word, words[:pos]))
+        and any(map(_is_content_word, words[pos + 1:]))
+        for pos, word in enumerate(words)
+    )
+
+
 # Element types that can carry a header line (from extract_unified_elements).
 _HEADER_LINE_TYPES = ("paragraph", "table_header")
 
@@ -180,6 +210,8 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
         # In strict mode (sequence matching), only accept very short paragraphs
         # that are likely actual headers, not content paragraphs
         if strict:
+            if _is_mid_line_word(expected_header, para_text):
+                return False
             # Header should be short: no more than 3x the expected header length
             # This prevents "ASHA's continuing education program" from matching "education"
             if len(para_text) <= len(expected_header) * 3:
