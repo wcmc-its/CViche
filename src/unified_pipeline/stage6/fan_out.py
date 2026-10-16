@@ -372,12 +372,22 @@ _NO_TEXT_COVERAGE_CODES = frozenset({'B1'})
 # column. Without them two records of one journal with different spans
 # (OIEPQD XAYKXA entry 134) printed alike to `_repeated_rows`, and the earlier
 # span was dropped.
+# #1901: the start/end range `sections/honors.py` `_record_date` writes into
+# H's date cell when the schema's `date` does not win (`_h_writes_bound`).
+# Without them two records of one award with different spans (NECRGC EYTHNB
+# entry 164: "2007-2012, 2015-2018") printed alike, and the earlier span was
+# dropped.
 _RENDERED_DATE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'B1': frozenset({'dates_attended_start_date', 'dates_attended_end_date',
                      'start_date', 'end_date'}),
     'B2': frozenset({'start_date', 'end_date'}),
+    'H': frozenset({'start_date', 'end_date'}),
     'Q4D': frozenset({'start_date', 'end_date'}),
 })
+# The one code whose date cell shows its single date over a start/end range.
+_DATE_WINS_CODE = 'H'
+_DATE_WINS_KEYS = ('date', 'year')
+_START_KEY = 'start_date'
 _NESTED_DATES_KEY = 'dates_attended'
 # The one code whose section writes a nested or string `dates_attended`.
 _NESTED_DATES_CODE = 'B1'
@@ -395,7 +405,7 @@ _NESTED_DATES_CODE = 'B1'
 _STAGE5_ENTRY_KEYS = frozenset({
     'enriched_fields', 'enrichment_data', 'enrichment_rejected',
     'enrichment_source', 'enrichment_status', 'institution_enrichment',
-    'in_press_note', 'in_press_superseded', 'crossref_match'})
+    'in_press_note', 'in_press_superseded', 'crossref_match', 'citation_note'})
 
 # Render-warning record for a record list that was not fanned out (#1187).
 REJECTED_LIST_CHECK = 'fan_out_record_list_rejected'
@@ -557,15 +567,28 @@ def _is_written_date(code: str, key: str, value: object,
     """Whether the code's renderer writes this date field outside its
     `_RENDERED_FIELDS` (`_RENDERED_DATE_FIELDS`). B1's string
     `dates_attended` is written only when no flat or generic start/end is
-    there to build the range from (#1187)."""
+    there to build the range from (#1187); H's start/end only when its
+    `date` does not win (`_h_writes_bound`, #1901)."""
     bounds = _RENDERED_DATE_FIELDS.get(code, frozenset())
     if key in bounds:
-        return True
+        return code != _DATE_WINS_CODE or _h_writes_bound(key, fields)
     if code != _NESTED_DATES_CODE or key != _NESTED_DATES_KEY:
         return False
     if isinstance(value, Mapping):
         return True
     return isinstance(value, str) and not any(fields.get(k) for k in bounds)
+
+
+def _h_writes_bound(key: str, fields: Mapping[str, Any]) -> bool:
+    """Whether H's `honors._record_date` writes this start/end bound (#1901).
+    A `date` (or `year`) is the cell when a start sits beside it or no end
+    does; otherwise the cell is the range from the start, or from the date,
+    to the end. So a start is written only with no date, and an end unless
+    a date and a start are both there."""
+    dated = any(not _is_blank(fields.get(name)) for name in _DATE_WINS_KEYS)
+    if key == _START_KEY:
+        return not dated
+    return not (dated and not _is_blank(fields.get(_START_KEY)))
 
 
 def _fields_carry_text(entry: Mapping[str, Any],

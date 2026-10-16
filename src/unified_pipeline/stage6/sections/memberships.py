@@ -87,6 +87,7 @@ except ImportError as exc:
 
 from unified_pipeline.core.render_check import entry_lines
 
+from ..fan_out import is_split_record
 from ..formatting import (
     _set_cell_vertical_alignment,
     _set_font,
@@ -744,7 +745,14 @@ class MembershipsSection:
             #    entries on 1FRABQ and others) crosses the >2 threshold but
             #    must still resolve to one membership, not be misread as
             #    several.
-            memberships = _parse_multi_membership_entry(parts) if len(parts) > 2 else []
+            #
+            # A record fanned out of a multi-record entry (`is_split_record`)
+            # is ONE membership and is never line-parsed: the last of stage
+            # 4's records keeps the parent's whole text, every record's line,
+            # so parsing it rendered each sibling record a second time
+            # (#1715 CBNXND-04: 7 records, 13 rows).
+            memberships = (_parse_multi_membership_entry(parts)
+                           if len(parts) > 2 and not is_split_record(entry) else [])
             if len(memberships) > 1 or (memberships and len(lines) > 2):
                 for mem_type, org, dates in memberships:
                     # `_add_table_row` owns stats['entries_inserted'] -- do not
