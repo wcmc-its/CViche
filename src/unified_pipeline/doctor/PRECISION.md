@@ -398,6 +398,13 @@ CEV-1 adds `cross_entry_value`: a stage-4 value that its own entry's text lacks 
 
 Re-measured under #1840 (`fix/1840-grounding-fte-and-mistyped-year` on origin/dev `7e41cd29`), after `stage4/grounding.py`'s own-text reading began to accept an effort written as an FTE fraction and a year mistyped by one keystroke in a date shape: 24 findings on 19 files (18 uids). Read by hand: 13 true, 5 partial, 6 false, so 13 / 24 (54%). The first measurement, with origin/dev's reading, was 28 findings on 22 files (21 uids), 13 / 28 (46%); the 4 that went are the four false hits in that reading's own shapes (below), and none was added. 54% clears the 50% a WARN needs, but in-sample: every rule was written from these runs, and the four removed were removed because they were known to be false. The lint stays INFO until a held-out set is read.
 
+Held-out read, 2026-10-16 (origin/dev `99a11df6`, lint unchanged): every S3 run whose uid is not among the 392 above, 224 runs dated 2026-05-26 to 2026-10-14, each with stage 3b, none sharing a sha256 with the 400. As a control, the same code on the 400 still gives 24 findings on 18 uids. On the held-out runs: 18 findings on 12 uids, read by hand with the rules above: 4 true, 4 partial, 10 false, so **4 / 18 (22%)**. 8 / 18 (44%) with partials counted true. Pooled with the in-sample read: 17 / 42 (40%). The WARN bar is not met, and the lint stays INFO. The false hits fall into three kinds, none of them seen in-sample:
+- 7 are one record that stage 2 cut in two, so the "other entry" is the same record's other half (ASRNQM, OWSAZN, PZQJKL, ZGNARO, WLUZVM 842/864). Four of these come from tables that put one field or line per row.
+- 3 are a `pi_role` the lint missed because the words were reordered ("(Yale) Principal Investigator", RUPGMT 262/269/277).
+- 1 is a total that stage 4 correctly computed as the annual amount times the years (MQZMMA 171).
+
+The 4 partials are "Fall/Spring YYYY" rows whose source does not say which year the term ends (EKGTXD, PESCOB 205/206; the two look like one CV run twice). Any lint change written from these 18 makes them in-sample, so a promotion would need another held-out read after it.
+
 - True (13): UVZNIC 592 (603's dates, amount and effort, 594's and 603's "PI" for its "MPI") and 559 (573's mentee as a second record), VNUAHA 262 (end 2004 for its 2003-2006), VVRTUC 43 and 45 (a 1973 start for "July 2010 -"), web199 1120 and 1157 (5% for a stated 2.5%), 2054 66.16 (2011-2014 for 2010-2013), web205 139 (2015 for 2014), JNATFN 380 (2021 for 2022-2025, in two stored copies), web056 874 and web062 1022 (the owner, a stated PI, given the co-investigator or co-PI role the next grant states).
 - Partial (5): the value is not in the entry's text and another entry does state it, but the right value cannot be read off the source: ECXGAT 832 ("Feb. 21 - 24" with no event year), GJXIWD 168 (an end year cut to "202"), YYVHNN 39 (a garbled table row), web205 849 (a grant naming another PI and no role for the owner, given "Co-PI"), 976WPY 122 (a narrative paragraph dated from the next one).
 - False (6): five are one record that stage 2 cut in two, so the "other entry" is the same grant or mentee (QZWBKQ 899 and 900, web246 355, YIXQFB 2222, UJNBIT 296); `grant_boundary` and `record_boundary` are the lints for that cut. One is an entry whose text is "As above" (web065 65).
@@ -478,7 +485,7 @@ Not caught, and why: a 5b city where the source names none (YUYVIG DYLJXC-02, th
 | `citation_field_dropped`: `elision_dropped` | 8 | 0 | none | 15 / 15 hand-checked (100%) | 0 / 8 (0%) | 0 | X6-cite |
 | `classified_unrendered` | 1 | 0 | 0 / 0 / 1 | 0 / 1 (0%) | names text | 0 | M1 |
 | `contact_slot_lost` | 1 | 1 | 1 / 0 / 0 | 2 / 2 hand-checked (100%) | 1 / 1 (100%) | 1 | RCB-D |
-| `cross_entry_value` | 24 | 0 | none | 13 / 24 hand-checked (54%), 5 partial; in-sample | 5 / 12 on labelled runs (42%) | 4 | CEV-1 |
+| `cross_entry_value` | 24 | 0 | none | 13 / 24 hand-checked (54%), 5 partial, in-sample; held-out 4 / 18 (22%) | 5 / 12 on labelled runs (42%) | 4 | CEV-1 |
 | `date_only_lines` | 2 | 0 | none | none | names text | 0 | M1 |
 | `dedup_drops` | 14 | 7 | 2 / 2 / 4 | 2 / 8 (25%) | 3 / 14 (21%) | 3 | M1-dup |
 | `duplicate_passages` | 1 | 1 | none | none | names text | 0 | M1 |
