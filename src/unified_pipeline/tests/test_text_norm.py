@@ -8,6 +8,31 @@ def test_norm_folds_marks_whitespace_and_case():
     assert text_norm.norm(None) == ""
 
 
+def test_norm_folds_latin_greek_and_cyrillic_accents_only():
+    """#1916: a mark on a letter of another script is part of the letter."""
+    assert text_norm.norm("Müller") == text_norm.norm("Muller") == "muller"
+    assert text_norm.norm("ἄλφα") == "αλφα"  # Greek tonos and breathing
+    assert text_norm.norm("Йо") == "ио"  # Cyrillic breve
+    assert text_norm.norm("がか") != text_norm.norm("かか")  # Japanese dakuten
+    assert text_norm.norm("が") == "が"  # decomposed, then recomposed
+    assert text_norm.norm("क्ष") == "क्ष"  # Devanagari virama
+    assert text_norm.norm("שָׁלוֹם") == "שָׁלוֹם"  # Hebrew points
+    # Compatibility forms fold on purpose; a spacing accent's mark is dropped.
+    assert text_norm.norm("ﬁne ™ Ａ") == "fine tm a"
+    assert text_norm.norm("Rohe\u00b4") == "rohe "
+
+
+def test_text_helpers_read_none_as_empty_and_keep_falsy_values():
+    """#1916: `str(text or "")` turned 0 and False into ""."""
+    for helper in (text_norm.norm, text_norm.fold_quotes, text_norm.squash):
+        assert helper(None) == ""
+        assert helper("") == ""
+        assert helper(0) == "0"
+    assert text_norm.norm(False) == text_norm.squash(False) == "false"
+    assert text_norm.fold_quotes(False) == "False"
+    assert text_norm.norm(2016) == "2016"
+
+
 def test_squash_drops_all_whitespace():
     assert text_norm.squash(" A b\tC\n") == "abc"
 
@@ -19,6 +44,10 @@ def test_looks_like_record_needs_length_and_a_delimiter():
     assert not text_norm.looks_like_record("x" * 70)
     assert not text_norm.looks_like_record("a | b")
     assert not text_norm.looks_like_record("  " + "x" * 56 + " | y  ")  # 60 stripped
+    assert text_norm.RECORD_ROW_MIN_CHARS == 60
+    # A prefilter: a long delimited line of prose passes, a short record does not.
+    assert text_norm.looks_like_record("We met every week to read papers | and we wrote notes on all of them")
+    assert not text_norm.looks_like_record("Chair\t2010-2012")
 
 
 def test_tab_record_segments_returns_each_dated_part_of_a_tab_fused_line():
@@ -34,6 +63,22 @@ def test_tab_record_segments_returns_each_dated_part_of_a_tab_fused_line():
     assert text_norm.tab_record_segments(
         "Chair of the Wombat Panel 2006-2012\tVice Chair of the Other Panel 2012-Jun 2015"
     ) == ["Chair of the Wombat Panel 2006-2012", "Vice Chair of the Other Panel 2012-Jun 2015"]
+
+
+def test_date_range_matches_each_documented_format_whole():
+    """#1916: "5/2017-10/2020" matched as "2017-10", a fragment."""
+    for text in ("2009-2011", "1996-8", "5/2017-10/2020", "2012-Jun 2015", "2013-present",
+                 "2013 \u2013 Present", "07/01/2012-05/31/2014", "07/2019-02/21", "2010-to date"):
+        assert [m.group() for m in text_norm._DATE_RANGE_RE.finditer(f"Chair {text}, Board")] == [text]
+    for text in ("2064-71", "pp. 52(10):2064-71", "1998", "2010/2012", "5/2017"):
+        assert text_norm._DATE_RANGE_RE.search(text) is None, text
+
+
+def test_edge_date_range_prefers_the_range_at_the_start():
+    part = "2001-2003 Chair of the Quokka Board, then member 2004-2006"
+    assert text_norm._edge_date_range(part) == "2001-2003"
+    assert text_norm._edge_date_range("Chair of the Quokka Board, member 2004-2006") == "2004-2006"
+    assert text_norm._edge_date_range("A sentence that holds 2001-2003 in its middle part") is None
 
 
 def test_tab_record_segments_needs_two_dated_parts_with_words():
@@ -69,6 +114,47 @@ def test_tab_record_segments_joins_a_part_wrapped_inside_a_parenthesis():
     assert text_norm.tab_record_segments(
         "Chair of the Wombat Panel (Elected by\tthe members) 2006-2012\tVice Chair of the Other Panel 2012-2015"
     ) == ["Chair of the Wombat Panel (Elected by the members) 2006-2012", "Vice Chair of the Other Panel 2012-2015"]
+
+
+def test_tab_record_segments_keeps_a_list_item_with_its_own_parenthesis_apart():
+    """#1916: a part with a stray ")" ("b) ...") joined a closed part before it."""
+    assert text_norm._join_wrapped_parts(
+        ["a) Chair of the Wombat Panel 2006-2012", "b) Vice Chair of the Other Panel 2012-2015"]
+    ) == ["a) Chair of the Wombat Panel 2006-2012", "b) Vice Chair of the Other Panel 2012-2015"]
+    assert text_norm.tab_record_segments(
+        "a) Chair of the Wombat Panel 2006-2012\tb) Vice Chair of the Other Panel 2012-2015"
+    ) == ["a) Chair of the Wombat Panel 2006-2012", "b) Vice Chair of the Other Panel 2012-2015"]
+    # An open parenthesis still takes every part up to the one that closes it.
+    assert text_norm._join_wrapped_parts(["Chair (Elected by", "the", "members) 2006-2012", "x"]) == [
+        "Chair (Elected by the members) 2006-2012", "x"]
+
+
+def test_tab_record_segments_counts_month_year_ranges_whole():
+    # Same years, different months: two ranges, so two records. The old
+    # "2017-10" fragment read both as one.
+    assert text_norm.tab_record_segments(
+        "President of the Quokka Society 5/2017-10/2020\tPresident of the Wombat Society 6/2017-10/2020"
+    ) == ["President of the Quokka Society 5/2017-10/2020", "President of the Wombat Society 6/2017-10/2020"]
+
+
+def test_tab_record_segments_keeps_duplicate_parts_in_order():
+    line = ("Member of the Quokka Board 2001-2003\tChair of the Wombat Panel 2004-2006\t"
+            "Member of the Quokka Board 2001-2003")
+    assert text_norm.tab_record_segments(line) == [
+        "Member of the Quokka Board 2001-2003", "Chair of the Wombat Panel 2004-2006",
+        "Member of the Quokka Board 2001-2003"]
+
+
+def test_tab_record_segments_reads_words_of_any_script():
+    """#1916: the word test was ASCII-only."""
+    assert text_norm.tab_record_segments(
+        "Председатель комитета 2009-2011\tЧлен совета общества 2012-2015"
+    ) == ["Председатель комитета 2009-2011", "Член совета общества 2012-2015"]
+    # Words anywhere in the part count, not only next to the range: a record
+    # that reads "title, place | dates" is still a record.
+    assert text_norm.tab_record_segments(
+        "Attending Physician | 07/2002 – 06/2003\tAttending Physician & Director | 06/2003 – 12/2006"
+    ) == ["Attending Physician | 07/2002 – 06/2003", "Attending Physician & Director | 06/2003 – 12/2006"]
 
 
 def test_tab_record_segments_takes_a_range_at_the_start_or_end_of_a_part_only():
@@ -114,3 +200,14 @@ def test_is_placeholder_title_flags_only_brackets_the_source_lacks():
     assert not text_norm.is_placeholder_title("A study [of things]", "")
     assert not text_norm.is_placeholder_title("A study of things", "")
     assert not text_norm.is_placeholder_title(None, "")
+
+
+def test_is_placeholder_title_reads_the_source_by_whole_phrase():
+    """#1916: the source vouches for a bracketed title as written, or for its
+    words without the brackets as a whole phrase."""
+    assert text_norm.is_placeholder_title("[AUC]", "An auction of quokka art.")
+    assert not text_norm.is_placeholder_title("[AUC]", "28.[AUC]")
+    assert not text_norm.is_placeholder_title("[AUC]", "Quill A. AUC. J Imag Stud.")
+    assert not text_norm.is_placeholder_title("[Erratum]", "Quill A. Erratum: wombats. J Imag Stud.")
+    assert not text_norm.is_placeholder_title("[Ürn]", "Quill A. Urn. J Imag Stud.")
+    assert text_norm.is_placeholder_title("[]", "Quill A. J Imag Stud.")
