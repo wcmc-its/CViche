@@ -1055,11 +1055,13 @@ def test_call_llm_logs_every_call_option_the_handler_receives():
          patch("unified_pipeline.llm_client.log_prompt_before_call", return_value="0" * 12) as before, \
          patch("unified_pipeline.llm_client.log_prompt_response"):
         mock_get_client.return_value.converse.return_value = _make_bedrock_response()
-        call_llm("stage_2", [{"role": "user", "content": "hi"}])
+        call_llm("stage_2", [{"role": "user", "content": "hi"}],
+                 top_p=0.5, cancel_check=lambda: None)
 
     extra = before.call_args.kwargs["extra_parameters"]
     assert extra["enable_prompt_caching"] is True
     assert extra["retry_count"] == 2
+    assert extra["top_p"] == 0.5  # a pass-through kwarg the handler forwards
     assert "cancel_check" not in extra
 
 

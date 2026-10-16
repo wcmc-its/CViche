@@ -6,6 +6,7 @@ _log_dir() otherwise builds PROMPT_LOG_DIR / run_id directly from it. It also
 returns the ContextVar token so a caller can restore the previous value,
 which matters for worker-thread/task reuse.
 """
+import hashlib
 import json
 import os
 import re
@@ -95,6 +96,9 @@ def test_identical_prompts_in_the_same_second_get_separate_records(tmp_path, mon
     records = [json.loads(p.read_text()) for p in sorted(tmp_path.glob("*_stage_x_*[0-9a-f].json"))]
     assert sorted(r["log_id"] for r in records) == sorted(ids)
     assert records[0]["prompt_hash"] == records[1]["prompt_hash"]
+    expected = hashlib.md5(json.dumps([{"role": "user", "content": "same"}],
+                                      sort_keys=True).encode()).hexdigest()[:12]
+    assert records[0]["prompt_hash"] == expected
     assert len(list(tmp_path.glob("*_RESPONSE.json"))) == 2
     assert len(list(tmp_path.glob("*_READABLE.txt"))) == 2
 
@@ -166,6 +170,18 @@ def test_structured_content_and_extra_parameters_are_logged(tmp_path, monkeypatc
     readable = next(tmp_path.glob("*_READABLE.txt")).read_text()
     assert '"text": "part one"' in readable
     assert '"retry_count": 3' in readable
+
+
+def test_a_response_holding_a_non_json_value_is_still_logged(tmp_path, monkeypatch):
+    """A provider field such as a datetime must not cost the response record."""
+    from unified_pipeline.core import prompt_logger
+
+    monkeypatch.setattr(prompt_logger, "PROMPT_LOG_DIR", tmp_path)
+    when = prompt_logger.datetime(2026, 1, 2, 3, 4, 5)
+    prompt_logger.log_prompt_response("a" * 12, {"content": "r", "model": when}, "stage_x")
+
+    record = json.loads(next(tmp_path.glob("*_RESPONSE.json")).read_text())
+    assert record["response"]["model"] == str(when)
 
 
 def test_import_creates_no_directory(tmp_path):
