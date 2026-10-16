@@ -187,6 +187,7 @@ RELOCATED_BY_398_RESIDUE = {
         "segment_already_rendered",
         "segment_held_by_fields",
         "segments_cover_source",
+        "short_tab_part_rendered",
         "t_recovery_lines",
         "tab_aware_record_lines",
         "token_pairs",
@@ -213,6 +214,7 @@ HOME_ONLY_IMPORTS = {
                                       "_citation_identity_text",
                                       "_field_dates_text", "_split_record_family",
                                       "_undated_split_record_absorbs_date"),
+    "unified_pipeline.stage6.render_check": ("short_tab_part_words",),
 }
 
 _RELOCATED_CASES = [
@@ -252,7 +254,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 39, (
+    assert len(_RELOCATED_CASES) == 40, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )

@@ -537,6 +537,19 @@ LINT_COPY = {
         "text but is in another entry of the same kind that was read with it, so it may be "
         "that entry's value.",
         "Check the flagged values against this entry in the source CV and correct them."),
+    "journal_name_joined": LintCopy(
+        "Several journals in one row",
+        "A journal row's name holds more than one journal, joined by commas, semicolons or a "
+        "tab, or holds a role such as Editorial Board or Ad hoc along with the journal, so "
+        "the row reads as one journal.",
+        "Split the row into one row per journal, and move any role out of the journal name."),
+    "group_credit_dropped": LintCopy(
+        "Citation drops a group author",
+        "The source CV credits a group, consortium or study team in a citation's authors, such "
+        "as \"...; TODAY Study Group\", and the citation in the document leaves it out or "
+        "shortens it to initials. When the CV names the owner nowhere else in that citation, "
+        "nothing in it credits them any more.",
+        "Add the group back to the author list as the source CV writes it."),
     "record_boundary": LintCopy(
         "A line of one entry opens the next",
         "A labelled line that belongs to one entry, such as a trainee's current position, "

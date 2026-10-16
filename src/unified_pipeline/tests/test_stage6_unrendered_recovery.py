@@ -17,6 +17,7 @@ test_stage6_funding_appendix.py does.
 """
 
 import ast
+import copy
 import inspect
 import json
 import sys
@@ -34,8 +35,15 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.stage6.fan_out import LAST_STAGE4_RECORD  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
+)
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
+from unified_pipeline.stage6.parsing.text import (  # noqa: E402
+    DATE_LED_SOURCE_TEXT,
+    split_date_led_records,
+)
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
@@ -43,8 +51,11 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _whole_record_rendered,
     segment_held_by_fields,
     segments_cover_source,
+    short_tab_part_rendered,
+    short_tab_part_words,
     tab_aware_record_lines,
 )
+from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
     _record_lines,
@@ -328,6 +339,99 @@ def test_record_line_held_by_fields_is_still_recovered_when_it_is_not_a_tab_part
     texts = [p.text for p in gen.doc.paragraphs]
     assert "2012-2014 Chair of the Wombat Panel for three years" in texts
     assert gen.stats['unrendered_records_recovered'] == 2
+
+
+def test_short_officer_tab_parts_the_render_dropped_are_recovered():
+    # #1243: an officer post under its society's line has one distinctive word
+    # and its years, too few for the overlap test, so the pass skipped it. Its
+    # word and its years identify it: a line naming the same office with other
+    # years does not vouch for it.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("American Board of Quokka Surgery, term: 2007-2015\t"
+                 "• Chairman, Credentials Committee, 2009-2011\t"
+                 "• Secretary, 2009-2011\t• Vice President, 2011-2012"),
+        "extracted_fields": {"role": "Member", "organization": "American Board of Quokka Surgery",
+                             "additional_roles": [{"role": "Secretary"}, {"role": "Vice President"}]},
+    }
+    gen.doc.add_paragraph("Member, American Board of Quokka Surgery 2007-2015")
+    gen.doc.add_paragraph("Chairman, Credentials Committee 2009-2011")
+    gen.doc.add_paragraph("Secretary of the Wombat Panel, 2005-2007")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Secretary, 2009-2011" in t for t in bullets)
+    assert any("Vice President, 2011-2012" in t for t in bullets)
+    assert not any("Chairman" in t for t in bullets)
+    assert gen.stats["unrendered_records_recovered"] == 2
+
+
+def test_short_tab_part_rendered_elsewhere_or_held_by_fields_is_not_recovered():
+    # #1243: the short part that did render, and a mentee line whose name a
+    # scalar field holds (its "Dates:" label and years render in rows of their
+    # own), are never written a second time.
+    gen = _generator()
+    officers = {
+        "taxonomy_code": "Q1",
+        "text": ("Member of the Quokka Society 1989-present\t"
+                 "Treasurer, 2004-2005\tSecond Vice President 2006-2007"),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member"},
+    }
+    mentee = {
+        "taxonomy_code": "N3B",
+        "text": ("Dr. Lisa Quokkason, Ph.D.    Dates: 1989-1990\t"
+                 "Assistant Professor of Wombat Surgery (1991-1996)\tNorvale University"),
+        "extracted_fields": {"mentee_name": "Lisa Quokkason", "mentee_level": "Ph.D.",
+                             "current_position": "Assistant Professor of Wombat Surgery (1991-1996)"},
+    }
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+    gen.doc.add_paragraph("Treasurer 2004-2005")
+    gen.doc.add_paragraph("Second Vice President 2006-2007")
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"Q1": [officers], "N3B": [mentee]})
+
+    assert len(gen.doc.paragraphs) == before
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_short_record_line_outside_tabs_stays_unverifiable():
+    # The words-and-years check reads tab parts only: a short line of a
+    # newline entry is still too short to verify, and is never written.
+    gen = _generator()
+    entry = {"taxonomy_code": "Q1", "extracted_fields": {},
+             "text": "2009-2011 Secretary of it\n2012-2014 Treasurer of it"}
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    assert len(gen.doc.paragraphs) == before
+
+
+@pytest.mark.parametrize("part, words", [
+    ("• Secretary, 2009-2011", {"secretary"}),
+    ("Secretary, July, 1993 - October 1994", {"secretary"}),
+    ("President Elect 5/2015-5/2017", {"president", "elect"}),
+    ("1996-97 Vice-President, Acting President", {"president", "acting"}),
+    ("2008-present Africa Liaison", {"africa", "liaison"}),
+    ("Dr. Lisa Quokkason, Ph.D.    Dates: 1989-1990", {"quokkason"}),
+    # Nothing to check it by: a heading with a year, a head count, a bare date.
+    ("COMMITTEES 1993-1994", None),
+    ("students 2013-2014: 12", None),
+    ("July 1992 - October 1994", None),
+])
+def test_short_tab_part_words(part, words):
+    assert short_tab_part_words(part) == words
+
+
+def test_short_tab_part_rendered_needs_its_years_on_the_line():
+    sets = [{"secretary", "wombat", "panel", "2005", "2007"}]
+    assert short_tab_part_rendered("Secretary, 2009-2011", {}, sets) is False
+    assert short_tab_part_rendered("Secretary, 2005-2007", {}, sets) is True
+    assert short_tab_part_rendered("Secretary, 2009-2011", {"role": "Secretary"}, []) is True
+    assert short_tab_part_rendered("COMMITTEES 1993-1994", {}, []) is None
 
 
 # ------------------------------------------------ D1 positions path (KFGXBW)
@@ -2119,3 +2223,496 @@ def test_an_honor_whose_award_the_pii_pass_withheld_gets_no_sub_point():
     assert _subpoint_rows(gen) == []
     assert _HONOR_PROSE not in "".join(
         t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+# ------------------------------------------- date-led sibling records (#983)
+# Stage 2 joins an entry's paragraphs with tabs, so three society records that
+# each open with their own date reach stage 6 as one line. Stage 4 extracted
+# the last one only (the web228/web26 I-entry shape, synthetic names).
+
+_SOCIETY_RECORDS = [
+    "2001-    Guild of Meandering Auditors (GMA)",
+    "2004-2008  Executive Board Member, Treasurer.",
+    "2007-2009 President, Organizing Committee, 44th Annual Meeting, GMA, Crab Hollow, ZQ",
+]
+
+
+def _society_entry(code="I", **fields):
+    return {
+        "element_idx_start": 60,
+        "element_idx_end": 62,
+        "element_type": "paragraph",
+        "hierarchy": ["PROFESSIONAL MEMBERSHIPS"],
+        "taxonomy_code": code,
+        "taxonomy_confidence": 0.9,
+        "text": "\t".join(_SOCIETY_RECORDS),
+        "extracted_fields": fields or {
+            "organization": "Guild of Meandering Auditors (GMA)",
+            "start_date": "2007",
+            "end_date": "2009",
+            "membership_type": "President, Organizing Committee, 44th Annual Meeting",
+        },
+        "extraction_coverage": {"extraction_coverage_percent": 40.0},
+    }
+
+
+def _fieldless_society_entry(code="I"):
+    # Stage 4 extracted nothing, so dev's renderer shows the text.
+    entry = _society_entry(code=code)
+    entry["extracted_fields"] = {}
+    return entry
+
+
+def _all_paragraph_texts(path):
+    """Every paragraph's w:t text, table cells and tracked insertions included."""
+    body = Document(path).element.body
+    return ["".join(t.text or "" for t in p.iter(qn("w:t"))) for p in body.iter(qn("w:p"))]
+
+
+def test_date_led_sibling_records_render_one_line_each(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "unified_pipeline.stage_6_word_template.call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "TESTUID983", "entries": [_fieldless_society_entry()],
+               "cv_owner": {"full_name": "Quenby Marblegate"}}
+    input_path = tmp_path / "TESTUID983_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    texts = _all_paragraph_texts(run_stage6(str(input_path), str(tmp_path / "out.docx"),
+                                            verbose=False))
+
+    # Each record is its own paragraph, once, where dev rendered the three
+    # fused into one line; none is recovered a second time beside it.
+    for record in _SOCIETY_RECORDS:
+        assert texts.count(record) == 1, record
+    assert not [t for t in texts if "Treasurer" in t and "President" in t]
+
+
+@pytest.mark.parametrize("code", ["I", "O", "P"])
+def test_date_led_siblings_render_one_line_each_when_one_records_fields_render(
+        tmp_path, monkeypatch, code):
+    # The web228/web26 (I) and web181 (O) shape: stage 4 extracted the last
+    # record only. On dev the I renderer wrote that record's fields and lost
+    # the 2001 membership; O and P wrote the records out of order or fused
+    # into one paragraph. Now each source record is its own paragraph, once.
+    monkeypatch.setattr(
+        "unified_pipeline.stage_6_word_template.call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "TESTUID983F", "entries": [_society_entry(code=code)],
+               "cv_owner": {"full_name": "Quenby Marblegate"}}
+    input_path = tmp_path / "TESTUID983F_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    texts = _all_paragraph_texts(run_stage6(str(input_path), str(tmp_path / "out.docx"),
+                                            verbose=False))
+
+    assert [t for t in texts if t in _SOCIETY_RECORDS] == _SOCIETY_RECORDS
+
+
+@pytest.mark.parametrize("tail", [
+    "Liaison, Quimby Farrow, (212) 555-0147",
+    "Liaison, Quimby Farrow, qfarrow@example.org",
+    "Member No. X1234567",
+], ids=["phone", "email", "ID number"])
+def test_an_entry_holding_contact_details_or_an_id_keeps_its_tabs(tail):
+    # #983 review round 3: the O/P line parser read the last four digits of a
+    # phone or an ID as the date column. Such an entry renders as on dev.
+    entry = _society_entry()
+    entry["text"] = "\t".join(_SOCIETY_RECORDS + [f"2010-2012 {tail}"])
+    entry = _grouped_text(entry)
+    assert "\n" not in entry["text"]
+    assert DATE_LED_SOURCE_TEXT not in entry
+
+
+def _grouped_text(entry):
+    gen = _generator()
+    grouped = gen._group_and_cut_entries([entry])
+    (only,) = [e for entries in grouped.values() for e in entries]
+    return only
+
+
+def test_grouping_puts_date_led_siblings_on_lines_and_keeps_stage2_text():
+    entry = _grouped_text(_fieldless_society_entry())
+    assert entry["text"] == "\n".join(_SOCIETY_RECORDS)
+    assert entry[DATE_LED_SOURCE_TEXT] == "\t".join(_SOCIETY_RECORDS)
+
+
+@pytest.mark.parametrize("fields, splits", [
+    ({}, True),
+    (None, True),
+    ({"organization": "", "start_date": None, "offices": []}, True),  # nothing extracted
+    # One record's fields: the renderer writes the lines instead, so the
+    # sibling records those fields leave out reach the page (#983, after #1859).
+    ({"organization": "Guild of Meandering Auditors"}, True),
+    ({"end_date": "2009"}, True),
+    # Records stage 4 separated: their renderer owns them, not the lines.
+    ({"offices": [{"office": "Treasurer"}, {"office": "President"}]}, False),
+])
+def test_an_entry_is_split_unless_stage4_separated_its_records(fields, splits):
+    entry = _society_entry()
+    entry["extracted_fields"] = fields
+    entry = _grouped_text(entry)
+    assert ("\n" in entry["text"]) is splits
+    assert (DATE_LED_SOURCE_TEXT in entry) is splits
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C", "M2D"])
+def test_a_grant_keeps_its_tabs(code):
+    entry = _grouped_text(_fieldless_society_entry(code=code))
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+    assert DATE_LED_SOURCE_TEXT not in entry
+
+
+@pytest.mark.parametrize("code", ["K1", "K2", "K4"])
+def test_a_teaching_entry_keeps_its_tabs(code):
+    # The teaching renderer splits the text on its tabs itself.
+    entry = _grouped_text(_fieldless_society_entry(code=code))
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+
+
+def test_records_stage4_separated_keep_their_tabs():
+    # A list of records under a key the I schema does not define: fan-out
+    # declines it (no schema key), and its renderer, not the text, owns them.
+    entry = _grouped_text(_society_entry(
+        organization="Guild of Meandering Auditors (GMA)",
+        offices=[{"office": "Treasurer", "start_date": "2004"},
+                 {"office": "President", "start_date": "2007"}]))
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+
+
+@pytest.mark.parametrize("marker", [FANNED_OUT_FROM, LAST_STAGE4_RECORD])
+def test_a_record_fan_out_made_keeps_its_tabs(marker):
+    # PR #1850 review: no test held the fan-out exclusion. A record fan-out
+    # made is one of stage 4's records; dedup reads its marker, not its lines.
+    entry = _fieldless_society_entry()
+    entry[marker] = {"key": "records", "index": 0, "count": 2}
+    entry = _grouped_text(entry)
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+    assert DATE_LED_SOURCE_TEXT not in entry
+
+
+# The web181 Q1 shape: a long lead-in, then dated offices, most of them
+# single years. #1243's tab-part rules read it as one record (fewer than half
+# its parts give a date range); its date-led lines would read as two.
+_FORUM_PARTS = [
+    "Example Rehabilitation Forum. A not-for-profit consortium of academic departments",
+    "2005-present Founding President.",
+    "2009 Conference Director: First World Conference, Example City.",
+    "2011 Conference Director: World Congress, Example City",
+    "2012 Conference co-director, World Congress, Example City",
+    "2016-present Example Fellowship Director",
+]
+
+
+def test_recovery_reads_stage2_text_not_the_date_led_lines():
+    entry = _grouped_text({
+        "taxonomy_code": "Q1",
+        "text": "\t".join(_FORUM_PARTS),
+        "extracted_fields": {},
+    })
+    assert "\n" in entry["text"]  # the lines render ...
+    # ... but the recovery pass reads records as it did before the split.
+    assert recovery_candidates("Q1", entry) == []
+    lines_only = {**entry}
+    del lines_only[DATE_LED_SOURCE_TEXT]
+    assert recovery_candidates("Q1", lines_only) != []
+
+
+def test_a_split_entry_whose_fields_render_recovers_nothing():
+    # The mentee shape of `test_tab_part_the_extracted_fields_hold_is_not_recovered`,
+    # with both parts date-led. Grouping splits it, but recovery reads stage
+    # 2's text, so it adds nothing beside the mentee table, as on dev.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "N3B",
+        "text": ("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)\t"
+                 "2009-2011 Marsupial Heart Association Fellowship"),
+        "extracted_fields": {"mentee_name": "Quimby Farrow", "mentee_level": "MSPH, PhD (Epidemiology)",
+                             "start_date": "2007", "end_date": "2011",
+                             "funding_source": "Marsupial Heart Association Fellowship (2009-2011)"},
+    }
+    grouped = gen._group_and_cut_entries([entry])
+    assert "\n" in grouped["N3B"][0]["text"]
+    assert DATE_LED_SOURCE_TEXT in grouped["N3B"][0]
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records(grouped)
+
+    assert len(gen.doc.paragraphs) == before
+
+
+@pytest.mark.parametrize("code", ["Q1", "D1"])
+@pytest.mark.parametrize("pii", ["SSN: 123-45-6789", "Date of Birth: 01/02/1960"])
+def test_a_withheld_fragment_in_a_date_led_record_is_not_recovered(tmp_path, monkeypatch,
+                                                                   code, pii):
+    # PR #1850 review: the PII pass cut `text`, but the recovery pass read the
+    # pre-split stage-2 text and put the withheld line back verbatim.
+    monkeypatch.setattr(
+        "unified_pipeline.stage_6_word_template.call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    entry = _fieldless_society_entry(code=code)
+    entry["text"] = "\t".join([_SOCIETY_RECORDS[0], f"{_SOCIETY_RECORDS[1]} {pii}",
+                               _SOCIETY_RECORDS[2]])
+    payload = {"document_uid": "TESTUID983P", "entries": [entry],
+               "cv_owner": {"full_name": "Quenby Marblegate"}}
+    input_path = tmp_path / "TESTUID983P_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    texts = _all_paragraph_texts(run_stage6(str(input_path), str(tmp_path / "out.docx"),
+                                            verbose=False))
+
+    value = pii.split(": ", 1)[1]
+    assert not [t for t in texts if value in t]
+
+
+# ------------------- #983 review round 2: the PII pass sees stage 2's tabs
+# The pass's bare-label extension and its continuation-cell absorption run on
+# over a tab and stop at a line break. A split that ran first turned the tab
+# after "Children:" or "Date of Birth:" into a line break, and the value in
+# the next cell rendered. Each case renders twice: as the branch does, and with
+# the split switched off, which is dev's grouping and PII pass unchanged
+# (stage6/pii_pass.py is dev's file). The pass must get the same input, cut the
+# same spans, and leave every protected value in the docx the same number of
+# times. Synthetic names and values throughout.
+#
+# Round 3 adds the render side. For every case, each of stage 2's tab parts
+# that reaches the branch's docx reached dev's too, and no part reaches it cut
+# across two paragraphs unless dev's cut it too (a trailing ID or phone number
+# read as the date column). Every shape here is protected data, contact
+# details or an ID, so an entry whose fields render is not split and renders
+# exactly as on dev.
+
+_PII_DATED_LEAD = ["2001-2005 Member, Guild of Meandering Auditors",
+                   "2006-2008 Treasurer, Guild of Meandering Auditors"]
+_PII_UNDATED_LEAD = ["Member, Guild of Meandering Auditors",
+                     "Treasurer, Guild of Meandering Auditors"]
+# name -> (the parts after the lead, the protected values, whether those parts
+# alone hold two date-led records and so split behind an undated lead too)
+_PII_SHAPES = {
+    "bare label, value in the next cell": (
+        ["Date of Birth:", "01/02/1960, Quillhaven, Ohio"], ["01/02/1960"], False),
+    "bare birth label, place in the next cell": (
+        ["Born:", "1960 Quillhaven, Ohio"], ["1960 Quillhaven"], False),
+    "children, year-led continuation cells": (
+        ["Children:", "2001 Ann Marblegate", "2004 Bob Marblegate"],
+        ["Ann Marblegate", "Bob Marblegate"], True),
+    "children, continuation cells": (
+        ["Children: Ann Marblegate (b. 2001)", "Bob Marblegate (b. 2004)"],
+        ["Ann Marblegate", "Bob Marblegate"], False),
+    "home address, continuation cell": (
+        ["Home Address: 12 Elm Street", "2019 Apartment 4, Quillhaven"],
+        ["12 Elm Street", "Apartment 4"], False),
+    "date of birth, birthplace cell": (
+        ["Date of Birth: 01/02/1960", "1960 Quillhaven General Hospital"],
+        ["01/02/1960", "Quillhaven General Hospital"], False),
+    "in-line SSN": (["President, Organizing Committee SSN: 123-45-6789"], ["123-45-6789"], False),
+    "in-line DOB": (["Auditor Date of Birth: 01/02/1960"], ["01/02/1960"], False),
+    # A value shape, not a label: withheld only in an Appendix-bound entry,
+    # and the full-scope `_pii_fragments` does not see it, so only the order
+    # keeps the split's copy of stage 2's text from holding it uncut.
+    "third-party email": (["2009-2011 Liaison, Quimby Farrow, qfarrow@example.org"],
+                          ["qfarrow@example.org"], False),
+    "third-party phone": (["2009-2011 Liaison, Quimby Farrow, (212) 555-0147"],
+                          ["555-0147"], False),
+    # A protected label after a leading date: withheld since #1859, so the
+    # entry is not split, whether or not its fields render.
+    "spouse after a date": (["2005 Spouse: Jane Quillfeather"], ["Jane Quillfeather"], False),
+    "salary after a date": (["2015 Salary: $250,000"], ["$250,000"], False),
+    "passport number after a date": (["2015 Passport No. X1234567"], ["X1234567"], False),
+}
+_PII_CODES = ["T", "A", "I", "D1", "Q1", "O", "P"]
+# Codes whose entries get the full Personal Data / Appendix cut; a routed code
+# withholds only the shapes in `_PII_ROUTED_SHAPES`.
+_PII_FULL_SCOPE_CODES = {"T", "A"}
+_PII_ROUTED_SHAPES = {"bare label, value in the next cell", "date of birth, birthplace cell",
+                      "in-line SSN", "in-line DOB", "spouse after a date",
+                      "salary after a date", "passport number after a date"}
+# Withheld in an Appendix-bound (T) entry only: an A entry's contacts are the
+# owner's, and a routed code keeps a contact.
+_PII_THIRD_PARTY_SHAPES = {"third-party email", "third-party phone"}
+
+
+def _pii_case_withholds(code, shape):
+    if shape in _PII_THIRD_PARTY_SHAPES:
+        return code == "T"
+    return code in _PII_FULL_SCOPE_CODES or shape in _PII_ROUTED_SHAPES
+
+
+def _docx_part_texts(path):
+    """Each paragraph's w:t + w:delText text in every XML part of the docx
+    (body, comments, headers): a protected value must be nowhere in it."""
+    import zipfile
+
+    from lxml import etree
+
+    texts = []
+    with zipfile.ZipFile(path) as docx:
+        for name in docx.namelist():
+            if not name.endswith(".xml"):
+                continue
+            root = etree.fromstring(docx.read(name))
+            for para in root.iter(qn("w:p")):
+                texts.append("".join(node.text or "" for node in para.iter(qn("w:t"), qn("w:delText"))))
+    return texts
+
+
+def _render_watching_pii_pass(tmp_path, monkeypatch, entries, *, dev_split_order):
+    """Render `entries`; return (what the PII pass got and gave, paragraph texts).
+    `dev_split_order` switches the date-led split off: dev's path."""
+    import copy
+
+    import unified_pipeline.stage_6_word_template as stage6
+
+    seen = {}
+    real_pass = stage6.run_pii_pass
+
+    def watched_pass(entries_by_code, **kwargs):
+        seen["input"] = {code: [e.get("text") for e in group]
+                         for code, group in entries_by_code.items()}
+        result = real_pass(entries_by_code, **kwargs)
+        seen["output"] = {code: [(e.get("text"), copy.deepcopy(e.get("_pii_fragments")),
+                                  e.get("_pii_orphaned_value")) for e in group]
+                          for code, group in entries_by_code.items()}
+        seen["withheld"] = list(result.withheld)
+        return result
+
+    arm = "dev" if dev_split_order else "branch"
+    with monkeypatch.context() as patch:
+        patch.setattr(stage6, "call_llm", lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("no LLM in tests")))
+        patch.setattr(stage6, "run_pii_pass", watched_pass)
+        if dev_split_order:
+            patch.setattr(stage6, "_split_date_led_groups", lambda entries_by_code: None)
+        input_path = tmp_path / f"TESTUID983{arm}_fields.json"
+        input_path.write_text(json.dumps({"document_uid": f"TESTUID983{arm}", "entries": entries,
+                                          "cv_owner": {"full_name": "Quenby Marblegate"}}))
+        out = run_stage6(str(input_path), str(tmp_path / f"{arm}.docx"), verbose=False)
+    return seen, _docx_part_texts(out)
+
+
+def _pii_case_entry(code, lead, shape, *, fields=False):
+    entry = _society_entry(code=code) if fields else _fieldless_society_entry(code=code)
+    entry["text"] = "\t".join(lead + _PII_SHAPES[shape][0])
+    return entry
+
+
+def _squashed(text):
+    return "".join(text.split())
+
+
+def _parts_on_page(texts, parts):
+    """The `parts` whose text is in the docx: in one paragraph, or run on
+    across paragraphs (a number cut into two cells still reached the page)."""
+    page = _squashed("".join(texts))
+    return {part for part in parts if _squashed(part) in page}
+
+
+def _parts_cut_across_paragraphs(texts, parts):
+    """The `parts` on the page that no single paragraph holds whole."""
+    return {part for part in _parts_on_page(texts, parts)
+            if not any(_squashed(part) in _squashed(text) for text in texts)}
+
+
+# (whether stage 4 extracted fields, the lead). An entry whose fields render
+# is the round-3 case; its undated lead adds nothing the dated one does not.
+_PII_VARIANTS = [(False, "dated"), (False, "undated"), (True, "dated")]
+
+
+@pytest.mark.parametrize("code", _PII_CODES)
+@pytest.mark.parametrize("fields,lead", _PII_VARIANTS)
+@pytest.mark.parametrize("shape", list(_PII_SHAPES))
+def test_the_pii_pass_cuts_what_dev_cuts_with_or_without_the_split(tmp_path, monkeypatch,
+                                                                   code, fields, lead, shape):
+    _parts, protected, parts_split_alone = _PII_SHAPES[shape]
+    entry = _pii_case_entry(code, _PII_DATED_LEAD if lead == "dated" else _PII_UNDATED_LEAD,
+                            shape, fields=fields)
+    # The case is what it says: stage 2's text splits behind a dated lead, and
+    # behind an undated one only when the PII parts alone hold two records.
+    assert (split_date_led_records(entry["text"]) != entry["text"]) == (
+        lead == "dated" or parts_split_alone)
+
+    dev_seen, dev_texts = _render_watching_pii_pass(
+        tmp_path, monkeypatch, [copy.deepcopy(entry)], dev_split_order=True)
+    seen, texts = _render_watching_pii_pass(
+        tmp_path, monkeypatch, [copy.deepcopy(entry)], dev_split_order=False)
+
+    assert seen["input"] == dev_seen["input"]  # stage 2's tabs, as on dev
+    assert seen["output"] == dev_seen["output"]
+    assert seen["withheld"] == dev_seen["withheld"]
+    withholds = _pii_case_withholds(code, shape)
+    assert bool(seen["withheld"]) == withholds
+    # Round 3: the split puts no source line on the page that dev left off it,
+    # and cuts none across two paragraphs.
+    source_parts = entry["text"].split("\t")
+    assert _parts_on_page(texts, source_parts) <= _parts_on_page(dev_texts, source_parts)
+    assert (_parts_cut_across_paragraphs(texts, source_parts)
+            <= _parts_cut_across_paragraphs(dev_texts, source_parts))
+    for value in protected:
+        assert (sum(t.count(value) for t in texts)
+                == sum(t.count(value) for t in dev_texts)), value
+        if withholds and code in _PII_FULL_SCOPE_CODES:
+            assert not [t for t in texts if value in t], value
+    if fields:
+        assert texts == dev_texts  # its fields render: not split, so dev's docx
+
+
+def test_an_entry_the_pii_pass_cut_is_not_split():
+    # Its text and the recovery pass's input stay dev's cut text, tabs and all.
+    # Field-less, so only the pass's mark keeps its dated lead unsplit.
+    entry = _grouped_text(_pii_case_entry("T", _PII_DATED_LEAD, "children, year-led continuation cells"))
+    assert entry["_pii_withheld"] is True
+    assert entry["text"] == "\t".join(_PII_DATED_LEAD)
+    assert DATE_LED_SOURCE_TEXT not in entry
+
+
+@pytest.mark.parametrize("fields", [{"date_of_birth": "01/02/1960"}, {"notes": "SSN 123-45-6789"}])
+def test_an_entry_the_pii_pass_touched_through_its_fields_is_not_split(fields):
+    # No fragment in the text: the pass's own mark, set before the split runs,
+    # and the fields it touched each keep the entry as dev renders it.
+    entry = _society_entry(code="Q1", organization="Guild of Meandering Auditors", **fields)
+    entry = _grouped_text(entry)
+    assert entry["_pii_withheld"] is True
+    assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
+
+
+def test_a_routed_entry_holding_protected_data_is_not_split():
+    # An I entry gets the routed scope, which does not withhold a children
+    # list, so the pass leaves it alone. Field-less, so only the full-scope
+    # fragment test keeps its lines as dev renders them.
+    entry = _grouped_text(_pii_case_entry("I", _PII_DATED_LEAD, "children, year-led continuation cells"))
+    assert "_pii_withheld" not in entry
+    assert "\n" not in entry["text"]
+    assert DATE_LED_SOURCE_TEXT not in entry
+
+
+# Judgement call 6: the web205/web210 shape. Date-led mentee lines whose
+# mentee table already renders them, now with a withheld fragment in one line.
+# Recovery must not write the mentee lines back beside the table.
+_MENTEE_PII_ENTRY = {
+    "element_idx_start": 80,
+    "element_idx_end": 81,
+    "element_type": "paragraph",
+    "hierarchy": ["MENTORING"],
+    "taxonomy_code": "N3B",
+    "taxonomy_confidence": 0.9,
+    "text": ("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology), SSN: 123-45-6789\t"
+             "2009-2011 Marsupial Heart Association Fellowship"),
+    "extracted_fields": {"mentee_name": "Quimby Farrow", "mentee_level": "MSPH, PhD (Epidemiology)",
+                         "start_date": "2007", "end_date": "2011",
+                         "funding_source": "Marsupial Heart Association Fellowship (2009-2011)"},
+}
+
+
+def test_a_pii_touched_date_led_mentee_entry_recovers_no_duplicate_lines(tmp_path, monkeypatch):
+    without_pii = _MENTEE_PII_ENTRY["text"].replace(", SSN: 123-45-6789", "")
+    assert split_date_led_records(without_pii) != without_pii  # date-led siblings
+    dev_seen, dev_texts = _render_watching_pii_pass(
+        tmp_path, monkeypatch, [copy.deepcopy(_MENTEE_PII_ENTRY)], dev_split_order=True)
+    seen, texts = _render_watching_pii_pass(
+        tmp_path, monkeypatch, [copy.deepcopy(_MENTEE_PII_ENTRY)], dev_split_order=False)
+
+    assert seen["withheld"] == dev_seen["withheld"] and seen["withheld"]
+    assert not [t for t in texts if "123-45-6789" in t]
+    for token in ("Quimby Farrow", "Marsupial Heart Association"):
+        # Once, in the mentee table, on both arms: never recovered again.
+        assert sum(token in t for t in texts) == sum(token in t for t in dev_texts) == 1, token
