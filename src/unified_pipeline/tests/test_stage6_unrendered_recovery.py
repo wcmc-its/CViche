@@ -35,6 +35,7 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
@@ -2283,6 +2284,284 @@ def test_an_honor_whose_award_the_pii_pass_withheld_gets_no_sub_point():
     assert _subpoint_rows(gen) == []
     assert _HONOR_PROSE not in "".join(
         t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+# --- #1205: N3A/N3B mentees, the next code family ----------------------------
+# The mentoring section writes each named mentee as a six-row "Label:" table of
+# its own, so the prose is a deleted row at the end of that mentee's table.
+
+_MENTEE_PROSE = ("Received the departmental travel award and presented the thesis findings "
+                 "at the regional pharmacology meeting")
+
+
+def _mentee(code="N3B", idx=1477, name="Ana Li", end="2017", prose=_MENTEE_PROSE):
+    """A mentee whose source line goes on past the name, level and years into
+    what the mentee won and presented, as EBYSBC MUHLLD 226's did. The name
+    has no five-letter word, so only the level's words can anchor it: another
+    postdoc's Site/Position row holds all of them (YUYVIG XNWSZN 188)."""
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": f"{name} (Postdoctoral Associate, 2014-{end})" + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {"mentee_name": name, "mentee_level": "Postdoctoral Associate",
+                             "start_date": "2014", "end_date": end},
+    }
+
+
+def _other_postdoc(code="N3B", end="2017"):
+    """A postdoc rendered before `_mentee()`'s, with no prose of its own."""
+    return _mentee(code, idx=1470, name="Casey Sample", end=end, prose="")
+
+
+def _render_mentoring(entries_by_code, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_mentoring(entries_by_code)
+    gen._add_supplementary_subpoints(entries_by_code)
+    return gen
+
+
+def _mentee_named_by(row):
+    """The Name: value of the mentee table `row` is a row of."""
+    first_row_cells = row.getparent().find(qn("w:tr")).findall(qn("w:tc"))
+    return "".join(t.text or "" for t in first_row_cells[1].iter(qn("w:t")))
+
+
+def _mentee_heading_above(row):
+    """The mentee heading the table holding `row` sits under."""
+    for element in row.getparent().itersiblings(preceding=True):
+        text = "".join(t.text or "" for t in element.iter(qn("w:t"))).strip()
+        if text in ("Current Mentees:", "Past Mentees:"):
+            return text
+    return None
+
+
+def _mentee_names(gen):
+    """The Name: value of every mentee table, in document order."""
+    return [_mentee_named_by(tbl.find(qn("w:tr"))) for tbl in gen.doc.element.body.iter(qn("w:tbl"))
+            if "".join(t.text or "" for t in tbl.find(qn("w:tr")).find(qn("w:tc")).iter(qn("w:t")))
+            == "Name:"]
+
+
+def _row_texts(body):
+    return [["".join(t.text or "" for t in tc.iter(qn("w:t"))) for tc in tr.findall(qn("w:tc"))]
+            for tr in body.iter(qn("w:tr"))]
+
+
+def _deleted_texts(gen):
+    return "".join(t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+@pytest.mark.parametrize("code, end, heading", [("N3B", "2017", "Past Mentees:"),
+                                                ("N3A", "present", "Current Mentees:")])
+def test_mentee_prose_is_a_deleted_row_at_the_end_of_its_table(code, end, heading):
+    gen = _render_mentoring({code: [_mentee(code, end=end)]}, supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert row.getnext() is None
+    assert _mentee_named_by(row) == "Ana Li"
+    assert _mentee_heading_above(row) == heading
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MENTEE_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "2"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_mentee_prose_goes_under_its_own_table_among_several():
+    """The postdoc before it shares its Site/Position row word for word; the
+    prose still goes to the end of the table whose Name: row is its mentee."""
+    gen = _render_mentoring({"N3B": [_other_postdoc(), _mentee()]}, supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _mentee_named_by(row) == "Ana Li" and row.getnext() is None
+    assert _mentee_names(gen) == ["Casey Sample", "Ana Li"]
+
+
+@pytest.mark.parametrize("code, end, other_end, heading", [
+    ("N3B", "present", "2017", "Current Mentees:"),   # the open range makes it current
+    ("N3A", "2017", "present", "Past Mentees:"),      # an ended period makes it past
+])
+def test_a_mentee_the_section_files_under_the_other_heading_keeps_its_sub_point(
+        code, end, other_end, heading):
+    gen = _render_mentoring({code: [_other_postdoc(code, other_end), _mentee(code, end=end)]},
+                            supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _mentee_named_by(row) == "Ana Li"
+    assert _mentee_heading_above(row) == heading
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MENTEE_PROSE
+
+
+def test_mentee_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_mentoring({"N3B": [_other_postdoc(), _mentee()]}, supplementary_subpoints=False)
+    on = _render_mentoring({"N3B": [_other_postdoc(), _mentee()]}, supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _MENTEE_PROSE in rejected
+    assert _MENTEE_PROSE not in "".join(_texts_of(off.doc.element.body))
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_mentee_prose_already_in_its_table_is_not_offered_again():
+    """Stage 4 put the prose in `awards`, which the Project/Accomplishments row
+    prints, though no N3B rendered field (`_RENDERED_FIELDS`) names it: the
+    document holds it, so nothing is left to offer."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _mentee()
+    entry["extracted_fields"]["awards"] = _MENTEE_PROSE
+    gen = _render_mentoring({"N3B": [entry]}, supplementary_subpoints=True)
+    assert _MENTEE_PROSE in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry, "N3B", haystack) == []
+
+
+def test_a_mentee_naming_no_one_renders_its_whole_line_and_gets_no_sub_point():
+    """An aggregate N3B line ("<n> postdocs ...") is a line, not a table."""
+    entry = _mentee()
+    del entry["extracted_fields"]["mentee_name"]
+    gen = _render_mentoring({"N3B": [_other_postdoc(), entry]}, supplementary_subpoints=True)
+
+    assert any(_MENTEE_PROSE in text for text in _texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == [] and _MENTEE_PROSE not in _deleted_texts(gen)
+
+
+def _render_grouped_mentoring(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_mentoring(grouped)
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def test_a_mentee_rerouted_to_n1_follows_its_destination_and_gets_no_sub_point():
+    """N1 is excluded: the entry renders as an N1 line of its text, and no
+    mentee table carries its prose, not even the postdoc's that shares its
+    level."""
+    moved = _rerouted(_mentee(), "N1", "Leadership and mentoring in programs")
+    gen, grouped = _render_grouped_mentoring([_other_postdoc(), moved],
+                                             supplementary_subpoints=True)
+
+    assert grouped["N1"] == [moved] and [e["element_idx_start"] for e in grouped["N3B"]] == [1470]
+    assert any(_MENTEE_PROSE in text for text in _texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == [] and _MENTEE_PROSE not in _deleted_texts(gen)
+
+
+def test_a_record_rerouted_into_n3b_follows_the_mentee_rule():
+    """A trainee stage 3b coded K2 under a past-mentees heading renders as a
+    mentee table: its prose is a deleted row at that table's end."""
+    trainee = dict(_mentee(), taxonomy_code="K2")
+    gen, grouped = _render_grouped_mentoring([_rerouted(trainee, "N3B", "PAST MENTEES")],
+                                             supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["N3B"]] == [1477]
+    (row,) = _subpoint_rows(gen)
+    assert _mentee_named_by(row) == "Ana Li" and row.getnext() is None
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MENTEE_PROSE
+
+
+def test_a_mentee_whose_field_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass dropped one of the mentee's fields. What is left
+    still describes what was withheld, so none of it is offered, under its
+    own table or the postdoc's."""
+    withheld = _mentee()
+    withheld["_pii_dropped_fields"] = ["site_position"]
+    gen = _render_mentoring({"N3B": [_other_postdoc(), withheld]}, supplementary_subpoints=True)
+
+    assert "Ana Li" in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == [] and _MENTEE_PROSE not in _deleted_texts(gen)
+
+
+def test_a_mentee_named_only_inside_an_award_title_gets_no_sub_point():
+    """#1702: the section refuses a mentee whose name is an award's and lists
+    the entry in the Appendix. No table names that person, so its prose goes
+    under no table, not even the postdoc's that shares its level."""
+    refused = _mentee(idx=1480, name="Jordan Example")
+    refused["text"] = f"Recipient of the Jordan Example Award, Postdoctoral Associate\t{_MENTEE_PROSE}"
+    gen = _render_mentoring({"N3B": [_other_postdoc(), refused]}, supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in gen._declined_grant_entries] == [1480]
+    assert "Jordan Example" not in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == [] and _MENTEE_PROSE not in _deleted_texts(gen)
+
+
+def test_a_one_segment_mentee_line_is_offered_whole_its_identity_included():
+    """A fragment is a whole tab segment, so a line giving the mentee's name,
+    level and years before its prose is offered as the CV wrote it: Reject
+    All prints those three a second time, beside the table's own rows."""
+    line = f"Ana Li, Postdoctoral Associate, 2014-2017, {_MENTEE_PROSE}"
+    gen = _render_mentoring({"N3B": [dict(_mentee(), text=line)]}, supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _mentee_named_by(row) == "Ana Li"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == line
+
+
+def _mentee_line(text, *periods):
+    """One source line stage 4 returned as a record per (name, start, end),
+    the entry's own fields being the last record's. Fan-out gives every
+    earlier record a line of its own and the last one the whole line."""
+    records = [{"mentee_name": name, "mentee_level": "Postdoctoral Associate",
+                "start_date": start, "end_date": end} for name, start, end in periods]
+    return {"element_idx_start": 1490, "taxonomy_code": "N3B", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_LISTED_MENTEES = (("Ana Li", "2014", "2017"), ("Casey Sample", "2012", "2015"),
+                   ("Jordan Example", "2010", "2013"))
+
+
+def test_a_line_listing_several_mentees_is_offered_under_none_of_their_tables():
+    """YUYVIG XNWSZN 188: twelve postdocs on one line. Each renders as a table
+    of its own, so the line is no one mentee's prose: under the last one's
+    table, Reject All would print every other name and period again."""
+    line = "Postdoctoral associates mentored in the laboratory: " + ", ".join(
+        f"{name} ({start}-{end})" for name, start, end in _LISTED_MENTEES)
+    gen, grouped = _render_grouped_mentoring([_mentee_line(line, *_LISTED_MENTEES)],
+                                             supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["N3B"][-1] and grouped["N3B"][-1]["text"] == line
+    assert sorted(_mentee_names(gen)) == sorted(name for name, _, _ in _LISTED_MENTEES)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+_ANA = "Ana Li, Postdoctoral Associate, 2014-2017"
+_CASEY = "Casey Sample, Postdoctoral Associate, 2012-2015"
+
+
+@pytest.mark.parametrize("segments, owner", [
+    # The segments pair with the records: each prose goes under its own mentee.
+    ([f"{_ANA}, {_MENTEE_PROSE}", _CASEY], "Ana Li"),
+    ([_ANA, f"{_CASEY}, {_MENTEE_PROSE}"], "Casey Sample"),
+    # They do not: whose prose it is cannot be told, so it goes under neither.
+    ([_ANA, _MENTEE_PROSE, _CASEY], None),
+])
+def test_prose_on_a_line_of_several_mentees_goes_under_its_own_or_none(segments, owner):
+    entry = _mentee_line("\t".join(segments), ("Ana Li", "2014", "2017"),
+                         ("Casey Sample", "2012", "2015"))
+    gen, _ = _render_grouped_mentoring([entry], supplementary_subpoints=True)
+
+    assert sorted(_mentee_names(gen)) == ["Ana Li", "Casey Sample"]
+    assert [_mentee_named_by(row) for row in _subpoint_rows(gen)] == ([owner] if owner else [])
+    assert _deleted_texts(gen).count(_MENTEE_PROSE) == (1 if owner else 0)
+
+
+def test_one_mentees_two_periods_on_one_line_keep_its_prose():
+    """YUYVIG ECXGAT 1479: stage 4 made one record per period of the same
+    mentee, so the whole line is that mentee's, and its prose goes once,
+    under the first of the two tables. Another line's mentee is no record
+    of this one."""
+    line = f"Ana Li, Postdoctoral Associate, 2008-2010 and 2012-2014, {_MENTEE_PROSE}"
+    entry = _mentee_line(line, ("Ana Li", "2008", "2010"), ("Ana Li", "2012", "2014"))
+    gen, _ = _render_grouped_mentoring([_other_postdoc(), entry], supplementary_subpoints=True)
+
+    assert sorted(_mentee_names(gen)) == ["Ana Li", "Ana Li", "Casey Sample"]
+    (row,) = _subpoint_rows(gen)
+    assert _mentee_named_by(row) == "Ana Li" and _deleted_texts(gen) == line
 
 
 # ------------------------------------------- date-led sibling records (#983)
