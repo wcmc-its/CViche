@@ -1040,6 +1040,31 @@ def test_call_llm_unsupported_provider_logs_no_orphan_prompt():
     assert after.call_count == 0
 
 
+def test_call_llm_logs_every_call_option_the_handler_receives():
+    """#1911: the prompt log names the whole invocation, not four fields of it.
+
+    enable_prompt_caching changes the request the provider receives (a
+    cachePoint block) and retry_count how many it may receive; neither was in
+    the log before.
+    """
+    from unified_pipeline.llm_client import call_llm
+
+    cfg = {**_bedrock_config(), "enable_prompt_caching": True, "retry_count": 2}
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=cfg), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.log_prompt_before_call", return_value="0" * 12) as before, \
+         patch("unified_pipeline.llm_client.log_prompt_response"):
+        mock_get_client.return_value.converse.return_value = _make_bedrock_response()
+        call_llm("stage_2", [{"role": "user", "content": "hi"}],
+                 top_p=0.5, cancel_check=lambda: None)
+
+    extra = before.call_args.kwargs["extra_parameters"]
+    assert extra["enable_prompt_caching"] is True
+    assert extra["retry_count"] == 2
+    assert extra["top_p"] == 0.5  # a pass-through kwarg the handler forwards
+    assert "cancel_check" not in extra
+
+
 # ---------------------------------------------------------------------------
 # latency_ms excludes retry backoff (#274)
 # ---------------------------------------------------------------------------

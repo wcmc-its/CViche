@@ -216,7 +216,8 @@ HOME_ONLY_IMPORTS = {
                                       "_field_dates_text", "_split_record_family",
                                       "_is_sibling_of",
                                       "_undated_split_record_absorbs_date"),
-    "unified_pipeline.stage6.render_check": ("short_tab_part_words",),
+    "unified_pipeline.stage6.render_check": ("record_chunks", "record_pieces",
+                                             "short_tab_part_words"),
 }
 
 _RELOCATED_CASES = [

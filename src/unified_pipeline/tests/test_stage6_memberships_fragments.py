@@ -105,6 +105,8 @@ from unified_pipeline.stage6.sections.memberships import (  # noqa: E402
     _split_trailing_dates,
     _type_already_named,
 )
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  # noqa: E402
+from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 # Genuinely multi-line, farm-derived shape (2071_Zuschlag_Cv's actual I
@@ -1200,3 +1202,45 @@ def test_1426_a_withheld_membership_whose_organization_field_survived_still_rend
                                   "start_date": "2001"}}
     rows = _render_memberships([entry])
     assert [row[0] for row in rows] == ["Fictional Society of Examples"]
+
+
+# --- (u) #1715 CBNXND-04: stage 4's records render once each ------------------
+
+# CBNXND's I entry: seven societies, one per line, the last wrapped onto an
+# eighth line. Stage 4 returned seven records; the parent's scalars are the
+# last one. Names here are placeholders of the same shape.
+_SOCIETIES = [f"Example Society of Field {n}" for n in range(1, 7)]
+_LAST_SOCIETY = "Example Society for Allergy and Immunology"
+_SEVEN_SOCIETIES_TEXT = "\n".join(
+    [*_SOCIETIES, "Example Society for Allergy and", "\u00a0\u00a0\u00a0Immunology"])
+
+
+def _stage4_records_entry(text, organizations):
+    records = [{"organization": org, "start_date": None, "end_date": None,
+                "membership_type": None} for org in organizations]
+    return {"element_idx_start": 79, "text": text, "taxonomy_code": "I",
+            "hierarchy": ["SOCIETIES"],
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+def test_an_entry_with_seven_stage4_records_and_eight_lines_renders_seven_rows():
+    """The last record's child kept the parent's whole eight-line text, and
+    the multi-membership line parse re-rendered every line beside the seven
+    records: 13 rows, each society twice and the last cut across two rows."""
+    entry = _stage4_records_entry(_SEVEN_SOCIETIES_TEXT, [*_SOCIETIES, _LAST_SOCIETY])
+    children = fan_out_multi_record_entries([entry], FIELD_SCHEMAS,
+                                            records_key=STAGE4_RECORDS_KEY)
+    assert len(children) == 7
+
+    rows = _render_memberships(children)
+
+    assert sorted(org for org, _ in rows) == sorted([*_SOCIETIES, _LAST_SOCIETY])
+
+
+def test_a_multiline_entry_without_stage4_records_still_parses_its_lines():
+    """Negative control: the line parse still runs for an entry that was not
+    fanned out."""
+    entry = {"text": "\n".join(_SOCIETIES[:3]), "taxonomy_code": "I",
+             "extracted_fields": {"organization": _SOCIETIES[2]}}
+
+    assert [org for org, _ in _render_memberships([entry])] == _SOCIETIES[:3]
