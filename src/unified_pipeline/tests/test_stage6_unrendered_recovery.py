@@ -35,6 +35,7 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
@@ -2426,6 +2427,81 @@ def test_a_mentee_named_only_inside_an_award_title_gets_no_sub_point():
     assert [e["element_idx_start"] for e in gen._declined_grant_entries] == [1480]
     assert "Jordan Example" not in "".join(_texts_of(gen.doc.element.body))
     assert _subpoint_rows(gen) == [] and _MENTEE_PROSE not in _deleted_texts(gen)
+
+
+def test_a_one_segment_mentee_line_is_offered_whole_its_identity_included():
+    """A fragment is a whole tab segment, so a line giving the mentee's name,
+    level and years before its prose is offered as the CV wrote it: Reject
+    All prints those three a second time, beside the table's own rows."""
+    line = f"Ana Li, Postdoctoral Associate, 2014-2017, {_MENTEE_PROSE}"
+    gen = _render_mentoring({"N3B": [dict(_mentee(), text=line)]}, supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _mentee_named_by(row) == "Ana Li"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == line
+
+
+def _mentee_line(text, *periods):
+    """One source line stage 4 returned as a record per (name, start, end),
+    the entry's own fields being the last record's. Fan-out gives every
+    earlier record a line of its own and the last one the whole line."""
+    records = [{"mentee_name": name, "mentee_level": "Postdoctoral Associate",
+                "start_date": start, "end_date": end} for name, start, end in periods]
+    return {"element_idx_start": 1490, "taxonomy_code": "N3B", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_LISTED_MENTEES = (("Ana Li", "2014", "2017"), ("Casey Sample", "2012", "2015"),
+                   ("Jordan Example", "2010", "2013"))
+
+
+def test_a_line_listing_several_mentees_is_offered_under_none_of_their_tables():
+    """YUYVIG XNWSZN 188: twelve postdocs on one line. Each renders as a table
+    of its own, so the line is no one mentee's prose: under the last one's
+    table, Reject All would print every other name and period again."""
+    line = "Postdoctoral associates mentored in the laboratory: " + ", ".join(
+        f"{name} ({start}-{end})" for name, start, end in _LISTED_MENTEES)
+    gen, grouped = _render_grouped_mentoring([_mentee_line(line, *_LISTED_MENTEES)],
+                                             supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["N3B"][-1] and grouped["N3B"][-1]["text"] == line
+    assert sorted(_mentee_names(gen)) == sorted(name for name, _, _ in _LISTED_MENTEES)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+_ANA = "Ana Li, Postdoctoral Associate, 2014-2017"
+_CASEY = "Casey Sample, Postdoctoral Associate, 2012-2015"
+
+
+@pytest.mark.parametrize("segments, owner", [
+    # The segments pair with the records: each prose goes under its own mentee.
+    ([f"{_ANA}, {_MENTEE_PROSE}", _CASEY], "Ana Li"),
+    ([_ANA, f"{_CASEY}, {_MENTEE_PROSE}"], "Casey Sample"),
+    # They do not: whose prose it is cannot be told, so it goes under neither.
+    ([_ANA, _MENTEE_PROSE, _CASEY], None),
+])
+def test_prose_on_a_line_of_several_mentees_goes_under_its_own_or_none(segments, owner):
+    entry = _mentee_line("\t".join(segments), ("Ana Li", "2014", "2017"),
+                         ("Casey Sample", "2012", "2015"))
+    gen, _ = _render_grouped_mentoring([entry], supplementary_subpoints=True)
+
+    assert sorted(_mentee_names(gen)) == ["Ana Li", "Casey Sample"]
+    assert [_mentee_named_by(row) for row in _subpoint_rows(gen)] == ([owner] if owner else [])
+    assert _deleted_texts(gen).count(_MENTEE_PROSE) == (1 if owner else 0)
+
+
+def test_one_mentees_two_periods_on_one_line_keep_its_prose():
+    """YUYVIG ECXGAT 1479: stage 4 made one record per period of the same
+    mentee, so the whole line is that mentee's, and its prose goes once,
+    under the first of the two tables. Another line's mentee is no record
+    of this one."""
+    line = f"Ana Li, Postdoctoral Associate, 2008-2010 and 2012-2014, {_MENTEE_PROSE}"
+    entry = _mentee_line(line, ("Ana Li", "2008", "2010"), ("Ana Li", "2012", "2014"))
+    gen, _ = _render_grouped_mentoring([_other_postdoc(), entry], supplementary_subpoints=True)
+
+    assert sorted(_mentee_names(gen)) == ["Ana Li", "Ana Li", "Casey Sample"]
+    (row,) = _subpoint_rows(gen)
+    assert _mentee_named_by(row) == "Ana Li" and _deleted_texts(gen) == line
 
 
 # ------------------------------------------- date-led sibling records (#983)

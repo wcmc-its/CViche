@@ -24,6 +24,10 @@ from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
 from unified_pipeline.stage6 import supplementary as sp  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
+)
 
 _DATE = "2026-10-08T00:00:00Z"
 
@@ -258,6 +262,11 @@ def test_plan_places_a_mentee_only_in_the_table_naming_it():
     # Stage 4's spacing is not the cell's: the row is read with its spaces collapsed.
     (planned,) = sp.plan_subpoints({"N3B": [_postdoc(" Ana \n Li ")]}, _haystack(), lines, spans)
     assert planned.anchor is lines[3]
+    # `name` is read before `mentee_name`, as the section reads it.
+    by_name = _postdoc("Casey Sample")
+    by_name["extracted_fields"]["name"] = "Ana Li"
+    (planned,) = sp.plan_subpoints({"N3B": [by_name]}, _haystack(), lines, spans)
+    assert planned.anchor is lines[3]
     for nobody in (_postdoc("Jordan Example"), {**_postdoc(), "extracted_fields": None}):
         assert sp.plan_subpoints({"N3B": [nobody]}, _haystack(), lines, spans) == []
 
@@ -269,6 +278,34 @@ def test_plan_places_a_mentee_naming_no_one_in_no_table():
     del nameless["extracted_fields"]["mentee_name"]
     assert sp.plan_subpoints({"N3B": [nameless]}, _haystack(), lines,
                              {"N3B": sp.SectionSpan(0, None)}) == []
+
+
+def _record_of_line(name, text, index, count):
+    """Record `index` of `count` that fan-out made of one source line: the
+    last keeps the whole line (`LAST_STAGE4_RECORD`), the others their own."""
+    entry = dict(_postdoc(name), text=text, element_idx_start=7)
+    marker = {"key": "stage4_records", "index": index, "count": count}
+    if index == count - 1:
+        entry[LAST_STAGE4_RECORD] = {**marker, "text": None}
+    else:
+        entry[FANNED_OUT_FROM] = marker
+    return entry
+
+
+def test_plan_reads_the_last_record_of_a_paired_line_from_its_own_segment():
+    # The first record's prose is withheld with it (#892): the last record,
+    # which keeps the whole line, does not offer it under its own table.
+    first_line, last_line = f"Ana Li, Postdoctoral Associate, {PROSE}", "Casey Sample, Postdoc"
+    first = _record_of_line("Ana Li", first_line, 0, 2)
+    first["_pii_dropped_fields"] = ["site_position"]
+    lines = _mentee_tables("Ana Li", "Casey Sample")
+    spans = {"N3B": sp.SectionSpan(0, None)}
+    last = _record_of_line("Casey Sample", f"{first_line}\t{last_line}", 1, 2)
+    assert sp.plan_subpoints({"N3B": [first, last]}, _haystack(), lines, spans) == []
+    # Prose in its own segment, the line's last, is its own.
+    last = _record_of_line("Casey Sample", f"{first_line}\t{last_line}, {OTHER_PROSE}", 1, 2)
+    (planned,) = sp.plan_subpoints({"N3B": [first, last]}, _haystack(), lines, spans)
+    assert planned.anchor is lines[2] and planned.paragraphs == (f"{last_line}, {OTHER_PROSE}",)
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():

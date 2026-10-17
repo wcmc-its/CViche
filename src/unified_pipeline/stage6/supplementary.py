@@ -77,7 +77,8 @@ from unified_pipeline.core.template_boilerplate import (
     is_template_instruction,
 )
 
-from .fan_out import _RENDERED_FIELDS
+from .dedup import _is_sibling_of
+from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
 from .normalization import _squash
 from .parsing import _refold_shattered
 from .pii_pass import PII_DROPPED_FIELDS_KEY
@@ -119,11 +120,13 @@ HONOR_CODES = frozenset({'H'})
 #: each named mentee as a six-row "Label:" table of its own, so a sub-point
 #: is a deleted row at the end of that table (`_insert_row_after`), and only
 #: that table's rows can anchor it (`_own_mentee_rows`): an entry naming no
-#: mentee renders as a line of its whole text and gets none. The section
-#: files a mentee under either heading by its dates, not its code, so both
-#: codes are placed over both headings' spans. An entry rerouted to another
-#: code before rendering is grouped under that code and follows its rule (N1
-#: is excluded); one rerouted into N3A or N3B follows this one.
+#: mentee renders as a line of its whole text and gets none. A line listing
+#: several mentees offers each one only its own part (`_own_mentee_line`).
+#: The section files a mentee under either heading by its dates, not its
+#: code, so both codes are placed over both headings' spans. An entry
+#: rerouted to another code before rendering is grouped under that code and
+#: follows its rule (N1 is excluded); one rerouted into N3A or N3B follows
+#: this one.
 MENTEE_CODES = frozenset({'N3A', 'N3B'})
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
@@ -312,11 +315,13 @@ def _holds_field_values(fragment: str, value_tokens: set[str]) -> bool:
     return len(tokens & value_tokens) >= SUBPOINT_FIELD_TOKEN_MAX_SHARE * len(tokens)
 
 
-def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack) -> list[str]:
-    """The entry's prose fragments that hold no rendered field value and that
-    the document provably does not contain."""
+def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack,
+                     text: str | None = None) -> list[str]:
+    """The prose fragments of `text` (by default the entry's own) that hold
+    none of the entry's rendered field values and that the document provably
+    does not contain."""
     value_tokens = _value_tokens(entry, code)
-    return [fragment for fragment in prose_fragments(entry.get('text') or '')
+    return [fragment for fragment in prose_fragments(entry.get('text') or '' if text is None else text)
             if not _holds_field_values(fragment, value_tokens)
             and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
 
@@ -338,20 +343,49 @@ def _section_candidates(code: str, candidates: list[AnchorCandidate],
     return [c for c in candidates if any(span.holds(c) for span in held)]
 
 
+def _mentee_name(entry: Mapping) -> str:
+    """The entry's mentee name (`_MENTEE_NAME_FIELDS`), case-folded and its
+    spacing collapsed, as a name row is compared; '' when it names none."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return ''
+    name = next((fields[key] for key in _MENTEE_NAME_FIELDS if fields.get(key)), '')
+    return ' '.join(str(name).split()).casefold()
+
+
 def _own_mentee_rows(entry: Mapping, candidates: list[AnchorCandidate]) -> list[AnchorCandidate]:
     """The candidates that are rows of a table whose name row names the
     entry's mentee (`_MENTEE_NAME_LABEL`): none when the entry names no
     mentee or no table names it."""
-    fields = entry.get('extracted_fields')
-    if not isinstance(fields, Mapping):
-        return []
-    name = next((fields[key] for key in _MENTEE_NAME_FIELDS if fields.get(key)), '')
+    name = _mentee_name(entry)
     if not name:
         return []
-    name_row = ' '.join(f'{_MENTEE_NAME_LABEL} {name}'.split()).casefold()
+    name_row = f'{_MENTEE_NAME_LABEL} {name}'.casefold()
     tables = [table for c in candidates if c.text.casefold() == name_row
               for table in c.paragraph._p.iterancestors(qn('w:tbl'))]
     return [c for c in candidates if _in_tables(c, tables)]
+
+
+def _own_mentee_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a mentee's prose is read from: its own, except for the last
+    of stage 4's records (`LAST_STAGE4_RECORD`). That one keeps its source
+    line's whole text, the other records' mentees in it, though each of them
+    renders as a table of its own (YUYVIG XNWSZN 188: twelve postdocs on one
+    line, offered under the twelfth). It reads its own tab segment when the
+    line's segments pair one to one with its records, as fan-out pairs the
+    others; the whole line when every record names its mentee (one mentee's
+    two periods, YUYVIG ECXGAT 1479); and nothing otherwise, as which mentee
+    a word is about cannot be told."""
+    text = str(entry.get('text') or '')
+    marker = entry.get(LAST_STAGE4_RECORD)
+    if not isinstance(marker, Mapping):
+        return text
+    segments = _segments(text)
+    if len(segments) == marker.get('count'):
+        return segments[-1]
+    others = [other for group in entries_by_code.values() for other in group
+              if _is_sibling_of(other, entry)]
+    return text if all(_mentee_name(other) == _mentee_name(entry) for other in others) else ''
 
 
 def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Haystack,
@@ -362,8 +396,9 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
     the first entry that carries it (fan-out children and dedup survivors
-    share their parent's text). A mentee's line must be a row of its own
-    table (`_own_mentee_rows`), under either mentee heading.
+    share their parent's text). A mentee's prose is read from its own line
+    (`_own_mentee_line`), and its line must be a row of its own table
+    (`_own_mentee_rows`), under either mentee heading.
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -382,7 +417,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
         for entry in entries_by_code[code]:
             if entry.get(PII_DROPPED_FIELDS_KEY):
                 continue
-            fragments = [f for f in unrendered_prose(entry, code, haystack) if f not in offered]
+            text = _own_mentee_line(entry, entries_by_code) if code in MENTEE_CODES else None
+            fragments = [f for f in unrendered_prose(entry, code, haystack, text) if f not in offered]
             if not fragments:
                 continue
             anchor_tokens = _value_tokens(entry, code) or (
