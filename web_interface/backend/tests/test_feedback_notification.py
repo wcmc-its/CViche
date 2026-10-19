@@ -285,7 +285,7 @@ def test_corrected_docx_upload_stores_the_copy_and_its_diff_and_returns_one_line
         resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
                            files={"file": ("corrected.docx", corrected)})
     assert resp.status_code == 200
-    assert resp.json() == {"changes": 1, "summary": "1 change recorded"}
+    assert resp.json() == {"changes": 1, "comments": 0, "summary": "1 text edit and 0 comments recorded"}
 
     import json
     assert run_storage.get_file(_RUN_ID, _copy_key(user, "corrected.docx")) == corrected
@@ -406,7 +406,7 @@ def test_corrected_docx_upload_is_open_to_staff_on_any_run(client, db, run_stora
         resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
                            files={"file": ("corrected.docx", corrected)})
     assert resp.status_code == 200
-    assert resp.json() == {"changes": 1, "summary": "1 change recorded"}
+    assert resp.json() == {"changes": 1, "comments": 0, "summary": "1 text edit and 0 comments recorded"}
     assert run_storage.get_file(_RUN_ID, _copy_key(staff, "corrected.docx")) == corrected
 
 
@@ -485,8 +485,29 @@ def test_the_run_owner_sees_staffs_corrected_copy_and_their_own(client, db, run_
     owner, _ = _owner_and_staff_copies(client, db, run_storage)
     resp = _list(client, owner)
     assert resp.status_code == 200, resp.text
-    rows = [(c["uploader"], c["role"], c["changes"], c["mine"], c["download"]) for c in resp.json()]
-    assert rows == [("Staff User", "staff", 1, False, "ready"), ("Reviewer", "owner", 2, True, "ready")]
+    rows = [(c["uploader"], c["role"], c["changes"], c["comments"], c["mine"], c["download"]) for c in resp.json()]
+    assert rows == [("Staff User", "staff", 1, 0, False, "ready"), ("Reviewer", "owner", 2, 0, True, "ready")]
+
+
+def test_a_copy_with_only_the_reviewers_comment_reports_and_lists_it(client, db, run_storage, monkeypatch):
+    """#1937: comments and no text edit read "0 changes recorded" and looked lost."""
+    import io
+
+    from docx import Document
+
+    monkeypatch.delenv(_SCAN_FLAG, raising=False)
+    owner = _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    doc = Document(io.BytesIO(_docx(*_DELIVERED)))
+    doc.add_comment(doc.paragraphs[0].runs, text="Synthetic note.", author="Synthetic Reviewer")
+    corrected = io.BytesIO()
+    doc.save(corrected)
+    with _as_user(owner):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", corrected.getvalue())})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"changes": 0, "comments": 1, "summary": "0 text edits and 1 comment recorded"}
+    assert [(c["changes"], c["comments"]) for c in _list(client, owner).json()] == [(0, 1)]
 
 
 def test_a_stranger_can_neither_list_nor_download_corrected_copies(client, db, run_storage):

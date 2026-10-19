@@ -804,15 +804,18 @@ def test_a_date_only_fragment_keeps_an_empty_name_cell():
 
 
 def test_534_an_entry_the_header_check_skips_is_lost_on_the_receipt():
-    """CKDDEG entry 90's shape (#534): a space-separated "year  award,
-    organization" line trips the header check, so no row renders. The
-    receipt reports it lost instead of excusing it as a header; the entry
-    beside it, an empty one with nothing to render and a withheld one (#892)
-    are not lost."""
+    """An entry the header check skips renders no row, and the receipt
+    reports it lost instead of excusing it as a header (#534). CKDDEG entry
+    90's shape, a space-separated "year  award, organization" line, used to
+    be skipped that way; it now renders (#1930). The empty entry with
+    nothing to render and the withheld one (#892) are not lost."""
     skipped = {"taxonomy_code": "H", "element_idx_start": 90,
-               "text": "2014         Pretend Award, North American Imaginary Organization",
-               "extracted_fields": {"award_name": "Pretend Award", "date": "2014",
-                                    "granting_body": "North American Imaginary Organization"}}
+               "text": "Name of award\tOrganization\tDate awarded",
+               "extracted_fields": {}}
+    dated = {"taxonomy_code": "H", "element_idx_start": 91,
+             "text": "2014         Pretend Award, North American Imaginary Organization",
+             "extracted_fields": {"award_name": "Pretend Award", "date": "2014",
+                                  "granting_body": "North American Imaginary Organization"}}
     written = _h_entry("2018 Teaching Award, Example University",
                        award_name="Teaching Award", granting_body="Example University",
                        date="2018")
@@ -837,10 +840,11 @@ def test_534_an_entry_the_header_check_skips_is_lost_on_the_receipt():
     for i, header in enumerate(["Name of award", "Organization", "Date awarded (yyyy)"]):
         table.rows[0].cells[i].text = header
     gen._row_receipts.begin_section("honors")
-    gen._fill_honors([skipped, written, empty, withheld])
-    assert [r.cells[0].text for r in table.rows[1:]] == ["Teaching Award"]
-    receipt, = gen._row_receipts.receipts({"honors": [skipped, written, empty, withheld]})
-    assert (receipt.given, receipt.written) == (4, 1)
+    gen._fill_honors([skipped, dated, written, empty, withheld])
+    assert [r.cells[0].text for r in table.rows[1:]] == ["Teaching Award", "Pretend Award"]
+    receipt, = gen._row_receipts.receipts(
+        {"honors": [skipped, dated, written, empty, withheld]})
+    assert (receipt.given, receipt.written) == (5, 2)
     assert [lost.element_idx_start for lost in receipt.lost] == [90]
 
 

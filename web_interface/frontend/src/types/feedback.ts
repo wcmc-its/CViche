@@ -53,8 +53,11 @@ export interface FeedbackDetail {
   submitted_at: string | null
 }
 
-/** POST /api/run/:id/feedback/corrected-docx: a one-line confirmation only. */
+/** POST /api/run/:id/feedback/corrected-docx: the copy's counts and a one-line confirmation. */
 export interface CorrectedDocxResult {
+  /** Text edits the diff found. */
   changes: number
+  /** The reviewer's own Word comments in the copy; CViche's are not counted. */
+  comments: number
   summary: string
 }

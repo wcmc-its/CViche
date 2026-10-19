@@ -32,10 +32,11 @@ class CopyRecord:
     role: str | None
     uploaded_at: datetime
     changes: int
+    comments: int
     storage_key: str
 
 
-def record_copy(db: Session, run_id: str, user_id: int | None, *, changes: int,
+def record_copy(db: Session, run_id: str, user_id: int | None, *, changes: int, comments: int,
                 storage_key: str, uploaded_at: datetime) -> None:
     """Insert the uploader's row for the run, or replace it: one row per run
     and uploader, as storage keeps one copy per run and uploader. Commits.
@@ -49,7 +50,8 @@ def record_copy(db: Session, run_id: str, user_id: int | None, *, changes: int,
         if row is None:
             row = CorrectedCopy(run_id=run_id, user_id=user_id)
             db.add(row)
-        row.changes, row.storage_key, row.uploaded_at = changes, storage_key, uploaded_at
+        row.changes, row.comments = changes, comments
+        row.storage_key, row.uploaded_at = storage_key, uploaded_at
         try:
             db.commit()
             return
@@ -86,5 +88,6 @@ def load_copies(db: Session, run_ids: list[str]) -> dict[str, list[CopyRecord]]:
         by_run.setdefault(copy.run_id, []).append(CopyRecord(
             id=copy.id, run_id=copy.run_id, user_id=copy.user_id,
             uploader=display_name if known else None, role=role,
-            uploaded_at=copy.uploaded_at, changes=copy.changes, storage_key=copy.storage_key))
+            uploaded_at=copy.uploaded_at, changes=copy.changes, comments=copy.comments,
+            storage_key=copy.storage_key))
     return by_run
