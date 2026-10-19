@@ -52,6 +52,7 @@ try:
     from docx.shared import Inches, Pt, RGBColor, Twips
     from docx.table import Table
     from docx.text.paragraph import Paragraph
+    from docx.text.run import Run
     from lxml import etree
 except ImportError:
     logger.error("Error: python-docx not installed. Install with: pip install python-docx lxml")
@@ -278,6 +279,7 @@ from unified_pipeline.stage6.sections.mentoring import (
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
+from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VERBATIM_M1
 from unified_pipeline.stage6.sections.service import EXTRAMURAL_ORGANIZATION_FIELDS
 from unified_pipeline.stage6.sorting import (  # noqa: F401
     element_idx_sort_key,
@@ -792,12 +794,6 @@ def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     if len({TAXONOMY_TO_SECTION.get(code) for code in candidates}) > 1:
         return None
     return min(candidates)
-
-
-# Stage 4.5's `generation_method` when its summary IS the CV's own M1 text,
-# joined verbatim (stage_4_5_research_summary.py); any other method paraphrases.
-# Duplicated rather than imported: stage 6 reads the stage 4.5 artifact as its contract.
-_SUMMARY_METHOD_VERBATIM_M1 = "existing_content"
 
 
 # The M1 fields that hold research-statement prose (field_schemas_v1.1.json M1:
@@ -4613,9 +4609,7 @@ Now analyze the text above:"""
         # as a plain run (no w:ins). The text is the final/accepted content, so
         # the document reads as if the change were already accepted.
         if not self.emit_track_changes:
-            run = para.add_run(text)
-            _set_font(run)
-            return run
+            return self._add_plain_run(para, text)
         try:
             revision_id = str(self._revision_id)
             self._revision_id += 1
@@ -4674,6 +4668,13 @@ Now analyze the text above:"""
             run = para.add_run(text)
             _set_font(run)
             return run
+
+    def _add_plain_run(self, para: Paragraph, text: str) -> Run:
+        """Append `text` to `para` as an ordinary run in the document font --
+        text that reads as the CV owner's own, with no tracked-change author."""
+        run = para.add_run(self._sanitize_run_text(text))
+        _set_font(run)
+        return run
 
     def _add_track_change_deletion(self, para: Paragraph, text: str, author: str = "LLM Formatter"):
         """Mark text as a deletion (track change) that appears in Word's review mode.
