@@ -726,6 +726,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_python_repr_in_output,
+    lint_renderer_row_receipts,
     lint_section_lost,
     lint_session_title_missing,
     lint_shattered_prose,
@@ -931,6 +932,7 @@ KNOWN_LINTS = (
     "journal_name_joined",
     "group_credit_dropped",
     "institution_cleaned_name",
+    "renderer_row_missing",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1493,7 +1495,7 @@ _ARTIFACTS = {
                              "_citation_formatted.json", record_lists=("entries",)),
     "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
     "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json",
-                                   optional_lists=("warnings", "dedup_decisions")),
+                                   optional_lists=("warnings", "dedup_decisions", "row_receipts")),
 }
 
 #: The artifacts `_load_json` reads, in load order; the docx is read by its
@@ -1866,6 +1868,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("institution_cleaned_name", lint_institution_cleaned_name,
              ("stage_5b", "table_rows"), optional=("blocks",)),
+    LintSpec("renderer_row_missing", lint_renderer_row_receipts, ("stage_6_report",)),
 )
 
 #: The views read from the stage-6 docx.

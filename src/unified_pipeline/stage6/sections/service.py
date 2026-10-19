@@ -992,6 +992,7 @@ class ServiceSection:
 
                 # Add row to table
                 row = table.add_row()
+                self._row_receipts.wrote(row._tr, entry)
                 num_cols = len(row.cells)
 
                 # Populate based on number of columns
@@ -1044,6 +1045,7 @@ class ServiceSection:
         for entry in entries:
             original_text = entry.get('text', '')
             fields = entry.get('extracted_fields', {}) or {}
+            self._row_receipts.begin_entry(entry)  # _add_extramural_row records against it (#534)
 
             # Check if extracted_fields has valid data - prefer using LLM extraction over raw parsing
             organization = next(
@@ -1077,6 +1079,7 @@ class ServiceSection:
                 else:
                     # Single entry without extracted fields - use raw text
                     self._add_extramural_row(table, original_text, '', '')
+        self._row_receipts.end_entry()  # a later extramural row is not the last entry's (#534)
 
     def _parse_extramural_leadership_lines(self, table, lines: list[str]) -> None:
         """Parse multiple extramural leadership lines and add rows.
@@ -1196,6 +1199,7 @@ class ServiceSection:
         role = _cell_text(role)
         dates = _cell_text(dates)
         row = table.add_row()
+        self._row_receipts.wrote(row._tr)
         num_cols = len(row.cells)
 
         if num_cols >= 3:
@@ -1230,6 +1234,7 @@ class ServiceSection:
             text = entry.get('text', '').strip().lower()
             # Skip if it's a single word that looks like a header
             if text and len(text.split()) <= 2 and any(text == h for h in header_patterns):
+                self._row_receipts.set_aside(entry)
                 continue
             filtered_entries.append(entry)
 
@@ -1286,9 +1291,11 @@ class ServiceSection:
 
             # Skip if still empty or too short
             if not journal or len(journal.strip()) < 3:
+                self._row_receipts.set_aside(entry)
                 continue
 
             row = table.add_row()
+            self._row_receipts.wrote(row._tr, entry)
             row.cells[0].text = journal
             if len(row.cells) > 1:
                 row.cells[1].text = dates
@@ -1426,6 +1433,7 @@ class ServiceSection:
                             organization = ''
 
                     row = table.add_row()
+                    self._row_receipts.wrote(row._tr, entry)
                     num_cols = len(row.cells)
                     if num_cols >= 3:
                         row.cells[0].text = role or ''

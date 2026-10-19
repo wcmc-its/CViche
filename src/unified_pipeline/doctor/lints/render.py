@@ -877,6 +877,50 @@ def lint_stage6_warnings(report: dict) -> list[dict]:
     return findings
 
 
+def lint_renderer_row_receipts(report: dict) -> list[dict]:
+    """One WARN per taxonomy code whose section was handed an entry it wrote
+    no row for (#534): the entry has no row or paragraph left in the
+    document and is not in the Appendix. Reads the render-warnings sidecar's `row_receipts`, which stage 6 builds by
+    bookkeeping (`stage6/row_receipts.py`), not by searching the docx --
+    so a row written and later wiped (#454, GNONHA) counts as lost, and a
+    tracked-change or reformatted row still counts as written.
+
+    Only receipts stage 6 marks `linted` are read: the other sections do not
+    record every row they write yet, so their `lost` lists are not evidence.
+    A sidecar from a build that predates receipts has no key and yields
+    nothing.
+
+    No dedup decision can excuse a lost entry: stage 6 dedups before it
+    snapshots what each section is given, so a dropped twin is never in a
+    receipt. The only given entry a decision's `dropped_text` can match is
+    the twin dedup KEPT, and that one's loss is real.
+
+    The message opens "taxonomy code <code>:" -- a prefix the run page and
+    the review copy (`run_quality_report._section_and_detail`) already read
+    -- so both name the section. One receipt (Service: Q1 to Q4D) spans
+    several codes, hence one finding per code."""
+    findings = []
+    for receipt in report.get("row_receipts", []):
+        if not receipt.get("linted"):
+            continue
+        lost = receipt.get("lost", [])
+        if not lost:
+            continue
+        section = receipt.get("section", "?")
+        by_code: dict[str, list[dict]] = {}
+        for e in lost:
+            by_code.setdefault(str(e.get("code") or "?"), []).append(e)
+        for code, entries in by_code.items():
+            findings.append(_finding(
+                "renderer_row_missing", "WARN",
+                f"taxonomy code {code}: {len(entries)} of the {receipt.get('given', '?')} entries "
+                f"handed to the {section} renderer have no row in the document or the "
+                f"Appendix (#534)",
+                [f"{e.get('code', '')} {e.get('element_idx_start')}: {str(e.get('text', ''))[:80]}"
+                 for e in entries[:5]]))
+    return findings
+
+
 # One legitimate pipe can appear in a title; a cluster of single-pipe bullets
 # under one section is the fused-cell fallback shape (19 under K4 on 2Q1_ZQ).
 PIPE_LEAK_MIN_SEPS = 2

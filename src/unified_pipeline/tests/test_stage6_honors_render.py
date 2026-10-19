@@ -801,3 +801,66 @@ def test_a_date_only_fragment_keeps_an_empty_name_cell():
     rows = _render_honors([_h_entry("1971- 1972.", award_name=None,
                                     start_date="1971", end_date="1972")])
     assert rows == [["", "", "1971-1972"]]
+
+
+def test_534_an_entry_the_header_check_skips_is_lost_on_the_receipt():
+    """CKDDEG entry 90's shape (#534): a space-separated "year  award,
+    organization" line trips the header check, so no row renders. The
+    receipt reports it lost instead of excusing it as a header; the entry
+    beside it, an empty one with nothing to render and a withheld one (#892)
+    are not lost."""
+    skipped = {"taxonomy_code": "H", "element_idx_start": 90,
+               "text": "2014         Pretend Award, North American Imaginary Organization",
+               "extracted_fields": {"award_name": "Pretend Award", "date": "2014",
+                                    "granting_body": "North American Imaginary Organization"}}
+    written = _h_entry("2018 Teaching Award, Example University",
+                       award_name="Teaching Award", granting_body="Example University",
+                       date="2018")
+    empty = {"taxonomy_code": "H", "element_idx_start": 3, "text": "", "extracted_fields": {}}
+    withheld = {"taxonomy_code": "H", "element_idx_start": 4,
+                "text": "2019 Extraordinary Ability in Sciences, O-1 Visa | "
+                        "U.S. Citizen & Immigration Service (USCIS)",
+                "extracted_fields": {"award_name": "Extraordinary Ability in Sciences, O-1 Visa",
+                                     "granting_body": "U.S. Citizen & Immigration Service (USCIS)",
+                                     "date": "2019"}}
+    from unified_pipeline.stage6.pii_pass import run_pii_pass
+    from unified_pipeline.stage_6_word_template import (
+        RENDER_ROUTED_CODES,
+        TAXONOMY_TO_SECTION,
+    )
+    run_pii_pass({"H": [withheld]}, routed_codes=RENDER_ROUTED_CODES,
+                 section_names=TAXONOMY_TO_SECTION)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("H. HONORS AND AWARDS")
+    table = gen.doc.add_table(rows=1, cols=3)
+    for i, header in enumerate(["Name of award", "Organization", "Date awarded (yyyy)"]):
+        table.rows[0].cells[i].text = header
+    gen._row_receipts.begin_section("honors")
+    gen._fill_honors([skipped, written, empty, withheld])
+    assert [r.cells[0].text for r in table.rows[1:]] == ["Teaching Award"]
+    receipt, = gen._row_receipts.receipts({"honors": [skipped, written, empty, withheld]})
+    assert (receipt.given, receipt.written) == (4, 1)
+    assert [lost.element_idx_start for lost in receipt.lost] == [90]
+
+
+def test_534_a_row_written_after_the_honors_loop_is_not_the_last_entrys():
+    """The honors loop ends its receipt cursor: a row added after it is not
+    credited to the last entry, so when that entry's own row is removed the
+    entry is lost, not vouched for by a row that is not its own."""
+    from unified_pipeline.stage6.sections.honors import HonorRecord
+
+    entry = _h_entry("2018 Teaching Award, Example University", award_name="Teaching Award",
+                     granting_body="Example University", date="2018")
+    entry["element_idx_start"] = 5
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("H. HONORS AND AWARDS")
+    table = gen.doc.add_table(rows=1, cols=3)
+    gen._row_receipts.begin_section("honors")
+    gen._fill_honors([entry])
+    gen._add_honors_row(table, HonorRecord(award="Later Row", organization="", date=""))
+    entry_row = table.rows[1]._tr
+    entry_row.getparent().remove(entry_row)
+    receipt, = gen._row_receipts.receipts({"honors": [entry]})
+    assert [lost.element_idx_start for lost in receipt.lost] == [5]
