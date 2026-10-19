@@ -453,7 +453,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 0 | ratchet |
 | 8.3 missing annotations (ANN*, RUF012) | falling | 447 | ratchet |
-| 8.4 pyflakes findings (F) | falling | 156 | ratchet |
+| 8.4 pyflakes findings (F) | falling | 155 | ratchet |
 | 8.4 bugbear findings (B) | falling | 135 | ratchet |
 
 <!-- check_standards:auto:end -->
