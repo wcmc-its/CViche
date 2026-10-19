@@ -722,6 +722,23 @@ def test_a_real_column_header_row_never_renders():
         assert _render_honors([_raw(text)]) == [], text
 
 
+def test_a_space_separated_year_award_row_is_not_a_header_row():
+    """#1930: "year  award, organization" with spaces, not a tab or pipe, is
+    one cell, so the date-cell exemption never saw a bare year. The entry has
+    two header words ("Award", "Organization") and rendered nothing. A cell
+    that opens with a year carries a date value, which no header row does."""
+    text = "2014         Sample Prize Award, Example Research Organization"
+    assert not _is_honors_header_entry(text)
+    entry = {"text": text, "extracted_fields": {
+        "award_name": "Sample Prize Award",
+        "granting_body": "Example Research Organization",
+        "date": "2014"}}
+    rows = _render_honors([entry])
+    assert len(rows) == 1, rows
+    assert "Sample Prize Award" in rows[0][0], rows
+    assert "2014" in rows[0][2], rows
+
+
 def test_a_fused_multi_award_list_is_not_a_header_row():
     """The first of this round's three rendering losses. The shared
     `_is_table_header_entry` counts a cell as header-like when it contains one

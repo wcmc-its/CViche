@@ -621,12 +621,15 @@ def _is_honors_header_entry(text: str) -> bool:
     cell that is itself a date is therefore data, whatever its header-word
     count, and only that case is taken back from the shared check -- a real
     header row ("Name of award | Organization | Date awarded") still has no
-    date cell and is still skipped.
+    date cell and is still skipped. A cell that opens with a year is taken
+    back the same way: a space-separated "2014  Award, Organization" row has
+    no delimiter to give its year a cell of its own (#1930).
     """
     if not _is_table_header_entry(text, _ENTRY_HEADER_KEYWORDS):
         return False
-    return not any(_is_date_column(cell.strip())
-                   for cell in _CELL_SPLIT_RE.split(text or '') if cell.strip())
+    cells = [cell.strip() for cell in _CELL_SPLIT_RE.split(text or '')]
+    return not any(_is_date_column(cell) or _LEADING_YEAR_RE.match(cell)
+                   for cell in cells if cell)
 
 
 def _looks_like_column_header(line: str) -> bool:
@@ -1440,9 +1443,10 @@ class HonorsSection:
 
             # Skip table header entries that were mistakenly extracted as data
             # Common patterns: "Name of award\tOrganization\tDate awarded" or similar
-            # Not set aside on the receipt (#534): this check misfires on a
-            # space-separated "year  award, organization" line (#1930), so a
-            # skip here is reported as a lost entry rather than excused.
+            # Not set aside on the receipt (#534): this check has misfired
+            # on real data before (a space-separated "year  award,
+            # organization" line, #1930), so a skip here is reported as a
+            # lost entry rather than excused.
             if _is_honors_header_entry(original_text):
                 if self.verbose:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
