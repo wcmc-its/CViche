@@ -70,7 +70,7 @@ from ..resolution import (
     _location_already_in_institution,
 )
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
-from ..supplementary import Revision, write_row_subpoint
+from ..supplementary import Revision, SubpointPlacement, write_row_subpoint
 
 logger = logging.getLogger(__name__)
 
@@ -1315,14 +1315,20 @@ class PositionsSection:
         and track changes, as `_add_supplementary_subpoints` requires) the row
         is the entry's tracked-deleted sub-point, recorded in `_subpoint_lines`
         and `_subpoint_entry_ids`, so the sub-point pass, the overflow routing
-        and the #221 recovery all read the duties as already offered.
+        and the #221 recovery all read the duties as already offered, and in
+        `_subpoint_placements` for the sidecar, under the record's
+        `taxonomy_code`, the code its table renders it as. A tab-joined child
+        record (`_child_position_records`) has no `element_idx_start`, so its
+        placement names no entry: the doctor counts it as no entry's own.
         Otherwise it is a plain continuation row (#1641)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             _add_continuation_row(table, duties)
             return
         revision = Revision(self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
-        self._subpoint_lines.append(write_row_subpoint(
-            table.rows[-1]._tr, (self._sanitize_run_text(duties),), revision))
+        texts = (self._sanitize_run_text(duties),)
+        self._subpoint_lines.append(write_row_subpoint(table.rows[-1]._tr, texts, revision))
         self._subpoint_entry_ids.add(id(entry))
+        self._subpoint_placements.append(SubpointPlacement(
+            entry.get('element_idx_start'), entry.get('taxonomy_code'), texts))
         self._revision_id = revision.next_id
         self.stats['track_changes_added'] += 1

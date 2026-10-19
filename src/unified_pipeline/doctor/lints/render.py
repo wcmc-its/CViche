@@ -678,8 +678,11 @@ def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
     stage 6's own recovery looks for the same lines (#1230).
 
     `subpoints` (optional: the rendered docx's sub-points): a record line a
-    tracked-deleted sub-point offers (#1205) is delivered for review, not
-    absent -- stage 6's own #221 recovery reads the sub-points the same way."""
+    tracked-deleted sub-point of its own entry offers (#1205) is delivered
+    for review, not absent; another entry's sub-point does not vouch for it
+    (`offered_as_subpoint`). Stage 6's own #221 recovery reads the
+    sub-points too, but every one for every entry, so a line only another
+    entry's sub-point matches is not recovered there, and is reported here."""
     # Only h.text (the verbatim-containment haystack) is used here; h.tokens
     # (the pooled document token set) is deliberately not — this lint scores
     # each record against per-OUTPUT-LINE token sets so common academic words
@@ -709,7 +712,8 @@ def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
             absent = [r for r in records
                       if _record_rendered(r, h.text, output) is False
                       and not (r in tab_parts and _held_by_extraction(r, fields))]
-        absent = [r for r in absent if not offered_as_subpoint(r, subpoints)]
+        absent = [r for r in absent
+                  if not offered_as_subpoint(r, subpoints, e.get('element_idx_start'))]
         if not absent:
             continue
         findings.append(_finding(

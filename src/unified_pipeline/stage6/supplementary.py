@@ -42,8 +42,12 @@ this pass runs, so they join its haystack and are not planned again.
 The doctor reads the sub-points through one shared test
 (`doctor.shared.offered_as_subpoint`): under_extraction and
 unrendered_records count the prose as delivered for review, offschema_fields
-still reports a value stage 4 misfiled, as INFO with a note. The render gate
-compares arms; its XML fingerprint sees every sub-point as a change.
+still reports a value stage 4 misfiled, as INFO with a note. The
+render-warnings sidecar records whose each sub-point is
+(`SUBPOINT_PLACEMENTS_KEY`), so the doctor counts a sub-point only for the
+entry it was written for, not for another entry it shares words with. The
+render gate compares arms; its XML fingerprint sees every sub-point as a
+change.
 
 Codes: K1-K5 and M2A-M2D first, where loss is highest (#1205 body), plus
 D1-D3 duties (owner decision 2026-10-08, lifting the D exclusion for this
@@ -154,6 +158,13 @@ SUBPOINT_FIELD_TOKEN_MAX_SHARE = 0.5
 #: the enrichment and formatter changes and from their own edits.
 SUBPOINT_AUTHOR = 'CViche: source text with no template field'
 
+#: The render-warnings sidecar's key for the sub-points stage 6 wrote, one
+#: `SubpointPlacement` record each. The doctor reads it so that a sub-point
+#: vouches only for its own entry (`doctor.shared.offered_as_subpoint`). A
+#: sidecar without it, written before the record existed, leaves the doctor
+#: matching every sub-point in the document.
+SUBPOINT_PLACEMENTS_KEY = 'subpoint_placements'
+
 #: A link or an e-mail address -- a contact line fused into a position entry,
 #: a webinar's tracking URL (EBYSBC) -- is not prose, and an address is not
 #: offered back to the reader in a review pane.
@@ -197,12 +208,34 @@ class SectionSpan(NamedTuple):
         return candidate.position >= self.start and (self.end is None or candidate.position < self.end)
 
 
+class SubpointPlacement(NamedTuple):
+    """One sub-point stage 6 wrote, as the sidecar records it
+    (`SUBPOINT_PLACEMENTS_KEY`, one `_asdict()` per sub-point): the
+    `element_idx_start` of the entry it was written for, which is the index
+    the doctor reads stage 4's entries by (fan-out children keep it); the
+    code the entry rendered as; and the paragraphs as written."""
+    element_idx_start: object
+    code: str
+    paragraphs: tuple[str, ...]
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> SubpointPlacement:
+        """A placement read back from its sidecar record."""
+        paragraphs = record.get('paragraphs')
+        return cls(record.get('element_idx_start'), str(record.get('code') or ''),
+                   tuple(map(str, paragraphs)) if isinstance(paragraphs, (list, tuple)) else ())
+
+
 class SubPoint(NamedTuple):
     """Prose an entry's render leaves out, and the line it goes under.
-    `entry_id` is `id()` of the entry dict, for the overflow pass to skip."""
+    `entry_id` is `id()` of the entry dict, for the overflow pass to skip;
+    `code` is the code the entry rendered as and `element_idx_start` its
+    index, for its `SubpointPlacement`."""
     anchor: AnchorCandidate
     paragraphs: tuple[str, ...]
     entry_id: int
+    code: str
+    element_idx_start: object
 
     def as_rendered_line(self) -> str:
         """The entry as a reader who rejects the deletion sees it: its line,
@@ -430,7 +463,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
             offered.update(fragments)
             if excluded_tables and _in_tables(anchor, excluded_tables):
                 continue
-            planned.append(SubPoint(anchor, tuple(fragments), id(entry)))
+            planned.append(SubPoint(anchor, tuple(fragments), id(entry), code,
+                                    entry.get('element_idx_start')))
     return planned
 
 

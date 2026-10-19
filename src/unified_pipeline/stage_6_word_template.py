@@ -1589,6 +1589,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the entries it was written for, which the overflow pass skips.
         self._subpoint_lines: list[str] = []
         self._subpoint_entry_ids: set[int] = set()
+        # Whose each written sub-point is, for the render-warnings sidecar.
+        self._subpoint_placements: list[supplementary.SubpointPlacement] = []
         # Tables of a code the sub-points exclude, whatever code the entries
         # written into them carry: Journal Reviewing (Q4D), which also takes
         # the Q2 entries `_route_q2_entries` reroutes there.
@@ -2179,10 +2181,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         Returns:
             Path to generated document
         """
-        # Reset per-render section-failure tracking (#565) -- a generator
-        # instance can render more than once, and a failure from a prior
-        # render must never leak into this one's sidecar.
-        self._section_failures, self._failed_section_codes, self._declined_grant_entries = [], set(), []
+        # Reset per-render section-failure tracking (#565) and the sub-point
+        # placements -- a generator instance can render more than once, and a
+        # failure or placement from a prior render must never leak into this one's sidecar.
+        self._section_failures, self._failed_section_codes, self._declined_grant_entries, self._subpoint_placements = [], set(), [], []
         # An A entry's ORCID iD for the S0 renderer, set by _fill_personal_data (#817).
         self._a_researcher_profiles = []
 
@@ -2477,7 +2479,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         (#227/#228) — until now they only ever reached the pod log. Written
         even when empty, so the doctor can tell a clean run from a
         pre-sidecar build. Fail-soft: a sidecar failure must never fail the
-        render.
+        render. Also records whose each #1205 sub-point is
+        (`_subpoint_placements`), so the doctor counts a sub-point only for
+        its own entry.
         """
         try:
             report_path = Path(output_path).with_name(
@@ -2486,6 +2490,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "document_uid": document_uid,
                 "warnings": warnings,
                 "dedup_decisions": dedup_decisions,
+                supplementary.SUBPOINT_PLACEMENTS_KEY: [
+                    placement._asdict() for placement in self._subpoint_placements],
             }, indent=2))
         except Exception:
             logger.exception("could not write render-warnings sidecar")
@@ -3892,6 +3898,8 @@ Now analyze the text above:"""
             supplementary.write_subpoint(subpoint, revision)
             self._subpoint_lines.append(subpoint.as_rendered_line())
             self._subpoint_entry_ids.add(subpoint.entry_id)
+            self._subpoint_placements.append(supplementary.SubpointPlacement(
+                subpoint.element_idx_start, subpoint.code, subpoint.paragraphs))
         self._revision_id = revision.next_id
         self.stats['supplementary_subpoints'] = len(self._subpoint_lines)
         self.stats['track_changes_added'] += sum(len(sp.paragraphs) for sp in planned)

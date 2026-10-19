@@ -1772,6 +1772,36 @@ def test_unrendered_records_reads_a_sub_point_as_delivered():
     assert one[0]["evidence"] == [_ROW_FOXGLOVE[:100]]
 
 
+# EBYSBC VGHNZD's shape, invented: a mentee's record line the page lacks
+# shares 5 of its 7 distinctive words with ANOTHER mentee's sub-point.
+_MENTEE_SHOWN = "2014-2016 Quimby Farrow, graduate student, marsupial cardiology rotation"
+_MENTEE_LOST = "2017-2019 Quimby Farrow, doctoral thesis on wallaby circulation outcomes"
+_OTHER_MENTEES_SUBPOINT = "Mentored outcomes research on wallaby circulation for a doctoral thesis"
+
+
+def test_unrendered_records_counts_only_the_entrys_own_sub_point():
+    """#1205: with the render's placements a sub-point vouches only for the
+    entry it was written for. Without them, every sub-point in the document
+    does, as before."""
+    from unified_pipeline.doctor.shared import subpoint_text
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    stage4 = {"entries": [
+        _entry("Casey Sample, postdoctoral associate", start=463, taxonomy_code="N3A"),
+        _entry(f"{_MENTEE_SHOWN}\n{_MENTEE_LOST}", start=477, taxonomy_code="N3A")]}
+    blocks = [("p", "MENTORING"), ("table", _MENTEE_SHOWN)]
+    lines = [_OTHER_MENTEES_SUBPOINT]
+
+    def placed(idx):
+        return subpoint_text(lines, (SubpointPlacement(idx, "N3A", tuple(lines)),))
+
+    assert lint_unrendered_records(stage4, blocks, subpoint_text(lines)) == []
+    assert lint_unrendered_records(stage4, blocks, placed(477)) == []
+    (finding,) = lint_unrendered_records(stage4, blocks, placed(463))
+    assert "entry 477 (N3A): 1 of 2 records absent" in finding["message"]
+    assert finding["evidence"] == [_MENTEE_LOST]
+
+
 def test_unrendered_records_skips_single_record_and_short_appendix_entries():
     blocks = [("p", "D. GRANTS"), ("table", _ROW_HARBORVIEW)]
     # One record line: not a fused candidate, even though it never rendered.

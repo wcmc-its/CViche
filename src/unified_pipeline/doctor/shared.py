@@ -11,6 +11,7 @@ neither.
 """
 import functools
 import re
+from collections import defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -40,6 +41,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentType
+
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
 
 
 # Separator joined between output lines in the containment haystack so a
@@ -310,20 +313,57 @@ class SubpointText(NamedTuple):
     """A rendered document's sub-points (`docx_subpoint_lines`) as
     `offered_as_subpoint` matches against them: the squashed lines,
     `_LINE_SENTINEL`-joined like `Haystack.text`, and each line's distinctive
-    token set."""
+    token set. `by_entry` is each entry's own sub-points, by its
+    `element_idx_start` (`subpoint_text`); None when there is no record of
+    whose each one is (no sidecar, or one written before it held one)."""
     text: str
     line_tokens: tuple[frozenset[str], ...]
+    by_entry: Mapping[object, SubpointText] | None = None
 
 
-def subpoint_text(lines: list[str] | None) -> SubpointText:
-    """`SubpointText` over `docx_subpoint_lines`' lines; empty for None (no
-    document, or none read)."""
-    lines = [line for line in lines or () if line.strip()]
+def subpoint_placements(report: Mapping[str, object] | None,
+                        ) -> tuple[SubpointPlacement, ...] | None:
+    """Stage 6's record of whose each sub-point is, from its render-warnings
+    sidecar (`SUBPOINT_PLACEMENTS_KEY`); None without a sidecar, or for one
+    written before the record existed."""
+    from unified_pipeline.stage6.supplementary import (
+        SUBPOINT_PLACEMENTS_KEY,
+        SubpointPlacement,
+    )
+    records = report.get(SUBPOINT_PLACEMENTS_KEY) if report is not None else None
+    if records is None:
+        return None
+    return tuple(SubpointPlacement.from_record(record) for record in records)
+
+
+def _subpoint_view(lines: list[str]) -> SubpointText:
+    """`SubpointText` over `lines`, with no per-entry view."""
     return SubpointText(_LINE_SENTINEL.join(squash(line) for line in lines),
                         tuple(frozenset(_long_word_tokens(line)) for line in lines))
 
 
-def offered_as_subpoint(text: str, subpoints: SubpointText | None) -> bool:
+def subpoint_text(lines: list[str] | None,
+                  placements: tuple[SubpointPlacement, ...] | None = None) -> SubpointText:
+    """`SubpointText` over `docx_subpoint_lines`' lines; empty for None (no
+    document, or none read). With `placements` (`subpoint_placements`), also
+    each entry's own lines: those a placement of that entry wrote. The
+    document stays the record of what is offered, since a corrected copy
+    (#1654) is read with the run's own sidecar; a placement only says whose
+    a line is."""
+    lines = [line for line in lines or () if line.strip()]
+    whole = _subpoint_view(lines)
+    if placements is None:
+        return whole
+    written: dict[object, set[str]] = defaultdict(set)
+    for placement in placements:
+        written[placement.element_idx_start].update(map(squash, placement.paragraphs))
+    return whole._replace(by_entry={
+        idx: _subpoint_view([line for line in lines if squash(line) in texts])
+        for idx, texts in written.items()})
+
+
+def offered_as_subpoint(text: str, subpoints: SubpointText | None,
+                        element_idx: object = None) -> bool:
     """Whether `text` -- a record line, an entry's prose, a field value --
     reaches the reader as a tracked-deleted sub-point (#1205): a verbatim piece
     of it (`_entry_pieces`) sits in one, or one sub-point line holds
@@ -331,7 +371,15 @@ def offered_as_subpoint(text: str, subpoints: SubpointText | None) -> bool:
     RENDER_TOKEN_MIN_COUNT of them. A sub-point is source prose the template
     has no field for, offered for review: rejecting the deletion keeps it.
     The one test every doctor consumer of the sub-points shares, so a lint
-    does not grow its own copy."""
+    does not grow its own copy.
+
+    `element_idx` is the `element_idx_start` of the entry `text` is from.
+    Given it, and the render's placements (`SubpointText.by_entry`), only
+    that entry's own sub-points count: another entry's sub-point sharing its
+    words does not vouch for it (EBYSBC VGHNZD 477's record line, matched by
+    463's sub-point). Without either, every sub-point in the document does."""
+    if subpoints is not None and element_idx is not None and subpoints.by_entry is not None:
+        subpoints = subpoints.by_entry.get(element_idx)
     if subpoints is None:
         return False
     if any(piece in subpoints.text for piece in _entry_pieces(text)):

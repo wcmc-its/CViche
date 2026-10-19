@@ -11,6 +11,7 @@ synthetic.
 """
 
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -196,6 +197,24 @@ def test_plan_places_an_entry_under_its_own_line_in_its_own_section():
     assert [(p.anchor, p.paragraphs) for p in planned] == [(lines[0], (PROSE,))]
 
 
+def test_plan_records_the_code_each_entry_is_planned_under_and_its_index():
+    # The group an entry is planned under is the code it rendered as: a K2
+    # rerouted into N3B keeps its stored code, but rendered as a mentee.
+    lines = _mentee_tables("Ana Li")
+    trainee = dict(_postdoc(), taxonomy_code="K2", element_idx_start=1477)
+    (planned,) = sp.plan_subpoints({"N3B": [trainee]}, _haystack(), lines,
+                                   {"N3B": sp.SectionSpan(0, None)})
+    assert (planned.code, planned.element_idx_start) == ("N3B", 1477)
+
+
+def test_a_placement_reads_back_from_its_sidecar_record():
+    placement = sp.SubpointPlacement(1477, "N3B", (PROSE, OTHER_PROSE))
+    assert sp.SubpointPlacement.from_record(json.loads(json.dumps(placement._asdict()))) == placement
+    # A record missing a key, or holding a stray shape, reads as empty, not as text.
+    assert sp.SubpointPlacement.from_record({"paragraphs": PROSE}) == sp.SubpointPlacement(None, "", ())
+    assert sp.SubpointPlacement.from_record({"paragraphs": [7]}).paragraphs == ("7",)
+
+
 def test_plan_finds_no_anchor_outside_the_section():
     line = _candidate("Associate Professor | Example University | 2010-2015", position=50)
     assert sp.plan_subpoints({"D1": [_appointment()]}, _haystack(line.text), [line],
@@ -379,7 +398,7 @@ def _reject_all_texts(body):
 
 
 def _subpoint(paragraph, *texts):
-    return sp.SubPoint(_candidate(paragraph.text, paragraph=paragraph), texts, 0)
+    return sp.SubPoint(_candidate(paragraph.text, paragraph=paragraph), texts, 0, "D1", 0)
 
 
 @pytest.mark.parametrize("anchor_kind", ["bullet", "citation"])

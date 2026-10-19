@@ -654,6 +654,20 @@ def test_under_extraction_leaves_out_lines_a_sub_point_delivers():
     assert len(lint_under_extraction({"entries": [entry]}, None)) == 1
 
 
+def test_under_extraction_leaves_out_only_its_own_sub_points_lines():
+    # #1205: once the render records whose each sub-point is, the same lines
+    # offered under another entry are not this entry's, so it is flagged.
+    from unified_pipeline.doctor.shared import subpoint_text
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    entry = _under_extraction_entry(30.0, UNDER_EXTRACTION_MIN_CHARS + 50, 3)
+    lines = tuple(line for line in entry["text"].split("\n") if line.strip())
+    own = subpoint_text(list(lines), (SubpointPlacement(1, "D1", lines),))
+    assert lint_under_extraction({"entries": [entry]}, own) == []
+    another = subpoint_text(list(lines), (SubpointPlacement(2, "D1", lines),))
+    assert len(lint_under_extraction({"entries": [entry]}, another)) == 1
+
+
 
 def _stage4_records_entry(code, field):
     """An entry whose two stage-4 records carry its whole text; its own
@@ -1587,6 +1601,20 @@ def test_offschema_value_a_sub_point_offers_is_info_with_a_note():
     other = lint_offschema_fields({"entries": [entry]}, blocks,
                                   subpoint_text(["Unrelated committee service for the example society"]))
     assert [f["severity"] for f in other] == ["WARN"]
+
+
+def test_offschema_value_only_another_entrys_sub_point_offers_is_a_loss():
+    # #1205: with the render's placements, the value counts as offered only
+    # under its own entry's sub-point (entry 11), not another entry's.
+    from unified_pipeline.doctor.shared import subpoint_text
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    entry = _anchored("D1", {"duties": _DUTY_VALUE}, text=f"Lecturer\t{_DUTY_VALUE}")
+    blocks = [("table", "Lecturer | Example College")]
+    for idx, severity in ((11, "INFO"), (12, "WARN")):
+        subpoints = subpoint_text([_DUTY_VALUE], (SubpointPlacement(idx, "D1", (_DUTY_VALUE,)),))
+        found = lint_offschema_fields({"entries": [entry]}, blocks, subpoints)
+        assert [f["severity"] for f in found] == [severity]
 
 
 def test_offschema_scalar_is_info_and_names_the_fact():

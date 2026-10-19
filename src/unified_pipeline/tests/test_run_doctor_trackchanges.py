@@ -220,3 +220,82 @@ def test_read_docx_subpoints_feeds_offered_as_subpoint(tmp_path):
     assert not offered_as_subpoint("old wording", subpoints)
     assert not offered_as_subpoint("Chairs the departmental finance review panel", subpoints)
     assert not offered_as_subpoint(_SUBPOINT_PROSE, None)
+
+
+def _sidecar_placements(*placements):
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    return {"warnings": [], SUBPOINT_PLACEMENTS_KEY: [p._asdict() for p in placements]}
+
+
+_OTHER_SUBPOINT = "Organises the regional examiners' workshop and moderates assessment panels"
+
+
+def test_a_sub_point_vouches_only_for_its_own_entry():
+    """#1205: the sidecar's placements say whose each sub-point is. With an
+    entry's index, only its own count; without one, or without placements
+    (an older sidecar, or none), every sub-point in the document does."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    doc, _line = _doc_with_a_sub_point_row_and_another_deletion()
+    lines = [*docx_subpoint_lines(doc), _OTHER_SUBPOINT]
+    placements = subpoint_placements(_sidecar_placements(
+        SubpointPlacement(29, "D1", (_SUBPOINT_PROSE,)), SubpointPlacement(30, "K1", (_OTHER_SUBPOINT,))))
+    placed = subpoint_text(lines, placements)
+    assert offered_as_subpoint(_SUBPOINT_PROSE, placed, 29)
+    assert not offered_as_subpoint(_SUBPOINT_PROSE, placed, 30)
+    assert not offered_as_subpoint(_SUBPOINT_PROSE, placed, 31)
+    assert offered_as_subpoint(_SUBPOINT_PROSE, placed)
+    for older in (None, {"warnings": []}):
+        assert subpoint_placements(older) is None
+        assert offered_as_subpoint(_SUBPOINT_PROSE, subpoint_text(lines, subpoint_placements(older)), 30)
+    # A sidecar recording no sub-point is a record too: none is any entry's.
+    assert subpoint_placements(_sidecar_placements()) == ()
+    assert not offered_as_subpoint(_SUBPOINT_PROSE, subpoint_text(lines, ()), 29)
+    # The document says what is offered: a placement whose text a corrected
+    # copy no longer holds as a sub-point vouches for nothing.
+    assert not offered_as_subpoint(_SUBPOINT_PROSE, subpoint_text([_OTHER_SUBPOINT], placements), 29)
+
+
+def test_run_doctor_reads_the_placements_from_the_render_sidecar(tmp_path):
+    """The wire: run_doctor hands the sidecar's placements to the sub-point
+    view, so a record line only another entry's sub-point matches is
+    reported (EBYSBC VGHNZD's shape, invented), and with a sidecar from
+    before the placements it stays quiet, as it did."""
+    from unified_pipeline.stage6.supplementary import (
+        Revision,
+        SubpointPlacement,
+        write_row_subpoint,
+    )
+
+    shown = "2014-2016 Quimby Farrow, graduate student, marsupial cardiology rotation"
+    lost = "2017-2019 Quimby Farrow, doctoral thesis on wallaby circulation outcomes"
+    others = "Mentored outcomes research on wallaby circulation for a doctoral thesis"
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    table.rows[0].cells[0].text = shown
+    write_row_subpoint(table.rows[0]._tr, (others,), Revision(1, "2026-01-01T00:00:00Z"))
+    stage6 = tmp_path / "stage_6_wcm_documents"
+    stage6.mkdir()
+    doc.save(str(stage6 / "VSHAPE_wcm.docx"))
+    stage4 = tmp_path / "stage_4_field_extraction"
+    stage4.mkdir()
+    (stage4 / "VSHAPE_fields.json").write_text(json.dumps({"entries": [
+        {"element_idx_start": 463, "taxonomy_code": "N3A", "text": "Casey Sample, postdoc"},
+        {"element_idx_start": 477, "taxonomy_code": "N3A", "text": f"{shown}\n{lost}"}]}))
+    sidecar = stage6 / "VSHAPE_render_warnings.json"
+
+    def unrendered(report):
+        sidecar.write_text(json.dumps(report))
+        return [f["message"] for f in run_doctor(tmp_path, "VSHAPE")["findings"]
+                if f["lint"] == "unrendered_records"]
+
+    assert unrendered(_sidecar_placements(SubpointPlacement(463, "N3A", (others,)))) == [
+        "entry 477 (N3A): 1 of 2 records absent from output"]
+    assert unrendered({"warnings": []}) == []

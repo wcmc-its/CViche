@@ -2464,6 +2464,64 @@ def test_a_record_rerouted_into_n3b_follows_the_mentee_rule():
     assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MENTEE_PROSE
 
 
+def test_a_rerouted_entrys_placement_records_the_code_it_rendered_as():
+    """The sidecar's record of the sub-point names the mentee code the K2
+    trainee rendered as, and the entry's own index (the doctor's key)."""
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    trainee = dict(_mentee(), taxonomy_code="K2")
+    gen, _ = _render_grouped_mentoring([_rerouted(trainee, "N3B", "PAST MENTEES")],
+                                       supplementary_subpoints=True)
+
+    assert gen._subpoint_placements == [SubpointPlacement(1477, "N3B", (_MENTEE_PROSE,))]
+
+
+def test_the_render_sidecar_records_each_sub_point_with_its_entry_and_code(tmp_path, monkeypatch):
+    """Through `run_stage6`: one placement per sub-point the docx holds, under
+    the entry it was written for -- a mentee's planned row and the duties the
+    positions writer split off a title -- so the doctor reads each as its own
+    entry's only (EBYSBC VGHNZD: one mentee's sub-point silenced another
+    mentee's WARN). The postdoc with no prose has none."""
+    from unified_pipeline.doctor.shared import docx_subpoint_lines
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "T1205P", "cv_owner": {"full_name": "Quenby Marblegate"},
+               "entries": [_other_postdoc(), _mentee(), _title_duty_appointment()]}
+    input_path = tmp_path / "T1205P_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+
+    placements = json.loads((tmp_path / "T1205P_render_warnings.json").read_text())[
+        SUBPOINT_PLACEMENTS_KEY]
+    assert sorted((p["element_idx_start"], p["code"]) for p in placements) == [
+        (661, "D3"), (1477, "N3B")]
+    by_entry = {p["element_idx_start"]: p["paragraphs"] for p in placements}
+    assert by_entry == {661: [_TITLE_DUTIES], 1477: [_MENTEE_PROSE]}
+    assert sorted(text for p in placements for text in p["paragraphs"]) == sorted(
+        docx_subpoint_lines(Document(out)))
+
+
+def test_a_generator_rendering_twice_records_only_this_renders_placements(tmp_path, monkeypatch):
+    """The placements reset per render, as the section failures do: a second
+    CV with no sub-point has none in its sidecar."""
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    gen = WCMTemplateGenerator(verbose=False, supplementary_subpoints=True)
+    placements = []
+    for uid, entries in (("T1205R1", [_mentee()]), ("T1205R2", [_other_postdoc()])):
+        input_path = tmp_path / f"{uid}_fields.json"
+        input_path.write_text(json.dumps({"document_uid": uid, "entries": entries}))
+        gen.generate(str(input_path), str(tmp_path / f"{uid}.docx"), discover_original_doc=False)
+        sidecar = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
+        placements.append([p["element_idx_start"] for p in sidecar[SUBPOINT_PLACEMENTS_KEY]])
+    assert placements == [[1477], []]
+
+
 def test_a_mentee_whose_field_the_pii_pass_withheld_gets_no_sub_point():
     """#892: the PII pass dropped one of the mentee's fields. What is left
     still describes what was withheld, so none of it is offered, under its
