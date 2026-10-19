@@ -485,11 +485,38 @@ def test_a_numeric_date_is_kept_when_the_dates_cell_shows_another_year():
 
 
 def test_untitled_talk_keeps_a_line_with_words_beyond_the_label():
-    """Only label words ('Invited talk') stop the line from counting as a
-    possible title; 'Virtual' and the series name are not shown elsewhere."""
+    """Only label words ('Virtual. Invited talk') stop the line from counting
+    as a possible title; the series name is not shown elsewhere."""
     cells = _untitled_row("08/19/2020 Zqcaltech, Kestrel, ZZ.\tSummer Zqpostdoc Series. Virtual. Invited talk.",
                           date="2020-08-19", location="Zqcaltech, Kestrel, ZZ")
     assert cells[0] == "Summer Zqpostdoc Series. Virtual. Invited talk."
+
+
+def test_untitled_talk_counts_virtual_as_a_label_word():
+    """PZTNWT 158 (#1346): with the series in event_name, 'Virtual. Invited
+    talk.' is all that is left, so the stripped line no longer fills the cell."""
+    cells = _untitled_row("08/19/2020 Zqcaltech, Kestrel, ZZ.\tSummer Zqpostdoc Series. Virtual. Invited talk.",
+                          date="2020-08-19", event_name="Summer Zqpostdoc Series",
+                          location="Zqcaltech, Kestrel, ZZ")
+    assert cells == ["Summer Zqpostdoc Series, Virtual Invited talk", "Zqcaltech, Kestrel, ZZ", "2020"]
+
+
+def test_untitled_talk_matches_an_event_whose_punctuation_the_source_spaces_differently():
+    """PZTNWT 151 (#1346): stage 4 wrote 'SFB960/RCB Colloquium' for the
+    source's 'SFB960 /RCB colloquium', so the event did not match and the
+    stripped line filled the Title cell."""
+    cells = _untitled_row("08/12/2021 Zqregen University, Varnoria. SFB960 /RCB colloquium.\tVirtual. Invited talk.",
+                          date="2021-08-12", event_name="SFB960/RCB Colloquium, Invited Talk",
+                          location="Zqregen University, Varnoria (Virtual)")
+    assert cells == ["SFB960/RCB Colloquium, Invited Talk",
+                     "Zqregen University, Varnoria (Virtual)", "2021"]
+
+
+def test_untitled_talk_still_needs_whitespace_between_two_words_of_its_event():
+    """The spacing tolerance is for punctuation only: event 'Zq Hall' does not
+    match the run-together 'ZqHall', so the line stays (#1346)."""
+    cells = _untitled_row("2019 ZqHall. Invited talk.", date="2019", event_name="Zq Hall")
+    assert cells[0] == "ZqHall. Invited talk."
 
 
 def test_a_titled_talk_renders_its_title_whatever_its_source_line_holds():

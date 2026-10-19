@@ -28,6 +28,7 @@ without the list number, year and venue the other two cells already show.
 import logging
 import re
 from collections.abc import Mapping
+from itertools import pairwise
 
 from ..fan_out import fallback_text
 from ..formatting import (
@@ -73,13 +74,17 @@ _VALUE_PIECE_SPLIT_RE = re.compile(r'\s*[,;()]\s*')
 # Words naming the kind of appearance, not its subject. A line left with only
 # these beyond role, event and venue ("<date> <event><TAB><venue>. Invited
 # talk.", 17 rows of PZTNWT) is titled by role and event, with the words kept
-# after them, instead of by the whole source line.
-_TALK_LABEL_WORDS = frozenset({'invited', 'talk', 'lecture', 'presentation'})
+# after them, instead of by the whole source line. 'virtual' names how the talk
+# was given ("<venue>. <series>. Virtual. Invited talk.", PZTNWT 158).
+_TALK_LABEL_WORDS = frozenset({'invited', 'talk', 'lecture', 'presentation', 'virtual'})
 _TITLE_EDGES = ' \t,;:|-–—'
 # A stop can only open a title once a venue that led the line is gone
 # ("<venue>. <series>. Invited talk."); at the end it may close one.
 _TITLE_START_EDGES = _TITLE_EDGES + '.'
 _SEPARATOR_RUN_RE = re.compile(r'\s*([,;:|\-–—])(?:\s*[,;:|.\-–—])+\s*')
+# A phrase's words and its punctuation marks, one token each.
+_PHRASE_TOKEN_RE = re.compile(r'\w+|[^\w\s]')
+_WORD_CHAR_RE = re.compile(r'\w')
 
 
 def _normalize_space(text: str) -> str:
@@ -88,11 +93,26 @@ def _normalize_space(text: str) -> str:
     return re.sub(r'\s+', ' ', text.replace('\u2019', "'").replace('\u2018', "'")).strip()
 
 
+def _phrase_pattern(phrase: str) -> str:
+    """A regex for `phrase` that lets the source space a punctuation mark
+    differently: stage 4 wrote "SFB960/RCB Colloquium" for the source's
+    "SFB960 /RCB colloquium" (PZTNWT 151, #1346). Two words still need
+    whitespace between them."""
+    tokens = _PHRASE_TOKEN_RE.findall(phrase)
+    pattern = re.escape(tokens[0])
+    for before, token in pairwise(tokens):
+        between_words = _WORD_CHAR_RE.match(before) and _WORD_CHAR_RE.match(token)
+        gap = r'\s+' if between_words else r'\s*'
+        pattern += gap + re.escape(token)
+    return pattern
+
+
 def _remove_phrase(text: str, phrase: str) -> str:
-    """`text` without each whole-word, case-insensitive occurrence of `phrase`."""
-    if not phrase:
+    """`text` without each whole-word, case-insensitive occurrence of `phrase`,
+    however the source spaces its punctuation (`_phrase_pattern`)."""
+    if not phrase.strip():
         return text
-    return re.sub(rf'(?<!\w){re.escape(phrase)}(?!\w)', ' ', text, flags=re.IGNORECASE)
+    return re.sub(rf'(?<!\w){_phrase_pattern(phrase)}(?!\w)', ' ', text, flags=re.IGNORECASE)
 
 
 def _remove_venue(text: str, venue: str) -> str:
