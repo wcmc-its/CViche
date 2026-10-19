@@ -98,6 +98,7 @@ from unified_pipeline.stage6.dedup import (
     _part_numbers,
     _standalone_numerals,
     _trial_phases,
+    _uncovered_letters,
 )
 from unified_pipeline.stage6.fan_out import (
     _FORMATTED_KEYS,
@@ -879,7 +880,9 @@ def _unrendered_identity(decision: Mapping, rendered_items: set[str]) -> str | N
 
 
 # What tells two occasions of one record apart, each read the way stage 6's
-# dedup reads it where stage 6 has a reader (#666, EBYSBC E4).
+# dedup reads it where stage 6 has a reader (#666, EBYSBC E4). A series letter
+# is read as a pair, not one text at a time (`_uncovered_letters`): it tells two
+# records apart only beside another letter on the same word.
 _OCCASION_MARKS = (("part", _part_numbers), ("phase", _trial_phases),
                    ("numeral", _standalone_numerals))
 
@@ -920,8 +923,8 @@ def _occasion_apart(dropped_text: str, kept_text: str) -> str | None:
     """Why the dropped text names another occasion than the kept text: a
     date stated to the month or a year the kept text does not carry, another
     class label or a year it carries only inside one, a range left open where
-    the kept one closes, or a part, phase or numeral it lacks. None when
-    nothing tells them apart.
+    the kept one closes, or a part, phase, numeral or series letter it lacks.
+    None when nothing tells them apart.
 
     The same predicate stage 6 now refuses a drop on (`_dates_compatible`,
     `_part_numbers`, `_trial_phases`), re-checked here because a sidecar may
@@ -942,6 +945,9 @@ def _occasion_apart(dropped_text: str, kept_text: str) -> str | None:
         missing = read(dropped_text) - read(kept_text)
         if missing:
             return f"{mark} {', '.join(sorted(missing))} the kept entry lacks"
+    letters = _uncovered_letters(dropped_text, kept_text)
+    if letters:
+        return f"letter {', '.join(sorted(letters))} the kept entry lacks"
     return None
 
 
@@ -1148,8 +1154,8 @@ def lint_dedup_drops(report: dict,
       these loose similarity thresholds it is a distinct record, not a
       duplicate (#227);
     - it names another occasion than the kept entry: a date, class, open
-      range, part, phase or numeral the kept text lacks (`_occasion_apart`,
-      #666);
+      range, part, phase, numeral or series letter the kept text lacks
+      (`_occasion_apart`, #666);
     - a citation drop whose matched copies in stage 5d state different dates
       or places (`_deliveries_apart`, needs `stage_5d`);
     - the two entries' extracted names name two records (`_distinct_name`).

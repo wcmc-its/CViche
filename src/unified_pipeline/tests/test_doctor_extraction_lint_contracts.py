@@ -892,6 +892,9 @@ def test_dedup_drops_quiet_when_the_kept_entry_carries_the_date():
     # OIEPQD YYVITM 425: a date, not a segment end, follows the lone "I"
     ("Example Course I November 2031", "Example Course II November 2031", "numeral I"),
     ("Example trial, Phase II", "Example trial, Phase III", "phase 2"),
+    # IZJADE 942's shape: another lettered committee of one council
+    ("Member, Committee Q, Example Council", "Member, Committee R, Example Council", "letter Q"),
+    ("Example Course I and II", "Example Course II", "numeral I"),
 ])
 def test_occasion_apart_reads_parts_and_numerals(dropped, kept, reason):
     assert extraction_lints._occasion_apart(dropped, kept) == f"{reason} the kept entry lacks"
@@ -930,6 +933,9 @@ def test_occasion_apart_quiet_on_one_class_and_one_open_range(dropped, kept):
     ("I taught an example course", "Taught an example course"),     # a pronoun
     ("Doe V, Roe X. Example paper", "Doe V. Example paper"),       # initials
     ("Example Series Part I", "Example Series Parts I and II"),     # a listing covers it
+    ("Member, Committee Q, Example Council",
+     "Member, Committee R and Committee Q, Example Council"),      # so does a lettered one
+    ("Member, Committee Q, Example Council", "Member, Committee, Example Council"),
 ])
 def test_occasion_apart_ignores_pronouns_initials_and_listed_parts(dropped, kept):
     assert extraction_lints._occasion_apart(dropped, kept) is None
