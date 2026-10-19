@@ -1544,6 +1544,21 @@ def test_the_duties_placement_holds_the_text_the_row_holds():
     assert gen._subpoint_placements == [SubpointPlacement(7, "D3", (DUTY_TITLE_DUTIES,))]
 
 
+def test_a_child_appointments_duties_are_placed_under_its_parents_index():
+    """A tab-joined child record is text of its parent's source element, so
+    the duties split off its title are placed under the parent's index, the
+    stage-4 entry the doctor reads them for, not under no entry (#1205)."""
+    duties = "to coordinate the example regional response network"
+    gen, table = _positions_generator(TABLE_ANCHORS["D2"])
+    gen.supplementary_subpoints = True
+    parent = _tab_joined_entry([(f"Attending Physician {duties}", "07/2002", "06/2003")], idx=42)
+    gen._fill_positions({"D2": [parent]})
+
+    (deleted,) = _deleted_rows(table)
+    assert "".join(t.text for t in deleted.iter(qn("w:delText"))) == duties
+    assert gen._subpoint_placements == [SubpointPlacement(42, "D2", (duties,))]
+
+
 def test_with_track_changes_off_the_duties_stay_a_plain_row():
     """A deletion means nothing without track changes, so the #1641 plain row stays."""
     gen, table = _positions_generator(TABLE_ANCHORS["D3"])

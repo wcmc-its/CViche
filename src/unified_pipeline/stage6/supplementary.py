@@ -213,7 +213,14 @@ class SubpointPlacement(NamedTuple):
     (`SUBPOINT_PLACEMENTS_KEY`, one `_asdict()` per sub-point): the
     `element_idx_start` of the entry it was written for, which is the index
     the doctor reads stage 4's entries by (fan-out children keep it); the
-    code the entry rendered as; and the paragraphs as written."""
+    code the entry rendered as; and the paragraphs as written.
+
+    The index is not an identity: stage-4 entries split from one source
+    element share it, and their sub-points then count for each other, as
+    fan-out siblings' do. The doctor matches on the index and the text only.
+    The code is for a reader of the sidecar, such as a run autopsy: it names
+    the table the sub-point sits in, which for a rerouted entry (a K2
+    trainee rendered as N3B) is not its stage-4 code."""
     element_idx_start: object
     code: str
     paragraphs: tuple[str, ...]
