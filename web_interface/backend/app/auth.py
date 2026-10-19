@@ -491,14 +491,15 @@ def authenticate_session_cookie(
     return user, identity
 
 
-def _recheck_ed_membership(user: User, db: Session) -> None:
+def _recheck_ed_membership(user: User, db: Session) -> bool:
     """Per-request ED group re-check for SAML users, when ED is enabled.
 
     Re-verifies on every request that the user is still in the access group and
     syncs their role from the admin and staff groups; a removal takes effect on
     the next request rather than at the next login. The check itself is
     ``ed_access.verify_ed_access`` (shared with the emailed-CV intake, #1298);
-    this wraps it with the 401s and audit events.
+    this wraps it with the 401s and audit events. Returns True if a role-sync
+    side write committed.
     """
     try:
         membership = ed_access.verify_ed_access(user, db, check_ed_membership)
@@ -521,7 +522,7 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
         )
         raise HTTPException(status_code=401, detail=_NOT_AUTHORIZED_DETAIL)
     if membership is None:
-        return
+        return False
 
     # Sync role from ED group membership
     new_role = role_for_membership(membership)
@@ -536,19 +537,22 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
         # since last read" -- every state-changing request after the 60s
         # debounce 500'd in prod on 2026-09-03 (run CJZE8G feedback POST).
         set_committed_value(user, "role", new_role)
-        _best_effort_persist(user.id, "role sync", role=new_role)
+        persisted = _best_effort_persist(user.id, "role sync", role=new_role)
         logger.info(
             ROLE_CHANGED,
             extra={"user_id": user.id, "old_role": old_role, "new_role": new_role},
         )
+        return persisted
+    return False
 
 
-def _bump_last_active(user: User) -> None:
-    """Debounced last_active_at update (once per 60s)."""
+def _bump_last_active(user: User) -> bool:
+    """Debounced last_active_at update (once per 60s). True if a side write committed."""
     now = utc_now()
     if not user.last_active_at or (now - user.last_active_at).total_seconds() > 60:
         set_committed_value(user, "last_active_at", now)  # see role sync above
-        _best_effort_persist(user.id, "last_active_at", last_active_at=now)
+        return _best_effort_persist(user.id, "last_active_at", last_active_at=now)
+    return False
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -557,8 +561,15 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     user, _identity = authenticate_session_cookie(
         request.cookies.get(COOKIE_NAME), db, touch_idle=True
     )
-    _recheck_ed_membership(user, db)
-    _bump_last_active(user)
+    role_written = _recheck_ed_membership(user, db)
+    bumped = _bump_last_active(user)
+    if (role_written or bumped) and not (db.new or db.dirty or db.deleted):
+        # A side session just committed to this user's row, after the request
+        # session's snapshot opened on the auth SELECT. A route that then
+        # writes the same row (POST /api/consent) is rejected by MariaDB 11.6+
+        # with 1020 "Record has changed since last read" (#1917). Ending the
+        # clean read transaction makes the route's write start a fresh one.
+        db.rollback()
     return user
 
 
