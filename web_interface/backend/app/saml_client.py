@@ -189,14 +189,26 @@ _MAPPED_ATTR_KEYS = frozenset({
 # be checked against metadata here -- the proxy is the trust boundary.
 CWID_SCOPES = frozenset({"med.cornell.edu"})
 
+# Partner domains whose IdP releases no ePPN or uid, only mail: a user there is
+# keyed on the full lowercased address. MSKCC sends mail, displayName, givenName,
+# sn, title and a transient NameID (WCM ITS IdP inventory 2026-10-05, confirmed
+# on a live login 2026-10-19). Listing a domain only identifies its users;
+# admitting them is still ed_partner_scopes (#1453). Limited to named domains so
+# an upstream can't assert another partner's address and take over that account.
+# ponytail: keyed on mail, so an address MSK reassigns inherits the old account;
+# a persistent NameID from the proxy is the upgrade if that ever matters.
+MAIL_ANCHOR_DOMAINS = frozenset({"mskcc.org"})
 
-def _identity_key(uid: str | None, eppn: str | None) -> str | None:
+
+def _identity_key(uid: str | None, eppn: str | None, mail: str | None = None) -> str | None:
     """Derive the user's identity anchor from released attributes.
 
     - ePPN outside CWID_SCOPES: the full lowercased ePPN. It contains "@" and
       a CWID never does, so a partner user can't land on a WCM account.
       `uid` is ignored -- a partner's uid (e.g. an AD sAMAccountName) is not
       a CWID.
+    - No ePPN, and mail in MAIL_ANCHOR_DOMAINS: the full lowercased mail,
+      ahead of `uid` for the same reason.
     - Otherwise: the CWID -- `uid` if released, else the ePPN local part.
       Unchanged from before #1452.
 
@@ -207,6 +219,10 @@ def _identity_key(uid: str | None, eppn: str | None) -> str | None:
     local, at, scope = (eppn or "").strip().lower().rpartition("@")
     if at and scope and scope not in CWID_SCOPES:
         return f"{local}@{scope}" if local else None
+    if not at:
+        mail_local, mail_at, mail_domain = (mail or "").strip().lower().rpartition("@")
+        if mail_at and mail_local and mail_domain in MAIL_ANCHOR_DOMAINS:
+            return f"{mail_local}@{mail_domain}"
     if uid and uid.strip():
         return uid.strip().lower()
     return local or None
@@ -249,10 +265,11 @@ def extract_user_attrs(identity: dict) -> dict:
     mail = _get(ATTR_MAIL, "mail")
     display_name = _get(ATTR_DISPLAY_NAME, "displayName")
 
-    cwid = _identity_key(uid, eppn)
+    cwid = _identity_key(uid, eppn, mail)
     if cwid is None:
         raise ValueError(
-            "No CWID derivable from SAML assertion (need uid or eduPersonPrincipalName)"
+            "No CWID derivable from SAML assertion (need uid or eduPersonPrincipalName,"
+            " or mail in MAIL_ANCHOR_DOMAINS)"
         )
 
     return {
