@@ -400,11 +400,17 @@ def short_tab_part_rendered(part: str, extracted_fields: dict,
     return any(tokens <= line_tokens for line_tokens in output_token_sets)
 
 
+def _record_token_counts(text: str | None) -> Counter:
+    """Letter tokens plus number runs (amounts, years) of a line, lowercased,
+    each with the number of times it occurs (#1230)."""
+    norm = re.sub(r"(?<=\d)[,.](?=\d)", "", _norm(text))
+    return Counter(_RENDER_TOKEN_RE.findall(norm)) + Counter(re.findall(r"\d{2,}", norm))
+
+
 def _record_tokens(text: str | None) -> set[str]:
     """Letter tokens plus number runs (amounts, years) of a line, lowercased.
     Digits separate sibling records that share their vocabulary (#1230)."""
-    norm = re.sub(r"(?<=\d)[,.](?=\d)", "", _norm(text))
-    return set(_RENDER_TOKEN_RE.findall(norm)) | set(re.findall(r"\d{2,}", norm))
+    return set(_record_token_counts(text))
 
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -470,20 +476,22 @@ def _line_carried(tokens: set[str], pooled: set[str], has_sibling: bool) -> bool
 def segments_cover_source(segments: list[str], source_text: str) -> bool:
     """Whether a reclassify reply's segments carry the source entry's text.
 
-    `segments` is a list of segment strings. Two checks, both must pass:
+    `segments` is a list of segment strings. Three checks, all must pass:
     pooled distinct-token coverage (`_RENDER_TOKEN_RE` tokens of the source
-    found in some segment) of at least `RECLASSIFY_MIN_TOKEN_COVERAGE`, and
-    every source line that occurs ONCE carried by the segments' letter and
-    number tokens (`_line_carried`). The pooled check catches a reply that
+    found in some segment) of at least `RECLASSIFY_MIN_TOKEN_COVERAGE`; every
+    source line that occurs ONCE carried by the segments' letter and number
+    tokens (`_line_carried`); and the sibling rows carried by count
+    (`_siblings_carried_by_count`). The pooled check catches a reply that
     stands a one-line summary in for a list ("[all 54 entries follow ...]");
     the per-line check catches a reply that keeps most lines and summarises a
-    few, which pooled coverage forgives (#209, #1230). A line that repeats in
-    the source is skipped: a page-break header the reply rightly drops repeats,
-    and a repeated record that matters is carried by its first copy. A line
-    that is too short to verify counts as carried. A rejected reply is safe:
-    the caller keeps the entry whole. A source with fewer than
-    `RENDER_TOKEN_MIN_COUNT` tokens cannot be verified either way and is
-    accepted.
+    few, which pooled coverage forgives (#209, #1230); the count check catches
+    a reply that drops a sibling row whose every token recurs in the rows it
+    kept. A line that repeats in the source is skipped: a page-break header the
+    reply rightly drops repeats, and a repeated record that matters is carried
+    by its first copy. A line that is too short to verify counts as carried. A
+    rejected reply is safe: the caller keeps the entry whole. A source with
+    fewer than `RENDER_TOKEN_MIN_COUNT` tokens cannot be verified either way
+    and is accepted.
     """
     source_tokens = set(_RENDER_TOKEN_RE.findall(_norm(source_text)))
     if len(source_tokens) < RENDER_TOKEN_MIN_COUNT:
@@ -497,19 +505,111 @@ def segments_cover_source(segments: list[str], source_text: str) -> bool:
     lines = [line.strip() for line in str(source_text or "").split("\n") if line.strip()]
     counts = Counter(lines)
     all_line_tokens = [_record_tokens(line) for line in counts]
-    return all(
-        _line_carried(tokens, pooled, _has_sibling(tokens, all_line_tokens))
-        for line, tokens in zip(counts, all_line_tokens, strict=True)
-        if counts[line] == 1
-        and len(set(_RENDER_TOKEN_RE.findall(_norm(line)))) >= RENDER_TOKEN_MIN_COUNT)
+    checked = [tokens for line, tokens in zip(counts, all_line_tokens, strict=True)
+               if counts[line] == 1
+               and len(set(_RENDER_TOKEN_RE.findall(_norm(line)))) >= RENDER_TOKEN_MIN_COUNT]
+    return (all(_line_carried(tokens, pooled, _has_sibling(tokens, all_line_tokens))
+                for tokens in checked)
+            and _siblings_carried_by_count(checked, all_line_tokens, segments))
+
+
+def _siblings_carried_by_count(checked: list[set[str]], all_line_tokens: list[set[str]],
+                               segments: list[str]) -> bool:
+    """Whether the reply holds a copy of each sibling row's tokens per source
+    line that holds them (#1230).
+
+    `checked` are the `_record_tokens` of the source lines `segments_cover_source`
+    verifies, `all_line_tokens` those of every distinct source line.
+    `_line_carried` asks only that a sibling row's tokens appear SOMEWHERE in
+    the reply. A row whose every token also sits in other rows passes that
+    test with nothing of its own on the page: one committee served in two
+    terms and a second committee in the same two terms is a 2x2 grid, and any
+    one of the four rows can be dropped. So the rows are counted. The family
+    is every checked sibling row plus every checked line it is a sibling of.
+    A token of a sibling row that N family lines hold must occur at least N
+    times (`_record_token_counts`) in the segments that are a piece of a
+    family line or hold one whole: a segment from an unrelated line cannot
+    pay for a dropped row with a shared word ("chair", "committee"). Rows
+    split across segments or merged into one keep their counts; a reply that
+    writes two rows as one ("member, 2010-2012 and 2014-2016") does not, and
+    is rejected like a dropped row, which leaves the entry whole.
+    """
+    family: list[set[str]] = []
+    sibling_tokens: set[str] = set()
+    for index, tokens in enumerate(checked):
+        if not _has_sibling(tokens, all_line_tokens):
+            continue
+        sibling_tokens |= tokens
+        family += [other for other_index, other in enumerate(checked)
+                   if other_index == index or _is_sibling(tokens, other)]
+    rows = list({id(row): row for row in family}.values())
+    if not rows:
+        return True
+    reply_counts = sum((_record_token_counts(segment) for segment in segments
+                        if any(_record_tokens(segment) <= row or row <= _record_tokens(segment)
+                               for row in rows)), Counter())
+    needed = Counter(token for row in rows for token in row & sibling_tokens)
+    return all(reply_counts[token] >= n for token, n in needed.items())
+
+
+def _is_sibling(tokens: set[str], other: set[str]) -> bool:
+    """Whether `other` holds `RECLASSIFY_MIN_TOKEN_COVERAGE` of `tokens`
+    while differing from them: a sibling row (#1230)."""
+    return (bool(tokens) and other != tokens
+            and len(tokens & other) / len(tokens) >= RECLASSIFY_MIN_TOKEN_COVERAGE)
+
+
+def _siblings(tokens: set[str], all_line_tokens: list[set[str]]) -> list[set[str]]:
+    """The other source lines that hold `RECLASSIFY_MIN_TOKEN_COVERAGE` of
+    `tokens` while differing from them: its sibling rows (#1230)."""
+    return [other for other in all_line_tokens if _is_sibling(tokens, other)]
 
 
 def _has_sibling(tokens: set[str], all_line_tokens: list[set[str]]) -> bool:
-    """Whether another source line holds `RECLASSIFY_MIN_TOKEN_COVERAGE` of
-    `tokens` while differing from them: a sibling row (#1230)."""
-    return any(other != tokens
-               and len(tokens & other) / len(tokens) >= RECLASSIFY_MIN_TOKEN_COVERAGE
-               for other in all_line_tokens)
+    """Whether `tokens` has a sibling row among `all_line_tokens` (#1230)."""
+    return bool(_siblings(tokens, all_line_tokens))
+
+
+def record_siblings(records: list[str]) -> dict[str, list[set[str]]]:
+    """Each record line of one entry that has sibling rows in it, mapped to
+    those siblings' `_record_tokens` (#1230). A sibling that holds every token
+    of the line is left out: the line is part of it, so its render carries
+    the line."""
+    tokens = {line: _record_tokens(line) for line in dict.fromkeys(records)}
+    all_tokens = list(tokens.values())
+    siblings = {line: [other for other in _siblings(own, all_tokens) if not own <= other]
+                for line, own in tokens.items()}
+    return {line: others for line, others in siblings.items() if others}
+
+
+def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack: str,
+                            line_token_sets: list[set],
+                            record_token_sets: list[set]) -> bool | None:
+    """`_record_rendered` for a record line of an entry that holds its sibling
+    rows (`record_siblings`), counted one output line per row (#1230).
+
+    `_record_rendered` lets any output line with `RENDER_TOKEN_OVERLAP` of the
+    line's letter tokens vouch for it, and ignores numbers. One committee in
+    two terms renders as one row, and that row then vouches for the other
+    term too. Here, past `_record_rendered`, the line must sit in the output
+    verbatim, or ONE output line must hold that overlap of its letter tokens
+    AND, against each sibling, a letter or number token the sibling lacks, so
+    a sibling's row cannot vouch for it. `line_token_sets` are the output
+    lines' letter tokens, for `_record_rendered`; `record_token_sets` are
+    `_record_tokens` of the output lines that may vouch here (the recovery
+    pass passes its uncut lines plus the lines it has recovered so far). A
+    line with no siblings gets `_record_rendered` unchanged.
+    """
+    rendered = _record_rendered(line, haystack, line_token_sets)
+    if not rendered or not siblings or _squash(line) in haystack:
+        return rendered
+    letters = set(_RENDER_TOKEN_RE.findall(_norm(line)))
+    if len(letters) < RENDER_TOKEN_MIN_COUNT:
+        return None
+    tokens = _record_tokens(line)
+    return any(len(letters & out) / len(letters) >= RENDER_TOKEN_OVERLAP
+               and all((tokens - sibling) & out for sibling in siblings)
+               for out in record_token_sets)
 
 
 def _entry_pieces(text) -> list[str]:

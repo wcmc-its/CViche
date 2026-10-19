@@ -40,7 +40,10 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
 )
-from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
+from unified_pipeline.stage6.normalization import (  # noqa: E402
+    _clean_inline_tabs,
+    _squash,
+)
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     DATE_LED_SOURCE_TEXT,
     split_date_led_records,
@@ -50,13 +53,16 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _entry_pieces,
     _norm,
     _record_rendered,
+    _record_tokens,
     _whole_record_rendered,
     record_chunks,
     record_pieces,
+    record_siblings,
     segment_held_by_fields,
     segments_cover_source,
     short_tab_part_rendered,
     short_tab_part_words,
+    sibling_record_rendered,
     tab_aware_record_lines,
 )
 from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
@@ -1815,6 +1821,137 @@ def test_segments_cover_source_pools_tokens_for_a_line_without_a_sibling():
     # Two tokens lost from the same line: 3 of 5, rejected.
     assert segments_cover_source([line.replace("geyser ", "").replace("basalt ", "")
                                   for line in lines[:1]] + lines[1:], source) is False
+
+
+def _two_by_two_grid():
+    """Two committees, each served in the same two terms: every token of each
+    row also sits in another row (#1230)."""
+    return [f"Member | {name} Committee | Example Department of Synthetic Geology | "
+            f"Example University | {term}"
+            for name in ("Zeolite", "Marigold") for term in ("2010-2012", "2014-2016")]
+
+
+def test_segments_cover_source_rejects_a_dropped_row_of_a_two_by_two_grid():
+    """Dropping any one row of the grid leaves each of its tokens in the
+    rows the reply kept, so the all-tokens rule accepted it. Each sibling
+    row needs its own copy of the tokens it shares (#1230)."""
+    rows = _two_by_two_grid()
+    source = "\n".join(rows)
+    assert segments_cover_source(rows, source) is True
+    for dropped in rows:
+        assert segments_cover_source([row for row in rows if row != dropped], source) is False
+
+
+def test_segments_cover_source_counts_split_and_merged_grid_rows():
+    """Rows split at their separators, or two rows written whole into one
+    segment, keep every row's tokens and are accepted. A segment that writes
+    two terms as one row carries the shared words once and is rejected,
+    which keeps the entry whole (#1230)."""
+    rows = _two_by_two_grid()
+    source = "\n".join(rows)
+    split = [cell for row in rows for cell in row.split(" | ")]
+    assert segments_cover_source(split, source) is True
+    assert segments_cover_source(["; ".join(rows[:2])] + rows[2:], source) is True
+    merged = ("Member | Zeolite Committee | Example Department of Synthetic Geology | "
+              "Example University | 2010-2012 and 2014-2016")
+    assert segments_cover_source([merged] + rows[2:], source) is False
+
+
+def test_segments_cover_source_unrelated_lines_do_not_pay_for_a_dropped_grid_row():
+    """Unrelated lines that between them hold every word of a dropped grid row
+    do not count for it: only segments that are a piece of a sibling row, or
+    hold one whole, are counted (#1230)."""
+    rows = _two_by_two_grid()
+    unrelated = ["Member of the Faculty Senate, Riverbend Example University, 2014",
+                 "Zeolite Prize Committee juror, 2016",
+                 "Department of Synthetic Geology seminar organiser"]
+    source = "\n".join(rows + unrelated)
+    assert segments_cover_source(rows + unrelated, source) is True
+    assert segments_cover_source([row for row in rows if row != rows[1]] + unrelated,
+                                 source) is False
+
+
+def test_segments_cover_source_a_partner_line_may_lose_a_word_no_sibling_row_holds():
+    """A line that holds a sibling row whole (its partner) is counted only for
+    the sibling row's words: trimming a word of its own keeps the pooled
+    share that any line without a sibling gets (#1230)."""
+    rows = _two_by_two_grid()
+    partner = rows[0] + " | organised the annual workshop retreat"
+    source = "\n".join(rows + [partner])
+    trimmed = partner.replace(" retreat", "")
+    assert segments_cover_source(rows + [trimmed], source) is True
+    assert segments_cover_source(rows[1:] + [partner], source) is False
+
+
+def test_record_siblings_skips_a_sibling_that_holds_the_whole_line():
+    """A line every token of which sits in a sibling is part of that sibling,
+    so the sibling's render carries it and it needs no token of its own
+    (#1230). The grid rows keep each other as siblings."""
+    rows = _two_by_two_grid()
+    short = rows[0].replace("Example Department of Synthetic Geology | ", "")
+    siblings = record_siblings([short] + rows)
+    assert _record_tokens(short) <= _record_tokens(rows[0])
+    assert _record_tokens(rows[0]) not in siblings[short]
+    assert siblings[short] == [_record_tokens(rows[2])]
+    assert set(rows) <= set(siblings)
+
+
+def test_non_t_grid_row_rendered_only_through_its_siblings_is_recovered():
+    """Three rows of the grid on the page vouched for the fourth: every one
+    of its words sits in a sibling's row. A sibling row is rendered only by
+    an output line that holds a token each sibling lacks (#1230)."""
+    rows = _two_by_two_grid()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for row in rows[:3]:
+        gen.doc.add_paragraph(row.replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert bullets == [rows[3].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_grid_rows_recovered_one_after_another_each_land_once():
+    """One grid row on the page: the other three are recovered in turn, and
+    each recovered row then counts as on the page for the rows after it. The
+    lines it may vouch through grow as rows are recovered (web207 crashed on
+    a list that did not grow with them, #1230)."""
+    rows = _two_by_two_grid()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0].replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert sorted(bullets) == sorted(row.replace(" | ", " \u2014 ") for row in rows[1:])
+
+
+def test_non_t_grid_rows_all_rendered_are_not_recovered():
+    """Every row on the page, reformatted: nothing is re-inserted (#1230)."""
+    rows = _two_by_two_grid()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for row in rows:
+        gen.doc.add_paragraph(row.replace(" | ", ", ").replace("-", " - "))
+    gen._recover_unrendered_records({"P": [entry]})
+    assert not [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+
+
+def test_sibling_record_rendered_without_siblings_is_record_rendered():
+    """A line with no sibling rows keeps `_record_rendered`'s verdict, and a
+    sibling row on the page verbatim is rendered (#1230)."""
+    rows = _two_by_two_grid()
+    out = [rows[0].replace("2010-2012", "2014-2016")]
+    letters = [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in out]
+    records = [_record_tokens(line) for line in out]
+    haystack = "\x00".join(_squash(line) for line in out)
+    siblings = record_siblings(rows)
+    assert sibling_record_rendered(rows[0], None, haystack, letters, records) is True
+    assert sibling_record_rendered(rows[0], siblings[rows[0]], haystack, letters,
+                                   records) is False
+    assert sibling_record_rendered(rows[1], siblings[rows[1]], haystack, letters,
+                                   records) is True
 
 
 def test_t_sibling_rows_differing_only_in_one_name_are_all_recovered():
