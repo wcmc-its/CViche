@@ -5361,6 +5361,57 @@ def test_duplicate_passages_see_through_renumbering_and_separator_drift():
     assert findings[0]["evidence"][0].startswith("blocks 0-2 repeat at 4-6")
 
 
+def _field_record(title, audience, institution, dates):
+    return [("p", f"Title: {title}"), ("p", f"Audience: {audience}"),
+            ("p", f"Institution: {institution}"), ("p", f"Dates: {dates}")]
+
+
+def test_duplicate_passages_quiet_on_field_lines_shared_by_distinct_records():
+    """#1940 (XAXVYB): teaching records rendered one labelled line per field
+    share their Institution/Audience/Dates lines whenever the same people were
+    taught at the same place in the same years. Those lines repeating together,
+    inside records whose Title differs, are shared fields -- not a record twice."""
+    hospital = "Children's Hospital of Chicago"
+    blocks = ([("p", "Clinical teaching")]
+              + _field_record("Clinical Teaching", "Medical students", hospital, "2005–2025")
+              + _field_record("Teaching Rounds", "Residents, fellows", hospital, "2005–2025")
+              + [("p", "Continuing education")]
+              + _field_record("Didactic Lectures", "Residents and fellows", hospital, "2010–2025")
+              + _field_record("Sinusitis lecture", "Residents and fellows", hospital, "2010–2025")
+              + _field_record("PBL Tutor", "Phase 1a module", "Feinberg", "2014")
+              + _field_record("PBL Tutor", "Phase 1b module", "Feinberg", "2014"))
+    assert lint_duplicate_passages(blocks) == []
+
+    # a shared run at the START of both records is still partial when the
+    # field after it differs: same Title and Dates, a different Audience
+    tutor = [("p", "Title: PBL Tutor"), ("p", "Dates: 2014")]
+    blocks += (tutor + [("p", "Audience: Module 6")]
+               + tutor + [("p", "Audience: Module 7")])
+    assert lint_duplicate_passages(blocks) == []
+
+
+def test_duplicate_passages_still_flags_a_whole_field_record_twice():
+    """The other side of #1940: the SAME per-field record, every labelled line
+    of it, rendered twice is still one record reaching the docx twice -- and a
+    labelled run that covers only part of one copy's record is not."""
+    hospital = "Children's Hospital of Chicago"
+    record = _field_record("Didactic Lectures", "Residents and fellows", hospital, "2010–2025")
+    other = _field_record("Grand Rounds", "Faculty", "Weill Cornell", "2019")
+    findings = lint_duplicate_passages(record + other + record)
+    assert len(findings) == 1 and "1 passage(s)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("blocks 0-3 repeat at 8-11")
+    # ...wherever the copy sits: here closed by a heading, not the document end
+    assert lint_duplicate_passages(record + other + record + [("p", "Mentoring")])
+
+    # the second copy shares only the fields after its own, different Title
+    partial = [("p", "Title: Another lecture")] + record[1:]
+    assert lint_duplicate_passages(record + other + partial) == []
+    # ...and BOTH copies must be whole: here the untitled one is, the titled one is not
+    untitled = [("p", "Lectures")] + record[1:] + [("p", "Mentoring")]
+    assert lint_duplicate_passages(untitled + partial) == []
+    assert lint_duplicate_passages(partial + untitled) == []
+
+
 def test_duplicate_passages_threshold_is_pinned_at_two_blocks():
     """The corpus's only true positive is a 2-block duplicate (web119: the same
     abstract at two adjacent numbers), so raising the threshold to 3 silently
