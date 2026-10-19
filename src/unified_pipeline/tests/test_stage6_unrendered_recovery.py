@@ -1114,6 +1114,29 @@ def test_table_cell_overflow_for_k3_k4_k5_stays_in_the_teaching_section(code):
     assert _plain_left(gen.doc.paragraphs[texts.index(text)]) == plain_entry_left_twips(0)
 
 
+@pytest.mark.parametrize(("code", "bulleted"), [("K1", False), ("L1", False), ("D1", True)])
+def test_body_paragraph_overflow_is_unbulleted_for_k_and_l(code, bulleted):
+    """The other overflow route: the entry's own line is a body paragraph,
+    replaced by the full text at the end of its section (#1943)."""
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+    short = gen._insert_bulleted_entry(idx + 1, "Synthetic short line", None, list_level=0)
+    text = f"Synthetic {code} overflow prose, Example University, 2015"
+    gen._overflow_entries = [(
+        {"taxonomy_code": code, "text": text,
+         "extraction_coverage": {"extraction_coverage_percent": 12}},
+        short, code)]
+
+    gen._route_overflow_entries()
+
+    assert gen.stats["overflow_bullets_added"] == 1
+    para = next(p for p in gen.doc.paragraphs if p.text == text)
+    if bulleted:
+        assert _num_level(para) == "0"
+    else:
+        assert _plain_left(para) == plain_entry_left_twips(0)
+
+
 @pytest.mark.parametrize("bulleted", [True, False])
 def test_overflow_levels_survive_with_or_without_bullets(bulleted):
     """A title, a context segment and a label's content: levels 0, 1, 2, as
