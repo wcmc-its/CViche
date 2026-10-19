@@ -427,18 +427,25 @@ Lints, ranked by the severity of the failure class they catch:
                           while a line carries a neighbouring column's
                           dates, so the columns are still interleaved. WARN,
                           one per entry. Reads stage 4 and the docx
-14ak. source_line_coverage a source line under half of whose word pairs
-                          (3+-letter words, both on one rendered line) the
-                          output holds anywhere, Appendix and tracked
-                          deletions included (#1588): a record or detail lost
-                          at any stage. A rendered leading author list,
-                          links, a column-header row and a withheld DEA
-                          number are left out; a wrapped line is judged
+14ak. source_line_coverage a judged source line (six words or more, as
+                          before) that is not found in its own place in the
+                          output, Appendix and tracked deletions included
+                          (#1588): aligned one-to-one to a rendered line, a
+                          table's rows, two paragraphs, or one row per
+                          period when it lists several, it holds under
+                          half of its rarity-weighted facts and words, or
+                          misses a year it states. One rendered token
+                          serves one record, so a lost near-duplicate of a
+                          rendered record is reported. A rendered leading
+                          author list, links, month words, a column-header
+                          row, a withheld DEA number, headings and, but for
+                          research activities, the model-written research
+                          summary are left out; a wrapped line is judged
                           with the one before it. INFO, one per stage-3b
                           entry, and a review-copy note only, never a
-                          run-page row: 4 of a held-out 30 is wholly
-                          missing text (YUY-SLC2). Reads the source docx
-                          and the docx; stage 1a and 3b when present
+                          run-page row (SLC-A3 in doctor/PRECISION.md).
+                          Reads the source docx and the docx; stage 1a, 3b
+                          and 4.5 when present
 14al. appointment_title_overlong a D1-D3 title role (one ';'-separated
                           part) over 150 characters: duty prose stage 4
                           packed into the role (#1205, YUYVIG DYLJXC
@@ -1192,11 +1199,14 @@ LINT_PREVALENCE = {
     # the same 3 runs as before the fold, since the fold mends none of their
     # 15 entries -- measured 2026-10-08. Same mixed-corpus caveat as above.
     "shattered_prose": 0.011,
-    # source_line_coverage (#1588, YUY-SLC2 in doctor/PRECISION.md): 81 of
-    # 100 runs with a source docx -- 32 of the 37 YUYVIG runs and 49 of the 63
-    # of the EBYSBC/s7ab/pilot farm -- over fresh renders of origin/dev
-    # 49ed5a4a, measured 2026-10-09. Same mixed-corpus caveat as above.
-    "source_line_coverage": 0.81,
+    # source_line_coverage (#1588, SLC-A3 in doctor/PRECISION.md): 156 of
+    # the 167 runs with a source docx among the 197 stored labelled runs
+    # (EBYSBC, s7ab, pilot, NDMRSO, NECRGC, JAFPFP, YUYVIG, OIEPQD, EOAHMI,
+    # X6; EMHFMB held out), each re-doctored on its stored delivered docx,
+    # measured 2026-10-16; the word-pair rule it replaced fires on 143 of the
+    # same 167. It replaces YUY-SLC2's 81 of 100. Same mixed-corpus caveat
+    # as above.
+    "source_line_coverage": 0.934,
     # appointment_title_overlong (#1205, YUY-AT in doctor/PRECISION.md): 2 of
     # the 132 runs of the YUYVIG (39), EBYSBC/s7ab/pilot (63) and NDMRSO (30)
     # farms (scripts/doctor_gate.py, measured 2026-10-08). Same mixed-corpus
@@ -1841,7 +1851,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `deleted_blocks` reads the same docx as `blocks`, as for
     # protected_data_in_output.
     LintSpec("source_line_coverage", lint_source_line_coverage, ("source_lines", "blocks"),
-             optional=("deleted_blocks", "stage_1a", "stage_3b")),
+             optional=("deleted_blocks", "stage_1a", "stage_3b", "table_rows", "stage_4_5")),
     LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
     # `blocks` and `subpoints` read the same docx as `table_rows`, as for
     # offschema_fields: where else a stated grant value reaches the reader.

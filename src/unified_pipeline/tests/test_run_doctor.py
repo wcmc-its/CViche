@@ -6643,6 +6643,15 @@ def test_dedup_drops_prevalence_is_the_measured_corpus_fraction():
     assert LINT_PREVALENCE["dedup_drops"] == round(60 / 227, 3)
 
 
+def test_source_line_coverage_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-16 (SLC-A3 in doctor/PRECISION.md) over the 167 of
+    the 197 stored labelled runs with a source docx, each re-doctored on its
+    stored delivered docx (one fire per run at any severity); a new
+    measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["source_line_coverage"] == round(156 / 167, 3)
+
+
 def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
     """The role_consistency row must hand the lint the docx (#1403, EOAHMI
     JIJRSN 516): a grant table whose role says PI and whose PI cell is empty
