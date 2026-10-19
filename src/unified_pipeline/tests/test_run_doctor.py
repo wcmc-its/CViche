@@ -83,6 +83,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_pubmed_title_truncated,
     lint_python_repr_in_output,
     lint_record_date_shift,
+    lint_renderer_row_receipts,
     lint_research_summary_call_failed,
     lint_section_lost,
     lint_segmentation,
@@ -2577,6 +2578,58 @@ def test_stage6_warnings_reemitted_as_warn():
 
 def test_stage6_warnings_quiet_on_clean_sidecar():
     assert lint_stage6_warnings({"warnings": [], "dedup_decisions": []}) == []
+
+
+def _receipt(section, lost, linted=True, given=9):
+    return {"section": section, "linted": linted, "given": given,
+            "written": given - len(lost), "lost": lost}
+
+
+def _lost(idx, text, code="Q1"):
+    return {"code": code, "element_idx_start": idx, "text": text}
+
+
+def test_534_row_receipt_lint_warns_per_code_with_lost_entries():
+    """GNONHA's Q1 table (#534): 9 given, the rows wiped -- one WARN per
+    taxonomy code, opening with the "taxonomy code Q1:" prefix the run page
+    reads its section from, with each lost entry as evidence. One Service
+    receipt spans Q1 to Q4D, so a Q2 loss is its own finding."""
+    report = {"warnings": [], "dedup_decisions": [], "row_receipts": [
+        _receipt("service", [_lost(241, "Imaginary Society, Treasurer"),
+                             _lost(250, "Pretend Journal, Reviewer", "Q2"),
+                             _lost(263, "Fictional Board, Chair")]),
+        _receipt("honors", []),
+    ]}
+    q1, q2 = lint_renderer_row_receipts(report)
+    assert q1["lint"] == "renderer_row_missing"
+    assert q1["severity"] == "WARN"
+    assert q1["message"].startswith(
+        "taxonomy code Q1: 2 of the 9 entries handed to the service renderer")
+    assert q1["evidence"] == ["Q1 241: Imaginary Society, Treasurer",
+                              "Q1 263: Fictional Board, Chair"]
+    assert q2["message"].startswith("taxonomy code Q2: 1 of the 9 entries")
+    assert q2["evidence"] == ["Q2 250: Pretend Journal, Reviewer"]
+
+
+def test_534_row_receipt_lint_skips_unlinted_sections_and_old_sidecars():
+    report = {"warnings": [], "dedup_decisions": [], "row_receipts": [
+        _receipt("presentations", [_lost(1, "A talk", "R")], linted=False),
+    ]}
+    assert lint_renderer_row_receipts(report) == []
+    assert lint_renderer_row_receipts({"warnings": [], "dedup_decisions": []}) == []
+
+
+def test_534_row_receipt_lint_reports_a_lost_kept_twin_whose_text_dedup_dropped():
+    """Dedup runs before stage 6 snapshots what a section is given, so the
+    dropped twin is never on a receipt. A lost entry whose text equals a
+    decision's `dropped_text` is the twin dedup KEPT (CKDDEG N3B's shape),
+    and its loss is real: the decision does not excuse it."""
+    report = {"warnings": [], "row_receipts": [
+        _receipt("mentoring", [_lost(7, "Pretend Mentee M.D.", "N3B")]),
+    ], "dedup_decisions": [{"dropped_text": "Pretend Mentee M.D.",
+                            "kept_text": "Pretend Mentee M.D.", "code": "N3B"}]}
+    finding, = lint_renderer_row_receipts(report)
+    assert finding["evidence"] == ["N3B 7: Pretend Mentee M.D."]
 
 
 def test_stage6_warnings_reemits_appendix_diversion_with_code_and_count():
@@ -5930,14 +5983,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (79), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (80), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 77
+    assert len(payload["findings"]) == 78
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6618,6 +6671,15 @@ def test_dedup_drops_prevalence_is_the_measured_corpus_fraction():
     severity); a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["dedup_drops"] == round(60 / 227, 3)
+
+
+def test_source_line_coverage_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-16 (SLC-A3 in doctor/PRECISION.md) over the 167 of
+    the 197 stored labelled runs with a source docx, each re-doctored on its
+    stored delivered docx (one fire per run at any severity); a new
+    measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["source_line_coverage"] == round(156 / 167, 3)
 
 
 def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):

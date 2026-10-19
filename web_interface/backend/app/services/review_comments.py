@@ -195,6 +195,8 @@ REVIEW_FLAGS = {
     "institution_cleaned_name": ("Part of this institution's name in your CV, such as a "
                                  "department or a second hospital, is missing here, or the name "
                                  "reads \"Unknown\": check it against your CV."),
+    "renderer_row_missing": ("Entries from your CV are missing from this section's table, and "
+                             "are not in the Appendix: add them from your CV."),
     "cross_entry_value": ("A date, amount, effort, role or name here may come from a different "
                           "entry of your CV: check this entry against the CV."),
     "session_title_missing": ("The title of this talk or session is missing, or the whole line "

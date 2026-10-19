@@ -22,6 +22,8 @@ from unified_pipeline.stage_5c_teaching_formatter import (
     _ENTRY_ID_TAG,
     _ROLE_EVIDENCE,
     _YEAR,
+    FIELDS_SOURCE,
+    REJECTED_RENDERS_KEY,
     TEACHING_CODES,
     _normalized,
     _record_dates,
@@ -140,17 +142,26 @@ def _formatted_line_reasons(entry: Mapping[str, Any]) -> list[str]:
     return reasons
 
 
+# Where a rejected entry renders, by its `entries_rejected` item's
+# `renders`. An item from before #1345 has no `renders`: unformatted.
+_RENDERS_FROM_FIELDS = "renders from its stage-4 fields instead"
+_RENDERS_UNFORMATTED = ("renders unformatted, from its stage-4 course fields or else "
+                        "its source text")
+
+
 def _rejection_findings(stage_5d: Mapping[str, Any]) -> list[dict]:
-    """INFO per line stage 5c's post-check rejected: the entry renders
-    unformatted, from its stage-4 course fields or else its source text
-    (stage 6 `_teaching_entry_lines`)."""
+    """INFO per line stage 5c's post-check rejected: the entry renders from
+    the line 5c wrote from its stage-4 fields (`fields_text`), or else
+    unformatted, from its stage-4 course fields or its source text (stage 6
+    `_teaching_entry_lines`)."""
     meta = stage_5d.get(_STAGE_5C_META_KEY)
     rejected = (meta.get(_REJECTED_KEY) or []) if isinstance(meta, Mapping) else []
     return [_finding(
         "teaching_postcheck", "INFO",
         f"entry {item.get('element_idx_start')} ({item.get('taxonomy_code')}): "
         f"stage 5c rejected its formatted line ({item.get('reason')}); the entry "
-        f"renders unformatted, from its stage-4 course fields or else its source text")
+        + (_RENDERS_FROM_FIELDS if item.get(REJECTED_RENDERS_KEY) == FIELDS_SOURCE
+           else _RENDERS_UNFORMATTED))
         for item in rejected if isinstance(item, Mapping)]
 
 

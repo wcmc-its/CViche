@@ -23,6 +23,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_grant_facts,
     lint_role_consistency,
 )
+from unified_pipeline.doctor.lints.render import lint_renderer_row_receipts  # noqa: E402
 from unified_pipeline.doctor.precision import LintPrecision  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     read_docx_blocks,
@@ -253,6 +254,24 @@ def test_no_quote_falls_back_to_the_sections_template_heading(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("section_lost", "M2B: 1 entry absent from the RESEARCH section")))
     assert _comments(out) == [(_flag("section_lost"), PAST_FUNDING_HEADING)]
+
+
+def test_a_lost_table_row_is_a_comment_on_its_sections_heading(tmp_path):
+    """#534: renderer_row_missing names its taxonomy code the way the run
+    page reads a section, so its flag sits on that section's heading rather
+    than in a note that names no section. The lost row is not on the page,
+    so its own text cannot carry the flag."""
+    doc = Document(str(_clean_docx(tmp_path)))
+    doc.add_paragraph("HONORS")
+    doc.add_paragraph("2001 Imaginary Medal, Pretend Society")
+    doc.save(str(tmp_path / "DOC_wcm.docx"))
+    finding, = lint_renderer_row_receipts({"row_receipts": [{
+        "section": "honors", "linted": True, "given": 2, "written": 1,
+        "lost": [{"code": "H", "element_idx_start": 90,
+                  "text": "2014 Fictional Award, Example Vascular Society"}]}]})
+    out, n = rc.write_review_docx(tmp_path / "DOC_wcm.docx", _report(finding))
+    assert n == 1 and _notes(out) == []
+    assert _comments(out) == [(_flag("renderer_row_missing"), "HONORS")]
 
 
 def test_findings_with_no_place_are_review_notes(tmp_path):

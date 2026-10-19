@@ -643,9 +643,11 @@ def test_run_stage_5c_multi_record_entry_missing_a_line_is_left_unformatted(tmp_
 
 def test_run_stage_5c_rejected_line_falls_back_and_is_recorded(tmp_path, monkeypatch):
     # A line that shows a year, just not the record's, is misstated, not
-    # missing its date: it is rejected rather than restored.
+    # missing its date: it is rejected rather than restored. 'tasting' is in
+    # the source and no field, so the entry is not written from its fields
+    # either (#1345) and renders unformatted.
     entries = [
-        {"taxonomy_code": "K4", "element_idx_start": 7, "text": "Participant in Supper Club 2004",
+        {"taxonomy_code": "K4", "element_idx_start": 7, "text": "Participant in Supper Club tasting 2004",
          "extracted_fields": {"activity_title": "Supper Club", "role": "Participant", "date": "2004"}},
         {"taxonomy_code": "K4", "element_idx_start": 9, "text": "2006 Kite Building Day",
          "extracted_fields": {"activity_title": "Kite Building Day", "date": "2006"}},
@@ -658,7 +660,8 @@ def test_run_stage_5c_rejected_line_falls_back_and_is_recorded(tmp_path, monkeyp
     assert out["entries"][1]["extracted_fields"]["formatted_text"] == "**2006** - Kite Building Day"
     assert out["stage_5c"]["entries_formatted"] == 1
     assert out["stage_5c"]["entries_rejected"] == [
-        {"element_idx_start": 7, "taxonomy_code": "K4", "reason": "EC-0001:year_missing:2004"}]
+        {"element_idx_start": 7, "taxonomy_code": "K4", "reason": "EC-0001:year_missing:2004",
+         "renders": "unformatted"}]
     assert out["stage_5c"]["entries_date_restored"] == []
 
 
@@ -739,6 +742,188 @@ def test_run_stage_5c_restores_one_record_of_a_multi_record_entry(tmp_path, monk
     assert out["entries"][0]["extracted_fields"]["formatted_text"] == \
         "**1981-1990** - Simulation Lab Leader\n**1995-2001** - Simulation Lab Leader"
     assert out["stage_5c"]["entries_date_restored"][0]["ids"] == ["EC-0001"]
+
+
+# ---------------------------------------------------------------------------
+# stage_5c fields line (#1345): a rejected entry is written from its stage-4
+# fields, not left to render as its raw source line
+# ---------------------------------------------------------------------------
+
+def test_5c_fields_line_takes_template_d_with_an_open_end_written_present():
+    # UXBHHF K4 196: rejected for an invented 'Attendee'; stage 4 has no role.
+    record = {"activity_title": "Noon Kite Series", "role": None,
+              "start_date": "2009", "end_date": "current"}
+    assert s5c.fields_line(record, "14. Noon Kite Series: 2009-current") \
+        == "**2009-Present** - Noon Kite Series"
+
+
+def test_5c_fields_line_writes_a_role_only_when_the_source_states_it():
+    record = {"activity_title": "Rope Knots", "role": "Presenter", "institution": "Sample Hall",
+              "date": "1991-06-05"}
+    # KHXOUF 1070 shape: stage 4 supplied 'Presenter' for a source that says "presented".
+    assert s5c.fields_line(record, '"Rope Knots", presented to Sample Hall, June 5, 1991.') \
+        == "**1991-06-05** - Rope Knots (Sample Hall)"
+    assert s5c.fields_line(record, 'Presenter: "Rope Knots", Sample Hall, June 5, 1991.') \
+        == "**1991-06-05** - Presenter, Rope Knots (Sample Hall)"
+
+
+def test_5c_fields_line_puts_places_in_the_prompts_order_and_skips_one_the_title_names():
+    record = {"activity_title": "Pond Day", "audience": "3rd grade", "location": "Elm School",
+              "date": "2015"}
+    assert s5c.fields_line(record, "2015 Pond Day, 3rd grade, Elm School") \
+        == "**2015** - Pond Day (3rd grade; Elm School)"
+    record = {"program_name": "SAMPLE Journal Club", "institution": "SAMPLE", "role": "Director",
+              "start_date": "2012", "end_date": "2018"}
+    assert s5c.fields_line(record, "e. Director, SAMPLE Journal Club (2012-2018)") \
+        == "**2012-2018** - Director, SAMPLE Journal Club"
+
+
+def test_5c_fields_line_writes_a_k1_course_code_with_its_title():
+    record = {"course_code": "BIO 101", "course_title": "Pond Ecology", "date": "2010"}
+    assert s5c.fields_line(record, "2010 BIO 101 Pond Ecology") == "**2010** - BIO 101: Pond Ecology"
+    # A course title with spaces around it keeps its code.
+    record = {"course_code": "MED 101", "course_title": "Anatomy ", "date": "2015"}
+    assert s5c.fields_line(record, "MED 101 Anatomy, 2015") == "**2015** - MED 101: Anatomy"
+
+
+def test_5c_fields_line_is_none_for_a_start_with_no_end():
+    # "2009-" (open) and "2009" (one year) are both kept as a start alone;
+    # writing "2009" would close an open range.
+    assert s5c.fields_line({"activity_title": "Kite seminar", "start_date": "2009"},
+                           "2009- Kite seminar") is None
+
+
+def test_5c_fields_line_is_none_for_a_place_with_its_own_parentheses():
+    # DPEHSZ 292 shape: the place's parentheses would nest inside the line's.
+    record = {"activity_title": "Kite Talk", "date": "2016-02",
+              "institution": "Sample Medical School (KT208 to kite fellows)"}
+    assert s5c.fields_line(record, "2/2016 Kite Talk, Sample Medical School "
+                                   "(KT208 to kite fellows)") is None
+
+
+def test_5c_fields_line_is_none_without_a_title_or_with_a_yearless_date():
+    # K2 has no title field (XAYKXA 192).
+    assert s5c.fields_line({"teaching_role": "Preceptor", "start_date": "2009"},
+                           "Preceptor 2009") is None
+    # FINSIS 453: stage 4 kept the source's "11/18" as "11-18".
+    assert s5c.fields_line({"activity_title": "Kite Event", "date": "11-18"},
+                           "11/18 - Kite Event") is None
+
+
+def test_5c_fields_text_writes_each_record_of_a_multi_record_entry():
+    # UXBHHF K4 89 shape: two seminars fused in one raw bullet, 5c's line
+    # rejected for an invented 'Participant'.
+    records = [{"activity_title": "Kite Physics", "role": "Professional seminar", "date": "2011"},
+               {"activity_title": "Pond Optics", "role": "Professional seminar", "date": "2013"}]
+    entry = {"text": '4. Professional seminar: "Kite Physics (2011)", "Pond Optics (2013)"',
+             "extracted_fields": {**records[1], "stage4_records": records}}
+    lines = s5c.fields_text(entry)
+    assert lines == ("**2011** - Professional seminar, Kite Physics\n"
+                     "**2013** - Professional seminar, Pond Optics")
+    # UXBHHF 89 itself says "seminars ... and": the lines say 'seminar' and
+    # no 'and', so the raw line renders.
+    entry["text"] = '4. Professional seminars: "Kite Physics (2011)" and "Pond Optics (2013)"'
+    assert s5c._word_mismatch(lines, entry["text"]) == (["and", "seminars"], ["seminar"])
+    assert s5c.fields_text(entry) is None
+
+
+def test_5c_fields_text_needs_every_source_word():
+    # VYRDHN 224 shape: the series name is only in the source text.
+    entry = {"text": "Kite Grand Rounds, 02/07/07 - 'Rope Knots'.",
+             "extracted_fields": {"activity_title": "Rope Knots", "date": "2007-02-07"}}
+    assert s5c._word_mismatch(s5c.fields_line(entry["extracted_fields"], entry["text"]),
+                              entry["text"]) == (["grand", "kite", "rounds"], [])
+    assert s5c.fields_text(entry) is None
+
+
+def test_5c_fields_text_matches_whole_words_of_any_length_both_ways():
+    # GKAQHB K5 166 shape: 'stem' is inside 'system', 'day' and 'for' are
+    # short, and the audience field adds 'students', which the source lacks.
+    entry = {"text": "2015 What is the kite system? STEM day for 3rd-5th grade, Elm School",
+             "extracted_fields": {"activity_title": "What is the kite system?",
+                                  "audience": "3rd-5th grade students", "location": "Elm School",
+                                  "date": "2015"}}
+    line = s5c.fields_line(entry["extracted_fields"], entry["text"])
+    assert line == "**2015** - What is the kite system? (3rd-5th grade students; Elm School)"
+    assert s5c._word_mismatch(line, entry["text"]) == (["day", "for", "stem"], ["students"])
+    assert s5c.fields_text(entry) is None
+    # A negation and an acronym are words too.
+    for text, title in (("Not a keynote: Kite Talk, 2015", "keynote: Kite Talk"),
+                        ("PBL Kite Rounds 2015", "Kite Rounds"),
+                        ("KITE 5210 Kite Medicine 2015", "Kite Medicine")):
+        entry = {"text": text, "extracted_fields": {"activity_title": title, "date": "2015"}}
+        assert s5c.fields_text(entry) is None, text
+    # KHXOUF 1089 shape: a word counts as often as it occurs, so the 'and'
+    # between two dates is not found in the title's 'and'.
+    assert s5c._word_mismatch("**1987-11-1988-01** - Kites and Ponds",
+                              "Kites and Ponds, November 1987 and January 1988") == (["and"], [])
+
+
+def test_5c_fields_text_needs_the_source_dates():
+    # BZZNRL 289 shape: years only the source shows would be lost.
+    entry = {"text": "Kite autopsy, 2011, 2013", "extracted_fields": {"activity_title": "Kite autopsy"}}
+    assert s5c.fields_line(entry["extracted_fields"], entry["text"]) == "Kite autopsy"
+    assert s5c.fields_text(entry) is None
+    # So would one of two years when the record holds only the other.
+    entry = {"text": "Kite labs 2011, 2013",
+             "extracted_fields": {"activity_title": "Kite labs", "date": "2011"}}
+    assert s5c.fields_line(entry["extracted_fields"], entry["text"]) == "**2011** - Kite labs"
+    assert s5c.fields_text(entry) is None
+    # A date with no year ("8/14/156") is a date too.
+    assert s5c._dates_differ("Kite Course", "Kite Course 8/14/156")
+    # A range stands for the years the source lists one by one.
+    assert not s5c._dates_differ("**1993-1995** - Kite labs", "Kite labs 1993, 1994, 1995")
+
+
+def test_5c_fields_text_counts_month_names_and_open_ends_as_the_date():
+    entry = {"text": '"Rope Knots." Kite Club. May 20, 2015. Elm Town.',
+             "extracted_fields": {"activity_title": "Rope Knots.", "audience": "Kite Club",
+                                  "location": "Elm Town", "date": "2015-05-20"}}
+    assert s5c.fields_text(entry) == "**2015-05-20** - Rope Knots. (Kite Club; Elm Town)"
+
+
+def test_5c_fields_text_shows_no_year_the_source_does_not():
+    # RXYBVF 233: stage 4 read "2013-5" as December 2015.
+    entry = {"text": "2013-5 Kite Genomics. Chicago, December.",
+             "extracted_fields": {"activity_title": "Kite Genomics", "institution": "Chicago",
+                                  "date": "2015-12"}}
+    assert s5c.postcheck_line(s5c.fields_line(entry["extracted_fields"], entry["text"]),
+                              entry["extracted_fields"], entry["text"]) is None
+    assert s5c.fields_text(entry) is None
+
+
+def test_5c_fields_text_needs_every_line_to_pass_the_postcheck():
+    # Stage 4's scalars hold the first of two dated activities: the line
+    # writes one date, and the post-check holds it to both (DPEHSZ 269).
+    fields = {"activity_title": "Kite Club Day", "date": "2007",
+              "activities": [{"activity_title": "Kite Club Day", "date": "2007"},
+                             {"activity_title": "Kite Club", "date": "2008"}]}
+    entry = {"text": "2007 Kite Club Day; 2008 Kite Club", "extracted_fields": fields}
+    line = s5c.fields_line(fields, entry["text"])
+    assert s5c.postcheck_line(line, fields, entry["text"]) == "year_missing:2008"
+    assert s5c.fields_text(entry) is None
+    # Its words and dates all match the source, but it echoes the prompt's
+    # `Original:` context line.
+    entry = {"text": "Original: Kite Day", "extracted_fields": {"activity_title": "Original: Kite Day"}}
+    assert s5c.fields_line(entry["extracted_fields"], entry["text"]) == "Original: Kite Day"
+    assert s5c.fields_text(entry) is None
+
+
+def test_run_stage_5c_writes_a_rejected_entry_from_its_fields(tmp_path, monkeypatch):
+    # UXBHHF K4 197: the model wrote 'Attendee', which the source never says.
+    entries = [{"taxonomy_code": "K4", "element_idx_start": 197,
+                "text": "15. Annual Kite Rounds 2013 - current",
+                "extracted_fields": {"activity_title": "Annual Kite Rounds", "role": None,
+                                     "start_date": "2013", "end_date": "current"}}]
+    out = _run_5c(tmp_path, monkeypatch, entries,
+                  "- [EC-0001] **2013-Present** - Attendee, Annual Kite Rounds\n")
+    fields = out["entries"][0]["extracted_fields"]
+    assert fields["formatted_text"] == "**2013-Present** - Annual Kite Rounds"
+    assert fields["formatting_source"] == s5c.FIELDS_SOURCE == "stage_4_fields"
+    assert out["stage_5c"]["entries_formatted"] == 0
+    assert out["stage_5c"]["entries_rejected"] == [
+        {"element_idx_start": 197, "taxonomy_code": "K4", "reason": "EC-0001:role_invented:attendee",
+         "renders": "stage_4_fields"}]
 
 
 # ---------------------------------------------------------------------------

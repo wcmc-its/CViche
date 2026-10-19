@@ -1434,9 +1434,13 @@ class HonorsSection:
         # Sort by date (most recent first)
         for entry in sort_entries_reverse_chronological(entries):
             original_text = entry.get('text', '')
+            self._row_receipts.begin_entry(entry)
 
             # Skip table header entries that were mistakenly extracted as data
             # Common patterns: "Name of award\tOrganization\tDate awarded" or similar
+            # Not set aside on the receipt (#534): this check misfires on a
+            # space-separated "year  award, organization" line (#1930), so a
+            # skip here is reported as a lost entry rather than excused.
             if _is_honors_header_entry(original_text):
                 if self.verbose:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
@@ -1447,15 +1451,18 @@ class HonorsSection:
                 # O-1 visa). What is left -- a cut-text remnant, the
                 # immigration service as organization, the year -- still
                 # describes the withheld item, so no row renders.
+                self._row_receipts.set_aside(entry)
                 continue
-            for record in parse_honor_entry(entry):
-                if not (record.award or record.organization or record.date):
-                    # An entry with no text and no extracted fields has
-                    # nothing to render; an empty row is not the honest
-                    # answer to that, and reaching cells for it is what
-                    # used to raise on a None text.
-                    continue
+            # An entry with no text and no extracted fields has nothing to
+            # render; an empty row is not the honest answer to that, and
+            # reaching cells for it is what used to raise on a None text.
+            records = [record for record in parse_honor_entry(entry)
+                       if record.award or record.organization or record.date]
+            if not records:
+                self._row_receipts.set_aside(entry)
+            for record in records:
                 self._add_honors_row(table, record)
+        self._row_receipts.end_entry()  # a later honors row is not the last entry's (#534)
 
     def _add_honors_row(self, table: Table, record: HonorRecord) -> None:
         """Add a single row to the honors table.
@@ -1475,6 +1482,7 @@ class HonorsSection:
             return
 
         row = table.add_row()
+        self._row_receipts.wrote(row._tr)
         num_cols = len(row.cells)
 
         if num_cols >= _HONORS_TABLE_COLUMNS:

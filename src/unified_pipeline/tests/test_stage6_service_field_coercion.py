@@ -1300,3 +1300,94 @@ def test_line_without_shown_role_and_dates(text, role, start, end, expected):
     """#1346: what a P or Q2 row's fallback line holds beyond the role and
     dates at its ends."""
     assert _line_without_shown_role_and_dates(text, role, start, end) == expected
+
+
+# ---------------------------------------------------------------------------
+# #534: the service section's row receipt, end to end through generate().
+# ---------------------------------------------------------------------------
+
+def _service_receipt(tmp_path, entries, gen=None):
+    gen = gen or WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TEST12", "entries": entries}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "TEST12_render_warnings.json").read_text())
+    receipt, = [r for r in sidecar["row_receipts"] if r["section"] == "service"]
+    return receipt, sidecar
+
+
+def _gnonha_shaped_entries():
+    """Three Q1 records and one Q4 entry: the GNONHA combination whose Q4
+    table resolved onto the Q1 table and cleared it (#454)."""
+    q1 = [{"text": f"20{10 + i}-20{12 + i} Imaginary Society {i}, Treasurer",
+           "taxonomy_code": "Q1", "element_idx_start": 10 + i,
+           "extracted_fields": {"organization": f"Imaginary Society {i}", "role": "Treasurer",
+                                "start_date": f"20{10 + i}", "end_date": f"20{12 + i}"}}
+          for i in range(3)]
+    q4 = {"text": "2019", "taxonomy_code": "Q4", "element_idx_start": 30,
+          "extracted_fields": {"start_date": "2019"}}
+    return [_entry("A", name="Jane Q. Public, MD"), *q1, q4]
+
+
+def test_534_service_receipt_counts_every_row_written(tmp_path):
+    """Every service table records its row: Q1 (extramural leadership), Q4
+    (other service), Q2 (boards) and Q4D (journal reviewing). A bare
+    "Reviewer" header and a journal too short to name are set aside, not
+    lost."""
+    entries = [*_gnonha_shaped_entries(),
+               {"text": "2015-2017 Imaginary Board of Widgets, Member", "taxonomy_code": "Q2",
+                "element_idx_start": 40,
+                "extracted_fields": {"committee_name": "Imaginary Board of Widgets",
+                                     "role": "Member", "start_date": "2015",
+                                     "end_date": "2017"}},
+               {"text": "Journal of Pretend Widgets", "taxonomy_code": "Q4D",
+                "element_idx_start": 41,
+                "extracted_fields": {"journal_name": "Journal of Pretend Widgets"}},
+               {"text": "Reviewer", "taxonomy_code": "Q4D", "element_idx_start": 42,
+                "extracted_fields": {}},
+               {"text": "AB", "taxonomy_code": "Q4D", "element_idx_start": 43,
+                "extracted_fields": {}}]
+    receipt, _ = _service_receipt(tmp_path, entries)
+    assert (receipt["linted"], receipt["given"], receipt["written"], receipt["lost"]) == (
+        True, 8, 6, [])
+
+
+def test_534_a_table_cleared_after_it_was_filled_is_reported_lost(tmp_path):
+    """With the #454 backstop bypassed -- every clear goes straight to the
+    row-removing function, as before #454's fix -- the Q4 fill wipes the Q1
+    rows. The receipt names them and the doctor lint fires."""
+    from unified_pipeline.run_doctor import lint_renderer_row_receipts
+    from unified_pipeline.stage6.formatting.docx import _clear_table_data
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._clear_table_data = lambda table, keep_header=True: _clear_table_data(
+        table, keep_header=keep_header)
+    receipt, sidecar = _service_receipt(tmp_path, _gnonha_shaped_entries(), gen)
+    assert {lost["element_idx_start"] for lost in receipt["lost"]} >= {10, 11, 12}
+    finding, = [f for f in lint_renderer_row_receipts(sidecar)
+                if f["message"].startswith("taxonomy code Q1:")]
+    assert finding["severity"] == "WARN"
+    assert "handed to the service renderer" in finding["message"]
+
+
+def test_534_a_row_written_after_the_extramural_loop_is_not_the_last_entrys():
+    """The Q1 loop ends its receipt cursor: a row added after it is not
+    credited to the last entry, so when that entry's own row is removed the
+    entry is lost, not vouched for by a row that is not its own."""
+    entry = {"text": "2010-2012 Imaginary Society, Treasurer", "taxonomy_code": "Q1",
+             "element_idx_start": 5,
+             "extracted_fields": {"organization": "Imaginary Society", "role": "Treasurer",
+                                  "start_date": "2010", "end_date": "2012"}}
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph().add_run("Leadership in Extramural Organizations").bold = True
+    table = gen.doc.add_table(rows=1, cols=3)
+    gen._row_receipts.begin_section("service")
+    gen._fill_extramural_leadership([entry])
+    assert [r.cells[0].text for r in table.rows[1:]] == ["Imaginary Society"]
+    gen._add_extramural_row(table, "Later Row", "", "")
+    entry_row = table.rows[1]._tr
+    entry_row.getparent().remove(entry_row)
+    receipt, = gen._row_receipts.receipts({"service": [entry]})
+    assert [lost.element_idx_start for lost in receipt.lost] == [5]

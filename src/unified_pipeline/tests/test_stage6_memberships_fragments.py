@@ -1204,6 +1204,33 @@ def test_1426_a_withheld_membership_whose_organization_field_survived_still_rend
     assert [row[0] for row in rows] == ["Fictional Society of Examples"]
 
 
+# --- #534: the memberships row receipt ---------------------------------------
+
+def test_534_receipt_counts_rows_and_sets_aside_only_what_has_nothing_to_render():
+    """A written membership is written (through `_add_entry_comments`); the
+    source header row, a fully withheld membership and an empty one write
+    nothing on purpose, so none of the four is lost."""
+    from unified_pipeline.stage6.pii_pass import PII_WITHHELD_KEY
+
+    written = {"taxonomy_code": "I", "element_idx_start": 1,
+               "text": "Imaginary Society of Widgets 2001-present",
+               "extracted_fields": {"organization": "Imaginary Society of Widgets",
+                                    "start_date": "2001", "end_date": "present"}}
+    header = {"taxonomy_code": "I", "element_idx_start": 2,
+              "text": "Organization\tDate (yyyy-yyyy)", "extracted_fields": {}}
+    withheld = {"taxonomy_code": "I", "element_idx_start": 3, "text": "",
+                "extracted_fields": {"membership_type": "Member"}, PII_WITHHELD_KEY: True}
+    blank = {"taxonomy_code": "I", "element_idx_start": 4, "text": " | ",
+             "extracted_fields": {}}
+    entries = [written, header, withheld, blank]
+    gen, table = _generator_with_table()
+    gen._row_receipts.begin_section("memberships")
+    gen._fill_memberships(entries)
+    assert [r.cells[0].text for r in table.rows[1:]] == ["Imaginary Society of Widgets"]
+    receipt, = gen._row_receipts.receipts({"memberships": entries})
+    assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (4, 1, 3, ())
+
+
 # --- (u) #1715 CBNXND-04: stage 4's records render once each ------------------
 
 # CBNXND's I entry: seven societies, one per line, the last wrapped onto an
