@@ -40,11 +40,14 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _lists_name,
     _names_a_sibling,
     _names_record,
+    _narrower_committee,
     _other_journal_same_row,
+    _other_series_member,
     _part_numbers,
     _place_only_event,
     _record_name,
     _row_residue,
+    _series_marks,
     _split_record_family,
     _standalone_numerals,
     _title_only_fragment,
@@ -251,8 +254,10 @@ def test_decision_name_fields_follow_the_code():
                                       ("H", "award_name"), ("P", "committee_name")])
 def test_deduplicate_entries_writes_the_code_keyed_name_fields(code, key):
     # #666: the code must reach _decision_fields from the dedup loop itself.
+    # The dropped row states the kept name's added words, so the P pair is not
+    # a narrower committee (`_narrower_committee`) and still drops.
     decisions = []
-    text = "Example Name Alpha Beta Gamma Delta Epsilon Zeta 2001"
+    text = "Example Name Instructor Guide Alpha Beta Gamma Delta Epsilon Zeta 2001"
     dropped = {"text": text, "extracted_fields": {key: "Example Name"}}
     kept = {"text": text + " Eta",
             "extracted_fields": {key: "Example Name Instructor Guide"}}
@@ -1734,6 +1739,11 @@ def test_a_citation_whose_author_initial_is_a_lone_i_still_drops():
     ("Sprocket I, Gizmo J. Widget study.", set()),             # a byline's lone initial
     ("Gizmo J, Sprocket I. Widget study.", set()),             # last in the byline
     ("Widget Seminar II, Section A", {"II"}),                  # "Seminar II" is no author
+    ("Widget Pharmacology I/II, 2031", {"I", "II"}),           # a slash listing names both
+    ("Widget Pharmacology I / III", {"I", "III"}),
+    ("Widget Pharmacology II/I", {"I", "II"}),
+    ("Widget I/O Board, 2031", set()),                         # a slash before no numeral
+    ("Widget Pharmacology I/V", set()),                        # V is never a numeral alone
 ])
 def test_standalone_numerals(text, numerals):
     assert _standalone_numerals(text) == numerals
@@ -2539,3 +2549,178 @@ def test_a_whole_entry_at_the_same_source_position_is_not_a_record_of_it():
     document = [*children, neighbour, dated]
     assert _split_record_family(children[0], document) == children
     assert _undated_split_record_absorbs_date(dated, children[0], document)
+
+
+# ------------- #666 residual: a lettered series, a slash listing, a narrower
+# committee. Invented content shaped like IZJADE 942 (a lettered committee),
+# JEFZWH 295, BLBVPD 94 and WYMVGU 557 (a committee the kept name qualifies).
+
+def test_two_lettered_committees_of_one_council_are_both_kept():
+    # IZJADE 942: undated, so the date test passes; one letter is no word.
+    kept = {"text": "2029-2030 Member, Committee R, Council on Widget Standards and Gizmo Safety Testing"}
+    dropped = {"text": "Member, Committee Q, Council on Widget Standards"}
+    assert deduplicate_entries([kept, dropped]) == [kept, dropped]
+
+
+def test_a_listing_of_both_lettered_committees_still_covers_a_copy_of_one():
+    kept = {"text": "2029-2030 Member, Committee R, Committee Q; Council on Widget Standards"}
+    dropped = {"text": "Member, Committee Q, Council on Widget Standards"}
+    assert deduplicate_entries([kept, dropped]) == [kept]
+
+
+def test_a_kept_text_with_no_letter_on_the_word_proves_nothing():
+    kept = {"text": "2029-2030 Member, Committee, Council on Widget Standards and Gizmo Safety Testing"}
+    dropped = {"text": "Member, Committee Q, Council on Widget Standards"}
+    assert deduplicate_entries([kept, dropped]) == [kept]
+
+
+def test_a_citation_copy_whose_byline_the_blank_cannot_read_still_drops():
+    # A stray comma ("Quill, MB") breaks the byline, so "Plover M" reads like
+    # "Committee Q"; the kept copy letters no word, so the copy still goes.
+    kept = {"text": "Plover M, Quill MB, Reed BP, Wren GR. Widget motion during gizmo "
+                    "transfers. Widget Research Society Proceedings, 2031."}
+    dropped = {"text": "Plover M, Quill, MB, Reed BP, Wren GR. Widget motion during gizmo "
+                       "transfers. Widget Research Society, 2031."}
+    assert deduplicate_entries([kept, dropped]) == [kept]
+
+
+def test_a_slash_listed_course_is_not_covered_by_one_of_its_parts():
+    # The longer text is kept, so the listing is the one dedup weighs dropping.
+    kept = {"text": "Section Lead: Widget Pharmacology II, Example School of Gizmos, 2031-2033"}
+    listing = {"text": "Section Lead: Widget Pharmacology I/II, Example School, 2031-2033"}
+    assert deduplicate_entries([kept, listing]) == [kept, listing]
+
+
+def test_a_slash_listed_course_covers_a_copy_of_one_part():
+    listing = {"text": "Section Lead: Widget Pharmacology I/II, Example School, 2031-2033"}
+    dropped = {"text": "Section Lead: Widget Pharmacology I, Example School, 2031-2033"}
+    assert deduplicate_entries([listing, dropped]) == [listing]
+
+
+@pytest.mark.parametrize("text, numerals, letters", [
+    ("Member, Committee Q, Council on Widgets", set(), {("committee", "Q")}),
+    ("Widget Group B", set(), {("group", "B")}),
+    ("Widget Group B; Gadget Unit C)", set(), {("group", "B"), ("unit", "C")}),
+    ("Widget Group B\tGadgets", set(), {("group", "B")}),          # a tab ends a segment
+    ("Widget Group B: Gadgets", set(), {("group", "B")}),
+    ("Chair, A Widget Committee", set(), set()),                   # the article: a word follows
+    ("Widget Group B Committee", set(), set()),                    # a word follows
+    ("Widget Group B. Gadgets", set(), set()),                     # an initial's period
+    ("Widget Compounding I, 2031", {"I"}, set()),                  # "I" is a numeral only
+    ("Plover M, Quill MB. Widget study.", set(), set()),           # a byline is blanked
+    ("Plover M, Quill, MB. Widget study.", set(), {("plover", "M")}),
+    ("Widget Part B, 2031", set(), {("part", "B")}),               # no part letter reader
+    ("Widget Part II, 2031", set(), set()),                        # a part numeral is `_part_numbers`'
+    ("WIDGET Group b,", set(), set()),                             # lower case is no mark
+    ("member of the widget group B,", set(), set()),               # nor after a lower-case word
+    ("Widget Seminar II, Section A", {"II"}, {("section", "A")}),
+])
+def test_series_marks(text, numerals, letters):
+    marks = _series_marks(text)
+    assert (marks.numerals, marks.letters) == (numerals, letters)
+
+
+@pytest.mark.parametrize("dropped, kept, other", [
+    ("Widget Compounding I, 2031", "Widget Compounding II, 2031", True),
+    ("Widget Compounding I, 2031", "Widget Compounding, 2031", True),     # a numeral the kept text lacks
+    ("Widget Compounding II, 2031", "Widget Compounding II, Acme, 2031", False),
+    ("Committee Q, Council", "Committee R, Council", True),
+    ("Committee Q, Council", "Committee R, Committee Q; Council", False),  # the kept text holds it
+    ("Committee Q, Council", "Committee, Council", False),                # no letter on that word
+    ("Committee Q, Council", "Gadget Group R, Council", False),           # another word lettered
+    ("Committee, Council", "Committee R, Council", False),                # nothing to compare
+    ("Widget Pharmacology I/II, 2031", "Widget Pharmacology II, 2031", True),
+    ("Widget Pharmacology I, 2031", "Widget Pharmacology I/II, 2031", False),
+])
+def test_other_series_member(dropped, kept, other):
+    assert _other_series_member(dropped, kept) is other
+
+
+def _committee(text: str, name, **fields) -> dict:
+    return _entry("P", text, committee_name=name, **fields)
+
+
+def test_a_committee_the_kept_name_places_in_a_department_is_kept():
+    # JEFZWH 295: the dropped committee sits in a college, the kept one is the
+    # department's; every word of the dropped row is in the kept row.
+    kept = _committee("Member, Steering Committee of the Department of Sprockets, "
+                      "Acme College of Gizmos, 2030-present",
+                      "Steering Committee of the Department of Sprockets", role="Member",
+                      start_date="2030", end_date="present")
+    dropped = _committee("Member, Steering Committee, Acme College of Gizmos, 2030-present",
+                         "Steering Committee", role="Member", start_date="2030", end_date="present")
+    assert _kept_both("P", dropped, kept)
+
+
+def test_a_committee_whose_name_the_kept_name_inserts_a_word_into_is_kept():
+    # BLBVPD 94: a word inside the name, not after it.
+    kept = _committee("Oct 2029 - Present Sprocket Leads Planning Committee, Gizmo Unit - Acme Hospital",
+                      "Sprocket Leads Planning Committee", institution="Gizmo Unit - Acme Hospital",
+                      start_date="2029-10", end_date="present")
+    dropped = _committee("Oct 2029 - Present Sprocket Leads Committee, Acme Hospital",
+                         "Sprocket Leads Committee", institution="Acme Hospital",
+                         start_date="2029-10", end_date="present")
+    assert _kept_both("P", dropped, kept)
+
+
+def test_a_committee_row_that_states_the_qualifier_is_still_dropped():
+    kept = _committee("Member, Steering Committee of the Department of Sprockets, "
+                      "Acme College of Gizmos, 2030-present",
+                      "Steering Committee of the Department of Sprockets", role="Member")
+    dropped = _committee("Member, Steering Committee, Department of Sprockets, "
+                         "Acme College of Gizmos, 2030-present", "Steering Committee", role="Member")
+    assert not _kept_both("P", dropped, kept)
+
+
+def test_a_committee_acronym_in_parentheses_is_not_a_qualifier():
+    kept = _committee("Member, Widget Program (WP) Executive Committee, 2028-2031",
+                      "Widget Program (WP) Executive Committee", role="Member",
+                      start_date="2028", end_date="2031")
+    dropped = _committee("2028-2031 Member, Widget Program Executive Committee",
+                         "Widget Program Executive Committee", role="Member",
+                         start_date="2028", end_date="2031")
+    assert not _kept_both("P", dropped, kept)
+
+
+def test_a_plural_in_the_kept_committee_name_is_not_a_qualifier():
+    kept = _committee("2030- Gizmo Access Committees: Widget Workforce Committee, Acme Health",
+                      "Gizmo Access Committees: Widget Workforce Committee",
+                      start_date="2030", end_date="present")
+    dropped = _committee("2030- Gizmo Access - Widget Workforce Committee, Acme Health",
+                         "Gizmo Access - Widget Workforce Committee",
+                         start_date="2030", end_date="present")
+    assert not _kept_both("P", dropped, kept)
+
+
+_NARROWER_KEPT = {"text": "Member, Gizmo Review Committee for Widgets, 2030",
+                  "extracted_fields": {"committee_name": "Gizmo Review Committee for Widgets"}}
+
+
+@pytest.mark.parametrize("code, dropped_text, name, narrower", [
+    ("P", "Member, Gizmo Review Committee, 2030", "Gizmo Review Committee", True),
+    ("Q2", "Member, Gizmo Review Committee, 2030", "Gizmo Review Committee", True),
+    ("P", "Member, Gizmo Review (GR) Committee, 2030", "Gizmo Review (GR) Committee", True),
+    ("P", "Member, Gizmo Review Committee, Widgets, 2030", "Gizmo Review Committee", False),
+    # stage 4 spelled the name out: its words count as stated
+    ("P", "Member, Gizmo Review Cttee, Widgets, 2030", "Gizmo Review Committee", False),
+    ("R", "Member, Gizmo Review Committee, 2030", "Gizmo Review Committee", False),   # no committee name rendered
+    (None, "Member, Gizmo Review Committee, 2030", "Gizmo Review Committee", False),
+    ("P", "Member, Sprocket Board, 2030", "Sprocket Board", False),                    # not in the kept name
+    ("P", "Member, Committee, 2030", "Committee", False),                              # one word: a fragment
+    ("P", "Member, Committee Q, 2030", "Committee Q", False),                          # a letter is no word
+    ("P", "Member, --, 2030", "--", False),                                            # a name with no words
+    ("P", "Member, Gizmo Review Committee, 2030", ["Gizmo Review Committee"], False),  # not a string
+    ("P", "Member, Gizmo Review Committee for Widgets", "Gizmo Review Committee for Widgets", False),
+    ("P", "Member, Committee for Widgets, 2030", "Committee for Widgets", False),      # added only in front
+])
+def test_narrower_committee(code, dropped_text, name, narrower):
+    dropped = {"text": dropped_text, "extracted_fields": {"committee_name": name}}
+    assert _narrower_committee(code, dropped, _NARROWER_KEPT) == (name if narrower else None)
+
+
+def test_a_kept_committee_name_that_is_not_a_string_is_no_narrower_body():
+    dropped = {"text": "Member, Gizmo Review Committee, 2030",
+               "extracted_fields": {"committee_name": "Gizmo Review Committee"}}
+    kept = {"text": _NARROWER_KEPT["text"],
+            "extracted_fields": {"committee_name": ["Gizmo Review Committee for Widgets"]}}
+    assert _narrower_committee("P", dropped, kept) is None

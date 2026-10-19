@@ -283,6 +283,71 @@ def test_a_one_word_specialty_never_pairs() -> None:
     assert _indexes(grouped) == [26, 34]
 
 
+# Training levels (#666, WWRSAL 31): stage 4 split one row naming an intern year
+# and a residency into two records with the same specialty, years and place.
+
+def _level(idx: int, training_type: str, specialty: str = "Widget Medicine",
+           text: str | None = None, **extra) -> dict:
+    fields = {"training_type": training_type, "specialty": specialty,
+              "institution": "Norvale University", "start_date": "2031", "end_date": "2033"}
+    fields.update(extra)
+    return _entry("C", idx, text or f"2031-2033 {training_type}, {specialty}, Norvale University",
+                  **fields)
+
+
+def test_an_intern_record_and_a_resident_record_of_one_row_both_stay() -> None:
+    grouped, decisions, _ = _run([_level(31, "Intern"), _level(32, "Resident")])
+    assert _indexes(grouped) == [31, 32] and decisions == []
+
+
+def test_a_combined_row_holds_the_intern_and_the_resident_copies() -> None:
+    """WWRSAL 31: the combined row vouched for the intern record's drop, then
+    went itself as a copy of the fuller resident record, so no row named the
+    intern year. The resident record goes instead: the combined row names
+    both years."""
+    combined = _level(13, "Internship and Residency")
+    intern = _level(31, "Intern", text="2031-2033")
+    resident = _level(32, "Resident", city="Quenby")
+    grouped, decisions, _ = _run([combined, intern, resident])
+    assert _indexes(grouped) == [13]
+    assert [d["dropped_text"] for d in decisions] == [intern["text"], resident["text"]]
+
+
+@pytest.mark.parametrize("dropped_type, kept_type, drops", [
+    ("Intern", "Internship and Residency", True),
+    ("Fellow", "Fellowship", True),
+    ("", "Residency", True),                                  # the dropped copy names no level
+    ("Fellowship", "", True),                                 # the kept copy names none: no evidence
+    ("Postdoctoral Research Associate", "Fellowship", True),
+    ("Intern", "Resident", False),
+    ("Fellowship", "Residency", False),
+    ("Fellow", "Residency", False),
+])
+def test_a_copy_drops_only_when_the_kept_type_names_every_level_it_names(
+        dropped_type: str, kept_type: str, drops: bool) -> None:
+    # The kept copy fills two more fields, so it is the fuller of the two even
+    # when its type is empty.
+    kept = _level(26, kept_type, program_director="Dr. Quenby", city="Quenby")
+    grouped, _, _ = _run([kept, _level(34, dropped_type)])
+    assert _indexes(grouped) == ([26] if drops else [26, 34])
+
+
+@pytest.mark.parametrize("fuller_first", [True, False])
+def test_the_fuller_copy_goes_when_only_the_other_names_every_level(fuller_first: bool) -> None:
+    resident = _level(26, "Residency", program_director="Dr. Quenby", city="Quenby")
+    combined = _level(34, "Internship and Residency")
+    grouped, decisions, _ = _run([resident, combined] if fuller_first else [combined, resident])
+    assert _indexes(grouped) == [34]
+    assert decisions[0]["dropped_text"] == resident["text"]
+
+
+def test_a_shorter_specialty_of_another_level_stays() -> None:
+    # The longer specialty is never dropped for the shorter one's levels.
+    grouped, _, _ = _run([_level(26, "Intern", "Pediatric Widget Medicine"),
+                          _level(34, "Internship and Residency", "Widget Medicine")])
+    assert _indexes(grouped) == [26, 34]
+
+
 def _leader(idx: int, institution: str, unit: str = "Widget Consult Service",
             start: str = "2031", role: str = "Medical Director", end: str = "2034") -> dict:
     return _entry("L3", idx, f"{start}-{end} {role} {unit} {institution}",
