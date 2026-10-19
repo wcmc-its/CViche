@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import sys
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -677,10 +678,11 @@ def fields_line(record: Mapping[str, Any], entry_text: str) -> str | None:
     return _RESTORED_DATE_LINE.format(date=date, line=head)
 
 
-def _content_words(text: str) -> set[str]:
-    """`text`'s words, dates and list markers aside, matched whole."""
+def _content_words(text: str) -> Counter[str]:
+    """`text`'s words with how often each occurs, dates and list markers
+    aside, matched whole."""
     lines = (_LIST_MARKER.sub('', _normalized(line)) for line in str(text).splitlines())
-    return set(_WORD_TOKEN.findall(_DATE_SPAN.sub(' ', ' '.join(lines))))
+    return Counter(_WORD_TOKEN.findall(_DATE_SPAN.sub(' ', ' '.join(lines))))
 
 
 def _dates_differ(text: str, entry_text: str) -> bool:
@@ -698,9 +700,13 @@ def _dates_differ(text: str, entry_text: str) -> bool:
 def _word_mismatch(text: str, entry_text: str) -> tuple[list[str], list[str]]:
     """(the entry text's words `text` lacks, `text`'s words the entry text
     lacks), each sorted. Whole words of any length: 'stem' is not in
-    'system', and 'Not a keynote' is not 'keynote' (GKAQHB 166)."""
+    'system', and 'Not a keynote' is not 'keynote' (GKAQHB 166). A source
+    word counts as often as it occurs, so the 'and' of KHXOUF 1089's
+    "November 1987 and January 1988" is not found in a later 'Conference and
+    Clerkship'; a word `text` repeats is not added (a multi-record entry's
+    shared role is written on each record's line)."""
     shown, source = _content_words(text), _content_words(entry_text)
-    return sorted(source - shown), sorted(shown - source)
+    return sorted((source - shown).elements()), sorted(shown.keys() - source.keys())
 
 
 def fields_text(entry: Mapping[str, Any]) -> str | None:

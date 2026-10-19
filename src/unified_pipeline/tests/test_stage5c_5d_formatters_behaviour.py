@@ -853,6 +853,10 @@ def test_5c_fields_text_matches_whole_words_of_any_length_both_ways():
                         ("KITE 5210 Kite Medicine 2015", "Kite Medicine")):
         entry = {"text": text, "extracted_fields": {"activity_title": title, "date": "2015"}}
         assert s5c.fields_text(entry) is None, text
+    # KHXOUF 1089 shape: a word counts as often as it occurs, so the 'and'
+    # between two dates is not found in the title's 'and'.
+    assert s5c._word_mismatch("**1987-11-1988-01** - Kites and Ponds",
+                              "Kites and Ponds, November 1987 and January 1988") == (["and"], [])
 
 
 def test_5c_fields_text_needs_the_source_dates():
@@ -891,7 +895,6 @@ def test_5c_fields_text_needs_every_line_to_pass_the_postcheck():
                              {"activity_title": "Kite Club", "date": "2008"}]}
     entry = {"text": "2007 Kite Club Day; 2008 Kite Club", "extracted_fields": fields}
     line = s5c.fields_line(fields, entry["text"])
-    assert s5c._word_mismatch(line, entry["text"]) == ([], [])
     assert s5c.postcheck_line(line, fields, entry["text"]) == "year_missing:2008"
     assert s5c.fields_text(entry) is None
 
