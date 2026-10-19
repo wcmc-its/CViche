@@ -864,6 +864,11 @@ def test_5c_fields_text_needs_the_source_dates():
     entry = {"text": "Kite autopsy, 2011, 2013", "extracted_fields": {"activity_title": "Kite autopsy"}}
     assert s5c.fields_line(entry["extracted_fields"], entry["text"]) == "Kite autopsy"
     assert s5c.fields_text(entry) is None
+    # So would one of two years when the record holds only the other.
+    entry = {"text": "Kite labs 2011, 2013",
+             "extracted_fields": {"activity_title": "Kite labs", "date": "2011"}}
+    assert s5c.fields_line(entry["extracted_fields"], entry["text"]) == "**2011** - Kite labs"
+    assert s5c.fields_text(entry) is None
     # A date with no year ("8/14/156") is a date too.
     assert s5c._dates_differ("Kite Course", "Kite Course 8/14/156")
     # A range stands for the years the source lists one by one.
@@ -896,6 +901,11 @@ def test_5c_fields_text_needs_every_line_to_pass_the_postcheck():
     entry = {"text": "2007 Kite Club Day; 2008 Kite Club", "extracted_fields": fields}
     line = s5c.fields_line(fields, entry["text"])
     assert s5c.postcheck_line(line, fields, entry["text"]) == "year_missing:2008"
+    assert s5c.fields_text(entry) is None
+    # Its words and dates all match the source, but it echoes the prompt's
+    # `Original:` context line.
+    entry = {"text": "Original: Kite Day", "extracted_fields": {"activity_title": "Original: Kite Day"}}
+    assert s5c.fields_line(entry["extracted_fields"], entry["text"]) == "Original: Kite Day"
     assert s5c.fields_text(entry) is None
 
 
