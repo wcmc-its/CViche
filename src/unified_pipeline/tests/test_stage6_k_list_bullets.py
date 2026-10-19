@@ -33,6 +33,7 @@ import inspect
 import sys
 from pathlib import Path
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -334,6 +335,23 @@ def test_validator_still_catches_semicolon_fused_unbulleted_entries():
 
     fused = [i for i in gen._validate_output() if i["check"] == "semicolon_fused_bullets"]
     assert [i["code"] for i in fused] == ["K1"]
+
+
+@pytest.mark.parametrize("writer", ["overflow", "reconsidered"])
+def test_validator_sees_unbulleted_overflow_and_reconsidered_paragraphs(writer):
+    # #1943: the overflow and reconsidered-segment writers also unbullet K, so
+    # the validator has to know their paragraphs too. Unregistered, check 3
+    # misreported the section as empty and check 1 missed the fused entry.
+    gen = _generator()
+    fused_text = "Lecture A; Lecture B; Lecture C; Lecture D; Lecture E"
+    if writer == "overflow":
+        idx = gen._find_paragraph_with_text("Didactic teaching")
+        assert gen._insert_overflow_bullet(idx + 1, fused_text, bulleted=False) is not None
+    else:
+        assert gen._insert_reconsidered_segment(fused_text, "K1")
+
+    issues = gen._validate_output({"K1": [{}]})
+    assert [(i["check"], i["code"]) for i in issues] == [("semicolon_fused_bullets", "K1")]
 
 
 # --- #423: sub-bullet levels re-read from the source table cell ---------------

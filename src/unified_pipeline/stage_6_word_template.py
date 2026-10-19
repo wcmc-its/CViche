@@ -3538,6 +3538,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     pPr.append(ind)
                 else:
                     self._apply_plain_list_indent(para, level=level)
+                    # No bullet to recognise it by: register it (#1943).
+                    self._bullet_paras.add(para._p)
 
                 run = para.add_run(seg_text)
                 _set_font(run)
@@ -3834,6 +3836,8 @@ Now analyze the text above:"""
             _set_font(run)
             if _renders_unbulleted(taxonomy_code):
                 self._apply_plain_list_indent(new_para, level=0)
+                # No bullet to recognise it by: register it (#1943).
+                self._bullet_paras.add(new_para._p)
             else:
                 self._apply_list_bullet(new_para, level=0)
 
