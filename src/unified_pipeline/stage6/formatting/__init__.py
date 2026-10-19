@@ -39,6 +39,8 @@ from .docx import (  # noqa: F401
     CVICHE_BOX_PREFIX,
     CVICHE_BOX_TEXT_PT,
     CVICHE_BOX_TITLE_PT,
+    PLAIN_ENTRY_LEFT_TWIPS,
+    PLAIN_ENTRY_LEVEL_STEP_TWIPS,
     DetachedAnchorError,
     _clear_table_data,
     _insert_after,
@@ -55,6 +57,8 @@ from .docx import (  # noqa: F401
     cviche_box_pair,
     cviche_box_text,
     is_cviche_box,
+    plain_entry_left_twips,
+    plain_entry_level,
     space_around_cviche_box,
 )
 from .values import (  # noqa: F401

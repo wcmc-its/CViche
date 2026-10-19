@@ -52,6 +52,7 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_lines  # noqa: E402
+from unified_pipeline.stage6.formatting import plain_entry_level  # noqa: E402
 from unified_pipeline.stage6.sections.clinical_practice import (
     _bullet_parts,  # noqa: E402
 )
@@ -679,12 +680,15 @@ def test_negative_control_single_part_text_unchanged():
     assert texts == [HEADING_TEXT, PIPE_COLUMN_RENDERED, SENTINEL_TEXT]
 
 
-def _ilvl(para):
-    """The paragraph's numPr ilvl, or None when it has no list properties."""
-    num_pr = para._p.pPr.numPr if para._p.pPr is not None else None
-    if num_pr is None or num_pr.ilvl is None:
+def _entry_level(para):
+    """The level of an entry written without a bullet (#1943), read from its
+    left indent; None when it is a bullet (has numPr) or carries no indent."""
+    if para._p.pPr is None or para._p.pPr.numPr is not None:
         return None
-    return int(num_pr.ilvl.val)
+    left = para.paragraph_format.left_indent
+    if left is None:
+        return None
+    return plain_entry_level(left.twips)
 
 
 def test_first_part_is_level_0_and_later_parts_are_level_1():
@@ -695,7 +699,7 @@ def test_first_part_is_level_0_and_later_parts_are_level_1():
         entry=None, add_blank_before=True)
 
     paras = scratch.gen.doc.paragraphs
-    levels = {p.text: _ilvl(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    levels = {p.text: _entry_level(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
     assert levels == {"Clinician, Clinic": 0, "8 hours per week": 1, "12/2016 to present": 1}
 
 
@@ -706,7 +710,7 @@ def test_two_part_entry_is_level_0_title_and_level_1_detail():
         scratch.insert_idx, "Title\tdetail", entry=None, add_blank_before=False)
 
     paras = scratch.gen.doc.paragraphs
-    levels = {p.text: _ilvl(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    levels = {p.text: _entry_level(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
     assert levels == {"Title": 0, "detail": 1}
 
 
@@ -718,7 +722,7 @@ def test_four_part_entry_keeps_every_detail_at_level_1():
         entry=None, add_blank_before=False)
 
     paras = scratch.gen.doc.paragraphs
-    levels = {p.text: _ilvl(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    levels = {p.text: _entry_level(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
     assert levels == {"Staff Radiologist": 0, "Musculoskeletal": 1, "14,000 studies": 1, "500 procedures": 1}
 
 
@@ -728,7 +732,7 @@ def test_single_part_entry_stays_level_0():
         scratch.insert_idx, "Attending Physician", entry=None, add_blank_before=False)
 
     para = next(p for p in scratch.gen.doc.paragraphs if p.text == "Attending Physician")
-    assert _ilvl(para) == 0
+    assert _entry_level(para) == 0
 
 def test_l3_bullet_bare_start_year_is_not_rendered_as_present():
     """#1699: the L3 bullet fallback called `format_date_range` without the

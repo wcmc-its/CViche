@@ -709,5 +709,6 @@ class TeachingSection:
             self._insert_bulleted_entry(
                 insert_idx, line_text, entry if j == 0 else None,
                 add_blank_before=is_first_visible and j == len(lines) - 1,
-                list_level=1 if is_child else 0
+                list_level=1 if is_child else 0,
+                bulleted=False,  # #1943: reviewers read unbulleted entries more easily
             )

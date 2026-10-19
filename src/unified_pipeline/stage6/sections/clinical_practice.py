@@ -730,6 +730,7 @@ class ClinicalPracticeSection:
                 entry if is_last else None,  # Attach entry/comments to first bullet
                 add_blank_before=add_blank_before and is_last,
                 list_level=_TITLE_BULLET_LEVEL if is_last else _DETAIL_BULLET_LEVEL,
+                bulleted=False,  # #1943: reviewers read unbulleted entries more easily
                 # Because insertion runs backwards, every later bullet of this
                 # entry already exists by the time the first one -- the one the
                 # entry rides -- is written. Hand them over with it: the

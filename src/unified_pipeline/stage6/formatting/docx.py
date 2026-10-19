@@ -185,6 +185,26 @@ def _set_cell_text(cell, text: str, bold: bool = False):
         _set_font(run, bold=bold)
 
 
+#: Where the WCM template's bullet list (numId 1, abstractNum 4) puts an item's
+#: TEXT: ilvl 0 at 1080 twips, each deeper level 720 further in. An unbulleted
+#: entry (#1943: Educational Contributions and Clinical Practice) sits at the
+#: same place, so dropping the glyph moves no text and a sub-item stays a step in.
+PLAIN_ENTRY_LEFT_TWIPS = 1080
+PLAIN_ENTRY_LEVEL_STEP_TWIPS = 720
+
+
+def plain_entry_left_twips(level: int) -> int:
+    """The left indent of an unbulleted entry at list `level`."""
+    return PLAIN_ENTRY_LEFT_TWIPS + PLAIN_ENTRY_LEVEL_STEP_TWIPS * level
+
+
+def plain_entry_level(left_twips: int) -> int | None:
+    """The list level an unbulleted entry's left indent stands for, or None
+    when the indent is not on that grid."""
+    steps, rest = divmod(left_twips - PLAIN_ENTRY_LEFT_TWIPS, PLAIN_ENTRY_LEVEL_STEP_TWIPS)
+    return steps if rest == 0 and steps >= 0 else None
+
+
 #: CViche's voice to the submitter: a one-cell, light-gray, bordered table in
 #: Arial whose first line starts "CViche" (#1388). One table, so deleting it
 #: removes the whole note. Fill and border are dark enough to survive print,

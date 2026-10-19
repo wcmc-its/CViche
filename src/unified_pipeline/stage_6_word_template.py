@@ -122,6 +122,7 @@ from unified_pipeline.stage6.formatting import (  # noqa: F401
     format_date_range,
     is_cviche_box,
     normalize_iso_dates_in_text,
+    plain_entry_left_twips,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: F401
     _ALL_PHONE_SLOT_KEYS,
@@ -2721,7 +2722,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: dict | None = None,
                                 add_blank_before: bool = False,
                                 list_level: int | None = None,
-                                entry_sibling_paras: list[Paragraph] | None = None) -> Paragraph | None:
+                                entry_sibling_paras: list[Paragraph] | None = None,
+                                bulleted: bool = True) -> Paragraph | None:
         """Insert a SINGLE bulleted entry paragraph as a real Word list item.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -2743,6 +2745,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 to weigh everything the entry rendered rather than this single
                 paragraph (#476 review). A caller that renders an entry as one
                 paragraph leaves it None and the check is unchanged.
+            bulleted: False writes the entry without a bullet, at the indent
+                the bullet's text would have had (`_apply_plain_list_indent`).
+                The teaching and clinical-practice writers pass False (#1943).
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -2762,7 +2767,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         body = _clean_inline_tabs(_strip_taxonomy_code(text))
         run = entry_para.add_run(body)
         _set_font(run)
-        self._apply_list_bullet(entry_para, level=list_level if list_level is not None else 0)
+        level = list_level if list_level is not None else 0
+        if bulleted:
+            self._apply_list_bullet(entry_para, level=level)
+        else:
+            self._apply_plain_list_indent(entry_para, level=level)
 
         if entry:
             self._add_entry_comments(entry_para, entry,
@@ -2783,11 +2792,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         This produces the closed circle -> open circle -> closed square hierarchy
         with proper margin indentation handled entirely by Word.
         """
-        # Set the List Paragraph style
-        try:
-            para.style = self.doc.styles['List Paragraph']
-        except KeyError:
-            pass  # Style not found — numbering alone will still work
+        self._set_list_paragraph_style(para)
 
         # Add numPr to paragraph properties
         pPr = para._p.get_or_add_pPr()
@@ -2805,6 +2810,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         numPr.append(ilvl)
         numPr.append(numId)
         pPr.append(numPr)
+
+    def _apply_plain_list_indent(self, para: Paragraph, level: int = 0) -> None:
+        """Format `para` as an unbulleted list item (#1943): the List Paragraph
+        style a bullet gets, so spacing matches, but no `w:numPr`, and a left
+        indent equal to where `_apply_list_bullet`'s level puts its text."""
+        self._set_list_paragraph_style(para)
+        para.paragraph_format.left_indent = Twips(plain_entry_left_twips(level))
+
+    def _is_entry_paragraph(self, para: Paragraph) -> bool:
+        """A bullet in either form `_is_bullet_paragraph` reads, or an entry
+        `_insert_bulleted_entry` wrote without one (#1943), which carries
+        neither a glyph nor `w:numPr` and so is invisible to that test."""
+        return _is_bullet_paragraph(para) or para._p in self._bullet_paras
+
+    def _set_list_paragraph_style(self, para: Paragraph) -> None:
+        """Give `para` the template's List Paragraph style, when it has one."""
+        try:
+            para.style = self.doc.styles['List Paragraph']
+        except KeyError:
+            pass  # Style not found — numbering or the explicit indent still applies
 
     @staticmethod
     def _get_wcm_section_header(taxonomy_code: str) -> str:
@@ -4870,7 +4895,7 @@ Now analyze the text above:"""
                 if not para_text:
                     continue
                 # Check if this looks like a combined entry (semicolon-separated list)
-                if _is_bullet_paragraph(para) and para_text.count(';') > 3:
+                if self._is_entry_paragraph(para) and para_text.count(';') > 3:
                     issues.append({
                         "check": "semicolon_fused_bullets",
                         "code": code,
@@ -4914,7 +4939,7 @@ Now analyze the text above:"""
                 para_text = para.text.strip()
                 if 'CLINICAL PRACTICE' in para_text.upper():
                     break
-                if _is_bullet_paragraph(para) and len(para_text) > 5:
+                if self._is_entry_paragraph(para) and len(para_text) > 5:
                     has_visible_bullets = True
                     break
             if not has_visible_bullets:
