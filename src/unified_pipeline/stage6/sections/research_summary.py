@@ -1,10 +1,13 @@
 """Section M1: the research summary (#398).
 
-One paragraph, and the only section whose content the pipeline WROTE rather than
-relocated. Stage 4.5 synthesizes a biosketch-style summary from the CV; this
-writer places it under the RESEARCH ACTIVITIES heading as a tracked insertion
-attributed to "LLM Research Summary", so nothing generated is ever
-indistinguishable from the author's own words.
+One paragraph, placed under the RESEARCH ACTIVITIES heading. Stage 4.5 either
+synthesizes a biosketch-style summary from the CV, or -- when the CV already
+has a research statement that scores well enough -- passes the owner's own M1
+text through verbatim (`generation_method == "existing_content"`). A generated
+summary is written as a tracked insertion attributed to "LLM Research Summary",
+so nothing generated is ever indistinguishable from the author's own words. The
+verbatim case is written as plain text: labelling the owner's prose as
+machine-written invites a reviewer to delete it (#1939).
 
 The paragraph cannot be appended: `add_paragraph` puts it at the end of the
 document, so it is created there and then moved into the body element list
@@ -36,6 +39,12 @@ except ImportError as exc:
     ) from exc
 
 logger = logging.getLogger(__name__)
+
+# Stage 4.5's `generation_method` when its summary IS the CV's own M1 text,
+# joined verbatim (stage_4_5_research_summary.py); any other method paraphrases.
+# Duplicated rather than imported: stage 6 reads the stage 4.5 artifact as its contract.
+# Also read by stage_6_word_template.py's Appendix routing (`_summary_paraphrases_m1`).
+_SUMMARY_METHOD_VERBATIM_M1 = "existing_content"
 
 
 class ResearchSummarySection:
@@ -104,10 +113,14 @@ class ResearchSummarySection:
         body.insert(insert_idx, blank_para._element)
         insert_idx += 1
 
-        # Create summary paragraph (no new header - goes under existing RESEARCH ACTIVITIES)
-        # Use track changes since this is LLM-generated content, not from the original CV
+        # Create summary paragraph (no new header - goes under existing RESEARCH ACTIVITIES).
+        # The owner's own M1 text is written as plain text; a generated summary is a
+        # tracked insertion, since it is not from the original CV.
         summary_para = self.doc.add_paragraph()
-        self._add_track_change_insertion(summary_para, summary_text.strip(), author="LLM Research Summary")
+        if generation_method == _SUMMARY_METHOD_VERBATIM_M1:
+            self._add_plain_run(summary_para, summary_text.strip())
+        else:
+            self._add_track_change_insertion(summary_para, summary_text.strip(), author="LLM Research Summary")
         summary_para.paragraph_format.space_after = Pt(12)
 
         # Move to correct position (after blank line)
