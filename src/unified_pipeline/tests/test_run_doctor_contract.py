@@ -524,6 +524,10 @@ _MALFORMED_ARTIFACTS = [
     ("stage_6_report", "stage_6_wcm_documents", "ABC_render_warnings.json",
      '{"warnings": {}}', "'warnings' is dict, not a list",
      "stage6_render_warnings"),
+    # #1205: the sub-point placements, under the key stored sidecars carry.
+    ("stage_6_report", "stage_6_wcm_documents", "ABC_render_warnings.json",
+     '{"subpoint_placements": "oops"}', "'subpoint_placements' is str, not a list",
+     "stage6_render_warnings"),
 ]
 
 

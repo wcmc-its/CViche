@@ -70,7 +70,7 @@ from ..resolution import (
     _location_already_in_institution,
 )
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
-from ..supplementary import Revision, write_row_subpoint
+from ..supplementary import Revision, SubpointPlacement, write_row_subpoint
 
 logger = logging.getLogger(__name__)
 
@@ -254,10 +254,13 @@ def _child_position_records(entry: dict) -> list[dict]:
     record copies the parent's enrichment and every employer field the
     Institution cell reads (`_INHERITED_EMPLOYER_FIELDS`, which is that read
     set and not a subset of it), and its Institution cell therefore comes out
-    identical to the parent's. It copies nothing else: no classification,
-    coverage or comment fields, so a child row carries no Word comments, which
-    is what the pre-#476 child rows did by passing `entry=None`. `entry`
-    itself is never modified.
+    identical to the parent's. It also carries the parent's
+    `element_idx_start`, since the child is text of that one source element:
+    the duties `_add_title_duties` splits off a child's title are the parent
+    stage-4 entry's own sub-point (#1205). It copies nothing else: no
+    classification, coverage or comment fields, so a child row carries no
+    Word comments, which is what the pre-#476 child rows did by passing
+    `entry=None`. `entry` itself is never modified.
 
     A child whose title and formatted dates are the parent's own is dropped:
     stage 4 sometimes promotes a bullet-prefixed fragment to its own record
@@ -287,6 +290,7 @@ def _child_position_records(entry: dict) -> list[dict]:
         records.append({
             'text': text,
             'taxonomy_code': taxonomy_code,
+            'element_idx_start': entry.get('element_idx_start'),
             'institution_enrichment': dict(enrichment) if isinstance(enrichment, dict) else enrichment,
             'extracted_fields': child_fields,
         })
@@ -1315,14 +1319,20 @@ class PositionsSection:
         and track changes, as `_add_supplementary_subpoints` requires) the row
         is the entry's tracked-deleted sub-point, recorded in `_subpoint_lines`
         and `_subpoint_entry_ids`, so the sub-point pass, the overflow routing
-        and the #221 recovery all read the duties as already offered.
+        and the #221 recovery all read the duties as already offered, and in
+        `_subpoint_placements` for the sidecar, under the record's
+        `taxonomy_code`, the code its table renders it as, and its
+        `element_idx_start`, which a tab-joined child record
+        (`_child_position_records`) takes from its parent.
         Otherwise it is a plain continuation row (#1641)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             _add_continuation_row(table, duties)
             return
         revision = Revision(self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
-        self._subpoint_lines.append(write_row_subpoint(
-            table.rows[-1]._tr, (self._sanitize_run_text(duties),), revision))
+        texts = (self._sanitize_run_text(duties),)
+        self._subpoint_lines.append(write_row_subpoint(table.rows[-1]._tr, texts, revision))
         self._subpoint_entry_ids.add(id(entry))
+        self._subpoint_placements.append(SubpointPlacement(
+            entry.get('element_idx_start'), entry.get('taxonomy_code'), texts))
         self._revision_id = revision.next_id
         self.stats['track_changes_added'] += 1

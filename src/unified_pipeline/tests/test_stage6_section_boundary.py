@@ -30,6 +30,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.doctor.lints.render import lint_stage6_warnings  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import RecoveredLine  # noqa: E402
+from unified_pipeline.stage6.supplementary import SubpointPlacement  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,
     WCMTemplateGenerator,
@@ -307,8 +308,10 @@ def test_two_section_failures_both_recorded_rest_still_renders(tmp_path):
 
 def test_write_render_warnings_sidecar_writes_expected_json(tmp_path):
     """Positive path: the sidecar is written with the exact merged shape
-    generate() relies on."""
+    generate() relies on, with the render's sub-point placements (#1205)
+    under the key the doctor reads."""
     gen = _new_generator()
+    gen._subpoint_placements = [SubpointPlacement(7, "D3", ("Example duty prose",))]
     output_path = str(tmp_path / "out.docx")
     gen._write_render_warnings_sidecar(
         output_path, "TESTAA", [{"check": "x"}], [{"code": "A"}])
@@ -318,6 +321,8 @@ def test_write_render_warnings_sidecar_writes_expected_json(tmp_path):
         "warnings": [{"check": "x"}],
         "dedup_decisions": [{"code": "A"}],
         "row_receipts": [],
+        "subpoint_placements": [
+            {"element_idx_start": 7, "code": "D3", "paragraphs": ["Example duty prose"]}],
     }
 
 

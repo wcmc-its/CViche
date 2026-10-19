@@ -303,14 +303,15 @@ _YEAR_EDGE_LINE_RE = re.compile(
     r"^\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[.)]?\s*$")
 
 
-def _not_offered_as_subpoints(text: str, subpoints: SubpointText | None) -> str:
+def _not_offered_as_subpoints(text: str, subpoints: SubpointText | None,
+                              element_idx: object) -> str:
     """`text` less the lines that reach the reader as a tracked-deleted
-    sub-point (`offered_as_subpoint`, #1205): those are delivered for review,
-    not lost."""
+    sub-point of entry `element_idx` (`offered_as_subpoint`, #1205): those
+    are delivered for review, not lost."""
     if subpoints is None or not subpoints.text:
         return text
     return "\n".join(line for line in text.split("\n")
-                     if not offered_as_subpoint(line, subpoints))
+                     if not offered_as_subpoint(line, subpoints, element_idx))
 
 
 def lint_under_extraction(stage4: dict, subpoints: SubpointText | None = None) -> list[dict]:
@@ -318,9 +319,9 @@ def lint_under_extraction(stage4: dict, subpoints: SubpointText | None = None) -
     almost none of the text: the rest of the records silently vanish.
 
     `subpoints` (optional: the rendered docx's sub-points) takes out of the
-    entry the lines a tracked-deleted sub-point delivers for review (#1205),
-    before its size and record lines are counted: an appointment whose
-    duties are its sub-point is not flagged for them."""
+    entry the lines a tracked-deleted sub-point of its own delivers for
+    review (#1205), before its size and record lines are counted: an
+    appointment whose duties are its sub-point is not flagged for them."""
     findings = []
     for e in stage4.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -332,7 +333,8 @@ def lint_under_extraction(stage4: dict, subpoints: SubpointText | None = None) -
         pct = (rendered_extraction_coverage(rendered) or {}).get("extraction_coverage_percent")
         if pct is None or pct >= UNDER_EXTRACTION_MAX_PCT:
             continue
-        text = _not_offered_as_subpoints(str(e.get("text", "")), subpoints)
+        text = _not_offered_as_subpoints(str(e.get("text", "")), subpoints,
+                                         e.get("element_idx_start"))
         if len(text) <= UNDER_EXTRACTION_MIN_CHARS:
             continue
         records = sum(
@@ -1806,7 +1808,8 @@ def _grade_value(entry: _FieldsEntry, key: str, value: object, keys: frozenset[s
     if shown_anywhere:
         return GRADE_ELSEWHERE
     leaves = _value_leaves(value)
-    if leaves and all(offered_as_subpoint(leaf, document.subpoints) for leaf in leaves):
+    if leaves and all(offered_as_subpoint(leaf, document.subpoints, entry.element_idx)
+                      for leaf in leaves):
         return GRADE_SUBPOINT
     return GRADE_ABSENT
 
@@ -1970,8 +1973,8 @@ def lint_offschema_fields(stage4: dict,
     reported, one the document shows nowhere raises the finding to WARN
     (#1245). Without it the lint reads stage 4 alone, as before, and leaves
     out dates and Personal Data. `subpoints` (optional, with `blocks`): a
-    value the page lacks but a tracked-deleted sub-point offers (#1205) is
-    `GRADE_SUBPOINT`, INFO with a note, not a loss."""
+    value the page lacks but a tracked-deleted sub-point of its own entry
+    offers (#1205) is `GRADE_SUBPOINT`, INFO with a note, not a loss."""
     declared_by_code = _declared_fields()
     document = _rendered_document(stage4, blocks, subpoints)
     groups: dict[tuple[str, str], list[OffschemaValue]] = {}

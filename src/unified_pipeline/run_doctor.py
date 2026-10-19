@@ -803,6 +803,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     docx_body_blocks,
     docx_subpoint_lines,
     docx_table_rows,
+    subpoint_placements,
     subpoint_text,
 )
 from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
@@ -816,6 +817,7 @@ from unified_pipeline.segmentation_regression import (
     iter_source_block_lines,
 )
 from unified_pipeline.stage3b.fragment_merge import fragment_text_in_parent
+from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
 from unified_pipeline.stage_errors import (
     StageError,
     read_stage_errors,
@@ -1443,11 +1445,12 @@ def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> list[tuple[str
     return docx_body_blocks(Document(docx_path), deleted=deleted)
 
 
-def read_docx_subpoints(docx_path: str) -> SubpointText:
+def read_docx_subpoints(docx_path: str, report: dict | None = None) -> SubpointText:
     """The docx's tracked-deleted sub-points (#1205; `docx_subpoint_lines`),
-    ready for `offered_as_subpoint`."""
+    ready for `offered_as_subpoint`: each entry's own among them, too, when
+    `report` (the render-warnings sidecar) records whose each one is."""
     Document = _get_docx_document()
-    return subpoint_text(docx_subpoint_lines(Document(docx_path)))
+    return subpoint_text(docx_subpoint_lines(Document(docx_path)), subpoint_placements(report))
 
 
 def read_docx_table_rows(docx_path: str) -> list[list[list[str]]]:
@@ -1481,7 +1484,8 @@ class ArtifactSpec(NamedTuple):
 #: carries an `entries` list of objects; stage-4's `cv_owner` is an object
 #: where present (absent on 2 of 66, which the owner gate scores as missing,
 #: not invalid); the render sidecar's `warnings`/`dedup_decisions` are lists
-#: of objects where present. Nested shapes stay the lints' business -- this
+#: of objects where present, and so are its sub-point placements (#1205,
+#: newer than the farm). Nested shapes stay the lints' business -- this
 #: is the boundary check, not a schema.
 _ARTIFACTS = {
     "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json",
@@ -1505,7 +1509,8 @@ _ARTIFACTS = {
                              "_citation_formatted.json", record_lists=("entries",)),
     "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
     "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json",
-                                   optional_lists=("warnings", "dedup_decisions", "row_receipts")),
+                                   optional_lists=("warnings", "dedup_decisions", "row_receipts",
+                                                   SUBPOINT_PLACEMENTS_KEY)),
 }
 
 #: The artifacts `_load_json` reads, in load order; the docx is read by its
@@ -2083,7 +2088,8 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     views["deleted_blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"]), deleted=True),
                                     "stage_6_docx", _note)
                                if paths["stage_6_docx"] else None)
-    views["subpoints"] = (_try(lambda: read_docx_subpoints(str(paths["stage_6_docx"])),
+    views["subpoints"] = (_try(lambda: read_docx_subpoints(str(paths["stage_6_docx"]),
+                                                           views["stage_6_report"]),
                                "stage_6_docx", _note)
                           if paths["stage_6_docx"] else None)
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)

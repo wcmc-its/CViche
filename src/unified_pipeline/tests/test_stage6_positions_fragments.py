@@ -82,6 +82,7 @@ from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     _position_row_cells,
     _tab_joined_child_fragments,
 )
+from unified_pipeline.stage6.supplementary import SubpointPlacement  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 # The exact -DAZFA D2 entry text (stage_5_enrichment JSON), en-dash and bullet
@@ -1522,7 +1523,40 @@ def test_with_sub_points_on_the_duties_row_is_a_tracked_deletion():
     assert gen._subpoint_lines == [
         f"{DUTY_TITLE_ROLE} Example Institute for Science 2013-2015 {DUTY_TITLE_DUTIES}"]
     assert gen._subpoint_entry_ids == {id(entry)}
+    # Its placement, for the render sidecar: the entry's index and code (#1205).
+    assert gen._subpoint_placements == [SubpointPlacement(7, "D3", (DUTY_TITLE_DUTIES,))]
     assert gen.stats["appointment_title_duties_split"] == 1
+
+
+def test_the_duties_placement_holds_the_text_the_row_holds():
+    """The duties' placement is the deleted row's own text, control
+    characters stripped as the row's are: the doctor finds a placement's text
+    among the docx's sub-points."""
+    gen, table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen.supplementary_subpoints = True
+    entry = _duty_title_entry()
+    fields = entry["extracted_fields"]
+    fields["title"] = fields["title"].replace("Appointment", "Appoint\x0bment")
+    gen._fill_positions({"D3": [entry]})
+
+    (deleted,) = _deleted_rows(table)
+    assert "".join(t.text for t in deleted.iter(qn("w:delText"))) == DUTY_TITLE_DUTIES
+    assert gen._subpoint_placements == [SubpointPlacement(7, "D3", (DUTY_TITLE_DUTIES,))]
+
+
+def test_a_child_appointments_duties_are_placed_under_its_parents_index():
+    """A tab-joined child record is text of its parent's source element, so
+    the duties split off its title are placed under the parent's index, the
+    stage-4 entry the doctor reads them for, not under no entry (#1205)."""
+    duties = "to coordinate the example regional response network"
+    gen, table = _positions_generator(TABLE_ANCHORS["D2"])
+    gen.supplementary_subpoints = True
+    parent = _tab_joined_entry([(f"Attending Physician {duties}", "07/2002", "06/2003")], idx=42)
+    gen._fill_positions({"D2": [parent]})
+
+    (deleted,) = _deleted_rows(table)
+    assert "".join(t.text for t in deleted.iter(qn("w:delText"))) == duties
+    assert gen._subpoint_placements == [SubpointPlacement(42, "D2", (duties,))]
 
 
 def test_with_track_changes_off_the_duties_stay_a_plain_row():

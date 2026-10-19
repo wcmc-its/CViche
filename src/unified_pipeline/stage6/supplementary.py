@@ -19,8 +19,8 @@ Where it goes, by what the entry's rendered line is:
   empty bullet;
 - a table row (an appointment, a grant table, a service row): a row
   spanning the table, marked as a deleted row, after the entry's row -- or,
-  for a label/value table holding one grant, at the table's end. Accepting
-  removes the row.
+  for a label/value table holding one grant or one mentee, at the table's
+  end. Accepting removes the row.
 
 Only a fragment `_record_rendered` verifies absent is written, never one
 that is merely reformatted, so a section that already prints its entry's
@@ -42,15 +42,20 @@ this pass runs, so they join its haystack and are not planned again.
 The doctor reads the sub-points through one shared test
 (`doctor.shared.offered_as_subpoint`): under_extraction and
 unrendered_records count the prose as delivered for review, offschema_fields
-still reports a value stage 4 misfiled, as INFO with a note. The render gate
-compares arms; its XML fingerprint sees every sub-point as a change.
+still reports a value stage 4 misfiled, as INFO with a note. The
+render-warnings sidecar records whose each sub-point is
+(`SUBPOINT_PLACEMENTS_KEY`), so the doctor counts a sub-point only for the
+entry it was written for, not for another entry it shares words with. The
+render gate compares arms; its XML fingerprint sees every sub-point as a
+change.
 
 Codes: K1-K5 and M2A-M2D first, where loss is highest (#1205 body), plus
 D1-D3 duties (owner decision 2026-10-08, lifting the D exclusion for this
 variant). Then one code family at a time, each the one a stage-6 replay
 measured losing the most prose of those left: Q1-Q2 extramural service next
 (the remit, the meeting or the session title behind a committee or panel
-row), then H honors (an award's criteria, or the paper it was for). The
+row), then H honors (an award's criteria, or the paper it was for), then
+N3A-N3B mentees (the mentee's awards and outputs, the owner's part). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -76,7 +81,8 @@ from unified_pipeline.core.template_boilerplate import (
     is_template_instruction,
 )
 
-from .fan_out import _RENDERED_FIELDS
+from .dedup import _is_sibling_of
+from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
 from .normalization import _squash
 from .parsing import _refold_shattered
 from .pii_pass import PII_DROPPED_FIELDS_KEY
@@ -113,10 +119,23 @@ SERVICE_CODES = frozenset({'Q1', 'Q2'})
 #: row. An entry rerouted to another code before rendering is grouped under
 #: that code and follows its rule; one rerouted into H follows this one.
 HONOR_CODES = frozenset({'H'})
+#: Mentees, current (N3A) and past (N3B): the owner's part in the mentoring,
+#: the mentee's programme, awards and outputs. The mentoring section writes
+#: each named mentee as a six-row "Label:" table of its own, so a sub-point
+#: is a deleted row at the end of that table (`_insert_row_after`), and only
+#: that table's rows can anchor it (`_own_mentee_rows`): an entry naming no
+#: mentee renders as a line of its whole text and gets none. A line listing
+#: several mentees offers each one only its own part (`_own_mentee_line`).
+#: The section files a mentee under either heading by its dates, not its
+#: code, so both codes are placed over both headings' spans. An entry
+#: rerouted to another code before rendering is grouped under that code and
+#: follows its rule (N1 is excluded); one rerouted into N3A or N3B follows
+#: this one.
+MENTEE_CODES = frozenset({'N3A', 'N3B'})
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
-                  | HONOR_CODES)
+                  | HONOR_CODES | MENTEE_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -139,6 +158,13 @@ SUBPOINT_FIELD_TOKEN_MAX_SHARE = 0.5
 #: the enrichment and formatter changes and from their own edits.
 SUBPOINT_AUTHOR = 'CViche: source text with no template field'
 
+#: The render-warnings sidecar's key for the sub-points stage 6 wrote, one
+#: `SubpointPlacement` record each. The doctor reads it so that a sub-point
+#: vouches only for its own entry (`doctor.shared.offered_as_subpoint`). A
+#: sidecar without it, written before the record existed, leaves the doctor
+#: matching every sub-point in the document.
+SUBPOINT_PLACEMENTS_KEY = 'subpoint_placements'
+
 #: A link or an e-mail address -- a contact line fused into a position entry,
 #: a webinar's tracking URL (EBYSBC) -- is not prose, and an address is not
 #: offered back to the reader in a review pane.
@@ -150,6 +176,13 @@ _FRAGMENT_SEPARATORS = ('\t', '\n', '|')
 #: A table whose every first cell ends with this is a label/value table (one
 #: grant): its sub-point goes at the table's end, not after the anchor row.
 _LABEL_SUFFIX = ':'
+
+#: A mentee table's name row label (`mentoring._mentee_table_rows`), and the
+#: field keys its value is read from, in `_normalize_mentee`'s order. Two
+#: mentees' tables often share every other row's words ("Site/Position: PhD
+#: student"), so the name row is what says whose table a row is.
+_MENTEE_NAME_LABEL = 'Name:'
+_MENTEE_NAME_FIELDS = ('name', 'mentee_name')
 
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
@@ -175,12 +208,41 @@ class SectionSpan(NamedTuple):
         return candidate.position >= self.start and (self.end is None or candidate.position < self.end)
 
 
+class SubpointPlacement(NamedTuple):
+    """One sub-point stage 6 wrote, as the sidecar records it
+    (`SUBPOINT_PLACEMENTS_KEY`, one `_asdict()` per sub-point): the
+    `element_idx_start` of the entry it was written for, which is the index
+    the doctor reads stage 4's entries by (fan-out children keep it); the
+    code the entry rendered as; and the paragraphs as written.
+
+    The index is not an identity: stage-4 entries split from one source
+    element share it, and their sub-points then count for each other, as
+    fan-out siblings' do. The doctor matches on the index and the text only.
+    The code is for a reader of the sidecar, such as a run autopsy: it names
+    the table the sub-point sits in, which for a rerouted entry (a K2
+    trainee rendered as N3B) is not its stage-4 code."""
+    element_idx_start: object
+    code: str
+    paragraphs: tuple[str, ...]
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> SubpointPlacement:
+        """A placement read back from its sidecar record."""
+        paragraphs = record.get('paragraphs')
+        return cls(record.get('element_idx_start'), str(record.get('code') or ''),
+                   tuple(map(str, paragraphs)) if isinstance(paragraphs, (list, tuple)) else ())
+
+
 class SubPoint(NamedTuple):
     """Prose an entry's render leaves out, and the line it goes under.
-    `entry_id` is `id()` of the entry dict, for the overflow pass to skip."""
+    `entry_id` is `id()` of the entry dict, for the overflow pass to skip;
+    `code` is the code the entry rendered as and `element_idx_start` its
+    index, for its `SubpointPlacement`."""
     anchor: AnchorCandidate
     paragraphs: tuple[str, ...]
     entry_id: int
+    code: str
+    element_idx_start: object
 
     def as_rendered_line(self) -> str:
         """The entry as a reader who rejects the deletion sees it: its line,
@@ -293,11 +355,13 @@ def _holds_field_values(fragment: str, value_tokens: set[str]) -> bool:
     return len(tokens & value_tokens) >= SUBPOINT_FIELD_TOKEN_MAX_SHARE * len(tokens)
 
 
-def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack) -> list[str]:
-    """The entry's prose fragments that hold no rendered field value and that
-    the document provably does not contain."""
+def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack,
+                     text: str | None = None) -> list[str]:
+    """The prose fragments of `text` (by default the entry's own) that hold
+    none of the entry's rendered field values and that the document provably
+    does not contain."""
     value_tokens = _value_tokens(entry, code)
-    return [fragment for fragment in prose_fragments(entry.get('text') or '')
+    return [fragment for fragment in prose_fragments(entry.get('text') or '' if text is None else text)
             if not _holds_field_values(fragment, value_tokens)
             and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
 
@@ -310,6 +374,60 @@ def _in_tables(anchor: AnchorCandidate, tables: Collection[BaseOxmlElement]) -> 
                for table in tables)
 
 
+def _section_candidates(code: str, candidates: list[AnchorCandidate],
+                        spans: Mapping[str, SectionSpan]) -> list[AnchorCandidate]:
+    """The candidates in `code`'s section, or for a mentee code in either
+    mentee heading's: the section files a mentee by its dates, not its code."""
+    codes = MENTEE_CODES if code in MENTEE_CODES else {code}
+    held = [spans[c] for c in codes if c in spans]
+    return [c for c in candidates if any(span.holds(c) for span in held)]
+
+
+def _mentee_name(entry: Mapping) -> str:
+    """The entry's mentee name (`_MENTEE_NAME_FIELDS`), case-folded and its
+    spacing collapsed, as a name row is compared; '' when it names none."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return ''
+    name = next((fields[key] for key in _MENTEE_NAME_FIELDS if fields.get(key)), '')
+    return ' '.join(str(name).split()).casefold()
+
+
+def _own_mentee_rows(entry: Mapping, candidates: list[AnchorCandidate]) -> list[AnchorCandidate]:
+    """The candidates that are rows of a table whose name row names the
+    entry's mentee (`_MENTEE_NAME_LABEL`): none when the entry names no
+    mentee or no table names it."""
+    name = _mentee_name(entry)
+    if not name:
+        return []
+    name_row = f'{_MENTEE_NAME_LABEL} {name}'.casefold()
+    tables = [table for c in candidates if c.text.casefold() == name_row
+              for table in c.paragraph._p.iterancestors(qn('w:tbl'))]
+    return [c for c in candidates if _in_tables(c, tables)]
+
+
+def _own_mentee_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a mentee's prose is read from: its own, except for the last
+    of stage 4's records (`LAST_STAGE4_RECORD`). That one keeps its source
+    line's whole text, the other records' mentees in it, though each of them
+    renders as a table of its own (YUYVIG XNWSZN 188: twelve postdocs on one
+    line, offered under the twelfth). It reads its own tab segment when the
+    line's segments pair one to one with its records, as fan-out pairs the
+    others; the whole line when every record names its mentee (one mentee's
+    two periods, YUYVIG ECXGAT 1479); and nothing otherwise, as which mentee
+    a word is about cannot be told."""
+    text = str(entry.get('text') or '')
+    marker = entry.get(LAST_STAGE4_RECORD)
+    if not isinstance(marker, Mapping):
+        return text
+    segments = _segments(text)
+    if len(segments) == marker.get('count'):
+        return segments[-1]
+    others = [other for group in entries_by_code.values() for other in group
+              if _is_sibling_of(other, entry)]
+    return text if all(_mentee_name(other) == _mentee_name(entry) for other in others) else ''
+
+
 def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Haystack,
                    candidates: list[AnchorCandidate],
                    spans: Mapping[str, SectionSpan],
@@ -318,7 +436,9 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
     the first entry that carries it (fan-out children and dedup survivors
-    share their parent's text).
+    share their parent's text). A mentee's prose is read from its own line
+    (`_own_mentee_line`), and its line must be a row of its own table
+    (`_own_mentee_rows`), under either mentee heading.
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -333,22 +453,25 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     for code in sorted(entries_by_code):
         if code not in SUBPOINT_CODES or code not in spans:
             continue
-        in_section = [c for c in candidates if spans[code].holds(c)]
+        in_section = _section_candidates(code, candidates, spans)
         for entry in entries_by_code[code]:
             if entry.get(PII_DROPPED_FIELDS_KEY):
                 continue
-            fragments = [f for f in unrendered_prose(entry, code, haystack) if f not in offered]
+            text = _own_mentee_line(entry, entries_by_code) if code in MENTEE_CODES else None
+            fragments = [f for f in unrendered_prose(entry, code, haystack, text) if f not in offered]
             if not fragments:
                 continue
             anchor_tokens = _value_tokens(entry, code) or (
                 _tokens(entry.get('text') or '') - set().union(*(_tokens(f) for f in fragments)))
-            anchor = best_anchor(anchor_tokens, in_section)
+            in_scope = _own_mentee_rows(entry, in_section) if code in MENTEE_CODES else in_section
+            anchor = best_anchor(anchor_tokens, in_scope)
             if anchor is None:
                 continue
             offered.update(fragments)
             if excluded_tables and _in_tables(anchor, excluded_tables):
                 continue
-            planned.append(SubPoint(anchor, tuple(fragments), id(entry)))
+            planned.append(SubPoint(anchor, tuple(fragments), id(entry), code,
+                                    entry.get('element_idx_start')))
     return planned
 
 
