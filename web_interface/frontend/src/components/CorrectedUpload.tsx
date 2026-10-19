@@ -17,13 +17,16 @@ const HELD_BACK: Record<Exclude<CorrectedCopyDetail['download'], 'ready'>, strin
   unscannable: HELP_IMPROVE.copyUnscannable,
 }
 
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
 interface CopyListProps {
   runId: string
   copies: CorrectedCopyDetail[]
   onError: (message: string) => void
 }
 
-/** Every reviewer's corrected copy of the run: uploader and role, date, change count, Download. */
+/** Every reviewer's corrected copy of the run: uploader and role, date, text-edit
+ *  and comment counts (#1937: a comments-only copy must not read as nothing), Download. */
 function CopyList({ runId, copies, onError }: CopyListProps) {
   const [fetching, setFetching] = useState<number | null>(null)
   // As the original CV's download: ask for the URL first so a refusal (409 still
@@ -49,7 +52,9 @@ function CopyList({ runId, copies, onError }: CopyListProps) {
             <span className="min-w-0 wrap-break-word text-gray-700">
               {uploaderLabel(copy)}
               <span className="text-gray-500">
-                {' · '}{formatDate(copy.uploaded_at)}{' · '}{copy.changes} {copy.changes === 1 ? 'change' : 'changes'}
+                {' · '}{formatDate(copy.uploaded_at)}
+                {' · '}{plural(copy.changes, 'text edit', 'text edits')}
+                {' · '}{plural(copy.comments, 'comment', 'comments')}
               </span>
             </span>
             {copy.download === 'ready' ? (

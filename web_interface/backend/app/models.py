@@ -206,7 +206,9 @@ class CorrectedCopy(Base):
     run_id = Column(String(10), ForeignKey("runs.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     uploaded_at = Column(UTCDateTime, nullable=False)
-    changes = Column(Integer, nullable=False)
+    changes = Column(Integer, nullable=False)  # text edits the diff found
+    # The reviewer's own Word comments in the copy, CViche's excluded (#1937).
+    comments = Column(Integer, nullable=False, server_default="0")
     storage_key = Column(String(255), nullable=False, unique=True)
 
 

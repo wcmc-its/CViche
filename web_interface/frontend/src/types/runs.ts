@@ -88,7 +88,10 @@ export type CorrectedCopyDownload = 'ready' | 'scanning' | 'threats_found' | 'un
 /** GET /run/:id/feedback/corrected-copies: one copy on the run page. */
 export interface CorrectedCopyDetail extends CorrectedCopySummary {
   id: number
+  /** Text edits the diff found. */
   changes: number
+  /** The reviewer's own Word comments in the copy; CViche's are not counted. */
+  comments: number
   /** The viewer's own copy, which their next upload replaces. */
   mine: boolean
   download: CorrectedCopyDownload

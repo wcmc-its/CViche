@@ -13,7 +13,7 @@ vi.mock('../api/feedback', () => ({
 
 const copy = (over: Partial<CorrectedCopyDetail>): CorrectedCopyDetail => ({
   id: 1, uploader: 'Sam Staff', role: 'staff', uploaded_at: '2026-10-13T14:00:00Z', changes: 3,
-  mine: false, download: 'ready', ...over,
+  comments: 0, mine: false, download: 'ready', ...over,
 })
 
 beforeEach(() => {
@@ -38,13 +38,14 @@ describe('CorrectedUpload', () => {
   })
 
   it('uploads a corrected copy, shows the one-line confirmation and refreshes the list', async () => {
-    vi.mocked(uploadCorrectedDocx).mockResolvedValue({ changes: 7, summary: '7 changes recorded' })
+    vi.mocked(uploadCorrectedDocx).mockResolvedValue(
+      { changes: 7, comments: 0, summary: '7 text edits and 0 comments recorded' })
     render(<CorrectedUpload runId="run-1" />)
     await waitFor(() => expect(getCorrectedCopies).toHaveBeenCalledTimes(1))
     vi.mocked(getCorrectedCopies).mockResolvedValue([copy({ uploader: 'Pat Example', role: 'owner', mine: true, changes: 7 })])
     const file = new File(['x'], 'corrected.docx')
     fireEvent.change(screen.getByTestId('file-input'), { target: { files: [file] } })
-    expect((await screen.findByRole('status')).textContent).toBe('7 changes recorded. Thank you.')
+    expect((await screen.findByRole('status')).textContent).toBe('7 text edits and 0 comments recorded. Thank you.')
     expect(uploadCorrectedDocx).toHaveBeenCalledWith('run-1', file)
     expect(await screen.findByText('Pat Example (owner)')).toBeTruthy()
     expect(getCorrectedCopies).toHaveBeenCalledTimes(2)
@@ -58,17 +59,24 @@ describe('CorrectedUpload', () => {
     expect(screen.getByTestId('file-input')).toBeTruthy()  // can try again
   })
 
-  it("lists staff's copy to the owner with its uploader, role, date, changes and Download", async () => {
+  it("lists staff's copy to the owner with its uploader, role, date, counts and Download", async () => {
     vi.mocked(getCorrectedCopies).mockResolvedValue([
-      copy({ id: 2 }), copy({ id: 1, uploader: 'Pat Example', role: 'owner', mine: true, changes: 1 })])
+      copy({ id: 2 }), copy({ id: 1, uploader: 'Pat Example', role: 'owner', mine: true, changes: 1, comments: 1 })])
     render(<CorrectedUpload runId="run-1" />)
     const staffRow = (await screen.findByText('Sam Staff (staff)')).closest('li')!
-    expect(staffRow.textContent).toMatch(/Oct 13.* · 3 changes/)
+    expect(staffRow.textContent).toMatch(/Oct 13.* · 3 text edits · 0 comments/)
     expect(within(staffRow).getByRole('button', { name: 'Download' })).toBeTruthy()
-    expect(screen.getByText('Pat Example (owner)').closest('li')!.textContent).toContain('1 change')
+    expect(screen.getByText('Pat Example (owner)').closest('li')!.textContent).toMatch(/ · 1 text edit · 1 comment(?!s)/)
     // The list sits above the drop zone.
     const list = screen.getByText('Corrected copies')
     expect(list.compareDocumentPosition(screen.getByTestId('file-input')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows a copy with only the reviewer\'s comments as comments, not as nothing (#1937)', async () => {
+    vi.mocked(getCorrectedCopies).mockResolvedValue([copy({ changes: 0, comments: 18 })])
+    render(<CorrectedUpload runId="run-1" />)
+    const row = (await screen.findByText('Sam Staff (staff)')).closest('li')!
+    expect(row.textContent).toContain(' · 0 text edits · 18 comments')
   })
 
   it('says a new upload replaces the viewer\'s own copy only when they have one', async () => {

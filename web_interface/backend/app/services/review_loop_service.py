@@ -170,14 +170,45 @@ def _stage4_entries(db: Session, run_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+@dataclass(frozen=True)
+class CopyCounts:
+    """What a corrected copy carries: ``changes``, the text edits the diff
+    found, and ``comments``, the reviewer's own Word comments (#1937)."""
+    changes: int
+    comments: int
+
+
+def _comment_authors(docx: bytes) -> list[str]:
+    """The author of every comment in the document, one per comment."""
+    return [comment.author for comment in Document(io.BytesIO(docx)).comments]
+
+
+def _cviche_comment_authors(db: Session, run_id: str, delivered: bytes) -> frozenset[str]:
+    """Every author CViche wrote comments under in this run: those of the
+    delivered document and of its review copy, when the run has one. Read
+    from the run's own documents rather than listed by name, so an author
+    stage 6 or the review copy adds later is never counted as the
+    reviewer's."""
+    review = _artifact_bytes(db, run_id, f"{run_id}{REVIEW_DOCX_SUFFIX}")
+    return frozenset(author for docx in (delivered, review) if docx is not None
+                     for author in _comment_authors(docx))
+
+
+def count_reviewer_comments(corrected: bytes, cviche_authors: frozenset[str]) -> int:
+    """How many comments in the corrected copy are the reviewer's: every one
+    whose author is not one of CViche's. A reply to a CViche comment counts."""
+    return sum(author not in cviche_authors for author in _comment_authors(corrected))
+
+
 def record_corrected_docx(db: Session, run_id: str, uploader_id: int, corrected: bytes,
-                          uploaded_at: datetime) -> int:
+                          uploaded_at: datetime) -> CopyCounts:
     """Diff a reviewer's corrected copy against the delivered document, store
     both the copy and the typed diff under CORRECTED_PREFIX as that uploader's
     (replacing any copy the same user uploaded before), record its
-    corrected_copies row, and return how many changes the diff found. The
-    caller has already checked access, size and file type. Nothing is stored
-    when the diff cannot be made.
+    corrected_copies row, and return how many text edits the diff found and
+    how many of the reviewer's own comments the copy holds. The caller has
+    already checked access, size and file type. Nothing is stored when the
+    copy cannot be read.
 
     Raises a 409 when the run has no delivered document, and a 400 when the
     corrected file cannot be read as a Word document.
@@ -185,12 +216,14 @@ def record_corrected_docx(db: Session, run_id: str, uploader_id: int, corrected:
     delivered = _artifact_bytes(db, run_id, f"{run_id}{DELIVERED_DOCX_SUFFIX}")
     if delivered is None:
         raise conflict("This run has no finished document to compare with.")
+    cviche_authors = _cviche_comment_authors(db, run_id, delivered)
     with tempfile.TemporaryDirectory(prefix=f"corrected_{run_id}_") as tmp:
         delivered_path, corrected_path = Path(tmp) / "delivered.docx", Path(tmp) / "corrected.docx"
         delivered_path.write_bytes(delivered)
         corrected_path.write_bytes(corrected)
         try:
             diff = diff_docx(delivered_path, corrected_path, _stage4_entries(db, run_id))
+            counts = CopyCounts(len(diff.changes), count_reviewer_comments(corrected, cviche_authors))
         # ValueError: python-docx's "not a Word file" (a zip whose main part
         # is some other content type), as scripts/docx_review_diff.py reads it.
         except (*_DOCX_READ_ERRORS, ValueError) as e:
@@ -201,9 +234,10 @@ def record_corrected_docx(db: Session, run_id: str, uploader_id: int, corrected:
     storage.put_file(run_id, docx_key, corrected)
     report = json.dumps(to_report(run_id, diff), indent=1, sort_keys=True)
     storage.put_file(run_id, corrected_diff_key(run_id, uploader_id), report.encode("utf-8"))
-    corrected_copy_service.record_copy(db, run_id, uploader_id, changes=len(diff.changes),
-                                       storage_key=docx_key, uploaded_at=uploaded_at)
-    return len(diff.changes)
+    corrected_copy_service.record_copy(db, run_id, uploader_id, changes=counts.changes,
+                                       comments=counts.comments, storage_key=docx_key,
+                                       uploaded_at=uploaded_at)
+    return counts
 
 
 #: What a corrected copy's download is named after the run's upload.
@@ -218,9 +252,14 @@ def corrected_download_name(run_filename: str | None, uploader: str | None) -> s
     return f"{stem} - {CORRECTED_DOWNLOAD_LABEL}{by}.docx"
 
 
-def changes_summary(changes: int) -> str:
-    """The uploader's one-line confirmation."""
-    return f"{changes} change{'' if changes == 1 else 's'} recorded"
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def changes_summary(counts: CopyCounts) -> str:
+    """The uploader's one-line confirmation: both counts, so a copy carrying
+    only comments never reads as nothing recorded (#1937)."""
+    return f"{_counted(counts.changes, 'text edit')} and {_counted(counts.comments, 'comment')} recorded"
 
 
 # --- after the upload (#1654): verdicts and the doctor re-run ------------------

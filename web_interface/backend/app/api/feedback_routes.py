@@ -334,9 +334,9 @@ async def upload_corrected_docx(
     run, diff it against that document (doctor/docx_diff.py) and store the
     typed diff beside it (#1587). Each uploader keeps one copy per run: a
     second upload by the same user replaces theirs, never another user's
-    (#1754). Returns a one-line count only; the
-    comment-fate verdicts and the doctor's re-run on the copy (#1654) follow
-    in a background task.
+    (#1754). Returns the text-edit and comment counts and a one-line summary
+    only; the comment-fate verdicts and the doctor's re-run on the copy
+    (#1654) follow in a background task.
 
     Owner, admin, and staff on any run (staff are read-only everywhere else
     and still cannot submit the feedback survey), and the CV upload's gates
@@ -352,15 +352,17 @@ async def upload_corrected_docx(
     if not _validate_docx_magic(content):
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
     await _reject_active_docx_content(content)
-    changes = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id,
-                                     current_user.id, content, utc_now())
-    logger.info("Corrected copy recorded for run %s by user %s: %d changes", run_id, current_user.id, changes)
+    counts = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id,
+                                    current_user.id, content, utc_now())
+    logger.info("Corrected copy recorded for run %s by user %s: %d text edits, %d comments",
+                run_id, current_user.id, counts.changes, counts.comments)
     # Verdicts from the review copy's comments and the doctor's re-run (#1654)
     # run after the response, so the confirmation never waits on them; their
     # failure is logged there, never shown to the uploader.
     background_tasks.add_task(review_loop_service.review_corrected_copy_in_background,
                               run_id, current_user.id, content)
-    return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
+    return CorrectedDocxResponse(changes=counts.changes, comments=counts.comments,
+                                 summary=review_loop_service.changes_summary(counts))
 
 
 def _listed_scan_state(storage: RunStorage, run_id: str, key: str) -> ScanState:
@@ -382,8 +384,8 @@ def list_corrected_copies(
     current_user: User = Depends(get_current_user),
 ) -> list[CorrectedCopyDetail]:
     """Every reviewer's corrected copy of the run, newest first: who uploaded
-    it (and as owner, staff or admin), when, how many changes, and whether
-    the malware scan lets it be downloaded yet.
+    it (and as owner, staff or admin), when, how many text edits and
+    comments, and whether the malware scan lets it be downloaded yet.
 
     Run owner, admin or staff (403 otherwise, 404 for an unknown run): the
     owner sees staff's copies of their run too.
@@ -393,7 +395,7 @@ def list_corrected_copies(
     return [
         CorrectedCopyDetail(id=copy.id, uploader=copy.uploader, role=copy.role,
                             uploaded_at=copy.uploaded_at, changes=copy.changes,
-                            mine=copy.user_id == current_user.id,
+                            comments=copy.comments, mine=copy.user_id == current_user.id,
                             download=_listed_scan_state(storage, run_id, copy.storage_key))
         for copy in corrected_copy_service.load_copies(db, [run_id]).get(run_id, [])
     ]

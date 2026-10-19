@@ -47,7 +47,7 @@ def test_record_corrected_docx_maps_changes_to_stage4_entries(db, store):
     stage4 = {"entries": [{"element_idx_start": 12, "taxonomy_code": "H", "text": _ENTRIES[1]}]}
     store.put_file(_RUN, f"outputs/{_RUN}_fields.json", json.dumps(stage4).encode())
 
-    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW) == 1
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW) == svc.CopyCounts(1, 0)
 
     report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, _USER)))
     assert [(c["change_type"], c["element_idx"]) for c in report["changes"]] == [("deleted", 12)]
@@ -64,7 +64,7 @@ def test_each_uploader_keeps_one_copy_and_a_pre_1754_copy_is_still_listed(db, st
     # One build, compared by identity of bytes: a second _docx() call can land
     # in the next 2-second zip timestamp and differ in its header bytes.
     replacement = _docx(*_ENTRIES)
-    assert svc.record_corrected_docx(db, _RUN, _USER, replacement, _LATER) == 0
+    assert svc.record_corrected_docx(db, _RUN, _USER, replacement, _LATER) == svc.CopyCounts(0, 0)
 
     assert svc.stored_uploaders(_RUN) == [None, _USER, 12]
     assert store.get_file(_RUN, f"corrected/{_RUN}_u{_USER}_corrected.docx") == replacement
@@ -81,9 +81,55 @@ def test_each_uploader_keeps_one_copy_and_a_pre_1754_copy_is_still_listed(db, st
 def test_record_corrected_docx_diffs_without_entries_when_stage4_is_unreadable(db, store):
     store.put_file(_RUN, f"outputs/{_RUN}_wcm.docx", _docx(*_ENTRIES))
     store.put_file(_RUN, f"outputs/{_RUN}_fields.json", b"{not json")
-    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW) == 1
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW).changes == 1
     report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, _USER)))
     assert report["changes"][0]["element_idx"] is None
+
+
+_REVIEWER = "Synthetic Reviewer"
+
+
+def _commented(*authors):
+    """The two entries, unedited, with one comment per author on the first."""
+    from docx import Document
+
+    doc = Document()
+    first = doc.add_paragraph(_ENTRIES[0])
+    doc.add_paragraph(_ENTRIES[1])
+    for author in authors:
+        doc.add_comment(first.runs, text="Synthetic note.", author=author)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_a_copy_with_only_the_reviewers_comments_counts_them_not_cviches(db, store):
+    """#1937: a copy with the reviewer's comments and no text edit read "0
+    changes". CViche's own comments, kept from the delivered document
+    (stage 6's) and from the review copy, are not the reviewer's."""
+    store.put_file(_RUN, f"outputs/{_RUN}_wcm.docx", _commented("PubMed Enrichment"))
+    store.put_file(_RUN, f"outputs/{_RUN}_wcm_review.docx", _commented("PubMed Enrichment", "CViche check"))
+    corrected = _commented("PubMed Enrichment", "CViche check", _REVIEWER, _REVIEWER, "Second Reviewer")
+
+    assert svc.record_corrected_docx(db, _RUN, _USER, corrected, _NOW) == svc.CopyCounts(0, 3)
+    row = db.query(CorrectedCopy).one()
+    assert (row.changes, row.comments) == (0, 3)
+
+
+@pytest.mark.parametrize("corrected_authors, cviche_authors, reviewers", [
+    ((), ("CViche check",), 0),                                    # no comments at all
+    (("CViche check", "CViche"), ("CViche check", "CViche"), 0),   # CViche's only
+    ((_REVIEWER,), (), 1),                                         # a run with no CViche comment
+    ((_REVIEWER, "CViche check"), ("CViche check",), 1),
+])
+def test_count_reviewer_comments(corrected_authors, cviche_authors, reviewers):
+    assert svc.count_reviewer_comments(_commented(*corrected_authors), frozenset(cviche_authors)) == reviewers
+
+
+def test_without_a_review_copy_cviches_authors_come_from_the_delivered_document(db, store):
+    store.put_file(_RUN, f"outputs/{_RUN}_wcm.docx", _commented("PubMed Enrichment"))
+    corrected = _commented("PubMed Enrichment", _REVIEWER)
+    assert svc.record_corrected_docx(db, _RUN, _USER, corrected, _NOW) == svc.CopyCounts(0, 1)
 
 
 def test_record_corrected_docx_stores_nothing_when_the_copy_cannot_be_read(db, store):
@@ -110,10 +156,13 @@ def test_corrected_download_name(filename, uploader, name):
     assert svc.corrected_download_name(filename, uploader) == name
 
 
-@pytest.mark.parametrize("changes, line", [(0, "0 changes recorded"), (1, "1 change recorded"),
-                                           (7, "7 changes recorded")])
-def test_changes_summary(changes, line):
-    assert svc.changes_summary(changes) == line
+@pytest.mark.parametrize("changes, comments, line", [
+    (0, 18, "0 text edits and 18 comments recorded"),
+    (1, 1, "1 text edit and 1 comment recorded"),
+    (7, 0, "7 text edits and 0 comments recorded"),
+])
+def test_changes_summary(changes, comments, line):
+    assert svc.changes_summary(svc.CopyCounts(changes, comments)) == line
 
 
 # --- #1654: verdicts from the review copy's comments, and the doctor re-run ---
