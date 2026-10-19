@@ -570,14 +570,36 @@ def _has_sibling(tokens: set[str], all_line_tokens: list[set[str]]) -> bool:
     return bool(_siblings(tokens, all_line_tokens))
 
 
+def _sibling_record_tokens(text: str | None) -> set[str]:
+    """`_record_tokens` without month names (#1230). A render may write
+    "March 2015" as "03/2015", so a month name cannot tell a row apart: rows
+    that differ only in one are not siblings, and keep `_record_rendered`'s
+    verdict."""
+    return _record_tokens(text) - _MONTH_WORDS
+
+
+def _number_sibling(tokens: set[str], other: set[str]) -> bool:
+    """Whether `other` has exactly the letter tokens of `tokens`, so it can
+    differ only in its number tokens: the same row in another term (#1230).
+    Such a pair can share less than `RECLASSIFY_MIN_TOKEN_COVERAGE` of its
+    tokens ("Member | Admissions Committee | <college> | 2010-2012" and its
+    2014-2016 row share 7 of 9)."""
+    return ({token for token in tokens if not token.isdigit()}
+            == {token for token in other if not token.isdigit()})
+
+
 def record_siblings(records: list[str]) -> dict[str, list[set[str]]]:
     """Each record line of one entry that has sibling rows in it, mapped to
-    those siblings' `_record_tokens` (#1230). A sibling that holds every token
-    of the line is left out: the line is part of it, so its render carries
-    the line."""
-    tokens = {line: _record_tokens(line) for line in dict.fromkeys(records)}
+    those siblings' `_sibling_record_tokens` (#1230). A sibling is a line that
+    holds `RECLASSIFY_MIN_TOKEN_COVERAGE` of the line's tokens, or one that
+    differs from it only in numbers (`_number_sibling`). A sibling that holds
+    every token of the line is left out: the line is part of it, so its
+    render carries the line."""
+    tokens = {line: _sibling_record_tokens(line) for line in dict.fromkeys(records)}
     all_tokens = list(tokens.values())
-    siblings = {line: [other for other in _siblings(own, all_tokens) if not own <= other]
+    siblings = {line: [other for other in all_tokens
+                       if (_is_sibling(own, other) or _number_sibling(own, other))
+                       and not own <= other]
                 for line, own in tokens.items()}
     return {line: others for line, others in siblings.items() if others}
 
@@ -594,7 +616,8 @@ def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack
     term too. Here, past `_record_rendered`, the line must sit in the output
     verbatim, or ONE output line must hold that overlap of its letter tokens
     AND, against each sibling, a letter or number token the sibling lacks, so
-    a sibling's row cannot vouch for it. `line_token_sets` are the output
+    a sibling's row cannot vouch for it. For the same row in another term,
+    that token is one of the line's own numbers. `line_token_sets` are the output
     lines' letter tokens, for `_record_rendered`; `record_token_sets` are
     `_record_tokens` of the output lines that may vouch here (the recovery
     pass passes its uncut lines plus the lines it has recovered so far). A
@@ -606,7 +629,7 @@ def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack
     letters = set(_RENDER_TOKEN_RE.findall(_norm(line)))
     if len(letters) < RENDER_TOKEN_MIN_COUNT:
         return None
-    tokens = _record_tokens(line)
+    tokens = _sibling_record_tokens(line)
     return any(len(letters & out) / len(letters) >= RENDER_TOKEN_OVERLAP
                and all((tokens - sibling) & out for sibling in siblings)
                for out in record_token_sets)

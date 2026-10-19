@@ -1825,10 +1825,11 @@ def test_segments_cover_source_pools_tokens_for_a_line_without_a_sibling():
 
 def _two_by_two_grid():
     """Two committees, each served in the same two terms: every token of each
-    row also sits in another row (#1230)."""
-    return [f"Member | {name} Committee | Example Department of Synthetic Geology | "
-            f"Example University | {term}"
-            for name in ("Zeolite", "Marigold") for term in ("2010-2012", "2014-2016")]
+    row also sits in another row (#1230). Each row has 9 record tokens, as a
+    real row does; the two terms of one committee share 7 of them, under
+    `RECLASSIFY_MIN_TOKEN_COVERAGE`."""
+    return [f"Member | {name} Committee | Example State Medical College | {term}"
+            for name in ("Admissions", "Curriculum") for term in ("2010-2012", "2014-2016")]
 
 
 def test_segments_cover_source_rejects_a_dropped_row_of_a_two_by_two_grid():
@@ -1852,8 +1853,8 @@ def test_segments_cover_source_counts_split_and_merged_grid_rows():
     split = [cell for row in rows for cell in row.split(" | ")]
     assert segments_cover_source(split, source) is True
     assert segments_cover_source(["; ".join(rows[:2])] + rows[2:], source) is True
-    merged = ("Member | Zeolite Committee | Example Department of Synthetic Geology | "
-              "Example University | 2010-2012 and 2014-2016")
+    merged = ("Member | Admissions Committee | Example State Medical College | "
+              "2010-2012 and 2014-2016")
     assert segments_cover_source([merged] + rows[2:], source) is False
 
 
@@ -1863,8 +1864,8 @@ def test_segments_cover_source_unrelated_lines_do_not_pay_for_a_dropped_grid_row
     hold one whole, are counted (#1230)."""
     rows = _two_by_two_grid()
     unrelated = ["Member of the Faculty Senate, Riverbend Example University, 2014",
-                 "Zeolite Prize Committee juror, 2016",
-                 "Department of Synthetic Geology seminar organiser"]
+                 "Admissions Prize Committee juror, 2016",
+                 "State Medical College seminar organiser"]
     source = "\n".join(rows + unrelated)
     assert segments_cover_source(rows + unrelated, source) is True
     assert segments_cover_source([row for row in rows if row != rows[1]] + unrelated,
@@ -1888,7 +1889,7 @@ def test_record_siblings_skips_a_sibling_that_holds_the_whole_line():
     so the sibling's render carries it and it needs no token of its own
     (#1230). The grid rows keep each other as siblings."""
     rows = _two_by_two_grid()
-    short = rows[0].replace("Example Department of Synthetic Geology | ", "")
+    short = rows[0].replace("Example State Medical College | ", "")
     siblings = record_siblings([short] + rows)
     assert _record_tokens(short) <= _record_tokens(rows[0])
     assert _record_tokens(rows[0]) not in siblings[short]
@@ -1936,6 +1937,78 @@ def test_non_t_grid_rows_all_rendered_are_not_recovered():
         gen.doc.add_paragraph(row.replace(" | ", ", ").replace("-", " - "))
     gen._recover_unrendered_records({"P": [entry]})
     assert not [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+
+
+def test_record_siblings_holds_the_same_row_in_another_term():
+    """The two terms of one committee share 7 of 9 tokens, under the sibling
+    share, yet differ only in their numbers: they are siblings (#1230). Rows
+    that differ only in a month name are not: a render may write the month as
+    a number."""
+    rows = _two_by_two_grid()
+    siblings = record_siblings(rows)
+    assert _record_tokens(rows[1]) in siblings[rows[0]]
+    assert _record_tokens(rows[0]) in siblings[rows[1]]
+    months = [f"Visiting Lecturer | Example State Medical College | {month} 2015"
+              for month in ("January", "March")]
+    assert record_siblings(months) == {}
+
+
+def test_non_t_one_committee_in_two_terms_recovers_the_missing_term():
+    """One committee in two terms, one term on the page: its row vouched for
+    the other term, which shares every word. A row whose own numbers are on
+    no rendered line with its words is recovered (#1230)."""
+    rows = _two_by_two_grid()[:2]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0].replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert bullets == [rows[1].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_date_led_grid_row_rendered_only_through_its_siblings_is_recovered():
+    """The grid written date first, three rows on the page: the fourth is
+    recovered (#1230)."""
+    rows = [f"{term} Member, {name} Committee, Example State Medical College"
+            for name in ("Admissions", "Curriculum") for term in ("2010-2012", "2014-2016")]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for row in rows[:3]:
+        gen.doc.add_paragraph(row.replace("-", " - "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if "Member" in t]
+    assert bullets == [rows[3]]
+
+
+def test_non_t_rows_differing_only_in_a_month_name_rendered_as_numbers_are_kept():
+    """Two rows told apart only by a month name, both on the page with the
+    month as a number: neither is re-inserted (#1230)."""
+    rows = [f"Visiting Lecturer | Example State Medical College | Boston | {month} 2015"
+            for month in ("January", "March")]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for number in ("01", "03"):
+        gen.doc.add_paragraph(
+            f"{number}/2015 Visiting Lecturer, Example State Medical College, Boston")
+    gen._recover_unrendered_records({"P": [entry]})
+    assert not [t for t in _bulleted_texts(gen.doc.paragraphs) if "Lecturer" in t]
+
+
+def test_non_t_sibling_rows_sharing_a_month_name_are_still_told_apart():
+    """Two committees in the same month: the month is no row's own token, so
+    the rendered row, which spells it, cannot vouch for the other (#1230)."""
+    rows = [f"Member | {name} Committee | Example State Medical College | January 2015"
+            for name in ("Admissions", "Curriculum")]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0].replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert bullets == [rows[1].replace(" | ", " \u2014 ")]
 
 
 def test_sibling_record_rendered_without_siblings_is_record_rendered():
