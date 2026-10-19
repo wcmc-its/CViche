@@ -1366,8 +1366,9 @@ def test_534_a_table_cleared_after_it_was_filled_is_reported_lost(tmp_path):
     receipt, sidecar = _service_receipt(tmp_path, _gnonha_shaped_entries(), gen)
     assert {lost["element_idx_start"] for lost in receipt["lost"]} >= {10, 11, 12}
     finding, = [f for f in lint_renderer_row_receipts(sidecar)
-                if f["message"].startswith("service:")]
+                if f["message"].startswith("taxonomy code Q1:")]
     assert finding["severity"] == "WARN"
+    assert "handed to the service renderer" in finding["message"]
 
 
 def test_534_a_row_written_after_the_extramural_loop_is_not_the_last_entrys():

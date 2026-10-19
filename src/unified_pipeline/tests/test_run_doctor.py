@@ -2559,20 +2559,26 @@ def _lost(idx, text, code="Q1"):
     return {"code": code, "element_idx_start": idx, "text": text}
 
 
-def test_534_row_receipt_lint_warns_per_section_with_lost_entries():
-    """GNONHA's Q1 table (#534): 9 given, the rows wiped -- one WARN naming
-    the section and the count, with each lost entry as evidence."""
+def test_534_row_receipt_lint_warns_per_code_with_lost_entries():
+    """GNONHA's Q1 table (#534): 9 given, the rows wiped -- one WARN per
+    taxonomy code, opening with the "taxonomy code Q1:" prefix the run page
+    reads its section from, with each lost entry as evidence. One Service
+    receipt spans Q1 to Q4D, so a Q2 loss is its own finding."""
     report = {"warnings": [], "dedup_decisions": [], "row_receipts": [
         _receipt("service", [_lost(241, "Imaginary Society, Treasurer"),
+                             _lost(250, "Pretend Journal, Reviewer", "Q2"),
                              _lost(263, "Fictional Board, Chair")]),
         _receipt("honors", []),
     ]}
-    finding, = lint_renderer_row_receipts(report)
-    assert finding["lint"] == "renderer_row_missing"
-    assert finding["severity"] == "WARN"
-    assert finding["message"].startswith("service: 2 of 9 entries")
-    assert finding["evidence"] == ["Q1 241: Imaginary Society, Treasurer",
-                                   "Q1 263: Fictional Board, Chair"]
+    q1, q2 = lint_renderer_row_receipts(report)
+    assert q1["lint"] == "renderer_row_missing"
+    assert q1["severity"] == "WARN"
+    assert q1["message"].startswith(
+        "taxonomy code Q1: 2 of the 9 entries handed to the service renderer")
+    assert q1["evidence"] == ["Q1 241: Imaginary Society, Treasurer",
+                              "Q1 263: Fictional Board, Chair"]
+    assert q2["message"].startswith("taxonomy code Q2: 1 of the 9 entries")
+    assert q2["evidence"] == ["Q2 250: Pretend Journal, Reviewer"]
 
 
 def test_534_row_receipt_lint_skips_unlinted_sections_and_old_sidecars():
