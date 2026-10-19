@@ -163,6 +163,39 @@ class TestExtractUserAttrs:
         with pytest.raises(ValueError, match="CWID"):
             extract_user_attrs({ATTR_UID: ["js1234"], ATTR_EPPN: ["@hss.edu"]})
 
+    # --- MSKCC releases only mail (no ePPN, no uid): key on the address.
+
+    def test_extract_attrs_mail_only_partner_keyed_on_mail(self):
+        result = extract_user_attrs({ATTR_MAIL: ["Jane.Doe@MSKCC.org"], ATTR_DISPLAY_NAME: ["Doe, Jane"]})
+        assert result["cwid"] == "jane.doe@mskcc.org"
+
+    def test_extract_attrs_mail_anchor_wins_over_uid(self):
+        """A uid from a mail-anchored partner is not a CWID: it must not
+        land on a WCM account."""
+        result = extract_user_attrs({ATTR_UID: ["js1234"], ATTR_MAIL: ["js1234@mskcc.org"]})
+        assert result["cwid"] == "js1234@mskcc.org"
+
+    def test_extract_attrs_mail_outside_anchor_domains_is_rejected(self):
+        """An unlisted domain's address can't become an anchor, so an
+        upstream can't assert another partner's (or a WCM) address."""
+        for mail in ("js1234@nyp.org", "js1234@med.cornell.edu", "js1234@evil-mskcc.org"):
+            with pytest.raises(ValueError, match="CWID"):
+                extract_user_attrs({ATTR_MAIL: [mail]})
+
+    def test_extract_attrs_eppn_still_wins_over_mail_anchor(self):
+        result = extract_user_attrs({ATTR_EPPN: ["js1234@hss.edu"], ATTR_MAIL: ["other@mskcc.org"]})
+        assert result["cwid"] == "js1234@hss.edu"
+
+    def test_extract_attrs_wcm_user_with_mskcc_mail_stays_on_cwid(self):
+        """A WCM ePPN wins: a WCM person whose released mail is @mskcc.org
+        must keep their CWID account, not get a second, mail-keyed one."""
+        result = extract_user_attrs({ATTR_EPPN: ["js1234@med.cornell.edu"], ATTR_MAIL: ["js1234@mskcc.org"]})
+        assert result["cwid"] == "js1234"
+
+    def test_extract_attrs_mail_anchor_needs_a_local_part(self):
+        with pytest.raises(ValueError, match="CWID"):
+            extract_user_attrs({ATTR_MAIL: ["@mskcc.org"]})
+
 
 # --- Unit test: certificate generation ---
 
