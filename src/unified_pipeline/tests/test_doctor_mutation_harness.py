@@ -133,7 +133,9 @@ def test_known_catches_and_misses_are_credited_to_the_right_mutation(measurement
     assert "year_not_in_source" in caught_by["shift_grant_end_year"]
     # #1575: each grant's swapped role is the role the other grant's text states.
     assert caught_by["swap_pi_and_coi"] == {"cross_entry_value"}
-    assert caught_by["shift_publication_year"] == set()
+    # #1588: the aligned source_line_coverage requires the line's own year.
+    assert "source_line_coverage" in caught_by["shift_publication_year"]
+    assert caught_by["award_as_appointment"] == set()
 
 
 def test_the_harness_refuses_an_llm_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
