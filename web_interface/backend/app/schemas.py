@@ -150,6 +150,7 @@ class CorrectedCopyDetail(CorrectedCopySummary):
     "threats_found" or "unscannable" when it will not be served."""
     id: int
     changes: int
+    comments: int
     mine: bool
     download: str
 
@@ -442,8 +443,10 @@ class FeedbackSubmit(BaseModel):
 
 class CorrectedDocxResponse(BaseModel):
     """POST /run/{id}/feedback/corrected-docx: a one-line confirmation only;
-    the typed diff itself is stored with the run, never returned."""
+    the typed diff itself is stored with the run, never returned. ``changes``
+    counts text edits, ``comments`` the reviewer's own Word comments (#1937)."""
     changes: int
+    comments: int
     summary: str
 
 
