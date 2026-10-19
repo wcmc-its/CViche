@@ -271,8 +271,9 @@ def _same_span(first: dict, second: dict) -> bool:
 
 
 def _training_levels(entry: dict) -> set[str]:
-    """The `_TRAINING_LEVELS` the entry's training type names."""
-    return {_TRAINING_LEVELS[word] for word in _ordered_words(_field(entry, 'training_type'))
+    """The `_TRAINING_LEVELS` the entry's training type names, a plural as
+    its singular (`_norm_words`: "Residents" names the resident level)."""
+    return {_TRAINING_LEVELS[word] for word in _norm_words(_field(entry, 'training_type'))
             if word in _TRAINING_LEVELS}
 
 

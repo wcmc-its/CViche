@@ -1744,6 +1744,10 @@ def test_a_citation_whose_author_initial_is_a_lone_i_still_drops():
     ("Widget Pharmacology II/I", {"I", "II"}),
     ("Widget I/O Board, 2031", set()),                         # a slash before no numeral
     ("Widget Pharmacology I/V", set()),                        # V is never a numeral alone
+    ("Widget Pharmacology I and II, 2031", {"I", "II"}),       # so is an "and" listing
+    ("Widget Pharmacology I & II", {"I", "II"}),
+    ("Widget study, I and colleagues", set()),                 # "and" before no numeral
+    ("Widget Course I andIV", set()),                          # "and" is a whole word
 ])
 def test_standalone_numerals(text, numerals):
     assert _standalone_numerals(text) == numerals
@@ -2562,9 +2566,32 @@ def test_two_lettered_committees_of_one_council_are_both_kept():
     assert deduplicate_entries([kept, dropped]) == [kept, dropped]
 
 
+# A semicolon listing: a comma one ("Committee R, Committee Q") reads as a
+# byline and is blanked, so it letters no word and refuses nothing.
+_LETTERED_LISTING = "2029-2030 Member, Committee R; Committee Q; Council on Widget Standards"
+
+
 def test_a_listing_of_both_lettered_committees_still_covers_a_copy_of_one():
-    kept = {"text": "2029-2030 Member, Committee R, Committee Q; Council on Widget Standards"}
+    kept = {"text": _LETTERED_LISTING}
     dropped = {"text": "Member, Committee Q, Council on Widget Standards"}
+    assert deduplicate_entries([kept, dropped]) == [kept]
+
+
+def test_a_listing_of_two_lettered_committees_does_not_cover_a_third():
+    kept = {"text": _LETTERED_LISTING}
+    dropped = {"text": "Member, Committee P, Council on Widget Standards"}
+    assert deduplicate_entries([kept, dropped]) == [kept, dropped]
+
+
+@pytest.mark.parametrize("kept_text", [
+    "2029-2030 Member, Committee R and Committee Q, Council on Widget Standards",
+    "2029-2030 Member, Committee R - Chair 2030; Committee Q, Council on Widget Standards",
+])
+def test_a_listing_joined_another_way_still_covers_a_copy_of_one(kept_text):
+    # The "and" or the dash hides R from the letter reader; R still stands
+    # on its own in the kept text, so the copy goes.
+    kept = {"text": kept_text}
+    dropped = {"text": "Member, Committee R, Council on Widget Standards"}
     assert deduplicate_entries([kept, dropped]) == [kept]
 
 
@@ -2603,6 +2630,11 @@ def test_a_slash_listed_course_covers_a_copy_of_one_part():
     ("Widget Group B; Gadget Unit C)", set(), {("group", "B"), ("unit", "C")}),
     ("Widget Group B\tGadgets", set(), {("group", "B")}),          # a tab ends a segment
     ("Widget Group B: Gadgets", set(), {("group", "B")}),
+    ("Widget Group B - Gadgets", set(), {("group", "B")}),        # a spaced hyphen
+    ("Widget Group B -Gadgets", set(), {("group", "B")}),         # a hyphen after a space
+    ("Widget Group B–Gadgets", set(), {("group", "B")}),        # a dash
+    ("Widget Memory B-cell study", set(), set()),                  # a hyphen joins a word
+    ("Widget Group B and Gadget Group C", set(), {("group", "C")}),  # "and" is no segment end
     ("Chair, A Widget Committee", set(), set()),                   # the article: a word follows
     ("Widget Group B Committee", set(), set()),                    # a word follows
     ("Widget Group B. Gadgets", set(), set()),                     # an initial's period
@@ -2625,12 +2657,22 @@ def test_series_marks(text, numerals, letters):
     ("Widget Compounding I, 2031", "Widget Compounding, 2031", True),     # a numeral the kept text lacks
     ("Widget Compounding II, 2031", "Widget Compounding II, Acme, 2031", False),
     ("Committee Q, Council", "Committee R, Council", True),
-    ("Committee Q, Council", "Committee R, Committee Q; Council", False),  # the kept text holds it
+    ("Committee Q, Council", "Committee R; Committee Q; Council", False),  # the kept text holds it
+    ("Committee P, Council", "Committee R; Committee Q; Council", True),
+    ("Committee Q, Council", "Committee R, Quality Council", True),       # a word's capital is no letter
+    ("Committee P, Council", "Committee R, Committee Q; Council", False),  # a comma listing is blanked
+    ("Committee R, Council", "Committee R and Committee Q, Council", False),  # R stands on its own
+    ("Hepatitis B, 2031", "Hepatitis B and Hepatitis C, 2031", False),
+    ("Hepatitis C, 2031", "Hepatitis B and C, 2031", False),
+    ("Committee Q - Council", "Committee R - Council", True),            # a dash ends the segment
     ("Committee Q, Council", "Committee, Council", False),                # no letter on that word
     ("Committee Q, Council", "Gadget Group R, Council", False),           # another word lettered
     ("Committee, Council", "Committee R, Council", False),                # nothing to compare
     ("Widget Pharmacology I/II, 2031", "Widget Pharmacology II, 2031", True),
     ("Widget Pharmacology I, 2031", "Widget Pharmacology I/II, 2031", False),
+    ("Widget Pharmacology I/II, 2031", "Widget Pharmacology I and II, 2031", False),
+    ("Widget Pharmacology I/II, 2031", "Widget Pharmacology I & II, 2031", False),
+    ("Widget Pharmacology I and II, 2031", "Widget Pharmacology II, 2031", True),
 ])
 def test_other_series_member(dropped, kept, other):
     assert _other_series_member(dropped, kept) is other
@@ -2724,3 +2766,65 @@ def test_a_kept_committee_name_that_is_not_a_string_is_no_narrower_body():
     kept = {"text": _NARROWER_KEPT["text"],
             "extracted_fields": {"committee_name": ["Gizmo Review Committee for Widgets"]}}
     assert _narrower_committee("P", dropped, kept) is None
+
+
+@pytest.mark.parametrize("kept_name, narrower", [
+    # a segment after the whole dropped name is where the committee sits, or
+    # its short name: stage 4 folds a P row's institution in after a comma
+    ("Gizmo Review Committee, Acme University", False),
+    ("Gizmo Review Committee; Acme University", False),
+    ("Gizmo Review Committee - GRC", False),
+    ("Gizmo Review Committee — GRC", False),
+    # a qualifier inside the segment that completes the dropped name counts
+    ("Gizmo Review Planning Committee, Acme University", True),
+    ("Gizmo Review Committee of Widgets, Acme University", True),
+    ("Gizmo Review Committee-Widgets", True),                   # a hyphen joins, it does not separate
+    ("Gizmo, Review Committee for Widgets", True),               # completed in the last segment
+    ("Gizmo Review, Acme University", False),                    # never holds the dropped name
+])
+def test_narrower_committee_reads_the_kept_name_up_to_the_dropped_one(kept_name, narrower):
+    name = "Gizmo Review Committee"
+    dropped = {"text": "Member, Gizmo Review Committee, 2030", "extracted_fields": {"committee_name": name}}
+    kept = {"text": f"Member, {kept_name}, 2030", "extracted_fields": {"committee_name": kept_name}}
+    assert _narrower_committee("P", dropped, kept) == (name if narrower else None)
+
+
+@pytest.mark.parametrize("code, kept_name, fields, narrower", [
+    ("Q2", "Gizmo Review Committee of the Widget Society", {"organization": "Widget Society"}, False),
+    ("Q2", "Gizmo Review Committee of the Widget Society", {}, True),
+    ("Q2", "Gizmo Review Committee of the Widget Society", {"notes": "Widget Society"}, True),
+    ("P", "Gizmo Review Committee of the Widget Society", {"institution": "Widget Society"}, False),
+    ("P", "Gizmo Review Committee of the Widget Society", {"organization": "Widget Society"}, True),
+    ("P", "Gizmo Review Committee of the Widget Society",
+     {"formatted_text": "Gizmo Review Committee, Widget Society"}, False),      # stage 5's rendering
+    ("P", "Gizmo Review Committee Member", {"role": "Member"}, False),
+    ("P", "Gizmo Review Committee Member", {}, True),
+])
+def test_a_qualifier_the_dropped_row_renders_in_a_field_is_stated(code, kept_name, fields, narrower):
+    # Only the fields the code's section renders count: P writes no organization.
+    dropped = {"text": "Gizmo Review Committee, 2030",
+               "extracted_fields": {"committee_name": "Gizmo Review Committee", **fields}}
+    kept = {"text": f"{kept_name}, 2030", "extracted_fields": {"committee_name": kept_name}}
+    assert (_narrower_committee(code, dropped, kept) is not None) is narrower
+
+
+def test_a_committee_whose_kept_name_adds_its_institution_after_a_comma_still_drops():
+    # The P row of the review: stage 4 folded the institution into the kept
+    # name. Both rows render the same committee.
+    kept = _committee("Member, Healthy Widget Executive Committee, Acme University, 2030-2032",
+                      "Healthy Widget Executive Committee, Acme University", role="Member",
+                      start_date="2030", end_date="2032")
+    dropped = _committee("Member, Healthy Widget Executive Committee, 2030-2032",
+                         "Healthy Widget Executive Committee", role="Member",
+                         start_date="2030", end_date="2032")
+    assert not _kept_both("P", dropped, kept)
+
+
+def test_a_committee_whose_organization_column_states_the_kept_qualifier_still_drops():
+    kept = _entry("Q2", "Member, Scientific Widget Committee of the Gizmo Society, 2030-2032",
+                  committee_name="Scientific Widget Committee of the Gizmo Society", role="Member",
+                  start_date="2030", end_date="2032")
+    dropped = _entry("Q2", "Member, Scientific Widget Committee, 2030-2032",
+                     committee_name="Scientific Widget Committee", organization="Gizmo Society",
+                     role="Member", start_date="2030", end_date="2032")
+    assert not _kept_both("Q2", dropped, kept)

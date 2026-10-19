@@ -322,6 +322,8 @@ def test_a_combined_row_holds_the_intern_and_the_resident_copies() -> None:
     ("Intern", "Resident", False),
     ("Fellowship", "Residency", False),
     ("Fellow", "Residency", False),
+    ("Interns", "Residents", False),                          # a plural names its level
+    ("Fellows", "Residency", False),
 ])
 def test_a_copy_drops_only_when_the_kept_type_names_every_level_it_names(
         dropped_type: str, kept_type: str, drops: bool) -> None:
