@@ -14,7 +14,8 @@ the template wording has drifted across revisions ("Clinical teaching" vs
 A code whose headers all miss falls back to the parent "EDUCATIONAL
 CONTRIBUTIONS" heading rather than dropping its entries.
 
-Entries render as a FLAT bulleted list under the template's own header. The
+Entries render as a FLAT list under the template's own header, without bullet
+glyphs since #1943 (WCM reviewers; a level is an indent step instead). The
 source CV's sub-headings are deliberately not carried over: the WCM subsections
 already are the taxonomy, and re-emitting the original hierarchy produced two
 competing levels of grouping.

@@ -27,6 +27,8 @@ way; see #841.)
 Bullet levels (#984): a multi-part entry ("title<TAB>hours<TAB>dates", or the
 same on separate lines) renders its first part as a level-0 bullet and every
 later part as a level-1 sub-bullet under it; a single-part entry is level 0.
+Since #1943 none of them carries a bullet glyph: a level is an indent step
+(`_apply_plain_list_indent`), as WCM reviewers asked.
 
 `_insert_multiline_as_bullets` is the bullet fallback used by all three
 subsections (L2 joined L1 and L3 in #572; it used the single-bullet inserter,
