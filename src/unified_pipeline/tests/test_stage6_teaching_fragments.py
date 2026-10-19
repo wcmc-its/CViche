@@ -1029,12 +1029,12 @@ def test_a_rejected_entry_written_from_its_fields_renders_one_bullet_per_record(
     """#1345, UXBHHF K4 89: 5c rejected the model's line, wrote the two
     records from their stage-4 fields, and stage 6 renders those lines (ISO
     date read as words, markdown off) where it rendered the fused raw line."""
-    raw = '4. Professional seminars: "Kite Physics (2011-05)" and "Pond Optics (2013)"'
+    raw = '4. Professional seminar: "Kite Physics (2011-05)", "Pond Optics (2013)"'
     records = [{"activity_title": "Kite Physics", "role": "Professional seminar", "date": "2011-05"},
                {"activity_title": "Pond Optics", "role": "Professional seminar", "date": "2013"}]
     fields = {**records[1], "stage4_records": records}
     assert _teaching_entry_lines(fields, raw, taxonomy_code="K4") == [
-        'Professional seminars: "Kite Physics (2011-05)" and "Pond Optics (2013)"']
+        'Professional seminar: "Kite Physics (2011-05)", "Pond Optics (2013)"']
     entry = {"text": raw, "taxonomy_code": "K4", "extracted_fields": fields}
     fields = {**fields, "formatted_text": s5c.fields_text(entry)}
     assert _teaching_entry_lines(fields, raw, taxonomy_code="K4") == [

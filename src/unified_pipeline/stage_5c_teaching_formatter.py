@@ -597,25 +597,41 @@ _OPEN_END = 'Present'
 _FIELDS_LINE = '{head} ({places})'
 _FIELDS_PLACE_SEPARATOR = '; '
 _FIELDS_HEAD_SEPARATOR = ', '
-# A plural in the source ("seminars") is carried by its singular in a field.
-_PLURAL_SUFFIX = 's'
-# Source words that are part of a date ("May 20, 2015", "2009-current"). The
-# fields line writes the date as stage 4 read it ("2015-05-20", "2009-Present"),
-# and the post-check already holds the line to the record's years.
-_MONTH_NAMES = frozenset({'january', 'february', 'march', 'april', 'june', 'july', 'august',
-                          'september', 'october', 'november', 'december'})
-_DATE_WORDS = _MONTH_NAMES | _OPEN_END_WORDS
+# The source's dates, which the fields line writes as stage 4 read them
+# ("May 20, 2015" as "2015-05-20", "2009-current" as "2009-Present"): the
+# post-check and the year check hold the line to them, so the word check
+# below leaves them out of both texts.
+_MONTH_WORD = (r'(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?'
+               r'|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?')
+_DAY = r'\d{1,2}(?:st|nd|rd|th)?\b'
+_DATE_SPAN = re.compile(
+    rf'\b{_MONTH_WORD}(?:\s*{_DAY}(?:\s*[-–]\s*{_DAY})?)?'
+    rf'|\b{_DAY}\s+{_MONTH_WORD}'
+    r'|(?<!\d)\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}(?!\d)'
+    r'|(?<!\d)\d{1,2}/(?:19|20)?\d{2}(?!\d)'
+    r'|(?<!\d)(?:19|20)\d{2}(?:-\d{1,2}(?!\d)){0,2}(?!\d)'
+    r'|\b(?:' + '|'.join(sorted(_OPEN_END_WORDS)) + r')\b')
+# A source line's list marker ("14.", "e.", "(3)", a bullet) numbers the CV's
+# list, it is not a word of the entry.
+_LIST_MARKER = re.compile(r'^\s*(?:\(?(?:\d{1,3}|[a-z]|[ivx]{1,4})[.)]|[•·*–—-])\s+')
+# A word: letters and digits. The fields line's punctuation (' - ', ', ',
+# ': ', '; ', the parentheses) is its template, not a word.
+_WORD_TOKEN = re.compile(r'[^\W_]+')
 FIELDS_SOURCE = 'stage_4_fields'
 
 
-def _fields_date(record: Mapping[str, Any]) -> str:
+def _fields_date(record: Mapping[str, Any]) -> str | None:
     """The record's date as its fields line writes it: `start-end` with an
-    open end written `Present`, else its one-off `date`."""
+    open end written `Present`, else its one-off `date`. None for a start
+    with no end: stage 4 keeps both "2009-" (open) and "2009" (one year) that
+    way, and writing "2009" would close an open range."""
     start = str(record.get('start_date') or '').strip()
     end = str(record.get('end_date') or '').strip()
     if end.lower() in _OPEN_END_WORDS:
         end = _OPEN_END
-    if start or end:
+    if start and not end:
+        return None
+    if end:
         return '-'.join(part for part in (start, end) if part)
     return _first_text(record, _RECORD_DATE_KEYS).strip()
 
@@ -624,15 +640,17 @@ def _fields_title(record: Mapping[str, Any]) -> str:
     """`code: title` for a K1 course, else the record's first title field."""
     title = _first_text(record, _FIELDS_TITLE_KEYS).strip()
     code = _first_text(record, (_FIELDS_CODE_KEY,)).strip()
-    if title and code and record.get('course_title') == title:
+    if title and code and str(record.get('course_title') or '').strip() == title:
         return f'{code}: {title}'
     return title
 
 
 def fields_line(record: Mapping[str, Any], entry_text: str) -> str | None:
     """One record's line written from its stage-4 fields, or None when it
-    has no title or a date with no year. The role is written only when the entry's own text holds
-    it, the prompt's role rule: stage 4 sometimes supplies one too
+    has no title, a date it cannot write (no year, or a start with no end),
+    or a place with its own parentheses, which would nest inside the line's
+    (DPEHSZ 292, EQGGRB 320). The role is written only when the entry's own
+    text holds it, the prompt's role rule: stage 4 sometimes supplies one too
     (BMYYOX's 'Lecturer', KHXOUF's 'Presenter'). A place the title already
     names ('LPCHS' in 'LPCHS ... Journal Club') is not repeated."""
     title = _fields_title(record)
@@ -645,9 +663,13 @@ def fields_line(record: Mapping[str, Any], entry_text: str) -> str | None:
     places = [place for place in dict.fromkeys(_first_text(record, (key,)).strip()
                                                for key in _FIELDS_PLACE_KEYS)
               if place and _normalized(place) not in _normalized(head)]
+    if any(bracket in place for place in places for bracket in '()'):
+        return None
     if places:
         head = _FIELDS_LINE.format(head=head, places=_FIELDS_PLACE_SEPARATOR.join(places))
     date = _fields_date(record)
+    if date is None:
+        return None
     if not date:
         return head
     if not _YEAR.search(date):
@@ -655,14 +677,30 @@ def fields_line(record: Mapping[str, Any], entry_text: str) -> str | None:
     return _RESTORED_DATE_LINE.format(date=date, line=head)
 
 
-def _source_words_missing(text: str, entry_text: str) -> list[str]:
-    """The entry text's words (of `_OVERLAP_WORD_MIN_CHARS`+ letters, date
-    words aside) that `text` does not hold, a plural counting as its singular."""
-    shown = _normalized(text)
-    words = dict.fromkeys(_OVERLAP_WORD.findall(_normalized(entry_text)))
-    return [word for word in words
-            if word not in _DATE_WORDS and word not in shown
-            and word.removesuffix(_PLURAL_SUFFIX) not in shown]
+def _content_words(text: str) -> set[str]:
+    """`text`'s words, dates and list markers aside, matched whole."""
+    lines = (_LIST_MARKER.sub('', _normalized(line)) for line in str(text).splitlines())
+    return set(_WORD_TOKEN.findall(_DATE_SPAN.sub(' ', ' '.join(lines))))
+
+
+def _dates_differ(text: str, entry_text: str) -> bool:
+    """Whether `text` shows other years than the source text (a range
+    standing for the years it spans: "1993-1997" for "1993, 1994, ... 1997"),
+    or no date where the source has one. A year only the source shows is a
+    date lost (BZZNRL 289 "autopsy, 2011, 2013" with no date field), one only
+    `text` shows is stage 4's misreading ("2013-5" as 2015, "11/19" as 2019)."""
+    if _years_shown(_normalized(text)) != _years_shown(_normalized(entry_text)):
+        return True
+    return bool(_DATE_SPAN.search(_normalized(entry_text))) and not _DATE_SPAN.search(
+        _normalized(text))
+
+
+def _word_mismatch(text: str, entry_text: str) -> tuple[list[str], list[str]]:
+    """(the entry text's words `text` lacks, `text`'s words the entry text
+    lacks), each sorted. Whole words of any length: 'stem' is not in
+    'system', and 'Not a keynote' is not 'keynote' (GKAQHB 166)."""
+    shown, source = _content_words(text), _content_words(entry_text)
+    return sorted(source - shown), sorted(shown - source)
 
 
 def fields_text(entry: Mapping[str, Any]) -> str | None:
@@ -670,11 +708,12 @@ def fields_text(entry: Mapping[str, Any]) -> str | None:
     (`fields_line`), or None.
 
     None unless every record has a line that passes `postcheck_line`, the
-    lines show no year the source text does not (stage 4 reads "2013-5" as
-    2015 and "11/19" as 2019), and they hold every word of the source text:
-    a word only the source holds (a description stage 4 left out, a label it
-    misread) would be lost, and the raw line, which keeps it, is rendered
-    instead.
+    lines show the source text's dates (`_dates_differ`), and, dates aside,
+    they hold exactly the source text's words (`_word_mismatch`). A word only the source holds (a
+    description stage 4 left out, a label it misread) would be lost, and a
+    word only a field holds (GKAQHB 166's audience '3rd-5th grade students'
+    for a source 'STEM day for 3rd-5th grade') would be invented; either way
+    the raw line, which keeps the source's words, is rendered instead.
     """
     entry_text = entry.get('text', '') or ''
     lines = []
@@ -684,9 +723,9 @@ def fields_text(entry: Mapping[str, Any]) -> str | None:
             return None
         lines.append(line)
     text = '\n'.join(lines)
-    if not _years_shown(_normalized(text)) <= _years_shown(_normalized(entry_text)):
+    if _dates_differ(text, entry_text) or any(_word_mismatch(text, entry_text)):
         return None
-    return None if _source_words_missing(text, entry_text) else text
+    return text
 
 
 # `accepted_formatted_text`'s reason prefix for an id the reply did not hold:
