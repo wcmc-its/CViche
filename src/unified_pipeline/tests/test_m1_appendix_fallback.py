@@ -97,6 +97,43 @@ def _summary(method: str, text: str) -> dict:
     return {"text": text, "generation_method": method, "word_count": len(text.split())}
 
 
+SUMMARY_TEXT = f"The {SUMMARY_TOKEN} program studies how widget surfaces wear under load."
+
+
+def _summary_paragraph(tmp_path, method: str, text: str = SUMMARY_TEXT):
+    """Render a CV with only a name line and a research summary produced by
+    *method*; return the one body paragraph that carries the summary text."""
+    summary = _summary(method, text)
+    entries = [{"text": "Name: Jane Q. Public, MD", "taxonomy_code": "A",
+                "extracted_fields": {}, "element_idx_start": 0}]
+    _render(tmp_path, entries, research_summary=summary)
+    body = Document(str(tmp_path / "out.docx")).element.body
+    hits = [p for p in body.iter(f"{_W_NS}p")
+            if SUMMARY_TOKEN in "".join(t.text or "" for t in p.iter(f"{_W_NS}t"))]
+    assert len(hits) == 1, f"expected the summary in exactly one paragraph, found {len(hits)}"
+    return hits[0]
+
+
+def test_owner_verbatim_research_summary_renders_as_plain_text(tmp_path):
+    """#1939: an existing_content summary IS the owner's own M1 text. It must not
+    be labelled as an "LLM Research Summary" tracked insertion. It is written in
+    the document font, and a stray control character in the owner's text is
+    stripped rather than failing the render (#552), as the tracked path does."""
+    para = _summary_paragraph(tmp_path, "existing_content", SUMMARY_TEXT.replace("program", "pro\x0bgram"))
+    assert list(para.iter(f"{_W_NS}ins")) == [], "owner's own text rendered as a tracked insertion"
+    runs = para.findall(f"{_W_NS}r")
+    assert "".join(t.text or "" for r in runs for t in r.iter(f"{_W_NS}t")) == SUMMARY_TEXT
+    assert [r.find(f"{_W_NS}rPr/{_W_NS}sz").get(f"{_W_NS}val") for r in runs] == ["22"]
+
+
+def test_generated_research_summary_renders_as_llm_tracked_insertion(tmp_path):
+    """A generated summary stays a tracked insertion attributed to the LLM."""
+    para = _summary_paragraph(tmp_path, "llm_generated")
+    insertions = list(para.iter(f"{_W_NS}ins"))
+    assert [ins.get(f"{_W_NS}author") for ins in insertions] == ["LLM Research Summary"]
+    assert SUMMARY_TOKEN in "".join(t.text or "" for t in insertions[0].iter(f"{_W_NS}t"))
+
+
 def _recoded_and_own_m1_entries() -> list[dict]:
     """An owner's own M1 research statement, plus a website line stage 3b's
     T-validation recoded from T to M1 (AUTOPSY-s7ab-batch-2026-10-02 class 11)."""
