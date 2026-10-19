@@ -240,7 +240,7 @@ def _apply_mentee_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     print()
     print("10b-2. Prose named-mentee corrections...")
-    entries, prose_mentee_stats = apply_prose_mentee_corrections(entries)
+    entries, prose_mentee_stats = apply_prose_mentee_corrections(entries, datetime.now().year)
     if prose_mentee_stats['corrections_made'] > 0:
         print(f"   ✓ Corrected {prose_mentee_stats['corrections_made']} prose mentee codes")
         for detail in prose_mentee_stats['correction_details'][:3]:

@@ -354,6 +354,21 @@ def test_plausible_year_bounds_are_inclusive(start_year, end_year, repairs):
         assert reformatted == {}
 
 
+# --- restore_closed_range=False: the caller withholds the repair (#1342) ---
+
+def test_restore_closed_range_false_leaves_a_dropped_end_dropped():
+    fields = {"mentee_name": "Redacted", "start_date": None, "end_date": None}
+    text = "Mentee: Redacted, 2018-2020, research mentorship"
+
+    kept, kept_reformatted = apply_regex_post_processing(text, dict(fields), "N1")
+    withheld, withheld_reformatted = apply_regex_post_processing(
+        text, dict(fields), "N1", restore_closed_range=False)
+
+    assert (kept["start_date"], kept["end_date"]) == ("2018", "2020")
+    assert (withheld["start_date"], withheld["end_date"]) == (None, None)
+    assert "end_date" not in withheld_reformatted and "end_date" in kept_reformatted
+
+
 # --- drift guard: DATE_RANGE_TAXONOMY_CODES vs. the live schema -----------
 
 def test_date_range_taxonomy_codes_matches_schema_derived_codes():

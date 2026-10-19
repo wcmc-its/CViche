@@ -869,6 +869,26 @@ def _date_tokens(record: Mapping[str, Any], code: str) -> set[str]:
                          if _is_date_key(key) and not _is_blank(value)))
 
 
+def _names_of_record(record: Mapping[str, Any], records: Sequence[Mapping[str, Any]]) -> list[str]:
+    """`record`'s non-date string values that no other record holds under
+    the same key, normalized: what names this record and no sibling."""
+    return [norm(value) for key, value in record.items()
+            if isinstance(value, str) and value.strip() and not _is_date_key(key)
+            and not any(other is not record and other.get(key) == value for other in records)]
+
+
+def _dated_on_own_line(record: Mapping[str, Any], records: Sequence[Mapping[str, Any]],
+                       segments: Sequence[str], code: str) -> bool:
+    """Whether one segment both names `record` by one of its own values and
+    holds every year its dates show: "Co-leader of ... program 2020-2021
+    Member of ..." for the co-leader's 2020-2021, though the segments are
+    out of step with the records above it (OIEPQD TVQZIP 116, #1342)."""
+    dates = _date_tokens(record, code)
+    own = _names_of_record(record, records)
+    return any(dates <= set(_tokens(segment)) and any(value in norm(segment) for value in own)
+               for segment in segments)
+
+
 def _unsourced_date_records(records: Sequence[Mapping[str, Any]], text: object,
                             code: str) -> set[int]:
     """The indexes of the records whose dates their own line does not give
@@ -882,7 +902,8 @@ def _unsourced_date_records(records: Sequence[Mapping[str, Any]], text: object,
     board term two lines up, copied onto an undated "Past-President" below
     two later terms) are not in the source for that record. A record above
     every dated line, and every record of an entry whose lines do not line
-    up, is left as stage 4 wrote it.
+    up, is left as stage 4 wrote it. So is a record whose dates sit on a
+    line that names it (`_dated_on_own_line`), wherever that line falls.
     """
     segments = _segments(text)
     if len(segments) != len(records):
@@ -893,7 +914,8 @@ def _unsourced_date_records(records: Sequence[Mapping[str, Any]], text: object,
         if _is_dated(segment):
             nearest_dated = segment
         elif nearest_dated is not None \
-                and not _date_tokens(record, code) <= set(_tokens(nearest_dated)):
+                and not _date_tokens(record, code) <= set(_tokens(nearest_dated)) \
+                and not _dated_on_own_line(record, records, segments, code):
             unsourced.add(i)
     return unsourced
 

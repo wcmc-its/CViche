@@ -1750,6 +1750,53 @@ def test_only_the_last_record_is_offered_the_entry_text(monkeypatch):
     assert sorted(out["reformatted_fields"]) == ["end_date", "start_date"]
 
 
+def _two_record_entry(monkeypatch, text: str, last: dict, first_extra: dict | None = None) -> dict:
+    """`text` as one P entry whose reply is a dated first record and `last`."""
+    entry = {"text": text, "taxonomy_code": "P", "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, "committee_name": "Fern Council",
+                                    "start_date": "2001", "end_date": "2005", **(first_extra or {})},
+                                   {"entry_index": 0, **last}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    return out
+
+
+def test_a_last_record_named_after_the_range_is_not_given_it(monkeypatch):
+    # RINASX 455 (#1342): the range dates an earlier clause, and the last
+    # record, named after it, is undated in the source.
+    out = _two_record_entry(monkeypatch, "Fern Council 2001-2005; Glade Board",
+                            {"committee_name": "Glade Board"})
+    last = out["extracted_fields"][STAGE4_RECORDS_KEY][-1]
+    assert (last.get("start_date"), last.get("end_date")) == (None, None)
+    assert (out["extracted_fields"].get("start_date"), out["extracted_fields"].get("end_date")) == (None, None)
+    assert "reformatted_fields" not in out
+
+
+def test_a_last_record_the_text_does_not_name_is_not_given_the_range(monkeypatch):
+    out = _two_record_entry(monkeypatch, "Fern Council 2001-2005; and a second board",
+                            {"committee_name": "Glade Board"})
+    assert out["extracted_fields"][STAGE4_RECORDS_KEY][-1].get("end_date") is None
+
+
+def test_a_value_the_last_record_shares_does_not_place_it(monkeypatch):
+    # "Ashby" is every record's institution: written before the range, it
+    # names the entry, not the last record (WYMVGU 865 shape).
+    out = _two_record_entry(monkeypatch, "Ashby: 2001-2005 Fern Council; and a second board",
+                            {"committee_name": "Glade Board", "institution": "Ashby"},
+                            first_extra={"institution": "Ashby"})
+    assert out["extracted_fields"][STAGE4_RECORDS_KEY][-1].get("end_date") is None
+
+
+def test_a_record_named_between_the_last_and_the_range_keeps_it(monkeypatch):
+    # The range follows Fern Council, the record named after Glade Board.
+    out = _two_record_entry(monkeypatch, "Glade Board; Fern Council 2001-2005",
+                            {"committee_name": "Glade Board"})
+    assert out["extracted_fields"][STAGE4_RECORDS_KEY][-1].get("end_date") is None
+
+
 def test_records_that_cover_the_entry_skip_the_recovery_call(monkeypatch):
     # The last item alone covers a fifth of a long dated entry, which sends it
     # to recovery; the five items together cover all of it.

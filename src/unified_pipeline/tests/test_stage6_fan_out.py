@@ -1570,6 +1570,26 @@ class TestStage4RecordDates:
         assert all(c['extracted_fields']['start_date'] for c in children)
 
 
+    def test_a_record_named_beside_its_dates_keeps_them_off_step(self):
+        # OIEPQD TVQZIP 116 (#1342): four lines, four records, out of step
+        # with each other. The co-leader's 2020-2021 is on the line that names
+        # it, so it stays; the undated member after it gets none.
+        text = ('2018.01 - Zqchair\tDepartment of Zqpathology\tAdjunct Professor, Zqsurgery\t'
+                'Co-leader of Zqtherapeutics program 2020-2021 Member of Zqcancer Center')
+        records = [{'title': 'Zqchair', 'institution': 'Department of Zqpathology',
+                    'start_date': '2018-01', 'end_date': 'present'},
+                   {'title': 'Adjunct Professor', 'institution': 'Zqsurgery'},
+                   {'title': 'Co-leader of Zqtherapeutics program', 'institution': None,
+                    'start_date': '2020', 'end_date': '2021'},
+                   {'title': 'Member', 'institution': 'Zqcancer Center'}]
+        children = _fan4(_stage4_entry(records, code='D1', text=text))
+        dates = {c['extracted_fields']['title']: (c['extracted_fields'].get('start_date'),
+                                                  c['extracted_fields'].get('end_date'))
+                 for c in children}
+        assert dates['Co-leader of Zqtherapeutics program'] == ('2020', '2021')
+        assert dates['Member'] == (None, None)
+
+
 class TestStage4RepeatedRows:
     def _talk(self, date, title='Zqsafety talk'):
         return {'title': title, 'location': 'Ashby', 'date': date,

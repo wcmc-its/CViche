@@ -1808,7 +1808,9 @@ def split_joined_journals(
 def apply_regex_post_processing(
     original_text: str,
     extracted_fields: ExtractedFields,
-    taxonomy_code: str
+    taxonomy_code: str,
+    *,
+    restore_closed_range: bool = True,
 ) -> tuple[ExtractedFields, ReformattedFields]:
     """
     Apply regex patterns to catch identifiers missed by LLM extraction.
@@ -1831,6 +1833,10 @@ def apply_regex_post_processing(
         original_text: Original CV entry text
         extracted_fields: Fields extracted by LLM
         taxonomy_code: Entry taxonomy code (e.g., S1, M2A)
+        restore_closed_range: False skips `reconcile_date_range`. The last
+            record of a multi-record entry passes False when the entry's one
+            closed range dates another record's clause
+            (`extraction._range_dates_last_record`, RINASX 455, #1342)
 
     Returns:
         Tuple of (updated_fields, reformatted_fields)
@@ -1893,7 +1899,7 @@ def apply_regex_post_processing(
     if taxonomy_code in POSITION_TAXONOMY_CODES:
         reduce_unstated_month(original_text, updated, reformatted)
 
-    if taxonomy_code in DATE_RANGE_TAXONOMY_CODES:
+    if restore_closed_range and taxonomy_code in DATE_RANGE_TAXONOMY_CODES:
         reconcile_date_range(original_text, updated, reformatted)
 
     if taxonomy_code in POSITION_TAXONOMY_CODES:

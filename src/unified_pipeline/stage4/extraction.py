@@ -35,6 +35,7 @@ from unified_pipeline.llm_provenance import (
 )
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
+    CLOSED_DATE_RANGE_PATTERN,
     JOURNAL_LIST_TAXONOMY_CODES,
     POSITION_TAXONOMY_CODES,
     ReformattedFields,
@@ -276,8 +277,9 @@ class _EntryExtraction(NamedTuple):
     records_returned: int
 
 
-def _clean_item(entry_text: str, item_fields: dict[str, Any],
-                taxonomy_code: str) -> tuple[dict[str, Any], ReformattedFields]:
+def _clean_item(entry_text: str, item_fields: dict[str, Any], taxonomy_code: str,
+                *, restore_closed_range: bool = True,
+                ) -> tuple[dict[str, Any], ReformattedFields]:
     """One reply item's fields, coerced, date-normalized and regex-completed.
 
     Declared `dict[str, Any]`, not `ExtractedFields`: the input is unvalidated
@@ -287,8 +289,47 @@ def _clean_item(entry_text: str, item_fields: dict[str, Any],
     """
     fields = coerce_field_value_types(item_fields)
     fields = normalize_dates(fields)
-    cleaned, reformatted = apply_regex_post_processing(entry_text, fields, taxonomy_code)
+    cleaned, reformatted = apply_regex_post_processing(
+        entry_text, fields, taxonomy_code, restore_closed_range=restore_closed_range)
     return dict(cleaned), reformatted
+
+
+def _own_values(item: dict[str, Any], items: list[dict[str, Any]]) -> list[str]:
+    """`item`'s string values that no other item holds under the same key:
+    what names that record rather than the entry around it."""
+    return [value.strip() for key, value in item.items()
+            if isinstance(value, str) and value.strip()
+            and not any(other is not item and other.get(key) == value for other in items)]
+
+
+def _first_positions(text: str, values: list[str]) -> list[int]:
+    """Where each of `values` is first written in `text`, for those it holds."""
+    return [position for position in (text.find(value) for value in values) if position >= 0]
+
+
+def _range_dates_last_record(entry_text: str, items: list[dict[str, Any]]) -> bool:
+    """Whether the entry's one closed date range may fill the last item's dates.
+
+    One item: yes, as always. Several: only when the last record is the
+    record the text names just before the range ("Fern Council; Glade Board
+    2001-2005"): its own values are all first written before the range, and
+    no other record's own value is first written between them and the range.
+    A last record named after the range, or not named in the text at all,
+    sits in a clause the range does not date: "...1993-1995, 1997. ... g)
+    Craig Foundation" gave the undated Craig Foundation that span (RINASX
+    455, #1342; 7 distinct entries in 6 distinct CVs, none of them dated by it).
+    Text with no single range is a yes: the repair finds nothing to restore.
+    """
+    ranges = list(CLOSED_DATE_RANGE_PATTERN.finditer(entry_text))
+    if len(items) < _MIN_RECORDS_PER_ENTRY or len(ranges) != 1:
+        return True
+    range_start = ranges[0].start()
+    named_at = _first_positions(entry_text, _own_values(items[-1], items))
+    if not named_at or max(named_at) >= range_start:
+        return False
+    others_at = _first_positions(entry_text, [value for item in items[:-1]
+                                              for value in _own_values(item, items)])
+    return not any(max(named_at) < position < range_start for position in others_at)
 
 
 def _union_of_records(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -384,14 +425,17 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
     percent effort, the one closed date range). With several records that
     value belongs to one of them at most, so only the last record, the one
     the entry kept before, is offered the text; an earlier one gets the
-    text-free cleanups alone.
+    text-free cleanups alone. The entry's one closed date range reaches the
+    last record only when the text dates that record with it
+    (`_range_dates_last_record`).
 
     A second record the model filed under an off-schema key follows the
     record it came from (`_offschema_records`). `records_returned` stays the
     count of items the model returned.
     """
     cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
-    cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code))
+    cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code,
+                               restore_closed_range=_range_dates_last_record(entry_text, items)))
     last_reformatted = cleaned[-1][1]
     if taxonomy_code in POSITION_TAXONOMY_CODES:
         outer = split_parenthetical_title_span(entry_text, cleaned[-1][0], last_reformatted)
