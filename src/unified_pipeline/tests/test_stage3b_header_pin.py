@@ -267,6 +267,58 @@ def test_q3_sub_heading_overrides_only_q2():
     assert n == 0 and out == entry
 
 
+# --- #1938: an O or K3 answer under an N1 sub-heading ---------------------------
+
+N1_HEADING = ("MENTORING", "Leadership and mentoring in programs")
+N1_CTX = _ctx(meta=_node("MENTORING", "N3", 0.5), section=_node("Leadership and mentoring in programs", "N1"))
+
+
+def test_n1_leaf_pins_under_a_disagreeing_parent():
+    assert pinned_header_code(N1_CTX) is None
+    assert leaf_header_code(N1_CTX) == "N1"
+
+
+@pytest.mark.parametrize("code", ["O", "K3"])
+@pytest.mark.parametrize("text", [
+    "2031-present Director, Example Fellowship Program, Example Hospital",
+    "2031-present Assistant Designated Institutional Officer, Example Hospital",
+    "2031 Faculty, Example T32 Training Program",
+])
+def test_o_or_k3_under_an_n1_sub_heading_becomes_n1(code, text):
+    (out,), n = apply_header_pin([_row(code, text, confidence=0.8, hierarchy=N1_HEADING)], N1_CTX)
+    assert n == 1 and out["taxonomy_code"] == "N1" and out["pre_pin_code"] == code
+    assert "category N1" in out["classification_reasoning"]
+
+
+@pytest.mark.parametrize("code", ["N3A", "N3B", "N4", "N2", "D1", "K1", "Q2"])
+def test_n1_sub_heading_leaves_mentee_and_other_codes_alone(code):
+    entry = _row(code, "2031 Example Trainee, MD: Example research project", hierarchy=N1_HEADING)
+    (out,), n = apply_header_pin([entry], N1_CTX)
+    assert n == 0 and out == entry
+
+
+def test_n1_sub_heading_below_the_floor_does_not_pin():
+    below = _ctx(meta=_node("MENTORING", "N3", 0.5),
+                 section=_node("Leadership and mentoring in programs", "N1", HEADER_PIN_MIN_CONFIDENCE - 0.01))
+    entry = _row("O", "2031-present Director, Example Fellowship Program", hierarchy=N1_HEADING)
+    (out,), n = apply_header_pin([entry], below)
+    assert n == 0 and out == entry
+
+
+def test_o_under_a_non_n1_heading_is_untouched():
+    ctx = _ctx(meta=_node("MENTORING", "N3"), section=_node("Mentees", "N3B"))
+    entry = _row("O", "2031-present Director, Example Fellowship Program", hierarchy=("MENTORING", "Mentees"))
+    (out,), n = apply_header_pin([entry], ctx)
+    assert n == 0 and out == entry
+
+
+def test_n1_pin_skips_a_fallback_answer():
+    entry = {**_row("O", "2031-present Director, Example Fellowship Program", hierarchy=N1_HEADING),
+             "classification_source": "fallback"}
+    (out,), n = apply_header_pin([entry], N1_CTX)
+    assert n == 0 and out == entry
+
+
 # --- YUYVIG (#1577): an unsure grant answer under an H pin --------------------------
 
 H_CTX = _ctx(meta=_node("Awards and Honors", "H"))
