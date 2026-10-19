@@ -654,6 +654,15 @@ OVERFLOW_OTHER_MIN_CHARS = 1000
 # 64 under Academic Appointments, Current Funding, Leadership and Clinical
 # Innovations, with its Appendix line cut mid-word).
 _NO_OVERFLOW_CODE = 'M1'
+# Sections whose entries carry no bullet (#1943, WCM reviewers): K Educational
+# Contributions and L Clinical Practice, Innovation and Leadership. Their own
+# writers pass bulleted=False; the recovery and overflow writers read this.
+UNBULLETED_CODE_PREFIXES = ('K', 'L')
+
+
+def _renders_unbulleted(taxonomy_code: str) -> bool:
+    """Whether an entry of `taxonomy_code` is written without a bullet."""
+    return taxonomy_code.startswith(UNBULLETED_CODE_PREFIXES)
 
 
 def _has_formatted_text(entry: Mapping[str, Any]) -> bool:
@@ -3408,7 +3417,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     if header_idx is not None:
                         section_end_idx = self._find_section_end_paragraph_idx(header_idx)
                         if section_end_idx is not None:
-                            overflow_para = self._insert_overflow_bullet(section_end_idx, original_text)
+                            overflow_para = self._insert_overflow_bullet(
+                                section_end_idx, original_text,
+                                bulleted=not _renders_unbulleted(taxonomy_code))
                             if overflow_para:
                                 self._add_word_comment(
                                     overflow_para,
@@ -3430,7 +3441,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if section_end_idx is not None:
                 # Insert overflow bullet just before the next section header
-                overflow_para = self._insert_overflow_bullet(section_end_idx, original_text)
+                overflow_para = self._insert_overflow_bullet(
+                    section_end_idx, original_text, bulleted=not _renders_unbulleted(taxonomy_code))
                 if overflow_para:
                     # Add explanatory comment (blue text + comment = reviewer signal)
                     self._add_word_comment(
@@ -3453,7 +3465,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Last section or lookup failed — fall back to appendix, keep original in place
                 self._route_overflow_to_appendix(entry, coverage_pct)
 
-    def _insert_overflow_bullet(self, insert_idx: int, text: str) -> Paragraph | None:
+    def _insert_overflow_bullet(self, insert_idx: int, text: str,
+                                bulleted: bool = True) -> Paragraph | None:
         """Insert overflow content as tracked-change bullet(s) preserving original structure.
 
         Each tab-separated segment from the original CV becomes its own paragraph,
@@ -3463,6 +3476,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
           - Label segments ending with ':': ilvl=1 (section labels)
           - Content after a label: ilvl=2 (detail content)
           - Everything else: ilvl=1 (dates, institution context)
+
+        `bulleted=False` writes the same levels without bullets, on the indent
+        grid of the section's own unbulleted entries (#1943).
 
         Returns the first created paragraph, or None if insertion failed.
         """
@@ -3511,18 +3527,21 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             first_para = None
             for idx, (seg_text, level) in enumerate(reversed(list(zip(clean_segments, levels)))):
                 para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-                self._apply_list_bullet(para, level=level)
+                if bulleted:
+                    self._apply_list_bullet(para, level=level)
 
-                # Override indentation so ilvl=0 bullet sits at the left margin.
-                pPr = para._p.get_or_add_pPr()
-                existing_ind = pPr.find(qn('w:ind'))
-                if existing_ind is not None:
-                    pPr.remove(existing_ind)
-                ind = OxmlElement('w:ind')
-                left = INDENT_PER_LEVEL * (level + 1)
-                ind.set(qn('w:left'), str(left))
-                ind.set(qn('w:hanging'), str(HANGING))
-                pPr.append(ind)
+                    # Override indentation so ilvl=0 bullet sits at the left margin.
+                    pPr = para._p.get_or_add_pPr()
+                    existing_ind = pPr.find(qn('w:ind'))
+                    if existing_ind is not None:
+                        pPr.remove(existing_ind)
+                    ind = OxmlElement('w:ind')
+                    left = INDENT_PER_LEVEL * (level + 1)
+                    ind.set(qn('w:left'), str(left))
+                    ind.set(qn('w:hanging'), str(HANGING))
+                    pPr.append(ind)
+                else:
+                    self._apply_plain_list_indent(para, level=level)
 
                 run = para.add_run(seg_text)
                 _set_font(run)
@@ -3817,7 +3836,10 @@ Now analyze the text above:"""
 
             run = new_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
-            self._apply_list_bullet(new_para, level=0)
+            if _renders_unbulleted(taxonomy_code):
+                self._apply_plain_list_indent(new_para, level=0)
+            else:
+                self._apply_list_bullet(new_para, level=0)
 
             # Add explanatory comment
             self._add_word_comment(
