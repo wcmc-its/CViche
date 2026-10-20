@@ -29,22 +29,33 @@ stage 3b reads that way when its batch holds none of the list's lead-in.
 
 Reads stage 3b only: the code, the heading path stage 2 gave the entry, and
 its text. One finding per shape and heading path, naming up to three entries.
+
+`lint_pinned_heading_empty` (#1949) is the one lint here that also reads
+stage 3a: a heading 3a mapped to code X at the header-pin floor whose entries
+3b coded anything but X, so X's template slot gets none of them (XAXVYB's
+N1 heading, #1938).
 """
 
+import copy
 import re
 from collections import Counter, defaultdict
 from typing import NamedTuple
 
+from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
+from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_context
 from unified_pipeline.stage3b.header_pin import (
     _GRANT_CODES,
     _GRANT_MARKER,
     _PI_ROLE_LEAD,
+    HEADER_PIN_MIN_CONFIDENCE,
 )
+from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     heading_names_teaching_role,
     names_teaching_or_authorship_role,
 )
+from unified_pipeline.stage_6_word_template import RENDER_ROUTED_CODES
 
 from ..shared import _finding
 
@@ -427,3 +438,81 @@ def lint_section_consistency(stage3b: dict) -> list[dict]:
     return [_finding("section_consistency", SHAPE_SEVERITY.get(shape, SECTION_CONSISTENCY_SEVERITY),
                      *_group_message(shape, expected, path, members))
             for (shape, expected, path), members in groups.items()]
+
+
+#: Severity of a confidently mapped heading none of whose entries got its code.
+#: INFO, not WARN: on 418 local runs it fired 59 times on 32 runs, 14 true and
+#: 7 partial (doctor/PRECISION.md, PHE-1). Most of the rest were correctly
+#: coded rows stage 2 put under the wrong heading (talks under a service
+#: sub-heading), a real defect but not the one this lint names (#1949).
+PINNED_HEADING_EMPTY_SEVERITY = "INFO"
+
+#: Stage 3b's heading context stops at three levels (`get_taxonomy_context`):
+#: a deeper heading is judged by its third level, as stage 3b judged it.
+_TAXONOMY_CONTEXT_DEPTH = 3
+
+_NON_RECORD_ELEMENT_TYPES = frozenset({"header", "break"})
+
+
+def _has_template_slot(code: str) -> bool:
+    """Stage 6 routes the code, or a child of it (N3 -> N3A/N3B)."""
+    return any(routed.startswith(code) for routed in RENDER_ROUTED_CODES)
+
+
+def _same_family(code: str, other: str) -> bool:
+    """One taxonomy letter (M2A/M2B, S1/S8, K1/K2): a grant-status or
+    publication-type call within a family is the model's to make, not an
+    empty section (most of the 552 hits before this rule, PHE-1)."""
+    return code[:1] == other[:1]
+
+
+def _leaf_heading_code(path: tuple[str, ...], mapping_index: dict) -> str | None:
+    """The code stage 3a gave the entry's own (deepest, up to three) heading
+    at or above HEADER_PIN_MIN_CONFIDENCE, else None. Only that level counts:
+    a confident MENTORING parent says nothing about rows under an unmapped or
+    differently mapped sub-heading."""
+    context = get_taxonomy_context(list(path), mapping_index)
+    level = (context.meta_section, context.section, context.subsection)[len(path) - 1]
+    options = (level or {}).get("taxonomy_options")
+    if not options:
+        return None
+    top = max(options, key=lambda option: option["confidence"])
+    return live_taxonomy_code(top["code"]) if top["confidence"] >= HEADER_PIN_MIN_CONFIDENCE else None
+
+
+def lint_pinned_heading_empty(stage3b: dict, stage3a: dict) -> list[dict]:
+    """A heading stage 3a mapped to X at the header-pin floor whose records
+    stage 3b coded outside X's family, while no entry anywhere in the CV is X
+    or a child of X, where X has a template slot (#1949). X's slot renders
+    empty and the heading's rows land elsewhere. Notes (T) are not records.
+    One finding per heading."""
+    mappings = copy.deepcopy(stage3a.get("mappings") or [])
+    _normalize_taxonomy_mappings(mappings)
+    mapping_index = build_mapping_index(mappings)
+
+    records = [entry for raw, entry in zip(stage3b.get("entries", []), _classified_entries(stage3b),
+                                           strict=True)
+               if raw.get("element_type") not in _NON_RECORD_ELEMENT_TYPES
+               and entry.code != UNCLASSIFIED_CODE]
+    cv_codes = {live_taxonomy_code(entry.code) for entry in records}
+    by_heading: dict[tuple[str, ...], list[_ClassifiedEntry]] = defaultdict(list)
+    for entry in records:
+        if entry.heading_path:
+            by_heading[entry.heading_path[:_TAXONOMY_CONTEXT_DEPTH]].append(entry)
+
+    findings = []
+    for path, entries in by_heading.items():
+        expected = _leaf_heading_code(path, mapping_index)
+        if expected is None or not _has_template_slot(expected):
+            continue
+        if any(code.startswith(expected) for code in cv_codes):
+            continue
+        if any(_same_family(live_taxonomy_code(e.code), expected) for e in entries):
+            continue
+        message, evidence = _group_message("pinned_heading_empty", f"{expected} (stage 3a mapped "
+                                           f"this heading to {expected} at >= {HEADER_PIN_MIN_CONFIDENCE}, "
+                                           f"and no entry in the CV is {expected})",
+                                           path, entries)
+        findings.append(_finding("pinned_heading_empty", PINNED_HEADING_EMPTY_SEVERITY,
+                                 message, evidence))
+    return findings

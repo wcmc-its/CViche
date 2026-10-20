@@ -18,8 +18,10 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.doctor.lints.classification import (  # noqa: E402
     S5_MIN_SIBLINGS,
     SECTION_CONSISTENCY_EVIDENCE_MAX,
+    lint_pinned_heading_empty,
     lint_section_consistency,
 )
+from unified_pipeline.stage3b.header_pin import HEADER_PIN_MIN_CONFIDENCE  # noqa: E402
 
 _ARTICLE = "Quill AB, Brook CD. A trial of things. J Invented Med. 2019;12(3):101-110."
 _GUIDELINE = "Panel EF, Quill AB. Practice guideline for widgets. J Invented Med. 2021;14(1):82-113."
@@ -598,3 +600,100 @@ def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
 ])
 def test_fellowship_shapes_that_are_quiet_1577(text, code, headings):
     assert _run(_entry(text, code, *headings)) == []
+
+
+# --- pinned_heading_empty (#1949) ------------------------------------------
+
+def _node(title, code, confidence, *children, alternative=None):
+    options = [{"code": code, "confidence": confidence}]
+    if alternative:
+        options.append({"code": alternative, "confidence": round(1 - confidence, 2)})
+    return {"title": title, "taxonomy_options": options, "children": list(children)}
+
+
+_MENTORING_3A = {"mappings": [
+    _node("MENTORING", "N3", 0.5, _node("Leadership and mentoring in programs", "N1", 1.0),
+          alternative="N1")]}
+_N1_PATH = ("MENTORING", "Leadership and mentoring in programs")
+_DIRECTOR = "2018-present Director, Invented Scholars Training Program"
+_CO_DIRECTOR = "2016-2020 Co-Director, Invented Summer Research Program"
+
+
+def _pinned(stage3a, *entries):
+    return lint_pinned_heading_empty({"entries": list(entries)}, stage3a)
+
+
+def test_n1_heading_whose_rows_all_went_to_o_is_reported_1949():
+    findings = _pinned(
+        _MENTORING_3A,
+        _entry("Describe activity; include dates", "T", *_N1_PATH, idx=266),
+        _entry(_DIRECTOR, "O", *_N1_PATH, idx=268),
+        _entry(_CO_DIRECTOR, "O", *_N1_PATH, idx=270))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "pinned_heading_empty"
+    assert findings[0]["severity"] == "INFO"
+    assert ("2 entries under 'MENTORING > Leadership and mentoring in programs' coded O"
+            in findings[0]["message"])
+    assert "N1 (stage 3a mapped" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("entry 268 (O): ")
+
+
+def test_one_row_coded_the_heading_code_keeps_it_quiet_1949():
+    findings = _pinned(_MENTORING_3A, _entry(_DIRECTOR, "N1", *_N1_PATH),
+                       _entry(_CO_DIRECTOR, "O", *_N1_PATH))
+    assert findings == []
+
+
+def test_the_code_elsewhere_in_the_cv_fills_the_slot_1949():
+    findings = _pinned(_MENTORING_3A, _entry(_DIRECTOR, "O", *_N1_PATH),
+                       _entry(_CO_DIRECTOR, "N1", "MENTORING"))
+    assert findings == []
+
+
+@pytest.mark.parametrize("code", ["N3A", "N4"])
+def test_a_row_in_the_same_family_keeps_it_quiet_1949(code):
+    """M2B under a heading mapped M2A is a grant-status call, not an empty section."""
+    findings = _pinned(_MENTORING_3A, _entry(_DIRECTOR, "O", *_N1_PATH),
+                       _entry(_CO_DIRECTOR, code, *_N1_PATH))
+    assert findings == []
+
+
+def test_a_heading_holding_only_notes_is_quiet_1949():
+    findings = _pinned(_MENTORING_3A, _entry("Describe activity; include dates", "T", *_N1_PATH))
+    assert findings == []
+
+
+def test_child_code_fills_a_parent_mapping_1949():
+    """MENTORING mapped N3 is filled by N3A/N3B rows: N3 has no slot of its own."""
+    stage3a = {"mappings": [_node("MENTORING", "N3", 0.97)]}
+    findings = _pinned(stage3a, _entry("2019-2021 Invented Student, MD candidate", "N3A", "MENTORING"),
+                       _entry("2020 Invented Fellow, postdoctoral", "N3B", "MENTORING"))
+    assert findings == []
+
+
+def test_confident_parent_does_not_judge_rows_under_its_sub_heading_1949():
+    """Only the entry's own heading counts: a confident parent over an
+    unmapped sub-heading whose rows got other codes is quiet."""
+    stage3a = {"mappings": [_node("MENTORING", "N1", 0.99, {"title": "Current mentees"})]}
+    findings = _pinned(stage3a, _entry("2021 Invented Student", "K2", "MENTORING", "Current mentees"))
+    assert findings == []
+
+
+def test_heading_below_the_pin_floor_is_quiet_1949():
+    stage3a = {"mappings": [_node("MENTORING", "N3", 0.5, _node(
+        "Leadership and mentoring in programs", "N1", HEADER_PIN_MIN_CONFIDENCE - 0.01))]}
+    findings = _pinned(stage3a, _entry(_DIRECTOR, "O", *_N1_PATH))
+    assert findings == []
+
+
+def test_heading_rows_and_unmapped_headings_are_ignored_1949():
+    header = {**_entry("Leadership and mentoring in programs", "O", *_N1_PATH), "element_type": "header"}
+    elsewhere = _entry("2018 Member, Invented Committee", "P", "COMMITTEES")
+    assert _pinned(_MENTORING_3A, header, elsewhere) == []
+
+
+def test_malformed_stage3a_options_are_dropped_not_raised_1949():
+    stage3a = {"mappings": [{"title": "MENTORING", "taxonomy_options": [
+        "N1", {"confidence": 1.0}, {"code": "N1", "confidence": "high"}]}]}
+    assert _pinned(stage3a, _entry(_DIRECTOR, "O", "MENTORING")) == []
+    assert stage3a["mappings"][0]["taxonomy_options"][0] == "N1", "the loaded artifact is not mutated"

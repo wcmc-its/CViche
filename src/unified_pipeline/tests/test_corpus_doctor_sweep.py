@@ -111,6 +111,7 @@ def test_stage_finds_source_docx_under_flat_layout_input_dir(tmp_path):
 _EXPECTED_SUFFIX_DIRS = {
     "_segmented.json": "stage_1a_segmentation",
     "_entries.json": "stage_2_entry_extraction",
+    "_header_taxonomy.json": "stage_3a_header_mappings",
     "_classified.json": "stage_3b_classified_entries",
     "_fields.json": "stage_4_field_extraction",
     "_enriched.json": "stage_5_enrichment",
