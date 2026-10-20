@@ -755,7 +755,7 @@ def test_recovered_row_dropped_when_confirmed_only_by_a_different_records_render
         "text": ("Award Source: | Fictional Research Foundation\n"
                  "Project title: | Synthetic Tools for Data Curation\n"
                  "Duration of support: | 2021-2022"),
-        "taxonomy_code": "M2B",
+        "taxonomy_code": "M2C",  # past tables omit the effort row (#1944)
         "element_idx_start": 500,
         "element_idx_end": 500,
         "extracted_fields": {
@@ -770,7 +770,7 @@ def test_recovered_row_dropped_when_confirmed_only_by_a_different_records_render
     row = {"text": "Your percent (%) effort: | 5%",
            "taxonomy_code": "T", "recovered_row": True,
            "parent_idx": 500, "element_idx_start": "500.0",
-           "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+           "extracted_fields": {}, "hierarchy": ["Pending Funding"]}
     entries = [_RECOVERY_OWNER_ENTRY, grant_entry, row]
 
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
