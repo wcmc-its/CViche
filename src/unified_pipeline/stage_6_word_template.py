@@ -3898,7 +3898,8 @@ Now analyze the text above:"""
         `_subpoint_lines` already holds the appointment-title duties the
         positions writer made sub-points (`_add_title_duties`); they join the
         haystack, so the same duties are not planned again from the entry's
-        text."""
+        text. The row-receipt ledger says which rows each entry wrote: a
+        degree's prose goes only under its own (`supplementary._own_degree_rows`)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(
@@ -3908,7 +3909,8 @@ Now analyze the text above:"""
         candidates = list(supplementary.anchor_candidates(self.doc, appendix))
         planned = supplementary.plan_subpoints(entries_by_code, haystack, candidates,
                                                self._subpoint_section_spans(),
-                                               self._subpoint_excluded_tables)
+                                               self._subpoint_excluded_tables,
+                                               self._row_receipts.elements_for)
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:

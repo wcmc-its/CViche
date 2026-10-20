@@ -2622,6 +2622,247 @@ def test_one_mentees_two_periods_on_one_line_keep_its_prose():
     assert _mentee_named_by(row) == "Ana Li" and _deleted_texts(gen) == line
 
 
+# --- #1205: B1 degrees, the next code family ----------------------------------
+# The education section writes every B1 entry as a row of its four-column
+# table, so the prose is a deleted row under the degree's own row: the row the
+# education writer recorded for that entry (the row-receipt ledger).
+
+_THESIS = ("Thesis: Seasonal variation of nitrogen fixation in coastal wetland soils "
+           "under experimental warming")
+_DEGREE_FIELD = "Example Marine Studies"
+
+
+def _degree(idx=19, degree="M.S.", year="2001", prose=_THESIS, code="B1", *,
+            discipline=_DEGREE_FIELD, institution="Norvale University", **fields):
+    """A degree whose source line goes on past the degree, field, institution
+    and year into its thesis, as YUYVIG FMIGLR 19's did. "M.S." and "Ph.D."
+    hold no five-letter word, so another degree of the same field and
+    institution shares every distinctive word of its row (`_doctorate`). A
+    value passed as None is in neither the line nor the fields."""
+    named = {"degree": degree, "discipline": discipline, "institution": institution, "year": year}
+    line = ", ".join(value for value in named.values() if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _doctorate():
+    """A later degree of the same field and institution, with no prose: it
+    renders first, reverse chronologically."""
+    return _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+
+
+def _render_education(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_education(entries)
+    gen._add_supplementary_subpoints({"B1": entries})
+    return gen
+
+
+def _row_text(tr):
+    return "".join(t.text or "" for t in tr.iter(qn("w:t")))
+
+
+def _degree_table_row():
+    """The same degree read from a source table: stage 2 joins the row's
+    cells with pipes, and its position names the row ("96.3")."""
+    entry = _degree()
+    entry["element_idx_start"] = "96.3"
+    entry["text"] = entry["text"].replace(", ", " | ").replace("\t", " | ")
+    return entry
+
+
+@pytest.mark.parametrize("entry", [_degree, _degree_table_row])
+def test_degree_prose_is_a_deleted_row_under_the_degree_row(entry):
+    gen = _render_education([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == f"M.S., {_DEGREE_FIELD}Norvale University2001"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _THESIS
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "4"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_degree_prose_goes_under_its_own_row_among_degrees_of_one_institution():
+    """The Ph.D. row renders first and holds every distinctive word of the
+    M.S. row, so words alone put the M.S. thesis under the Ph.D. (YUYVIG
+    FMIGLR 19). Only the row the writer recorded for the M.S. entry takes it."""
+    gen = _render_education([_doctorate(), _degree()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert _row_text(above).startswith("M.S.,")
+    assert _row_text(above.getprevious()).startswith("Ph.D.,")
+    assert row.getnext() is None
+
+
+def test_degree_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_education([_doctorate(), _degree()], supplementary_subpoints=False)
+    on = _render_education([_doctorate(), _degree()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _THESIS in rejected
+    assert _THESIS not in "".join(_texts_of(off.doc.element.body))
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+@pytest.mark.parametrize("field, value, line", [
+    # The degree's honors print in parentheses in the degree cell.
+    ("honors", "summa cum laude, with highest departmental honors",
+     "Graduated summa cum laude with highest departmental honors"),
+    # Stage 4 put the thesis title in `major`, which the degree cell prints.
+    ("major", _THESIS.removeprefix("Thesis: "), _THESIS),
+])
+def test_degree_prose_already_in_its_row_is_not_offered_again(field, value, line):
+    """No B1 rendered field (`_RENDERED_FIELDS`) names these, but the degree
+    cell prints them, so the document holds the line: it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _degree(prose=line, **{field: value})
+    gen = _render_education([entry], supplementary_subpoints=True)
+    assert value in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry, "B1", haystack) == []
+
+
+def test_a_degree_the_section_skips_gets_no_sub_point_under_another_row():
+    """An entry naming no degree and no institution is not written (`_fill_
+    education`), so it has no row of its own; its field's words would put
+    its prose under the other degree's row."""
+    skipped = _degree(idx=21, degree=None, institution=None,
+                      prose="Completed coursework in estuarine ecology and coastal sediment chemistry")
+    gen = _render_education([_degree(prose=""), skipped], supplementary_subpoints=True)
+
+    assert len([tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+                if _row_text(tr).startswith("M.S.,")]) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _render_grouped_education(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_education(grouped.get("B1", []))
+    gen._fill_other_education(grouped.get("B2", []))
+    gen._fill_postdoc_training(grouped, [e for group in grouped.values() for e in group])
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def test_a_degree_rerouted_out_of_b1_follows_its_destination_and_gets_no_sub_point():
+    """B2 is excluded: a school with no degree renders under Other
+    Educational Experiences (`_route_precollegiate_education`). C is not
+    offered either, and its heading lookup finds the title block, not its
+    section: a training row stage 3b coded B1 under a postdoctoral heading
+    renders as C. Neither the degree row of the same institution nor any
+    other carries their prose."""
+    school = _degree(idx=32, degree=None, discipline=None, institution="Example Preparatory School",
+                     prose="Completed the advanced laboratory sequence in marine field methods")
+    training = _rerouted(_degree(idx=31, degree=None, year=None, discipline=None,
+                                 prose="Trained in quantitative methods for estuarine monitoring "
+                                       "programmes", dates_attended="2002-2004"),
+                         "C", "POSTDOCTORAL TRAINING")
+    gen, grouped = _render_grouped_education([_degree(prose=""), school, training],
+                                             supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["B2"]] == [32]
+    assert [e["element_idx_start"] for e in grouped["C"]] == [31]
+    assert "Example Preparatory School" in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_record_rerouted_into_b1_follows_the_degree_rule():
+    """A degree programme stage 3b coded C under an education heading renders
+    as a degree row: its thesis is a deleted row under that row."""
+    gen, grouped = _render_grouped_education(
+        [_rerouted(_degree(idx=30, code="C"), "B1", "EDUCATION")], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["B1"]] == [30]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()).startswith("M.S.,")
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _THESIS
+
+
+def test_a_degree_whose_field_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass dropped one of the degree's fields. What is left
+    still describes what was withheld, so none of it is offered."""
+    withheld = _degree()
+    withheld["_pii_dropped_fields"] = ["advisor"]
+    gen = _render_education([_doctorate(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_text(tr).startswith("M.S.,") for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _degree_line(text, *degrees):
+    """One source line stage 4 returned as a record per (degree, year), the
+    entry's own fields being the last record's. Fan-out gives every earlier
+    record a line of its own and the last one the whole line."""
+    records = [{"degree": degree, "discipline": _DEGREE_FIELD, "institution": "Norvale University",
+                "year": year} for degree, year in degrees]
+    return {"element_idx_start": 25, "taxonomy_code": "B1", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_MS_LINE = f"M.S., {_DEGREE_FIELD}, Norvale University, 2001"
+_PHD_LINE = f"Ph.D., {_DEGREE_FIELD}, Norvale University, 2005"
+
+
+@pytest.mark.parametrize("segments, owners", [
+    # The segments pair with the records: the prose goes under its own degree.
+    ([f"{_MS_LINE}, {_THESIS}", _PHD_LINE], ["M.S."]),
+    ([_MS_LINE, f"{_PHD_LINE}, {_THESIS}"], ["Ph.D."]),
+    # They do not: whose thesis it is cannot be told, so it goes under neither.
+    ([_MS_LINE, _THESIS, _PHD_LINE], []),
+])
+def test_prose_on_a_line_of_several_degrees_goes_under_its_own_or_none(segments, owners):
+    entry = _degree_line("\t".join(segments), ("M.S.", "2001"), ("Ph.D.", "2005"))
+    gen, grouped = _render_grouped_education([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["B1"][-1] and len(grouped["B1"]) == 2
+    rows = _subpoint_rows(gen)
+    assert [_row_text(row.getprevious()).split(",")[0] for row in rows] == owners
+    assert _deleted_texts(gen).count(_THESIS) == len(owners)
+
+
+def test_the_doctor_matches_a_degree_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the M.S. entry's sub-point
+    under its own index and B1, and the doctor's per-entry match counts it for
+    that entry, not for the Ph.D. that shares its words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "T1205B", "cv_owner": {"full_name": "Quenby Marblegate"},
+               "entries": [_doctorate(), _degree()]}
+    input_path = tmp_path / "T1205B_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+
+    sidecar = json.loads((tmp_path / "T1205B_render_warnings.json").read_text())
+    assert [(p["element_idx_start"], p["code"], p["paragraphs"])
+            for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(19, "B1", [_THESIS])]
+    subpoints = subpoint_text(docx_subpoint_lines(Document(out)), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_THESIS, subpoints, element_idx=19)
+    assert not offered_as_subpoint(_THESIS, subpoints, element_idx=17)
+
+
 # ------------------------------------------- date-led sibling records (#983)
 # Stage 2 joins an entry's paragraphs with tabs, so three society records that
 # each open with their own date reach stage 6 as one line. Stage 4 extracted

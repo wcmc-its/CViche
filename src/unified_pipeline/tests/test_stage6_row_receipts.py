@@ -152,3 +152,23 @@ def test_534_end_entry_stops_crediting_the_marked_entry():
     ledger.wrote(table.add_row()._tr)
     receipt = _only(ledger.receipts({"honors": [entry]}))
     assert [lost.element_idx_start for lost in receipt.lost] == [1]
+
+
+def test_elements_for_an_entry_are_its_own_in_write_order():
+    """#1205: the sub-point pass anchors a degree's prose only under a row
+    recorded for that entry. Another entry sharing its element index (a
+    fan-out sibling, a derived copy) records rows that are not its own, and
+    a row written with no entry belongs to no one."""
+    table, ledger, entry = _table(), _ledger("education"), _entry(19, code="B1")
+    sibling = dict(entry)
+    first, second, unowned, siblings = (table.add_row()._tr for _ in range(4))
+    ledger.wrote(first, entry)
+    ledger.wrote(siblings, sibling)
+    ledger.wrote(unowned)
+    ledger.end_section()
+    ledger.wrote(second, entry)  # outside any section: still the entry's own
+    assert [row is mine for row, mine in zip(ledger.elements_for(entry), (first, second),
+                                             strict=True)] == [True, True]
+    assert ledger.elements_for(sibling) == [siblings]
+    assert ledger.elements_for(_entry(19, code="B1")) == []
+    assert DiscardingLedger().elements_for(entry) == []
