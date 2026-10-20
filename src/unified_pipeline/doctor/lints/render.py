@@ -1404,56 +1404,29 @@ def _field_record_bounds(labels: list[str | None]) -> tuple[list[bool], list[boo
     return starts, ends
 
 
-def _field_records(labels: list[str | None]) -> list[range]:
-    """The index range of each per-field record over a label sequence."""
-    starts, ends = _field_record_bounds(labels)
-    records, first = [], 0
-    for t in range(len(labels)):
-        first = t if starts[t] else first
-        if ends[t]:
-            records.append(range(first, t + 1))
-    return records
-
-
-def _same_form(a: dict[str, str], b: dict[str, str]) -> bool:
-    """Two records are the same form filled in twice: >=2 labels in common, and
-    a different value under at least one of them."""
-    shared = a.keys() & b.keys()
-    return len(shared) >= 2 and any(a[label] != b[label] for label in shared)
-
-
-def _recurring_field_labels(labels: list[str | None], keys: list[str]) -> list[str | None]:
-    """`labels` with None for every line whose record is not of a recurring
-    form. A title or citation that merely opens "Topic: ..." is labelled
-    differently from its neighbours, so no other record repeats its form and
-    it stays an ordinary block (#1940 review: 498 of 27,839 blocks over 70
-    stored docx open with such a colon, under 113 distinct labels)."""
-    records = _field_records(labels)
-    forms = [{labels[t]: keys[t] for t in record} for record in records]
-    kept: list[str | None] = [None] * len(labels)
-    for record, form in zip(records, forms, strict=True):
-        if any(other is not form and _same_form(form, other) for other in forms):
-            for t in record:
-                kept[t] = labels[t]
-    return kept
-
-
 def _trim_to_whole_records(first: int, second: int, length: int, labels: list[str | None],
                            bounds: tuple[list[bool], list[bool]]) -> tuple[int, int]:
-    """(offset, length) of a repeated stretch once the field lines at either
-    end that do not open (lead) or close (tail) a record in BOTH copies are
-    cut: those are fields shared by distinct records, while a record repeated
-    whole in the middle of the stretch is still a duplicate (#1940)."""
+    """(offset, length) of a repeated stretch once the field lines at an end
+    that do not open (lead) or close (tail) a record in BOTH copies are cut --
+    but only at an end where the lines just outside both copies carry the SAME
+    field label: the same field filled in differently, so the records there
+    differ and the cut lines are fields they share (#1940). Any other
+    neighbour (a heading, a one-off "Note:" line, a record of another form)
+    leaves that end alone, and a record repeated whole is still reported."""
     starts, ends = bounds
 
     def partial(k: int, edge: list[bool]) -> bool:
         a, b = first + k, second + k
         return None not in (labels[a], labels[b]) and not (edge[a] and edge[b])
 
+    def differing_field(k: int) -> bool:
+        a, b = first + k, second + k
+        return a >= 0 and b < len(labels) and labels[a] is not None and labels[a] == labels[b]
+
     lo, hi = 0, length - 1
-    while lo <= hi and partial(lo, starts):
+    while differing_field(-1) and lo <= hi and partial(lo, starts):
         lo += 1
-    while hi >= lo and partial(hi, ends):
+    while differing_field(length) and hi >= lo and partial(hi, ends):
         hi -= 1
     return lo, hi - lo + 1
 
@@ -1470,8 +1443,8 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     exactly the date block. On C0ZGFW's original output the rule keeps 4
     passages of 29 -- all four read by hand and genuinely duplicated records --
     and on the post-#418/#420 rerun it keeps 0 of 16. Labelled field lines
-    ("Institution: ...") of a recurring record form are trimmed off either end
-    of a stretch unless they open/close a record in both copies, so fields
+    ("Institution: ...") are trimmed off an end of a stretch where the same
+    field, filled in differently, sits just outside both copies, so fields
     shared by distinct records are not a duplicate (#1940;
     `_trim_to_whole_records`).
 
@@ -1485,7 +1458,7 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     keyed = [(i, _passage_key(text)) for i, (_kind, text) in enumerate(blocks)]
     keyed = [(i, key) for i, key in keyed if key]
     keys = [key for _i, key in keyed]
-    labels = _recurring_field_labels([_field_label(blocks[i][1]) for i, _key in keyed], keys)
+    labels = [_field_label(blocks[i][1]) for i, _key in keyed]
     bounds = _field_record_bounds(labels)
     span = DUPLICATE_PASSAGE_MIN_BLOCKS
     n = len(keys)
