@@ -14,7 +14,7 @@ is. Reject the deletion to keep it; accept all changes to get the template.
 
 Where it goes, by what the entry's rendered line is:
 
-- a body paragraph (a teaching bullet): a paragraph after it, one list level
+- a body paragraph (a teaching entry): a paragraph after it, one list level
   deeper, whose run AND paragraph mark are deleted, so accepting leaves no
   empty bullet;
 - a table row (an appointment, a grant table, a service row): a row
@@ -55,7 +55,8 @@ variant). Then one code family at a time, each the one a stage-6 replay
 measured losing the most prose of those left: Q1-Q2 extramural service next
 (the remit, the meeting or the session title behind a committee or panel
 row), then H honors (an award's criteria, or the paper it was for), then
-N3A-N3B mentees (the mentee's awards and outputs, the owner's part). The
+N3A-N3B mentees (the mentee's awards and outputs, the owner's part), then
+B1 degrees (the thesis or dissertation, a minor, a research topic). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -66,7 +67,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from typing import NamedTuple
 
 from docx.document import Document
@@ -83,6 +84,7 @@ from unified_pipeline.core.template_boilerplate import (
 
 from .dedup import _is_sibling_of
 from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
+from .formatting import plain_entry_left_twips, plain_entry_level
 from .normalization import _squash
 from .parsing import _refold_shattered
 from .pii_pass import PII_DROPPED_FIELDS_KEY
@@ -132,10 +134,27 @@ HONOR_CODES = frozenset({'H'})
 #: follows its rule (N1 is excluded); one rerouted into N3A or N3B follows
 #: this one.
 MENTEE_CODES = frozenset({'N3A', 'N3B'})
+#: Academic degrees: the thesis or dissertation, a minor, a research topic.
+#: The degree's cell already prints its field, honors and advisor, so a
+#: fragment mostly restating them is not offered (`_DEGREE_CELL_FIELDS`). The
+#: education section writes each B1 entry as a row of
+#: its four-column table, so a sub-point is a deleted row under the degree's
+#: row. Only a row the education writer recorded for that entry can anchor
+#: it (`_own_degree_rows`, the row-receipt ledger): two degrees of one
+#: institution share every distinctive word of their rows, and an entry the
+#: section skips (no degree and no institution) writes no row. That one row
+#: is taken without a word test (`_pick_anchor`). An entry naming no degree
+#: gets none: its row is an institution or a field alone. The last of
+#: stage 4's records offers only its own segment of the line
+#: (`_own_degree_line`). An entry rerouted to another code before rendering
+#: is grouped under that code and follows its rule (B2 is excluded, and C is
+#: not offered: its heading lookup finds the title block, not its section);
+#: one rerouted into B1 follows this one.
+EDUCATION_CODES = frozenset({'B1'})
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
-                  | HONOR_CODES | MENTEE_CODES)
+                  | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -184,7 +203,23 @@ _LABEL_SUFFIX = ':'
 _MENTEE_NAME_LABEL = 'Name:'
 _MENTEE_NAME_FIELDS = ('name', 'mentee_name')
 
+#: The fields the education writer prints in a degree's cell that
+#: `_RENDERED_FIELDS` cannot list, as its probe marks only schema fields:
+#: `major` or `field_of_study`, stage 4's off-schema `honors` (#817), and the
+#: advisor under its two off-schema names (#1245, `ADVISOR_LABELS`). A
+#: fragment restating them is the degree's row reformatted
+#: (`_holds_field_values`). Literals, as `_MENTEE_NAME_FIELDS` are: importing
+#: `sections.education` here imports `sections.positions`, which imports this
+#: module.
+_DEGREE_CELL_FIELDS = ('major', 'field_of_study', 'honors', 'major_professor', 'mentor')
+
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
+
+#: The elements a section writer recorded for an entry, by identity
+#: (`RowReceiptLedger.elements_for`): its rows, or its first cells'
+#: paragraphs. Read for the families that anchor only on those
+#: (`EDUCATION_CODES`).
+RowsWritten = Callable[[Mapping], Iterable[BaseOxmlElement]]
 
 
 class AnchorCandidate(NamedTuple):
@@ -339,12 +374,14 @@ class _Haystack(NamedTuple):
 
 def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
-    (`_RENDERED_FIELDS`), or of every scalar field for a code rendered from
-    its text."""
+    (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`), or of every
+    scalar field for a code rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
     names = _RENDERED_FIELDS.get(code) or fields.keys()
+    if code in EDUCATION_CODES:
+        names = (*names, *_DEGREE_CELL_FIELDS)
     values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
                          if isinstance(value, (str, int, float)) and value))
@@ -406,39 +443,125 @@ def _own_mentee_rows(entry: Mapping, candidates: list[AnchorCandidate]) -> list[
     return [c for c in candidates if _in_tables(c, tables)]
 
 
-def _own_mentee_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
-    """The text a mentee's prose is read from: its own, except for the last
-    of stage 4's records (`LAST_STAGE4_RECORD`). That one keeps its source
-    line's whole text, the other records' mentees in it, though each of them
-    renders as a table of its own (YUYVIG XNWSZN 188: twelve postdocs on one
-    line, offered under the twelfth). It reads its own tab segment when the
-    line's segments pair one to one with its records, as fan-out pairs the
-    others; the whole line when every record names its mentee (one mentee's
-    two periods, YUYVIG ECXGAT 1479); and nothing otherwise, as which mentee
-    a word is about cannot be told."""
+def _own_segment(entry: Mapping) -> str | None:
+    """The entry's own text, except for the last of stage 4's records
+    (`LAST_STAGE4_RECORD`). That one keeps its source line's whole text, the
+    other records in it, though each of them renders on its own. It reads its
+    own tab segment when the line's segments pair one to one with its records,
+    as fan-out pairs the others, and is None when they do not: its family's
+    rule decides (`_own_mentee_line`, `_own_degree_line`)."""
     text = str(entry.get('text') or '')
     marker = entry.get(LAST_STAGE4_RECORD)
     if not isinstance(marker, Mapping):
         return text
     segments = _segments(text)
-    if len(segments) == marker.get('count'):
-        return segments[-1]
+    return segments[-1] if len(segments) == marker.get('count') else None
+
+
+def _own_mentee_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a mentee's prose is read from (`_own_segment`). The last of a
+    line's records whose segments do not pair with them (YUYVIG XNWSZN 188:
+    twelve postdocs on one line, offered under the twelfth) reads the whole
+    line when every record names its mentee (one mentee's two periods, YUYVIG
+    ECXGAT 1479), and nothing otherwise, as which mentee a word is about
+    cannot be told."""
+    own = _own_segment(entry)
+    if own is not None:
+        return own
     others = [other for group in entries_by_code.values() for other in group
               if _is_sibling_of(other, entry)]
+    text = str(entry.get('text') or '')
     return text if all(_mentee_name(other) == _mentee_name(entry) for other in others) else ''
+
+
+def _row_of(element: BaseOxmlElement) -> BaseOxmlElement | None:
+    """`element` when it is a table row, else the nearest row holding it."""
+    return element if element.tag == qn('w:tr') else next(element.iterancestors(qn('w:tr')), None)
+
+
+def _names_degree(entry: Mapping) -> bool:
+    """Whether stage 4's `degree` for the entry holds any text."""
+    fields = entry.get('extracted_fields')
+    return isinstance(fields, Mapping) and bool(str(fields.get('degree') or '').strip())
+
+
+def _own_degree_rows(entry: Mapping, candidates: list[AnchorCandidate],
+                     rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """The candidates that are a row a writer recorded for `entry` itself
+    (`rows_written`, the row-receipt ledger): none when it recorded none, or
+    with no ledger. Words cannot tell a degree's row from another degree's
+    of the same institution: "Ph.D." and "M.S." hold no distinctive token,
+    nor does a year (YUYVIG FMIGLR 19: an M.S. thesis went under the Ph.D.
+    row). Nor can they see that the section skipped an entry naming no
+    degree and no institution, which leaves that entry no row.
+
+    An entry naming no degree (`_names_degree`) has none either. Its row is
+    an institution or a field alone, and its prose is of no degree there: a
+    thesis citation stage 4 coded B1, whose master's degree renders as a row
+    of its own (EBYSBC VGHNZD 1861)."""
+    if rows_written is None or not _names_degree(entry):
+        return []
+    rows = [row for row in map(_row_of, rows_written(entry)) if row is not None]
+    return [c for c in candidates if any(_row_of(c.paragraph._p) is row for row in rows)]
+
+
+def _own_degree_line(entry: Mapping) -> str:
+    """The text a degree's prose is read from (`_own_segment`), and nothing
+    for the last of a line's records whose segments do not pair with them:
+    which degree a thesis is of cannot be told."""
+    own = _own_segment(entry)
+    return '' if own is None else own
+
+
+def _prose_text(code: str, entry: Mapping,
+                entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
+    """The text `code`'s rule reads the entry's prose from; None for its own."""
+    if code in MENTEE_CODES:
+        return _own_mentee_line(entry, entries_by_code)
+    if code in EDUCATION_CODES:
+        return _own_degree_line(entry)
+    return None
+
+
+def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
+                  rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """The candidates of the entry's section that `code`'s rule lets it
+    anchor under."""
+    if code in MENTEE_CODES:
+        return _own_mentee_rows(entry, in_section)
+    if code in EDUCATION_CODES:
+        return _own_degree_rows(entry, in_section, rows_written)
+    return in_section
+
+
+def _pick_anchor(code: str, entry_tokens: set[str],
+                 scope: list[AnchorCandidate]) -> AnchorCandidate | None:
+    """The line of `scope` the entry's prose goes under. A degree's one own
+    row (`_own_degree_rows`) is taken as it is: the writer's record already
+    says whose it is, and a short degree's row ("PhD", "Kell University",
+    "2010") holds too few distinctive words for `best_anchor`, as does a row
+    whose stage-5b institution name shares few words with the field. Any
+    other scope is read by words."""
+    if code in EDUCATION_CODES and len(scope) == 1:
+        return scope[0]
+    return best_anchor(entry_tokens, scope)
 
 
 def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Haystack,
                    candidates: list[AnchorCandidate],
                    spans: Mapping[str, SectionSpan],
-                   excluded_tables: Collection[BaseOxmlElement] = ()) -> list[SubPoint]:
+                   excluded_tables: Collection[BaseOxmlElement] = (),
+                   rows_written: RowsWritten | None = None) -> list[SubPoint]:
     """One `SubPoint` per entry of a `SUBPOINT_CODES` code that has unrendered
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
     the first entry that carries it (fan-out children and dedup survivors
     share their parent's text). A mentee's prose is read from its own line
     (`_own_mentee_line`), and its line must be a row of its own table
-    (`_own_mentee_rows`), under either mentee heading.
+    (`_own_mentee_rows`), under either mentee heading. A degree's prose is
+    read from its own line (`_own_degree_line`), and its line must be a row
+    the education writer recorded for it (`rows_written`, `_own_degree_rows`),
+    which it takes with no word test (`_pick_anchor`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -457,14 +580,14 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
         for entry in entries_by_code[code]:
             if entry.get(PII_DROPPED_FIELDS_KEY):
                 continue
-            text = _own_mentee_line(entry, entries_by_code) if code in MENTEE_CODES else None
+            text = _prose_text(code, entry, entries_by_code)
             fragments = [f for f in unrendered_prose(entry, code, haystack, text) if f not in offered]
             if not fragments:
                 continue
             anchor_tokens = _value_tokens(entry, code) or (
                 _tokens(entry.get('text') or '') - set().union(*(_tokens(f) for f in fragments)))
-            in_scope = _own_mentee_rows(entry, in_section) if code in MENTEE_CODES else in_section
-            anchor = best_anchor(anchor_tokens, in_scope)
+            anchor = _pick_anchor(code, anchor_tokens,
+                                  _anchor_scope(code, entry, in_section, rows_written))
             if anchor is None:
                 continue
             offered.update(fragments)
@@ -581,16 +704,30 @@ def _keep_mark(p: BaseOxmlElement) -> None:
             ppr.remove(old)
 
 
+def _deepen_plain_entry(ppr: BaseOxmlElement) -> None:
+    """One level deeper for an entry written without a bullet (#1943: K and
+    L), which shows its level by a left indent on the bullet-text grid
+    rather than `w:ilvl`. Any other indent is left as it is."""
+    ind = ppr.find(qn('w:ind'))
+    left = None if ind is None else ind.get(qn('w:left'))
+    level = plain_entry_level(int(left)) if left is not None and left.isdigit() else None
+    if level is not None:
+        ind.set(qn('w:left'), str(plain_entry_left_twips(level + 1)))
+
+
 def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
                             revision: Revision) -> None:
     """Deleted paragraphs after `anchor`, with its paragraph properties; a
-    list paragraph goes one level deeper, so it reads as a sub-bullet. The
-    last one keeps its mark when no paragraph follows it (`_keep_mark`)."""
+    list paragraph goes one level deeper, so it reads as a sub-bullet, and so
+    does an unbulleted entry (`_deepen_plain_entry`). The last one keeps its
+    mark when no paragraph follows it (`_keep_mark`)."""
     ppr = copy.deepcopy(anchor._p.pPr) if anchor._p.pPr is not None else None
     if ppr is not None:
         level = ppr.find(f"{qn('w:numPr')}/{qn('w:ilvl')}")
         if level is not None:
             level.set(qn('w:val'), str(int(level.get(qn('w:val'), '0')) + 1))
+        else:
+            _deepen_plain_entry(ppr)
     after = _after_subpoints(anchor._p)
     if after is not anchor._p and not _has_deleted_mark(after):
         # An earlier sub-point kept its mark; one now follows it, so delete it again.
