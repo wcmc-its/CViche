@@ -24,7 +24,7 @@ from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
-from .fragment_merge import merge_into_parent
+from .fragment_merge import SKIP_ORGANIZATION, merge_into_parent
 from .header_pin import is_note_not_record
 from .io import GROUP_YEAR_KEY, _safe_float, taxonomy_code_set
 from .prompt import (
@@ -74,9 +74,14 @@ T_VALIDATION_FORBIDDEN_CODES = frozenset({"M1"})
 # recoded on its own it became a mentee row, and stage 4 took the person an
 # award is named after as the mentee (#1702). It joins its row instead.
 MENTEE_CODE_PREFIX = "N3"
-_ROW_NUMBER_RE = re.compile(r"\s*\d{1,3}[.)]")  # used with .match: anchored
+_ROW_NUMBER_RE = re.compile(r"\s*(\d{1,3})[.)]")  # used with .match: anchored
 _FRAGMENT_REASONING_RE = re.compile("fragment", re.IGNORECASE)
 ROW_CONTINUATION_TAG = "[T-validation: continues the numbered row before it]"
+# A line between mentee rows n and n + 1 can only be row n's, so it joins row
+# n even past an award line coded N4 (YIXQFB 2413), and a bare organisation
+# name there is no sub-heading (YIXQFB 2564: row 27's employer). The merge's
+# organisation guard is waived for that line alone.
+BRACKETED_ROW_WAIVES = frozenset({SKIP_ORGANIZATION})
 
 
 @dataclass
@@ -669,20 +674,63 @@ def _opening_line(entries: list[dict]) -> tuple[dict | None, str | None]:
     return first, first.get("text")
 
 
-def _is_mentee_row_continuation(entries: list[dict], idx: int, reasoning: str) -> bool:
-    """Whether recoded entry `idx` is the unnumbered rest of the numbered
-    mentee row right before it, by the reasoning's own word "fragment".
-    For entry 0 the "row" is the last entry; `merge_into_parent` refuses that
-    pairing (no parent), so it needs no check here."""
-    entry, row = entries[idx], entries[idx - 1]
-    return (
-        bool(_FRAGMENT_REASONING_RE.search(reasoning))
+def _row_number(text: object) -> int | None:
+    """The row number a mentee-list line opens with ("30.", "7)"), or None."""
+    match = _ROW_NUMBER_RE.match(str(text))
+    return int(match.group(1)) if match else None
+
+
+def _nearest_numbered(entries: list[dict], idx: int, step: int) -> int | None:
+    """Index of the nearest line from `idx` in direction `step` (-1 or 1)
+    that opens with a row number; None when the list or the hierarchy ends first."""
+    hierarchy = entries[idx].get("hierarchy")
+    other = idx + step
+    while 0 <= other < len(entries) and entries[other].get("hierarchy") == hierarchy:
+        if _row_number(entries[other].get("text")) is not None:
+            return other
+        other += step
+    return None
+
+
+def _bracketing_mentee_row(entries: list[dict], idx: int) -> int | None:
+    """Index of mentee row n when entry `idx` sits between row n and row n + 1
+    of the same list, else None."""
+    before = _nearest_numbered(entries, idx, -1)
+    after = _nearest_numbered(entries, idx, 1)
+    if before is None or after is None:
+        return None
+    row = entries[before]
+    next_number = _row_number(row.get("text")) + 1
+    is_mentee_row = str(row.get("taxonomy_code")).startswith(MENTEE_CODE_PREFIX)
+    return before if is_mentee_row and _row_number(entries[after].get("text")) == next_number else None
+
+
+def _mentee_row_of(entries: list[dict], idx: int, reasoning: str) -> tuple[int, frozenset[str]] | None:
+    """The numbered mentee row recoded entry `idx` continues, by the
+    reasoning's own word "fragment", with the merge guards to waive; None
+    when it continues none.
+
+    The row is the one `idx` sits inside (`_bracketing_mentee_row`), else
+    the numbered row right before it. For entry 0 that "row" is the last
+    entry; `merge_into_parent` refuses that pairing (no parent)."""
+    entry = entries[idx]
+    if not (
+        _FRAGMENT_REASONING_RE.search(reasoning)
         and entry["taxonomy_code"].startswith(MENTEE_CODE_PREFIX)
-        and str(row.get("taxonomy_code")).startswith(MENTEE_CODE_PREFIX)
+        and _row_number(entry.get("text", "")) is None
+    ):
+        return None
+    bracketing = _bracketing_mentee_row(entries, idx)
+    if bracketing is not None:
+        return bracketing, BRACKETED_ROW_WAIVES
+    row = entries[idx - 1]
+    if (
+        str(row.get("taxonomy_code")).startswith(MENTEE_CODE_PREFIX)
         and entry.get("hierarchy") == row.get("hierarchy")
-        and bool(_ROW_NUMBER_RE.match(str(row.get("text"))))
-        and not _ROW_NUMBER_RE.match(entry.get("text", ""))
-    )
+        and _row_number(row.get("text")) is not None
+    ):
+        return idx - 1, frozenset()
+    return None
 
 
 def _fold_into_mentee_row(entries: list[dict], idx: int, reasoning: str) -> None:
@@ -692,15 +740,17 @@ def _fold_into_mentee_row(entries: list[dict], idx: int, reasoning: str) -> None
     stage 4 skips it and extracts the row from the whole text. A fragment
     `merge_into_parent` refuses keeps its recode and no tag: a tag on text
     that never reached the row would drop the line (#1365 R2)."""
-    if not _is_mentee_row_continuation(entries, idx, reasoning):
+    found = _mentee_row_of(entries, idx, reasoning)
+    if found is None:
         return
+    row_idx, waive = found
     fragment_tags = {
         "is_fragment": True,
-        "fragment_of": idx - 1,
+        "fragment_of": row_idx,
         "fragment_reasoning": f"{ROW_CONTINUATION_TAG} {reasoning}",
     }
     entries[idx].update(fragment_tags)
-    if merge_into_parent(entries, idx) is not None:
+    if merge_into_parent(entries, idx, waive) is not None:
         for key in fragment_tags:
             del entries[idx][key]
 

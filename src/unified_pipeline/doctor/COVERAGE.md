@@ -38,6 +38,8 @@ All cells together: 155 of 444 (35%) with `source_line_coverage`, 140 without; H
 
 `renderer_row_missing` (#534, `PRECISION.md` RRR-1) reads missing / entry, from stage 6's own bookkeeping rather than from the document's text: an entry a section was given that no row or Appendix line accounts for. A dedup decision excuses none: stage 6 dedups before it records what each section is given. It is linted on Honors, Memberships, Mentoring and Service only. It moves no count here: it was not scored against the YUYVIG v2 labels, and the mutation harness has no receipt-wiping mutation yet.
 
+`mentee_field_incomplete` (#1941, `PRECISION.md` MFI-1) reads missing / field, but of the submitter's input rather than a CViche defect: a mentee table field the WCM template asks for that the document leaves blank or "N/A", whether the CV gave none or a stage lost it. It moves no count here: no YUYVIG label is a template field the CV left empty.
+
 Privacy / field scope, decided in #1864 (2026-10-15): a congregation named inside a body record other than a membership (I) row is not protected data. That covers a membership or role stated in an honor, appointment, education or leadership row, and a congregation named as the venue of a talk or teaching session (K4, K5, R). Such text renders, and `protected_data_in_output` does not scan body sections for it by design. A miss there is not a blind spot in this cell. The census behind the decision found the membership shape 0 times in 206 labelled runs, and the venue shape 11 times.
 
 ## Mutation catch rates

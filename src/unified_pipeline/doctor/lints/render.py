@@ -1362,6 +1362,75 @@ def _passage_key(text) -> str:
     return " ".join(_PASSAGE_PUNCT_RE.sub(" ", norm("\n".join(lines))).split())
 
 
+# A record rendered as one labelled line per field ("Title: ...", "Audience:
+# ...", "Institution: ...", "Dates: ...") shares its Institution and Dates
+# lines with every other record taught at the same place in the same years, so
+# two such lines repeating together is a shared FIELD, not a duplicated record
+# (#1940: all 4 of XAXVYB's passages, two of them marked incorrect by a
+# reviewer). The label is up to this many words, capitalised, before the colon.
+FIELD_LABEL_MAX_WORDS = 4
+
+
+_FIELD_LINE_RE = re.compile(
+    rf"^([A-Z][A-Za-z/&]*(?: [A-Za-z/&]+){{0,{FIELD_LABEL_MAX_WORDS - 1}}}):\s+\S")
+
+
+def _field_label(text: str) -> str | None:
+    """The casefolded field label a one-line block starts with ("Audience"
+    in "Audience: Medical students"), else None."""
+    line = _PASSAGE_ENUMERATOR_RE.sub("", str(text or "").strip())
+    m = _FIELD_LINE_RE.match(line) if "\n" not in line else None
+    return m.group(1).casefold() if m else None
+
+
+def _field_record_bounds(labels: list[str | None]) -> tuple[list[bool], list[bool]]:
+    """Where each per-field record starts and ends, over a block sequence's
+    field labels (None for a block that is not a labelled line). A record is a
+    run of labelled lines; it starts after a non-labelled block, or where a
+    label already seen in the current record comes round again (the next
+    record's "Title:")."""
+    starts = [False] * len(labels)
+    seen: set[str] = set()
+    for t, label in enumerate(labels):
+        if label is None:
+            continue
+        if t == 0 or labels[t - 1] is None or label in seen:
+            starts[t] = True
+            seen = set()
+        seen.add(label)
+    ends = [label is not None and (t + 1 == len(labels) or labels[t + 1] is None
+                                   or starts[t + 1])
+            for t, label in enumerate(labels)]
+    return starts, ends
+
+
+def _trim_to_whole_records(first: int, second: int, length: int, labels: list[str | None],
+                           bounds: tuple[list[bool], list[bool]]) -> tuple[int, int]:
+    """(offset, length) of a repeated stretch once the field lines at an end
+    that do not open (lead) or close (tail) a record in BOTH copies are cut --
+    but only at an end where the lines just outside both copies carry the SAME
+    field label: the same field filled in differently, so the records there
+    differ and the cut lines are fields they share (#1940). Any other
+    neighbour (a heading, a one-off "Note:" line, a record of another form)
+    leaves that end alone, and a record repeated whole is still reported."""
+    starts, ends = bounds
+
+    def partial(k: int, edge: list[bool]) -> bool:
+        a, b = first + k, second + k
+        return None not in (labels[a], labels[b]) and not (edge[a] and edge[b])
+
+    def differing_field(k: int) -> bool:
+        a, b = first + k, second + k
+        return a >= 0 and b < len(labels) and labels[a] is not None and labels[a] == labels[b]
+
+    lo, hi = 0, length - 1
+    while differing_field(-1) and lo <= hi and partial(lo, starts):
+        lo += 1
+    while differing_field(length) and hi >= lo and partial(hi, ends):
+        hi -= 1
+    return lo, hi - lo + 1
+
+
 def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     """Stretches of DUPLICATE_PASSAGE_MIN_BLOCKS+ consecutive rendered blocks
     that appear twice in the output document — one source record reaching the
@@ -1373,7 +1442,11 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     the same activity described identically on different occasions differs in
     exactly the date block. On C0ZGFW's original output the rule keeps 4
     passages of 29 -- all four read by hand and genuinely duplicated records --
-    and on the post-#418/#420 rerun it keeps 0 of 16.
+    and on the post-#418/#420 rerun it keeps 0 of 16. Labelled field lines
+    ("Institution: ...") are trimmed off an end of a stretch where the same
+    field, filled in differently, sits just outside both copies, so fields
+    shared by distinct records are not a duplicate (#1940;
+    `_trim_to_whole_records`).
 
     Known blind spots, measured over 125 rendered corpus outputs rather than
     assumed: a record occupying ONE block cannot be seen (a duplicated citation
@@ -1385,6 +1458,8 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     keyed = [(i, _passage_key(text)) for i, (_kind, text) in enumerate(blocks)]
     keyed = [(i, key) for i, key in keyed if key]
     keys = [key for _i, key in keyed]
+    labels = [_field_label(blocks[i][1]) for i, _key in keyed]
+    bounds = _field_record_bounds(labels)
     span = DUPLICATE_PASSAGE_MIN_BLOCKS
     n = len(keys)
     if n < 2 * span:
@@ -1423,12 +1498,14 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
             j = i
             while j + 1 < n - distance and keys[j + 1] == keys[j + 1 + distance]:
                 j += 1
-            second_range = (i + distance, i + distance + (j - i + 1) - 1)
-            if (j - i + 1 >= span
-                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))
+            offset, length = _trim_to_whole_records(i, i + distance, j - i + 1, labels, bounds)
+            start = i + offset
+            second_range = (start + distance, start + distance + length - 1)
+            if (length >= span
+                    and any(_YEAR_RE.search(keys[t]) for t in range(start, start + length))
                     and not any(s <= second_range[1] and second_range[0] <= e
                                 for s, e in charged_second_ranges)):
-                passages.append((i, i + distance, j - i + 1))
+                passages.append((start, start + distance, length))
                 charged_second_ranges.append(second_range)
             i = j + 1
     if len(passages) < DUPLICATE_PASSAGE_WARN_COUNT:
