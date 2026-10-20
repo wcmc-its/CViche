@@ -1404,15 +1404,58 @@ def _field_record_bounds(labels: list[str | None]) -> tuple[list[bool], list[boo
     return starts, ends
 
 
-def _is_partial_field_run(first: int, second: int, length: int, labels: list[str | None],
-                          bounds: tuple[list[bool], list[bool]]) -> bool:
-    """True when a repeated stretch is labelled field lines only and, in either
-    copy, does not cover its records whole -- the rest of each record differs,
-    so these are distinct records sharing fields."""
-    if any(labels[t] is None for t in range(first, first + length)):
-        return False
+def _field_records(labels: list[str | None]) -> list[range]:
+    """The index range of each per-field record over a label sequence."""
+    starts, ends = _field_record_bounds(labels)
+    records, first = [], 0
+    for t in range(len(labels)):
+        first = t if starts[t] else first
+        if ends[t]:
+            records.append(range(first, t + 1))
+    return records
+
+
+def _same_form(a: dict[str, str], b: dict[str, str]) -> bool:
+    """Two records are the same form filled in twice: >=2 labels in common, and
+    a different value under at least one of them."""
+    shared = a.keys() & b.keys()
+    return len(shared) >= 2 and any(a[label] != b[label] for label in shared)
+
+
+def _recurring_field_labels(labels: list[str | None], keys: list[str]) -> list[str | None]:
+    """`labels` with None for every line whose record is not of a recurring
+    form. A title or citation that merely opens "Topic: ..." is labelled
+    differently from its neighbours, so no other record repeats its form and
+    it stays an ordinary block (#1940 review: 498 of 27,839 blocks over 70
+    stored docx open with such a colon, under 113 distinct labels)."""
+    records = _field_records(labels)
+    forms = [{labels[t]: keys[t] for t in record} for record in records]
+    kept: list[str | None] = [None] * len(labels)
+    for record, form in zip(records, forms):
+        if any(other is not form and _same_form(form, other) for other in forms):
+            for t in record:
+                kept[t] = labels[t]
+    return kept
+
+
+def _trim_to_whole_records(first: int, second: int, length: int, labels: list[str | None],
+                           bounds: tuple[list[bool], list[bool]]) -> tuple[int, int]:
+    """(offset, length) of a repeated stretch once the field lines at either
+    end that do not open (lead) or close (tail) a record in BOTH copies are
+    cut: those are fields shared by distinct records, while a record repeated
+    whole in the middle of the stretch is still a duplicate (#1940)."""
     starts, ends = bounds
-    return not all(starts[s] and ends[s + length - 1] for s in (first, second))
+
+    def partial(k: int, edge: list[bool]) -> bool:
+        a, b = first + k, second + k
+        return None not in (labels[a], labels[b]) and not (edge[a] and edge[b])
+
+    lo, hi = 0, length - 1
+    while lo <= hi and partial(lo, starts):
+        lo += 1
+    while hi >= lo and partial(hi, ends):
+        hi -= 1
+    return lo, hi - lo + 1
 
 
 def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
@@ -1426,9 +1469,11 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     the same activity described identically on different occasions differs in
     exactly the date block. On C0ZGFW's original output the rule keeps 4
     passages of 29 -- all four read by hand and genuinely duplicated records --
-    and on the post-#418/#420 rerun it keeps 0 of 16. A stretch made only of
-    labelled field lines ("Institution: ...") counts only when it covers its
-    records whole in both copies (#1940; `_is_partial_field_run`).
+    and on the post-#418/#420 rerun it keeps 0 of 16. Labelled field lines
+    ("Institution: ...") of a recurring record form are trimmed off either end
+    of a stretch unless they open/close a record in both copies, so fields
+    shared by distinct records are not a duplicate (#1940;
+    `_trim_to_whole_records`).
 
     Known blind spots, measured over 125 rendered corpus outputs rather than
     assumed: a record occupying ONE block cannot be seen (a duplicated citation
@@ -1440,7 +1485,7 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     keyed = [(i, _passage_key(text)) for i, (_kind, text) in enumerate(blocks)]
     keyed = [(i, key) for i, key in keyed if key]
     keys = [key for _i, key in keyed]
-    labels = [_field_label(blocks[i][1]) for i, _key in keyed]
+    labels = _recurring_field_labels([_field_label(blocks[i][1]) for i, _key in keyed], keys)
     bounds = _field_record_bounds(labels)
     span = DUPLICATE_PASSAGE_MIN_BLOCKS
     n = len(keys)
@@ -1480,13 +1525,14 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
             j = i
             while j + 1 < n - distance and keys[j + 1] == keys[j + 1 + distance]:
                 j += 1
-            second_range = (i + distance, i + distance + (j - i + 1) - 1)
-            if (j - i + 1 >= span
-                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))
-                    and not _is_partial_field_run(i, i + distance, j - i + 1, labels, bounds)
+            offset, length = _trim_to_whole_records(i, i + distance, j - i + 1, labels, bounds)
+            start = i + offset
+            second_range = (start + distance, start + distance + length - 1)
+            if (length >= span
+                    and any(_YEAR_RE.search(keys[t]) for t in range(start, start + length))
                     and not any(s <= second_range[1] and second_range[0] <= e
                                 for s, e in charged_second_ranges)):
-                passages.append((i, i + distance, j - i + 1))
+                passages.append((start, start + distance, length))
                 charged_second_ranges.append(second_range)
             i = j + 1
     if len(passages) < DUPLICATE_PASSAGE_WARN_COUNT:

@@ -5407,9 +5407,38 @@ def test_duplicate_passages_still_flags_a_whole_field_record_twice():
     partial = [("p", "Title: Another lecture")] + record[1:]
     assert lint_duplicate_passages(record + other + partial) == []
     # ...and BOTH copies must be whole: here the untitled one is, the titled one is not
+    # (`other` gives the page a recurring record form; see the citation test below)
     untitled = [("p", "Lectures")] + record[1:] + [("p", "Mentoring")]
-    assert lint_duplicate_passages(untitled + partial) == []
-    assert lint_duplicate_passages(partial + untitled) == []
+    assert lint_duplicate_passages(untitled + other + partial) == []
+    assert lint_duplicate_passages(partial + other + untitled) == []
+
+
+def test_duplicate_passages_reports_a_whole_record_inside_a_shared_field_stretch():
+    """#1940 review: records sharing Audience/Institution/Dates run straight into
+    a record that IS duplicated, so the maximal repeated stretch opens on shared
+    fields mid-record. The stretch is trimmed to the whole records, not dropped."""
+    def record(title):
+        return _field_record(title, "Medical students", "Weill Cornell Medicine", "2015-2019")
+    blocks = ([("p", "Educational Contributions")] + record("Pharmacology") + record("Anatomy")
+              + [("p", "Other Section")] + record("Neuroscience") + record("Anatomy"))
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1 and "1 passage(s)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("blocks 5-8 repeat at 14-17: Title: Anatomy")
+
+
+def test_duplicate_passages_flags_a_repeated_pair_of_colon_titles():
+    """#1940 review: a talk or citation title that opens "Topic: subtitle" is not
+    a field line -- its neighbours carry different "labels", so no record form
+    recurs -- and a duplicated pair of them is still one passage twice."""
+    blocks = [("p", t) for t in (
+        "Invited Talks", "Lung disease: an update, 2021",
+        "Cancer: a review of outcomes, 2019", "Heart failure: revisited, 2020",
+        "Sepsis: early signs, 2022", "Selected Talks", "Brain imaging: new methods, 2018",
+        "Cancer: a review of outcomes, 2019", "Heart failure: revisited, 2020",
+        "Kidney transplant: long-term results, 2017")]
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1
+    assert findings[0]["evidence"][0].startswith("blocks 2-3 repeat at 7-8: Cancer:")
 
 
 def test_duplicate_passages_threshold_is_pinned_at_two_blocks():
