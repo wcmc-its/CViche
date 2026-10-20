@@ -116,3 +116,76 @@ def test_the_gate_sees_a_multi_line_call_and_passes_a_label() -> None:
         "        logger.warning('x %s', redacted_error_label(e))\n"
         "        logger.debug('x %s', e)\n")
     assert _raw_exception_log_sites(source, "probe.py") == ["probe.py:5"]
+
+
+# The other half of the policy: a handler that logs only the class above DEBUG
+# keeps the raw text at DEBUG (a logger.debug naming the bound exception, or
+# one with exc_info), unless the line above DEBUG carries exc_info itself.
+
+#: (repo path, enclosing function) -> why the class alone is enough there.
+_CLASS_ONLY_ALLOWED = {
+    ("src/unified_pipeline/stage_5b_institution_enrichment.py", "run_stage5b"):
+        "§3.2a ratchet: one more line raises the oversized-function debt (#1888)",
+    ("src/unified_pipeline/repair/protected_data.py", "repair_and_report"):
+        "logs the class by design; predates #639",
+    ("web_interface/backend/app/services/review_loop_service.py", "record_corrected_docx"):
+        "logs the class by design; predates #639",
+    ("web_interface/backend/app/services/batch_service.py", "_live_workers"):
+        "the type tells an outage from a bug; predates #639",
+    ("web_interface/backend/app/services/mailer.py", "send"):
+        "logs the class by design; predates #639",
+}
+
+
+def _labels(expr: ast.AST, name: str) -> bool:
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Name) \
+                and node.args[0].id == name:
+            fn = node.func
+            if (fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")) in _LABEL_CALLS:
+                return True
+    return False
+
+
+def _class_only_sites(source: str, rel: str) -> list[str]:
+    sites = []
+    for handler, func_name in _enclosing_function(ast.parse(source)).items():
+        if (rel, func_name) in _CLASS_ONLY_ALLOWED:
+            continue
+        nodes = [n for stmt in handler.body for n in ast.walk(stmt)]
+        labelled = [n for n in nodes if _is_logger_call(n)
+                    and any(_labels(arg, handler.name) for arg in n.args)]
+        if not labelled or any(k.arg == "exc_info" for n in labelled for k in n.keywords):
+            continue
+        has_detail = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "debug"
+            and (any(k.arg == "exc_info" for k in n.keywords)
+                 or any(isinstance(x, ast.Name) and x.id == handler.name
+                        for arg in n.args for x in ast.walk(arg)))
+            for n in nodes)
+        if not has_detail:
+            sites.append(f"{rel}:{labelled[0].lineno}")
+    return sites
+
+
+def test_a_class_only_log_line_keeps_the_raw_text_at_debug() -> None:
+    sites = sorted({
+        site
+        for root in _GATED_ROOTS
+        for path in (_REPO / root).rglob("*.py")
+        if "tests" not in path.relative_to(_REPO).parts
+        for site in _class_only_sites(
+            path.read_text(encoding="utf-8"), path.relative_to(_REPO).as_posix())
+    })
+    assert sites == [], (
+        "this handler logs only the exception class; add logger.debug(..., e) on its own "
+        "line so the detail survives at DEBUG (CODING_STANDARDS §4.7): " + ", ".join(sites))
+
+
+def test_the_debug_half_flags_a_missing_detail_line() -> None:
+    source = (
+        "def f():\n    try:\n        pass\n    except OSError as e:\n"
+        "        logger.warning('x %s', redacted_error_label(e))\n"
+        "def g():\n    try:\n        pass\n    except OSError as e:\n"
+        "        logger.warning('x %s', type(e).__name__)\n        logger.debug('x %s', e)\n")
+    assert _class_only_sites(source, "probe.py") == ["probe.py:5"]
