@@ -233,7 +233,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'K1': frozenset({'course_code', 'course_title', 'institution', 'role'}),
     'L3': frozenset({'end_date', 'institution', 'leadership_role', 'start_date', 'unit_program'}),
     'M2A': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'notes', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'status', 'title', 'total_funding'}),
-    'M2B': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'notes', 'pi_name', 'pi_role', 'start_date', 'status', 'title', 'total_funding'}),
+    'M2B': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'notes', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'status', 'title', 'total_funding'}),
     'M2C': frozenset({'agency', 'annual_funding', 'grant_number', 'notes', 'pi_name', 'pi_role', 'status', 'submission_date', 'title', 'total_funding_requested'}),
     'M2D': frozenset({'assignee', 'filing_date', 'inventors', 'issue_date', 'patent_number', 'status', 'title'}),
     'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'role', 'start_date'}),
