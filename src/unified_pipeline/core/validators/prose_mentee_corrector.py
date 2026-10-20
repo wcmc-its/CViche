@@ -63,19 +63,19 @@ _NOT_A_NAME = frozenset({
 })
 
 # --- N3A (current) vs N3B (past) --------------------------------------------
-_OPEN_PERIOD = re.compile(r"\b(present|current|ongoing|to\s+date)\b", re.I)
+_OPEN_PERIOD = re.compile(r"\b(present|current|ongoing|to\s+date|onwards?|until\s+now)\b", re.I)
 # A range end that is a concrete year, optionally month-prefixed: "- 2023",
 # "– May 2023". Used only when there is no open-period marker.
 _END_DATED = re.compile(r"[-–—]\s*(?:[A-Z][a-z]{2,8}\.?\s+)?(?:19|20)\d{2}\b")
 
 # Every four-digit year the text states.
 _YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
-# Anything that may leave a year open: "since 2015", or a dash after a year
+# Anything that may leave a year open: "since 2015", "from 2015", or a dash after a year
 # that no year follows ("2015 -", "2015 - Mentor for ..."). Looser than an
 # open range on purpose: a false match keeps the entry N3A, as it was coded
 # before the lone-past-year rule below, and only a clean miss moves it.
 _MAY_BE_OPEN = re.compile(
-    r"\bsince\b|(?:19|20)\d{2}\s*[-–—](?!\s*(?:[A-Z][a-z]{2,8}\.?\s+)?\d)",
+    r"\b(?:since|from)\b|(?:19|20)\d{2}\s*[-–—](?!\s*(?:[A-Z][a-z]{2,8}\.?\s+)?\d)",
     re.I,
 )
 

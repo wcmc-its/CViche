@@ -138,11 +138,14 @@ def test_every_stated_year_past_becomes_n3b():
 @pytest.mark.parametrize("text", [
     "2026 Mentor for Ana Doe, dissertation advising",          # the run's year
     "Mentor for Ana Doe since 2016",                           # since
+    "Mentor for Ana Doe from 2016",                            # from
+    "Mentor for Ana Doe 2016 onwards",                         # onwards
+    "Mentor for Ana Doe 2016 until now",                       # until now
     "2016 - Mentor for Ana Doe",                               # year, dash, no end year
     "Mentor for Ana Doe (2016-",                               # dangling dash
     "Mentor for Ana Doe 2016, current",                        # open-period word
     "Mentor for Ana Doe",                                      # no year at all
-], ids=["run-year", "since", "spaced-dash", "dangling-dash", "current", "no-year"])
+], ids=["run-year", "since", "from", "onwards", "until-now", "spaced-dash", "dangling-dash", "current", "no-year"])
 def test_a_year_that_may_be_open_stays_n3a(text):
     e, _ = _apply_one(_entry(text))
     assert e["taxonomy_code"] == "N3A"
