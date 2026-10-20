@@ -58,7 +58,9 @@ row), then H honors (an award's criteria, or the paper it was for), then
 N3A-N3B mentees (the mentee's awards and outputs, the owner's part), then
 B1 degrees (the thesis or dissertation, a minor, a research topic), then O
 institutional leadership (what a role oversaw or achieved), then P
-institutional committees (a committee's remit, the member's part on it). The
+institutional committees (a committee's remit, the member's part on it),
+then R invited presentations (the audience, the session and its
+co-presenters, what the owner organized). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -86,11 +88,23 @@ from unified_pipeline.core.template_boilerplate import (
 
 from .dedup import _is_sibling_of
 from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
-from .formatting import plain_entry_left_twips, plain_entry_level
+from .formatting import (
+    DATE_SPAN_SEPARATOR,
+    format_date_list,
+    further_date_spans,
+    plain_entry_left_twips,
+    plain_entry_level,
+)
 from .normalization import _pii_fragments, _squash
 from .normalization.pii import _BARE_PHONE_SHAPE
 from .parsing import _looks_like_multiple_records, _refold_shattered
-from .parsing.text import DATE_LED_MIN_RECORDS, _opens_dated_record
+from .parsing.text import (
+    _RECORD_DATE_MONTH,
+    _RECORD_YEAR,
+    DATE_LED_MIN_RECORDS,
+    _line_carries_record_date,
+    _opens_dated_record,
+)
 from .pii_pass import PII_WITHHELD_KEY
 from .render_check import (
     _RECORD_DATE_PREFIX_RE,
@@ -202,14 +216,37 @@ LEADERSHIP_CODES = frozenset({'O'})
 #: lookup finds the title block, not their section); one rerouted into P
 #: follows this one.
 ADMINISTRATIVE_CODES = frozenset({'P'})
+#: Invitations to speak and present: what a talk was beyond its fields --
+#: its audience (how many, who they were), the session or panel and its
+#: co-presenters, a continuing-education or sponsor note, a visit the owner
+#: organized. The presentations section writes each R entry as one row of
+#: its Regional, National or International table (the title, the venue with
+#: the role and meeting folded in, the dates), so a sub-point is a deleted
+#: row under the talk's row. The row prints stage 4's off-schema title,
+#: venue, meeting and date names when the schema's are empty
+#: (`PRESENTATION_TITLE_FIELDS` and the three after it), and a talk with no
+#: title is titled from its line (`_untitled_talk_title`), which the document
+#: then holds, so it is not offered again. Only the one row the writer
+#: recorded for that entry can anchor it (`_own_rows`, the row-receipt
+#: ledger, taken with no word test): two talks at one venue, or one title
+#: given twice, share their rows' words. An entry holding several talks gets
+#: none, as which of them a line is about cannot be shown
+#: (`_own_talk_line`): the last of stage 4's records reads only its own
+#: segment, and a line holding talks the row does not print offers nothing.
+#: One talk given on several dates is one record when its row prints those
+#: dates. An entry rerouted to another code before rendering is grouped under
+#: that code and follows its rule (an excluded code offers nothing, and C,
+#: F2 and I are not offered: their heading lookup finds the title block, not
+#: their section); one rerouted into R follows this one.
+PRESENTATION_CODES = frozenset({'R'})
 #: The families whose writer records each entry's rows in the row-receipt
 #: ledger, and whose prose goes only under one of those rows (`_anchor_scope`).
-_OWN_ROW_CODES = EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES
+_OWN_ROW_CODES = EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES | PRESENTATION_CODES
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
                   | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES
-                  | ADMINISTRATIVE_CODES)
+                  | ADMINISTRATIVE_CODES | PRESENTATION_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -310,6 +347,42 @@ _COMMITTEE_NAME_RE = re.compile(
 #: <institution>"), still shares most of its words, and another committee
 #: little more than the word for its kind ("Committee").
 _OWN_COMMITTEE_MIN_SHARE = 0.5
+#: The fields the presentations writer reads a talk's row from, each cell's
+#: in its one precedence: the Title cell's (the schema's, then stage 4's
+#: off-schema name), the venue's (`institution`, then the schema's
+#: `location`, then `venue`), the meeting it folds into the venue (R's own,
+#: then S8's, for an abstract a hierarchy mismatch moved here, #1570), and
+#: the talk's own date (the first that holds one, which an `end_date` makes
+#: a range). The writer reads them from here, so the row and `_value_tokens`
+#: cannot drift apart. Its `role` is a schema field, which `_RENDERED_FIELDS`
+#: lists.
+PRESENTATION_TITLE_FIELDS = ('title', 'presentation_title')
+PRESENTATION_VENUE_FIELDS = ('institution', 'location', 'venue')
+PRESENTATION_EVENT_FIELDS = ('event_name', 'conference_name')
+PRESENTATION_DATE_FIELDS = ('year', 'date', 'start_date')
+PRESENTATION_END_DATE_FIELD = 'end_date'
+#: The off-schema ones among them: `_value_tokens` adds them for R.
+_PRESENTATION_ROW_FIELDS = tuple(
+    name for name in (*PRESENTATION_TITLE_FIELDS, *PRESENTATION_VENUE_FIELDS,
+                      *PRESENTATION_EVENT_FIELDS, *PRESENTATION_DATE_FIELDS,
+                      PRESENTATION_END_DATE_FIELD)
+    if name not in _RENDERED_FIELDS['R'])
+#: A part of a talk's line split before each date it holds, so a date
+#: inside the part can be read as opening a record (`_opens_dated_record`),
+#: as one opening the part is: a CV that writes its talks in one paragraph
+#: ("2003 <venue>: <title>, <city> 2003 <venue>: <title>") reaches stage 6 as
+#: one part, which stage 2's tabs never split.
+_BEFORE_A_DATE_RE = re.compile(rf'\s+(?={_RECORD_DATE_MONTH}{_RECORD_YEAR})')
+#: A title as a line quotes it, in curly or straight quotes.
+_QUOTED_RE = re.compile(r'“([^”]+)”|"([^"]+)"')
+#: A quoted phrase of at least this many distinctive words can be a title;
+#: a shorter one is a word or a name the line puts in quotes ("a 'Student
+#: Choice' seminar").
+_QUOTED_TITLE_MIN_TOKENS = 3
+#: A quoted title more than this share of whose distinctive words are the
+#: talk's own title or meeting is that title, punctuated or typed
+#: differently; another talk's title shares little more than a topic word.
+_OWN_TITLE_MIN_SHARE = 0.5
 
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
@@ -474,8 +547,8 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
     (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
     leadership role `_LEADERSHIP_ROW_FIELDS`, for a committee
-    `_ADMINISTRATIVE_ROW_FIELDS`), or of every scalar field for a code
-    rendered from its text."""
+    `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`), or
+    of every scalar field for a code rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
@@ -486,6 +559,8 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
         names = (*names, *_LEADERSHIP_ROW_FIELDS)
     elif code in ADMINISTRATIVE_CODES:
         names = (*names, *_ADMINISTRATIVE_ROW_FIELDS)
+    elif code in PRESENTATION_CODES:
+        names = (*names, *_PRESENTATION_ROW_FIELDS)
     values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
                          if isinstance(value, (str, int, float)) and value))
@@ -717,6 +792,86 @@ def _own_committee_row(entry: Mapping, candidates: list[AnchorCandidate],
     return rows if len(rows) == 1 else []
 
 
+def _talk_records(line: str) -> int:
+    """How many talks the dates of a talk's line mark: its tab, line and pipe
+    parts the writer-side #660 test reads as dated
+    (`_line_carries_record_date`, a list of talks each ending in its date),
+    or the pieces a date opens (`_opens_dated_record`, read before each date
+    of a part, `_BEFORE_A_DATE_RE`), whichever is more."""
+    parts = _split_fragments(line)
+    dated_parts = sum(map(_line_carries_record_date, parts))
+    opened = sum(_opens_dated_record(piece) for part in parts
+                 for piece in _BEFORE_A_DATE_RE.split(part))
+    return max(dated_parts, opened)
+
+
+def _talk_dates(fields: Mapping, code: str) -> int:
+    """How many dates the talk's Dates cell prints, as the presentations
+    writer builds it (`_talk_date_cell`): the talk's own date
+    (`PRESENTATION_DATE_FIELDS`), or each of a list of them under one key
+    (`format_date_list`), and each further span stage 4 kept
+    (`further_date_spans`)."""
+    own = next((fields[name] for name in PRESENTATION_DATE_FIELDS if fields.get(name)), None)
+    listed = format_date_list(own, code) if own is not None else ''
+    own_dates = len(listed.split(DATE_SPAN_SEPARATOR)) if listed else int(own is not None)
+    return own_dates + len(further_date_spans(fields, code))
+
+
+def _quotes_another_talk(line: str, fields: Mapping) -> bool:
+    """Whether the line quotes a title (`_QUOTED_RE`) that is not the talk's
+    own: one no more than `_OWN_TITLE_MIN_SHARE` of whose distinctive words
+    are in its title or meeting fields. With no title or meeting to hold,
+    whose a quoted title is cannot be shown."""
+    own = _tokens(' '.join(str(fields.get(name) or '') for name in
+                           (*PRESENTATION_TITLE_FIELDS, *PRESENTATION_EVENT_FIELDS)))
+    for match in _QUOTED_RE.finditer(line):
+        quoted = _tokens(match.group(1) or match.group(2))
+        if (len(quoted) >= _QUOTED_TITLE_MIN_TOKENS
+                and len(quoted & own) <= _OWN_TITLE_MIN_SHARE * len(quoted)):
+            return True
+    return False
+
+
+def _lists_talks(fields: Mapping) -> bool:
+    """Whether stage 4 listed talks under one of the entry's fields: a list
+    holding a record that names a title, a meeting or a venue (R's
+    `additional_presentations`, which fan-out keeps whole when the text holds
+    words no record does, #983). The writer prints the entry's own fields
+    only (`_LIST_LOST_WHEN_KEPT_WHOLE`). A list of date spans names none."""
+    names = (*PRESENTATION_TITLE_FIELDS, *PRESENTATION_EVENT_FIELDS, *PRESENTATION_VENUE_FIELDS)
+    return any(isinstance(item, Mapping) and any(item.get(name) for name in names)
+               for value in fields.values() if isinstance(value, list) for item in value)
+
+
+def _own_talk_line(entry: Mapping, code: str) -> str:
+    """The text a talk's prose is read from (`_own_segment`: the last of
+    stage 4's records reads its own segment, and nothing when the segments
+    do not pair with them), and nothing when it holds another talk than the
+    one the writer prints for it, as that talk's text would be offered as
+    this one's prose, under its row:
+
+    - its dates mark more talks than its row prints dates (`_talk_records`
+      against `_talk_dates`): talks each with its own date, joined by tabs or
+      written in one paragraph (EBYSBC BMAMWE 1440: three talks of one year,
+      offered under the first one's row). One talk given on several dates or
+      at several venues is one record when stage 4 kept those dates, as the
+      Dates cell then prints each of them, so the parts' dates are read
+      against that cell rather than by `_own_record_line`'s count alone;
+    - it quotes another title than the talk's own (`_quotes_another_talk`);
+    - stage 4 listed several talks under one entry (`_lists_talks`).
+
+    A talk the line names with no date and no quotes ("<title A>, <venue>.
+    <title B>, <venue>, 2012") is not seen."""
+    own = _own_segment(entry)
+    fields = entry.get('extracted_fields')
+    fields = fields if isinstance(fields, Mapping) else {}
+    if (own is None
+            or _talk_records(own) >= max(DATE_LED_MIN_RECORDS, _talk_dates(fields, code) + 1)
+            or _quotes_another_talk(own, fields) or _lists_talks(fields)):
+        return ''
+    return own
+
+
 def _prose_text(code: str, entry: Mapping,
                 entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
     """The text `code`'s rule reads the entry's prose from; None for its own."""
@@ -724,6 +879,8 @@ def _prose_text(code: str, entry: Mapping,
         return _own_mentee_line(entry, entries_by_code)
     if code in ADMINISTRATIVE_CODES:
         return _own_committee_line(entry)
+    if code in PRESENTATION_CODES:
+        return _own_talk_line(entry, code)
     if code in _OWN_ROW_CODES:
         return _own_record_line(entry)
     return None
@@ -741,18 +898,20 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
         return _own_rows(entry, in_section, rows_written)
     if code in ADMINISTRATIVE_CODES:
         return _own_committee_row(entry, in_section, rows_written)
+    if code in PRESENTATION_CODES:
+        return _own_rows(entry, in_section, rows_written)
     return in_section
 
 
 def _pick_anchor(code: str, entry_tokens: set[str],
                  scope: list[AnchorCandidate]) -> AnchorCandidate | None:
     """The line of `scope` the entry's prose goes under. A degree's, a
-    leadership role's or a committee's one own row (`_own_rows`) is taken as
-    it is: the writer's record already says whose it is, and a short row
-    ("PhD", "Kell University", "2010"; a "Dean" of an acronym) holds too few
-    distinctive words for `best_anchor`, as does a degree's row whose
-    stage-5b institution name shares few words with the field. Any other
-    scope is read by words."""
+    leadership role's, a committee's or a talk's one own row (`_own_rows`) is
+    taken as it is: the writer's record already says whose it is, and a
+    short row ("PhD", "Kell University", "2010"; a "Dean" of an acronym)
+    holds too few distinctive words for `best_anchor`, as does a degree's
+    row whose stage-5b institution name shares few words with the field. Any
+    other scope is read by words."""
     if code in _OWN_ROW_CODES and len(scope) == 1:
         return scope[0]
     return best_anchor(entry_tokens, scope)
@@ -791,7 +950,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     (`_pick_anchor`). A committee's is read the same way, and none is
     offered when its line holds another record than the one its row prints
     (`_own_committee_line`) or its writer recorded it several rows
-    (`_own_committee_row`).
+    (`_own_committee_row`). A talk's is read the same way, and none is
+    offered when its line holds another talk (`_own_talk_line`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing

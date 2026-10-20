@@ -24,6 +24,11 @@ makes the Dates cell a range (`_own_talk_date`), and further dates under an
 off-schema span key follow it (`_talk_date_cell`, #1245). A title-less entry is titled by `_untitled_talk_title`: role and
 event name when the source line holds nothing else, otherwise the source line
 without the list number, year and venue the other two cells already show.
+
+Every row written is recorded in the row-receipt ledger against the entry it
+renders (#534), so the #1205 sub-point pass anchors a talk's prose only under
+that entry's own row. The fields each cell is read from are
+`supplementary`'s, which that pass counts as the row's.
 """
 import logging
 import re
@@ -41,6 +46,13 @@ from ..formatting import (
     with_event_status,
 )
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import (
+    PRESENTATION_DATE_FIELDS,
+    PRESENTATION_END_DATE_FIELD,
+    PRESENTATION_EVENT_FIELDS,
+    PRESENTATION_TITLE_FIELDS,
+    PRESENTATION_VENUE_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -202,18 +214,23 @@ def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
 
 
 # The field names a talk's date arrives under, most specific first.
-_TALK_DATE_KEYS = ('year', 'date', 'start_date')
+_TALK_DATE_KEYS = PRESENTATION_DATE_FIELDS
 # The field names the meeting that hosted a talk arrives under: R's own, then
 # S8's, for an abstract a hierarchy mismatch moved here (#1570, YUYVIG
 # SQMWHM 1047 rendered without its meeting).
-_TALK_EVENT_KEYS = ('event_name', 'conference_name')
-_TALK_END_DATE_KEY = 'end_date'
+_TALK_EVENT_KEYS = PRESENTATION_EVENT_FIELDS
+_TALK_END_DATE_KEY = PRESENTATION_END_DATE_FIELD
 _NONE_STRING = 'none'
+
+
+def _first_value(fields: Mapping, keys: tuple[str, ...]) -> object:
+    """The first filled value of `keys`, as stored, else ''."""
+    return next((fields[key] for key in keys if fields.get(key)), '')
 
 
 def _talk_event_value(fields: Mapping) -> object:
     """The first filled `_TALK_EVENT_KEYS` value, as stored, else ''."""
-    return next((fields[key] for key in _TALK_EVENT_KEYS if fields.get(key)), '')
+    return _first_value(fields, _TALK_EVENT_KEYS)
 
 
 def _date_field(fields: dict, key: str) -> str | Mapping:
@@ -264,13 +281,14 @@ def _talk_date_cell(fields: dict) -> str:
 class PresentationsSection:
     """Section R writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_presentations(self, entries: list[dict]):
+    def _fill_presentations(self, entries: list[dict]) -> None:
         """Fill R. INVITATIONS TO SPEAK/PRESENT section.
 
         WCM template has tables for Regional/National/International:
         Table structure: Title | Institution/Location | Dates (yyyy)
 
         Uses cv_owner_location to classify geographic scope of each entry.
+        Each row is recorded against its entry in the row-receipt ledger.
         """
         if not entries:
             return
@@ -343,8 +361,8 @@ class PresentationsSection:
                 fields = entry.get('extracted_fields', {}) or {}
                 taxonomy_code = entry.get('taxonomy_code', 'R')
 
-                title = fields.get('title') or fields.get('presentation_title') or ''
-                institution = fields.get('institution') or fields.get('location') or fields.get('venue') or ''
+                title = _first_value(fields, PRESENTATION_TITLE_FIELDS)
+                institution = _first_value(fields, PRESENTATION_VENUE_FIELDS)
 
                 formatted_date = _talk_date_cell(fields)
 
@@ -392,3 +410,4 @@ class PresentationsSection:
                         for run in para.runs:
                             _set_font(run)
                 self.stats['entries_inserted'] += 1
+                self._row_receipts.wrote(row._tr, entry)  # the talk's own row (#534, #1205)

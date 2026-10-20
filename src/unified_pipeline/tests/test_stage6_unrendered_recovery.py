@@ -4510,6 +4510,604 @@ def test_committee_prose_holding_protected_data_is_not_offered_through_the_pii_p
     assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
 
 
+# --- #1205: R invited presentations, the next code family --------------------
+# The presentations section writes every R entry as one row of its Regional,
+# National or International table, so the prose is a deleted row under the
+# talk's own row: the one row the writer recorded for that entry (the
+# row-receipt ledger). An entry holding several talks offers none.
+
+_TALK_PROSE = ("Delivered to an audience of about two hundred residents and nursing staff, "
+               "followed by a moderated question session")
+_TALK_TITLE = "Example Advances in Coastal Wetland Hydrology"
+_TALK_EVENT = "Example Grand Rounds"
+_TALK_VENUE = "Norvale University, Crab Hollow, ZQ"
+
+
+def _talk(idx=601, title=_TALK_TITLE, event=_TALK_EVENT, venue=_TALK_VENUE, date="2016",
+          prose=_TALK_PROSE, code="R", **fields):
+    """A talk whose source line goes on past its title, meeting, venue and
+    year into who it was for, as YUYVIG SIJYJZ 621's did. Another talk of the
+    same title at the same venue shares every distinctive word of its row:
+    only the year, a digit, tells them apart. A value passed as None is in
+    neither the line nor the fields."""
+    named = {"title": title, "event_name": event, "location": venue, "date": date}
+    line = ", ".join(value for value in (title, event, venue, date) if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _later_talk(title=_TALK_TITLE):
+    """The same talk given again, at the same venue, with no prose: it renders
+    first, reverse chronologically."""
+    return _talk(idx=599, title=title, date="2019", prose="")
+
+
+def _render_talks(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_presentations(entries)
+    gen._add_supplementary_subpoints({"R": entries})
+    return gen
+
+
+def _talk_table_row():
+    """The same talk read from a source table: stage 2 joins the row's cells
+    with pipes, and its position names the row ("41.2")."""
+    entry = _talk()
+    entry["element_idx_start"] = "41.2"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+_TALK_ROW = f"{_TALK_TITLE}{_TALK_EVENT}, {_TALK_VENUE}2016"
+_TALK_HEADER = "TitleInstitution/LocationDates (yyyy)"
+
+
+@pytest.mark.parametrize("entry", [_talk, _talk_table_row])
+def test_talk_prose_is_a_deleted_row_under_the_talk_row(entry):
+    gen = _render_talks([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TALK_ROW
+    assert _table_header(row) == _TALK_HEADER
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _TALK_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "3"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_a_talks_several_prose_lines_are_one_row_of_paragraphs_in_source_order():
+    lines = (_TALK_PROSE, "Co-presented with two hospital pharmacists from the regional formulary service")
+    gen = _render_talks([_talk(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TALK_ROW
+    assert ["".join(t.text for t in p.iter(qn("w:delText"))) for p in row.iter(qn("w:p"))] \
+        == list(lines)
+
+
+@pytest.mark.parametrize("later", [
+    # One talk given twice at one venue: the rows differ in their years only.
+    _TALK_TITLE,
+    # A later talk at the same venue holding every word of this one's title.
+    f"Revisiting {_TALK_TITLE}",
+])
+def test_talk_prose_goes_under_its_own_row_among_talks_of_one_venue(later):
+    """The later talk renders first and holds every distinctive word of the
+    earlier one's row, so words alone put the earlier one's prose under the
+    later row. Only the row the writer recorded for the earlier entry takes
+    it."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_talks([_later_talk(later), _talk()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert _row_text(above) == _TALK_ROW
+    assert _row_text(above.getprevious()) == f"{later}{_TALK_EVENT}, {_TALK_VENUE}2019"
+    assert row.getnext() is None
+    # Words alone would have taken the later talk's row.
+    lines = list(supplementary.anchor_candidates(_render_talks(
+        [_later_talk(later), _talk()], supplementary_subpoints=False).doc))
+    rows = [line for line in lines if _TALK_VENUE in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(_talk(), "R"), rows) is rows[0]
+    assert rows[0].text.startswith(later)
+
+
+def test_talks_filed_under_two_scope_tables_each_take_their_own_prose():
+    """A talk the CV files under its International heading renders in that
+    table, the other in National: each prose goes under its own talk's row,
+    in its own table."""
+    abroad_prose = "Keynote for the closing plenary, followed by a workshop for early career faculty"
+    abroad = _talk(idx=603, venue="Kestrel Institute, Osprey Bay", prose=abroad_prose)
+    abroad["hierarchy"] = ["INVITATIONS TO SPEAK/PRESENT", "International"]
+    gen = _render_talks([abroad, _talk()], supplementary_subpoints=True)
+
+    by_text = {"".join(t.text for t in row.iter(qn("w:delText"))): row for row in _subpoint_rows(gen)}
+    assert set(by_text) == {abroad_prose, _TALK_PROSE}
+    assert _row_text(by_text[_TALK_PROSE].getprevious()) == _TALK_ROW
+    assert _row_text(by_text[abroad_prose].getprevious()).startswith(_TALK_TITLE)
+    assert "Kestrel Institute" in _row_text(by_text[abroad_prose].getprevious())
+    assert by_text[_TALK_PROSE].getparent() is not by_text[abroad_prose].getparent()
+
+
+def test_talk_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_talks([_later_talk(), _talk()], supplementary_subpoints=False)
+    on = _render_talks([_later_talk(), _talk()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _TALK_PROSE in rejected
+    assert _TALK_PROSE not in "".join(_texts_of(off.doc.element.body))
+    assert len(_subpoint_rows(on)) == 1
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_a_short_talks_prose_goes_under_its_own_row():
+    """An acronym title at an acronym's venue holds no distinctive word, too
+    few for the word test: the writer's record says the one row is the
+    entry's own (`_pick_anchor`)."""
+    gen = _render_talks([_talk(title="IBD", event=None, venue="NVU")], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == "IBDNVU2016"
+    assert _deleted_texts(gen) == _TALK_PROSE
+
+
+def _untitled_talk():
+    """No title: the Title cell is the entry's line without the meeting,
+    venue and year the other cells show (`_untitled_talk_title`), so it
+    prints the prose too."""
+    return _talk(title=None)
+
+
+def _talk_titled_by_its_prose():
+    """The prose is the title stage 4 extracted."""
+    entry = _talk(prose=None)
+    entry["extracted_fields"]["title"] = _TALK_PROSE
+    entry["text"] = f"{_TALK_PROSE}, {_TALK_EVENT}, {_TALK_VENUE}, 2016"
+    return entry
+
+
+@pytest.mark.parametrize("entry", [_untitled_talk, _talk_titled_by_its_prose])
+def test_talk_prose_already_in_its_row_is_not_offered_again(entry):
+    """The row prints it (`_record_rendered`), so it does not print twice: a
+    title derived from the line counts as rendered."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_talks([entry()], supplementary_subpoints=True)
+    assert _TALK_PROSE in "".join(_row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "R", haystack) == []
+
+
+# A date-shaped marker for the date fields, which the Dates cell prints
+# only as a date; an end date only after a start.
+_DATE_MARKERS = {"year": "1987", "start_date": "1987", "end_date": "1989"}
+
+
+def _talk_with_only(field, marker):
+    entry = _talk(title=None, event=None, venue=None, date=None, prose="")
+    entry["extracted_fields"] = {field: marker}
+    if field == "end_date":
+        entry["extracted_fields"]["start_date"] = "1985"
+    entry["text"] = "Example invited lecture"
+    return entry
+
+
+def test_every_talk_row_field_the_pass_counts_is_printed_in_the_talk_row():
+    """`supplementary._PRESENTATION_ROW_FIELDS`, the off-schema names among
+    the fields the writer reads its cells from (`_RENDERED_FIELDS` marks
+    schema fields only): each one, alone on an entry, reaches the row."""
+    from unified_pipeline.stage6 import supplementary
+
+    assert supplementary._PRESENTATION_ROW_FIELDS
+    for field in supplementary._PRESENTATION_ROW_FIELDS:
+        marker = _DATE_MARKERS.get(field, f"Zq{field}Z")
+        gen = _render_talks([_talk_with_only(field, marker)], supplementary_subpoints=True)
+        assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
+
+
+def test_every_field_the_talk_row_prints_is_one_the_pass_counts():
+    """The other direction: a field the row prints that `_value_tokens` does
+    not count would offer a fragment restating the row. The names are the
+    fields of the codes an entry is rerouted into R from (S8, S9, K1-K3,
+    Q2, H, D1), each alone on an entry."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    counted = _RENDERED_FIELDS["R"] | set(supplementary._PRESENTATION_ROW_FIELDS)
+    names = set().union(*(_RENDERED_FIELDS[code] for code in
+                          ("S8", "S9", "K1", "K2", "K3", "Q2", "H", "D1") if code in _RENDERED_FIELDS),
+                        supplementary.PRESENTATION_TITLE_FIELDS, supplementary.PRESENTATION_VENUE_FIELDS,
+                        supplementary.PRESENTATION_EVENT_FIELDS, {"name", "organization", "position"})
+    for field in sorted(names):
+        marker = f"Zq{field}Z"
+        gen = _render_talks([_talk_with_only(field, marker)], supplementary_subpoints=True)
+        printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+        assert not printed or field in counted, field
+
+
+@pytest.mark.parametrize("field", ["presentation_title", "institution", "venue", "conference_name"])
+def test_a_talk_line_mostly_restating_its_row_is_not_offered(field):
+    """Stage 4 named the talk's title, venue or meeting under an off-schema
+    key, which the row prints when the schema's is empty. A line at least
+    half of whose words restate it is the row
+    (`SUBPOINT_FIELD_TOKEN_MAX_SHARE`); the document holds too few of its
+    words for `_record_rendered` to see that."""
+    from unified_pipeline.stage6 import supplementary
+
+    value = "Regional Pharmacy Formulary Review Symposium"
+    line = "Formulary Review Symposium for Regional Pharmacy: approved statewide pediatric dosing"
+    schema_name = {"presentation_title": "title", "institution": "location",
+                   "venue": "location", "conference_name": "event_name"}[field]
+    entry = _talk(prose=line)
+    del entry["extracted_fields"][schema_name]
+    entry["extracted_fields"][field] = value
+    gen = _render_talks([entry], supplementary_subpoints=True)
+    assert any(value in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary._record_rendered(line, haystack.text, haystack.line_tokens) is False
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+_OTHER_TALK = ("Kestrel Lecture on Estuary Sediment Transport and Marsh Restoration Outcomes, "
+               "Osprey Regional Council, Bramble Harbour")
+
+
+def _talks_in_one_paragraph():
+    """Two talks each opening with its year, which the CV wrote in one
+    paragraph (EBYSBC BMAMWE 1440's shape): one line, so the writer prints
+    one row, of the talk stage 4 extracted; the other is its record, not its
+    prose."""
+    entry = _talk(prose=None)
+    entry["text"] = (f"2016 {_TALK_VENUE}: {_TALK_TITLE}, {_TALK_EVENT} "
+                     f"2016 {_OTHER_TALK}, Crab Hollow, ZQ")
+    return entry
+
+
+def _talks_each_ending_in_its_year():
+    """Two talks each ending in its year, which stage 2 joined with a tab:
+    the writer-side #660 test reads two dated parts."""
+    entry = _talk(prose=None)
+    entry["text"] = f"{_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE}, 2016\t{_OTHER_TALK}, 2014"
+    return entry
+
+
+@pytest.mark.parametrize("make", [_talks_in_one_paragraph, _talks_each_ending_in_its_year])
+@pytest.mark.parametrize("flag", [True, False])
+def test_a_line_of_several_dated_talks_offers_none_and_its_records_are_recovered(make, flag):
+    """#1205 comment 6275741663: the #221 recovery reads every sub-point
+    line as rendered, so a talk offered as another's prose would be in the
+    accepted document nowhere and still not be recovered. None is offered,
+    and the recovery re-emits the same lines with sub-points on as off."""
+    entry = make()
+    gen = _render_talks([entry], supplementary_subpoints=flag)
+    assert len(gen._row_receipts.elements_for(entry)) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+    gen._recover_unrendered_records({"R": [entry]})
+    off = _render_talks([make()], supplementary_subpoints=False)
+    off._recover_unrendered_records({"R": [make()]})
+
+    assert gen.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"]
+    assert _texts_of(gen.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+@pytest.mark.parametrize("dates", [
+    # Stage 4 kept both dates under the talk's own key ...
+    {"date": "2014; 2016"},
+    # ... or one under it and the other as a further span (#1245).
+    {"date": "2016", "additional_dates": ["2014"]},
+])
+def test_one_talk_given_on_two_dates_is_one_record_and_offers_its_prose(dates):
+    """The same title at two venues, each opening with its year: the Dates
+    cell prints both years, so the two dated parts are this talk's own dates,
+    not two talks (`_talk_dates`). Its prose goes under its row."""
+    entry = _talk(prose=None, **dates)
+    entry["text"] = (f"2014 {_TALK_TITLE}, {_TALK_EVENT}, Kestrel Institute\t"
+                     f"2016 {_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE}\t{_TALK_PROSE}")
+    gen = _render_talks([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert set(_row_texts_of(row.getprevious())[-1].split(", ")) == {"2014", "2016"}
+    assert _deleted_texts(gen) == _TALK_PROSE
+
+
+def test_the_same_line_with_one_date_kept_is_two_talks_and_offers_none():
+    """With one date kept, the row prints one occasion: the other dated part
+    is a talk the row does not print."""
+    entry = _talk(prose=None)
+    entry["text"] = (f"2014 {_TALK_TITLE}, {_TALK_EVENT}, Kestrel Institute\t"
+                     f"2016 {_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE}\t{_TALK_PROSE}")
+    gen = _render_talks([entry], supplementary_subpoints=True)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _talk_quoting_another_title():
+    """Two quoted titles on one undated line: the other talk's title shares
+    no word with this one's."""
+    entry = _talk(prose=None)
+    entry["text"] = (f"“{_TALK_TITLE}”, {_TALK_EVENT}, {_TALK_VENUE}. “Estuary Sediment "
+                     f"Transport in Tidal Marshes”, Osprey Regional Council. {_TALK_PROSE}")
+    return entry
+
+
+def _talk_list_kept_whole():
+    """Stage 4 listed a second talk under an off-schema key, and fan-out kept
+    the list whole because the text holds prose no record does (#983): the
+    writer prints the entry's own fields only."""
+    entry = _talk()
+    entry["extracted_fields"]["additional_presentations"] = [
+        {"title": "Estuary Sediment Transport in Tidal Marshes", "location": "Osprey Bay",
+         "date": "2014"}]
+    return entry
+
+
+@pytest.mark.parametrize("entry", [_talk_quoting_another_title, _talk_list_kept_whole])
+def test_a_talk_row_holding_another_talk_gets_no_sub_point(entry):
+    """The writer prints one row, the entry's own, though the line holds
+    another talk: that talk's text would be offered as this one's prose,
+    under its row."""
+    entry = entry()
+    gen = _render_talks([entry], supplementary_subpoints=True)
+
+    assert len(gen._row_receipts.elements_for(entry)) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_talk_quoting_its_own_title_differently_punctuated_offers_its_prose():
+    entry = _talk(prose=None)
+    entry["text"] = f"“{_TALK_TITLE.lower()}.” {_TALK_EVENT}, {_TALK_VENUE}, 2016\t{_TALK_PROSE}"
+    gen = _render_talks([entry], supplementary_subpoints=True)
+    assert _deleted_texts(gen) == _TALK_PROSE
+
+
+def test_a_talk_the_section_writes_no_row_for_gets_no_sub_point():
+    """An entry no row was written for -- one the section skipped -- has no
+    row of its own: its prose goes under no other line of the document,
+    though the other talk's row holds every distinctive word of its line."""
+    skipped, later = _talk(), _later_talk()
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_presentations([later])
+    gen._add_supplementary_subpoints({"R": [later, skipped]})
+
+    assert gen._row_receipts.elements_for(skipped) == []
+    assert gen._row_receipts.elements_for(later)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _render_grouped_talks(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_presentations(grouped.get("R", []))
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def _talk_line(text, *talks):
+    """One source line stage 4 returned as a record per (title, venue, date),
+    the entry's own fields being the last record's. Fan-out gives every
+    earlier record a line of its own and the last one the whole line."""
+    records = [{"title": title, "location": venue, "date": date} for title, venue, date in talks]
+    return {"element_idx_start": 663, "taxonomy_code": "R", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_ESTUARY = ("Estuary Sediment Transport in Tidal Marshes", "Kestrel Institute", "2014")
+_WETLAND = (_TALK_TITLE, _TALK_VENUE, "2016")
+_ESTUARY_LINE = "Estuary Sediment Transport in Tidal Marshes, Kestrel Institute, 2014"
+_WETLAND_LINE = f"{_TALK_TITLE}, {_TALK_VENUE}, 2016"
+_ESTUARY_PROSE = ("Opened the morning session on sediment budgets and led a discussion with "
+                  "three regional water managers")
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own talk.
+    ([f"{_ESTUARY_LINE}. {_ESTUARY_PROSE}", _WETLAND_LINE],
+     [("Estuary Sediment Transport in Tidal Marshes", f"{_ESTUARY_LINE}. {_ESTUARY_PROSE}")]),
+    ([_ESTUARY_LINE, f"Invited speaker, {_WETLAND_LINE}. {_TALK_PROSE}"],
+     [(_TALK_TITLE, f"Invited speaker, {_WETLAND_LINE}. {_TALK_PROSE}")]),
+    # They do not: which talk the prose is about cannot be told, so neither takes it.
+    ([_ESTUARY_LINE, _TALK_PROSE, _WETLAND_LINE], []),
+])
+def test_prose_on_a_line_of_several_talks_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the talk's line as well as its prose brings the title, venue and
+    year along, and Reject All prints them a second time, under the row that
+    holds them (the shape every family has; #1205, 2026-10-09)."""
+    entry = _talk_line("\t".join(segments), _ESTUARY, _WETLAND)
+    gen, grouped = _render_grouped_talks([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["R"][-1] and len(grouped["R"]) == 2
+    assert [(_row_texts_of(row.getprevious())[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def _row_texts_of(tr):
+    return ["".join(t.text or "" for t in tc.iter(qn("w:t"))) for tc in tr.findall(qn("w:tc"))]
+
+
+def test_a_talk_line_opening_with_its_title_cell_is_read_as_its_row():
+    """A line that opens with the Title cell's whole text holds the row's own
+    text verbatim (`_record_rendered`'s first `RENDER_PIECE_WINDOW`
+    characters), and the whole line reads as rendered: none of it is offered,
+    its prose included. A line opening with the role is offered whole, as the
+    CV wrote it."""
+    title_first = f"{_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE}, 2016. {_TALK_PROSE}"
+    role_first = f"Invited speaker, {title_first}"
+    for line, offered in ((title_first, ""), (role_first, role_first)):
+        entry = _talk(prose=None)
+        entry["text"] = line
+        gen = _render_talks([entry], supplementary_subpoints=True)
+        assert _deleted_texts(gen) == offered
+
+
+def test_generic_list_fan_out_children_of_talks_offer_nothing_their_fields_do_not_hold():
+    """Fan-out splits a record list stage 4 filed under a key the schema does
+    not define only when the fields hold every word of the text, and each
+    child's text is then the line built from its fields: nothing is prose.
+    With prose in the text the list is not split, the entry renders its own
+    fields, and the list is talks the row does not print (`_lists_talks`)."""
+    records = [{"title": _ESTUARY[0], "location": _ESTUARY[1], "date": _ESTUARY[2]},
+               {"title": _WETLAND[0], "location": _WETLAND[1], "date": _WETLAND[2]}]
+    for text, children in ((f"{_ESTUARY_LINE}\t{_WETLAND_LINE}", 2),
+                           (f"{_ESTUARY_LINE}\t{_WETLAND_LINE}\t{_TALK_PROSE}", 1)):
+        entry = {"element_idx_start": 664, "taxonomy_code": "R", "text": text,
+                 "extracted_fields": {"presentations": copy.deepcopy(records)}}
+        gen, grouped = _render_grouped_talks([entry], supplementary_subpoints=True)
+        assert len(grouped["R"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["R"])
+        assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("N1", "MENTORING PROGRAMS"), ("S0", "BIBLIOGRAPHY")])
+def test_a_talk_rerouted_out_of_r_to_an_excluded_code_gets_no_sub_point(code, heading):
+    """N1 and S0 are excluded: a talk rendered as either is that code's
+    record, so neither the talk row of the same title nor any other carries
+    its prose."""
+    gen, grouped = _render_grouped_talks([_later_talk(), _rerouted(_talk(), code, heading)],
+                                         supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[code]] == [601]
+    assert [e["element_idx_start"] for e in grouped["R"]] == [599]
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("C", "POSTDOCTORAL TRAINING"), ("I", "MEMBERSHIPS")])
+def test_a_refused_reroute_keeps_the_talk_rule(code, heading):
+    """A talk rerouted to C or I keeps its R code: their renderers would drop
+    its title (`_fields_lost_in_reroute`). It renders as an R row and its
+    prose is a deleted row under that row."""
+    gen, grouped = _render_grouped_talks([_rerouted(_talk(), code, heading)],
+                                         supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["R"]] == [601]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TALK_ROW
+
+
+def _abstract_under_invited_talks():
+    """An abstract stage 3b coded S8, under the invited-talks heading: its
+    meeting is S8's `conference_name`, which the row reads (#1570)."""
+    return _talk(code="S8", event=None, conference_name=_TALK_EVENT, authors="Marblegate Q")
+
+
+@pytest.mark.parametrize("make", [_abstract_under_invited_talks, lambda: _talk(code="K3")])
+def test_a_record_rerouted_into_r_follows_the_talk_rule(make):
+    """An abstract coded S8, or a lecture coded K3, under the invited-talks
+    heading renders as an R row: its prose is a deleted row under that row."""
+    gen, grouped = _render_grouped_talks(
+        [_rerouted(make(), "R", "INVITATIONS TO SPEAK/PRESENT")], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["R"]] == [601]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TALK_ROW
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _TALK_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.code == "R"
+
+
+def test_a_talk_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass touched the entry. What is left can still describe
+    what was withheld, so none of it is offered."""
+    withheld = _talk()
+    withheld["_pii_withheld"] = True
+    gen = _render_talks([_later_talk(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_text(tr) == _TALK_ROW for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_talk_dedup_drops_offers_its_prose_once_under_the_kept_row():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no row, so its
+    prose goes only under the row of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_talk(idx=601), _talk(idx=602)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["R"]) == 2 and len(kept["R"]) == 1
+    gen._fill_presentations(kept["R"])
+    gen._add_supplementary_subpoints(before)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TALK_ROW
+    assert _deleted_texts(gen) == _TALK_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["R"][0]["element_idx_start"]
+
+
+def test_talk_and_honor_prose_each_stay_under_their_own_section_row():
+    """An award for a talk can share its title and venue: each one's prose
+    goes under its own section's row, never under the other's."""
+    honor_prose = ("Awarded each year to the best lecture given by an early career speaker "
+                   "at the regional meeting")
+    honor = {"element_idx_start": 39, "taxonomy_code": "H",
+             "text": f"2016\tBest Lecture Award for {_TALK_TITLE}, {_TALK_EVENT}\t{honor_prose}",
+             "extracted_fields": {"award_name": f"Best Lecture Award for {_TALK_TITLE}",
+                                  "granting_body": _TALK_EVENT, "date": "2016"}}
+    talk = _talk()
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_honors([honor])
+    gen._fill_presentations([talk])
+    gen._add_supplementary_subpoints({"H": [honor], "R": [talk]})
+
+    by_text = {"".join(t.text for t in row.iter(qn("w:delText"))): row for row in _subpoint_rows(gen)}
+    assert set(by_text) == {honor_prose, _TALK_PROSE}
+    assert _table_header(by_text[_TALK_PROSE]) == _TALK_HEADER
+    assert _table_header(by_text[honor_prose]) != _TALK_HEADER
+    assert by_text[_TALK_PROSE].getparent() is not by_text[honor_prose].getparent()
+
+
+def test_the_doctor_matches_a_talk_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier talk's sub-point
+    under its own index and R, and the doctor's per-entry match counts it for
+    that entry, not for the later talk that shares its words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+
+    doc, placements = _stage6_render(tmp_path, monkeypatch, [_later_talk(), _talk()], uid="T1205R")
+    assert placements == [[_TALK_PROSE]]
+    sidecar = json.loads((tmp_path / "T1205R_render_warnings.json").read_text())
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    assert [(p["element_idx_start"], p["code"]) for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(601, "R")]
+    subpoints = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_TALK_PROSE, subpoints, element_idx=601)
+    assert not offered_as_subpoint(_TALK_PROSE, subpoints, element_idx=599)
+
+
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_talk_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, protect, value):
+    """The PII pass drops a field named for protected data and marks the
+    entry withheld; no scope withholds a phone number in the middle of a
+    line (#1205 review of O). The same talk without them still has its
+    sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [_talk()])
+    assert placements == [[_TALK_PROSE]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
+                                     [protect(_talk(), _TALK_PROSE)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
 # ------------------------------------------- date-led sibling records (#983)
 # Stage 2 joins an entry's paragraphs with tabs, so three society records that
 # each open with their own date reach stage 6 as one line. Stage 4 extracted

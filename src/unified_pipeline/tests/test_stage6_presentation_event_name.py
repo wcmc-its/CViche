@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.oxml.ns import qn
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -574,3 +575,38 @@ def test_untitled_talk_counts_lecture_and_presentation_as_label_words(label):
     cells = _untitled_row(f"2019 Zq Event, Zq Hall. {label}.", date="2019",
                           role="Speaker", event_name="Zq Event", location="Zq Hall")
     assert cells[0] == f"Speaker, Zq Event, {label}"
+
+
+def test_every_talk_row_is_recorded_against_its_own_entry():
+    """#534, #1205: the row-receipt ledger holds each talk's one row, in
+    whichever scope table it renders, and no other entry's: the sub-point
+    pass anchors a talk's prose only under it."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen.cv_owner_location = None          # skip the LLM geographic classifier
+    national = {"taxonomy_code": "R", "text": "Zqwidget Calibration",
+                "extracted_fields": {"title": "Zqwidget Calibration", "year": "2020"}}
+    abroad = {"taxonomy_code": "R", "text": "Zqgear Alignment",
+              "hierarchy": ["INVITATIONS TO SPEAK/PRESENT", "International"],
+              "extracted_fields": {"title": "Zqgear Alignment", "year": "2019"}}
+    gen._fill_presentations([national, abroad])
+
+    rows = {}
+    for entry, title in ((national, "Zqwidget Calibration"), (abroad, "Zqgear Alignment")):
+        (row,) = gen._row_receipts.elements_for(entry)
+        assert row.tag == qn("w:tr")
+        assert "".join(t.text or "" for t in row.iter(qn("w:t"))).startswith(title)
+        rows[title] = row
+    assert rows["Zqwidget Calibration"].getparent() is not rows["Zqgear Alignment"].getparent()
+
+
+@pytest.mark.parametrize("fields, venue", [
+    ({"institution": "Zq Institute", "location": "Zq City", "venue": "Zq Hall"}, "Zq Institute"),
+    ({"location": "Zq City", "venue": "Zq Hall"}, "Zq City"),
+    ({"venue": "Zq Hall"}, "Zq Hall"),
+])
+def test_the_venue_cell_takes_institution_then_location_then_venue(fields, venue):
+    """The writer's one precedence (`supplementary.PRESENTATION_VENUE_FIELDS`),
+    which the #1205 sub-point pass counts as the row's."""
+    assert _venue(**fields) == venue
+
