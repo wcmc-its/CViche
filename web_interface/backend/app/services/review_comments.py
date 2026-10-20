@@ -191,6 +191,8 @@ REVIEW_FLAGS = {
     "footer_in_record": ("This entry may hold a page footer from your CV, such as a month and "
                          "year: check its date against the CV."),
     "glyph_field": "A bullet symbol is shown here instead of a value: fill it in from your CV.",
+    "pinned_heading_empty": ("Filed in a different section than its heading in your CV, which "
+                             "left that section empty: check where it belongs."),
     "stage2_unaccounted": "Part of your CV was never read: check this section against the CV.",
     "record_date_shift": ("Dates, places or titles in this list may belong to the entry before "
                           "or after: check each against your CV."),

@@ -1850,6 +1850,66 @@ class TestStage4RecordDates:
         assert all(c['extracted_fields']['start_date'] for c in children)
 
 
+    def test_a_record_named_beside_its_dates_keeps_them_off_step(self):
+        # OIEPQD TVQZIP 116 (#1342): four lines, four records, out of step
+        # with each other. The co-leader's 2020-2021 is on the line that names
+        # it, so it stays; the undated member after it gets none.
+        text = ('2018.01 - Zqchair\tDepartment of Zqpathology\tAdjunct Professor, Zqsurgery\t'
+                'Co-leader of Zqtherapeutics program 2020-2021 Member of Zqcancer Center')
+        records = [{'title': 'Zqchair', 'institution': 'Department of Zqpathology',
+                    'start_date': '2018-01', 'end_date': 'present'},
+                   {'title': 'Adjunct Professor', 'institution': 'Zqsurgery'},
+                   {'title': 'Co-leader of Zqtherapeutics program', 'institution': None,
+                    'start_date': '2020', 'end_date': '2021'},
+                   {'title': 'Member', 'institution': 'Zqcancer Center'}]
+        children = _fan4(_stage4_entry(records, code='D1', text=text))
+        dates = {c['extracted_fields']['title']: (c['extracted_fields'].get('start_date'),
+                                                  c['extracted_fields'].get('end_date'))
+                 for c in children}
+        assert dates['Co-leader of Zqtherapeutics program'] == ('2020', '2021')
+        assert dates['Member'] == (None, None)
+
+    @pytest.mark.parametrize('records, text', [
+        # "President" is written inside its sibling's "Vice President" line.
+        ([_q1_record('Vice President', '2010', '2012'), _q1_record('Treasurer', '2014', '2015'),
+          _q1_record('President', '2010', '2012')],
+         'Vice President 2010-2012\tTreasurer 2014-2015\tPresident'),
+        # "Member" sits at the end of a sibling's line, not at its start.
+        ([_q1_record('Executive Committee Member', '2010', '2012'), _q1_record('Treasurer', '2014', '2015'),
+          _q1_record('Member', '2010', '2012')],
+         'Executive Committee Member 2010-2012\tTreasurer 2014-2015\tMember'),
+        # "Glade" opens its sibling's "Glade Society Chair" line, a value of that sibling.
+        ([_q1_record('Chair', '2010', '2012', 'Glade Society'), _q1_record('Treasurer', '2014', '2015'),
+          _q1_record('Member', '2010', '2012', 'Glade')],
+         'Glade Society Chair 2010-2012\tTreasurer 2014-2015\tGlade Member'),
+        # The sibling stored under another spelling: its line still is not this record's.
+        ([_q1_record('VP', '2010', '2012'), _q1_record('Treasurer', '2014', '2015'),
+          _q1_record('President', '2010', '2012')],
+         'Vice President 2010-2012\tTreasurer 2014-2015\tPresident'),
+        # "President" does not open "President-elect", a hyphenated word.
+        ([_q1_record('Pres.-elect', '2010', '2012'), _q1_record('Treasurer', '2014', '2015'),
+          _q1_record('President', '2010', '2012')],
+         'President-elect 2010-2012\tTreasurer 2014-2015\tPresident'),
+        # A date-first sibling line: the year that opens it is not a name,
+        # though that sibling's reply dropped it.
+        ([_q1_record('Vice President', None, None), _q1_record('Treasurer', '2014', None),
+          _q1_record('President', '2010', None)],
+         '2010 Vice President\t2014 Treasurer\tPresident'),
+        # The sibling's reply left out the words its line opens with, so the
+        # later record's organization opens that line; its dates equal the
+        # sibling's, so they are a copy.
+        ([_q1_record('Council Chair', '2010', '2012'), _q1_record('Treasurer', '2014', '2015'),
+          _q1_record('Member', '2010', '2012', 'American Heart Association')],
+         'American Heart Association Council Chair 2010-2012\tTreasurer 2014-2015\tMember'),
+    ], ids=['inside-a-sibling-name', 'end-of-a-sibling-line', 'start-of-a-sibling-value',
+            'sibling-spelled-otherwise', 'hyphenated-word', 'date-first-sibling-line',
+            'sibling-dates-equal'])
+    def test_a_name_on_a_siblings_line_does_not_keep_its_copied_date(self, records, text):
+        # #1342 round 3: each last record's 2010-2012 is copied from the
+        # first line, which names a sibling; dev clears it, and so must this.
+        assert fan_out._unsourced_date_records(records, text, 'Q1') == {2}
+
+
 class TestStage4RepeatedRows:
     def _talk(self, date, title='Zqsafety talk'):
         return {'title': title, 'location': 'Ashby', 'date': date,

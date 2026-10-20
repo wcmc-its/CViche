@@ -6200,6 +6200,8 @@ def _build_clean_run(tmp_path, uid=_UID):
         _entry(grant, start=i + 1) for i, grant in enumerate(grants)]
     _write_stage(root, "stage_2_entry_extraction", f"{uid}_cv_entries.json",
                  {"document_uid": uid, "entries": stage2_entries})
+    _write_stage(root, "stage_3a_header_mappings", f"{uid}_cv_header_taxonomy.json",
+                 {"document_uid": uid, "mappings": []})
     codes = ["M2A", "M2C", "M2C"]
     _write_stage(root, "stage_3b_classified_entries", f"{uid}_cv_classified.json",
                  {"document_uid": uid, "entries": [
@@ -6250,14 +6252,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (82), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (83), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 80
+    assert len(payload["findings"]) == 81
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

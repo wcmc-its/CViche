@@ -566,6 +566,12 @@ Lints, ranked by the severity of the failure class they catch:
                           CViche defect: INFO, review copy only, one per
                           heading and field. Reads the docx's table rows;
                           its paragraphs, for the heading, when present
+14bb. pinned_heading_empty a heading stage 3a mapped to a code at the
+                          header-pin floor (0.95) whose records stage 3b
+                          coded outside that code's family, while no entry in
+                          the CV has the code, so its template slot renders
+                          empty (XAXVYB's N1 heading, #1938/#1949). INFO, one
+                          per heading. Reads stage 3b and stage 3a
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -635,6 +641,7 @@ from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_pinned_heading_empty,
     lint_section_consistency,
 )
 from unified_pipeline.doctor.lints.completeness import (  # noqa: F401,E402
@@ -968,6 +975,7 @@ KNOWN_LINTS = (
     "institution_cleaned_name",
     "renderer_row_missing",
     "mentee_field_incomplete",
+    "pinned_heading_empty",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1296,6 +1304,10 @@ LINT_PREVALENCE = {
     # distinct CVs over the 465 S3 runs' stored delivered docx, 2026-10-19.
     # Most CVs leave some mentee field blank; it is INFO and review-copy only.
     "mentee_field_incomplete": 0.503,
+    # pinned_heading_empty (#1949; PHE-1 in doctor/PRECISION.md): 32 of 418
+    # distinct uids with a stored stage-3b artifact and its stage-3a mapping,
+    # 2026-10-19.
+    "pinned_heading_empty": 0.077,
 }
 
 
@@ -1528,6 +1540,8 @@ _ARTIFACTS = {
                              record_lists=("hierarchy_with_indices", "section_boundaries")),
     "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json",
                             record_lists=("entries",)),
+    "stage_3a": ArtifactSpec("stage_3a_header_mappings", "_header_taxonomy.json",
+                             optional_lists=("mappings",)),
     "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json",
                              record_lists=("entries",)),
     "stage_4": ArtifactSpec("stage_4_field_extraction", "_fields.json",
@@ -1772,6 +1786,7 @@ _VIEW_LABELS = {
     "stage_1a": "stage_1a",
     "stage_1b": "stage_1b",
     "stage_2": "stage_2",
+    "stage_3a": "stage_3a",
     "stage_3b": "stage_3b",
     "stage_4": "stage_4",
     "stage_4_5": "stage_4_5",
@@ -1922,6 +1937,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("mentee_field_incomplete", lint_mentee_field_incomplete, ("table_rows",),
              optional=("blocks",)),
+    LintSpec("pinned_heading_empty", lint_pinned_heading_empty, ("stage_3b", "stage_3a")),
 )
 
 #: The views read from the stage-6 docx.

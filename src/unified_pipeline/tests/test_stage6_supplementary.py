@@ -69,10 +69,10 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_and_leadership():
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_and_committees():
     assert sorted(sp.SUBPOINT_CODES) == ["B1", "D1", "D2", "D3", "H", "K1", "K2", "K3", "K4",
                                          "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B", "O",
-                                         "Q1", "Q2"]
+                                         "P", "Q1", "Q2"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -609,6 +609,267 @@ def test_plan_offers_no_prose_of_an_entry_holding_protected_data(protect):
 
     protect(entry)
     assert sp.plan_subpoints({"O": [entry]}, _haystack(), lines, spans,
+                             rows_written=lambda e: [table.rows[0]._tr]) == []
+
+
+_COMMITTEE = "Example Curriculum Steering Committee"
+_COMMITTEE_ROW = [f"{_COMMITTEE}, Norvale University", "Member", "2008-2012"]
+
+
+def _committee_rows(*rows):
+    """A line naming the committee and institution, then a committee table,
+    one row of cells per item; and their anchor candidates."""
+    doc = Document()
+    doc.add_paragraph(f"{_COMMITTEE}, Norvale University")
+    table = doc.add_table(rows=len(rows), cols=3)
+    for row, cells in zip(table.rows, rows, strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    return table, list(sp.anchor_candidates(doc))
+
+
+def _committee(text=f"{_COMMITTEE}, Norvale University, Member, 2008-2012\t{PROSE}", **fields):
+    return _entry(text, code="P", **{"committee_name": _COMMITTEE, "institution": "Norvale University",
+                                     "role": "Member", "start_date": "2008", "end_date": "2012",
+                                     **fields})
+
+
+def test_plan_places_a_committee_only_under_its_one_own_row():
+    # One committee in two terms: the rows differ only in their dates, which
+    # are digits, and words alone take the first row holding them.
+    table, lines = _committee_rows([*_COMMITTEE_ROW[:2], "2016-2020"], _COMMITTEE_ROW)
+    entry, spans = _committee(), {"P": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "P"), lines) is lines[1]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({"P": [entry]}, _haystack(), lines, spans,
+                                   rows_written=written([table.rows[1]._tr]))
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+    assert (planned.code, planned.entry_id) == ("P", id(entry))
+    # Both rows recorded for it (a list of records, a re-parsed block): which
+    # one a line is about cannot be shown. No row recorded for it, a paragraph
+    # outside any table, or no ledger: none either.
+    stray = Document().add_paragraph(_COMMITTEE)._p
+    for rows_written in (written([row._tr for row in table.rows]), written([]), written([stray]),
+                         None):
+        assert sp.plan_subpoints({"P": [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_takes_a_committees_one_own_row_whatever_its_words():
+    # An acronym and a short role hold too few distinctive words for the word
+    # test, and the writer's record alone says the row is the entry's.
+    table, lines = _committee_rows(["IRB, NVU", "Chair", "2010"])
+    entry = _entry(f"IRB, NVU, Chair, 2010\t{PROSE}", code="P", committee_name="IRB",
+                   institution="NVU", role="Chair", start_date="2010")
+    spans = {"P": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "P"), lines[1:]) is None
+    (planned,) = sp.plan_subpoints({"P": [entry]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+
+
+@pytest.mark.parametrize("field", sp._ADMINISTRATIVE_ROW_FIELDS)
+def test_a_committee_rows_fallback_fields_count_as_its_rendered_values(field):
+    # The row prints them when the schema's committee_name is empty, though
+    # `_RENDERED_FIELDS` cannot list them. Another code's are its own.
+    entry = _entry("Member", code="P", **{field: "Estuarine Sediment Geochemistry"})
+    assert {"estuarine", "sediment", "geochemistry"} <= sp._value_tokens(entry, "P")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="O"), "O")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="Q2"), "Q2")
+
+
+def test_the_committee_fallback_fields_are_the_writers_off_schema_names():
+    # The writer's precedence, schema field first, and the two names the
+    # schema does not define.
+    assert sp.ADMINISTRATIVE_ACTIVITY_FIELDS == ("committee_name", "committee", "activity")
+    assert sp._ADMINISTRATIVE_ROW_FIELDS == ("committee", "activity")
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its
+    # own. Neither names a committee body (`_names_another_committee`).
+    (["Chair line", f"Office line, {PROSE}"], 1, f"Office line, {PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    (["Chair line", PROSE, "Office line"], 1, ""),
+    # An earlier record: the line fan-out gave it, whatever it holds.
+    ([f"Chair line, {PROSE}", "Office line"], 0, f"Chair line, {PROSE}\tOffice line"),
+])
+def test_a_committee_reads_its_prose_from_its_own_line(segments, index, read):
+    entry = _degree_record("\t".join(segments), index, 2)
+    entry["taxonomy_code"] = "P"
+    assert sp._prose_text("P", entry, {}) == read
+
+
+_ADMISSIONS = "Example Admissions Committee, Norvale University"
+
+
+@pytest.mark.parametrize("text, own", [
+    # One committee and its years, then its remit: its own line.
+    (f"{_COMMITTEE}, Norvale University, Member, 2008-2012\t{PROSE}", True),
+    # The role and years in a parenthesis, the writer's repair shape.
+    (f"{_COMMITTEE} (Member 2008-2012)\t{PROSE}", True),
+    # A run of committees each followed by its years, stage 2's tabs between
+    # them: one line, so the writer prints one row, of the last.
+    (f"{_ADMISSIONS}, 2001-2004\t{OTHER_PROSE}\t{_COMMITTEE}, Norvale University, 2008-2012"
+     f"\t{PROSE}", False),
+    # Two committees in a pipe table, the years in a parenthesis and a column.
+    (f"{_ADMISSIONS} (Chair 2001-2004) | {OTHER_PROSE}\n{_COMMITTEE} | 2008-2012 | {PROSE}", False),
+    # Each opening with its years (`_holds_dated_records`).
+    (f"2001-2004 {_ADMISSIONS}\t{OTHER_PROSE}\t2008-2012 {_COMMITTEE}\t{PROSE}", False),
+], ids=["one_record", "parenthetical", "trailing_years", "pipe_rows", "leading_years"])
+def test_a_committee_line_holding_several_dated_records_offers_none(text, own):
+    """Which committee a prose line is about cannot be told: the others'
+    records would be offered as the extracted one's prose, under its row."""
+    entry = _committee(text)
+    assert sp._own_committee_line(entry) == (text if own else "")
+    table, lines = _committee_rows(_COMMITTEE_ROW)
+    planned = sp.plan_subpoints({"P": [entry]}, _haystack(), lines, {"P": sp.SectionSpan(0, None)},
+                                rows_written=lambda e: [table.rows[0]._tr])
+    assert [p.paragraphs for p in planned] == ([(PROSE,)] if own else [])
+
+
+def test_only_a_committee_reads_its_parts_for_several_records():
+    # The writer's own test, per line, sees one record on a tab-joined run,
+    # and so do the degree and leadership rules, which read date-led parts only.
+    # The other record names no committee: its years alone say it is one.
+    text = (f"Example Admissions Office, Norvale University, 2001-2004\t{OTHER_PROSE}"
+            f"\t{_COMMITTEE}, Norvale University, 2008-2012")
+    assert not sp._looks_like_multiple_records([text])
+    own_name = sp._committee_name_tokens(_committee(text)["extracted_fields"])
+    assert not any(sp._names_another_committee(part, own_name) for part in text.split("\t"))
+    assert sp._own_committee_line(_committee(text)) == ""
+    for code in ("O", "B1"):
+        assert sp._prose_text(code, dict(_committee(text), taxonomy_code=code), {}) == text
+
+
+_KESTREL = "Example Admissions Appeals Committee, Kestrel Medical Society"
+
+
+@pytest.mark.parametrize("text", [
+    # An undated committee before the extracted one, which carries the years.
+    # It shares a word of the extracted name ("Example"), not all of them.
+    f"Member, {_KESTREL}\t{_COMMITTEE}, Norvale University, Member, 2008-2012\t{PROSE}",
+    # Two undated ones, a panel among them.
+    f"Chair, Example Formulary Review Panel, Osprey Regional Hospital\tMember, {_KESTREL}"
+    f"\t{_COMMITTEE}, Norvale University, Member, 2008-2012\t{PROSE}",
+    # One dated one, the extracted committee's years in its fields only.
+    f"Member, {_KESTREL} (2001-2004)\tMember, {_COMMITTEE}, Norvale University\t{PROSE}",
+], ids=["undated_sibling", "two_undated_siblings", "dated_sibling_own_years_in_fields"])
+def test_a_committee_line_naming_another_committee_offers_none(text):
+    """At most one part is dated, so the writer's #660 test reads one record
+    and one row prints, of the committee stage 4 extracted: the other
+    committee's record would be offered as its prose, under its row."""
+    entry = _committee(text)
+    assert not sp._looks_like_multiple_records(text.split("\t"))
+    assert sp._own_committee_line(entry) == ""
+    table, lines = _committee_rows(_COMMITTEE_ROW)
+    assert sp.plan_subpoints({"P": [entry]}, _haystack(), lines, {"P": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [table.rows[0]._tr]) == []
+
+
+@pytest.mark.parametrize("prose", [
+    # It names its own committee again, every word of the name.
+    f"As secretary to the {_COMMITTEE}, {PROSE.lower()}",
+    # "the Committee" refers back to the one the line named: all its words are the name's.
+    f"{PROSE} for the Committee",
+], ids=["names_its_own", "refers_back"])
+def test_a_committee_line_naming_only_its_own_committee_offers_its_prose(prose):
+    text = f"{_COMMITTEE}, Norvale University, Member, 2008-2012\t{prose}"
+    entry = _committee(text)
+    assert sp._own_committee_line(entry) == text
+    table, lines = _committee_rows(_COMMITTEE_ROW)
+    (planned,) = sp.plan_subpoints({"P": [entry]}, _haystack(), lines,
+                                   {"P": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.paragraphs == (prose,)
+
+
+@pytest.mark.parametrize("field", ["committee", "activity"])
+def test_a_committees_own_name_is_read_from_the_fields_its_row_prints(field):
+    # Stage 4's off-schema names, which the row prints when the schema's is empty.
+    text = f"Member, {_COMMITTEE}, Norvale University, 2008-2012\t{PROSE}"
+    assert sp._own_committee_line(_entry(text, code="P", **{field: _COMMITTEE})) == text
+    other = f"Member, {_KESTREL}\t{text}"
+    assert sp._own_committee_line(_entry(other, code="P", **{field: _COMMITTEE})) == ""
+
+
+@pytest.mark.parametrize("body", ["Committee", "Subcommittee", "Council", "Board", "Panel",
+                                  "Commission", "Senate", "Task Force", "Taskforce",
+                                  "Working Group", "Workgroup"])
+def test_a_part_naming_a_committee_body_not_the_entrys_own_is_another_record(body):
+    part = f"Member, Example Admissions {body}, Kestrel Medical Society"
+    assert sp._names_another_committee(part, {"curriculum", "steering"})
+    assert not sp._names_another_committee(part, {"admissions"})
+    # In lower case it is no name, nor is a word that only begins with one.
+    assert not sp._names_another_committee(part.lower(), {"curriculum", "steering"})
+    assert not sp._names_another_committee(part.replace(body, f"{body}ist"), {"curriculum"})
+
+
+@pytest.mark.parametrize("part, other", [
+    # The name wrapped onto the next part, or typed with a typo: most of its words.
+    ("Committee, Norvale University, 2008-2012", False),
+    ("Elected member of Example Curriculum Steerng Committee, Norvale University", False),
+    # Another committee shares the word for its kind and one more ("Example"), no more.
+    ("Member, Example Admissions Appeals Committee, Kestrel Medical Society", True),
+    # A committee on a subject is named with it.
+    ("Member, Committee on the Admissions Appeals, Kestrel Medical Society", True),
+    # The part holds the whole name: its record, and a sub-committee one of its details.
+    (f"Member, {_COMMITTEE} (Example Admissions Subcommittee)", False),
+], ids=["wrapped", "typo", "another", "committee_on", "sub_committee"])
+def test_another_committee_shares_no_more_than_half_its_words_with_the_entrys(part, other):
+    own_name = sp._committee_name_tokens({"committee_name": _COMMITTEE})
+    assert sp._names_another_committee(part, own_name) is other
+
+
+def test_a_committee_on_a_subject_is_named_with_every_word_of_it():
+    own_name = sp._committee_name_tokens({"committee_name": "Kestrel Admissions Committee"})
+    assert sp._names_another_committee("Committee on Admissions Appeals Review", own_name)
+
+
+def test_a_committee_line_naming_a_committee_its_fields_do_not_name_offers_none():
+    # Stage 4 named no committee, or only in a list of bare names: whose the
+    # named one is cannot be shown. A line naming none is its own.
+    named = f"Member, {_KESTREL}, 2001-2004\t{PROSE}"
+    plain = f"Member, Example Admissions Office, 2001-2004\t{PROSE}"
+    for fields in ({"role": "Member", "start_date": "2001"}, {"committee_name": [_KESTREL]}):
+        assert sp._own_committee_line(_entry(named, code="P", **fields)) == ""
+        assert sp._own_committee_line(_entry(plain, code="P", **fields)) == plain
+    assert sp._own_committee_line({"taxonomy_code": "P", "text": plain}) == plain
+
+
+@pytest.mark.parametrize("field", ["committee_name", "committee", "activity"])
+def test_a_committee_list_of_several_records_offers_none_though_one_names_no_committee(field):
+    """The writer prints no row for a record naming no committee (#256): a
+    list of a nameless record and a named one, under any of its committee
+    fields, prints one row, of the named one, and the other's text would be
+    offered as its prose. No part names a committee body here, so the list
+    alone says the entry holds two."""
+    programme = "Example Clerkship Steering Programme"
+    text = f"Member, 2001-2004, {OTHER_PROSE}\t{programme}, Norvale University, Member"
+    named = {"committee_name": programme, "institution": "Norvale University", "role": "Member"}
+    nameless = {"role": "Member", "start_date": "2001", "end_date": "2004"}
+    entry = _entry(text, code="P", **{field: [nameless, named]})
+    assert sp._own_committee_line(entry) == ""
+    table, lines = _committee_rows([f"{programme}, Norvale University", "Member", ""])
+    assert sp.plan_subpoints({"P": [entry]}, _haystack(), lines, {"P": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [table.rows[0]._tr]) == []
+    # A list of one record is one record.
+    assert sp._own_committee_line(_entry(text, code="P", **{field: [named]})) == text
+
+
+def test_plan_offers_no_prose_of_a_committee_the_pii_pass_withheld():
+    table, lines = _committee_rows(_COMMITTEE_ROW)
+    spans = {"P": sp.SectionSpan(0, None)}
+    entry = _committee()
+    (planned,) = sp.plan_subpoints({"P": [entry]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.paragraphs == (PROSE,)
+
+    entry["_pii_withheld"] = True
+    assert sp.plan_subpoints({"P": [entry]}, _haystack(), lines, spans,
                              rows_written=lambda e: [table.rows[0]._tr]) == []
 
 
