@@ -2723,8 +2723,12 @@ def test_degree_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_
     ("major", _THESIS.removeprefix("Thesis: "), _THESIS),
 ])
 def test_degree_prose_already_in_its_row_is_not_offered_again(field, value, line):
-    """No B1 rendered field (`_RENDERED_FIELDS`) names these, but the degree
-    cell prints them, so the document holds the line: it does not print twice."""
+    """The degree cell prints these, and the document holds most of each
+    line's words (`_record_rendered`), so neither prints twice. A line with
+    more words of its own than that is judged by its share of the printed
+    field values (`test_a_degree_line_mostly_restating_its_cell_is_not_offered`),
+    and one with more new words still is offered whole
+    (`test_degree_prose_restating_part_of_its_cell_is_offered_as_written`)."""
     from unified_pipeline.stage6 import supplementary
 
     entry = _degree(prose=line, **{field: value})
@@ -2733,6 +2737,117 @@ def test_degree_prose_already_in_its_row_is_not_offered_again(field, value, line
     assert _subpoint_rows(gen) == []
     haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
     assert supplementary.unrendered_prose(entry, "B1", haystack) == []
+
+
+def test_every_degree_cell_field_the_pass_counts_is_printed_in_the_degree_cell():
+    """`supplementary._DEGREE_CELL_FIELDS` restates the education writer's
+    degree cell as literals (`_RENDERED_FIELDS` marks schema fields only):
+    each one, alone on an entry, reaches that cell."""
+    from unified_pipeline.stage6 import supplementary
+
+    for field in supplementary._DEGREE_CELL_FIELDS:
+        marker = f"Zq{field.replace('_', 'x')}Z"
+        gen = _render_education([_degree(prose="", **{field: marker})], supplementary_subpoints=True)
+        (row,) = [tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+                  if _row_text(tr).startswith("M.S.,")]
+        assert marker in _row_text(row.find(qn("w:tc"))), field
+
+
+_ADVISOR = "Orrin Halvard Vellacott"
+
+
+@pytest.mark.parametrize("field, value, line", [
+    ("major", "Estuarine Sediment Geochemistry",
+     "Concentration: Estuarine Sediment Geochemistry and Coastal Processes"),
+    ("field_of_study", "Estuarine Sediment Geochemistry",
+     "Concentration: Estuarine Sediment Geochemistry and Coastal Processes"),
+    ("honors", "summa cum laude with distinction",
+     "Awarded summa cum laude with distinction in research"),
+    ("major_professor", _ADVISOR, f"Research supervised by {_ADVISOR}"),
+    ("mentor", _ADVISOR, f"Research supervised by {_ADVISOR}"),
+    # The minor is new, but half the line's words are the printed major: the
+    # share rule every family uses (`SUBPOINT_FIELD_TOKEN_MAX_SHARE`) reads it
+    # as the row, so it is not offered.
+    ("major", "Estuarine Sediment Geochemistry",
+     "Major in Estuarine Sediment Geochemistry with minor in Chemistry"),
+])
+def test_a_degree_line_mostly_restating_its_cell_is_not_offered(field, value, line):
+    """The degree cell prints `major` or `field_of_study`, the honors and an
+    advisor under any of its names, though no B1 schema field is any of them
+    (`_DEGREE_CELL_FIELDS`). A line at least half of whose words are theirs
+    restates the row; the document holds too few of its words for
+    `_record_rendered` to see that."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _degree(prose=line, **{field: value})
+    gen = _render_education([entry], supplementary_subpoints=True)
+    assert value in _row_text(next(tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+                                   if _row_text(tr).startswith("M.S.,")))
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary._record_rendered(line, haystack.text, haystack.line_tokens) is False
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("field, value, line", [
+    ("advisor", _ADVISOR, f"Dissertation advisor: Professor {_ADVISOR}, Department of Oceanography"),
+    ("honors", "magna cum laude", "Graduated magna cum laude with departmental distinction honors"),
+])
+def test_degree_prose_restating_part_of_its_cell_is_offered_as_written(field, value, line):
+    """More of the line's words are its own than the cell's, so it is
+    offered, and as the CV wrote it: Reject All prints the advisor or the
+    honors again, under the row that holds them."""
+    gen = _render_education([_degree(prose=line, **{field: value})], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert value in _row_text(row.getprevious())
+    assert _deleted_texts(gen) == line
+
+
+def _short_degree(kind):
+    """A degree whose row holds too few distinctive (5+ letter) words for the
+    word anchor: "PhD", "MD", a year and a four-letter name hold none, and a
+    stage-5b name the row prints may share none with stage 4's field."""
+    if kind == "one word":
+        return _degree(degree="PhD", discipline=None, institution="Kell University", year="2010")
+    if kind == "no word":
+        return _degree(degree="MD", discipline=None, institution="Vaux", year=None)
+    entry = _degree(degree="Ph.D.", discipline=None,
+                    institution="Norvale Graduate School of Biomedical Sciences", year="2008")
+    entry["institution_enrichment"] = {"cleaned_name": "Halbrook Medical College"}
+    return entry
+
+
+@pytest.mark.parametrize("kind", ["one word", "no word", "renamed"])
+def test_a_short_degrees_prose_goes_under_its_own_row(kind):
+    """The writer's record says which row is the entry's, so the row is
+    taken as it is (`_pick_anchor`), however few words it shares with the
+    fields. Before, the word test found no anchor, and the prose reached
+    the document in neither arm. Accept All is still the flag-off render."""
+    off = _render_education([_short_degree(kind)], supplementary_subpoints=False)
+    on = _render_education([_short_degree(kind)], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(on)
+    assert _row_text(row.getprevious()).startswith(_short_degree(kind)["extracted_fields"]["degree"])
+    assert _deleted_texts(on) == _THESIS
+    assert _THESIS not in "".join(_texts_of(off.doc.element.body))
+    row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_a_thesis_citation_on_a_row_naming_no_degree_gets_no_sub_point():
+    """Stage 4 coded a thesis citation B1 with a field and an institution but
+    no degree (EBYSBC VGHNZD 1861). The section writes it a row of its own,
+    the field alone in the degree cell, beside the master's degree the
+    thesis was for; the prose is of no degree on that row, so it gets none."""
+    citation = _degree(idx=23, degree=None, year="2001", prose="",
+                       author="Example AB", title=_THESIS.removeprefix("Thesis: "))
+    citation["text"] = f"Example AB. {_THESIS.removeprefix('Thesis: ')}. Norvale University, 2001."
+    gen = _render_education([_degree(prose=""), citation], supplementary_subpoints=True)
+
+    assert any(_row_text(tr).startswith(f"{_DEGREE_FIELD}Norvale University")
+               for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
 
 
 def test_a_degree_the_section_skips_gets_no_sub_point_under_another_row():
@@ -2817,21 +2932,43 @@ _MS_LINE = f"M.S., {_DEGREE_FIELD}, Norvale University, 2001"
 _PHD_LINE = f"Ph.D., {_DEGREE_FIELD}, Norvale University, 2005"
 
 
-@pytest.mark.parametrize("segments, owners", [
+@pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own degree.
-    ([f"{_MS_LINE}, {_THESIS}", _PHD_LINE], ["M.S."]),
-    ([_MS_LINE, f"{_PHD_LINE}, {_THESIS}"], ["Ph.D."]),
+    ([f"{_MS_LINE}, {_THESIS}", _PHD_LINE], [("M.S.", f"{_MS_LINE}, {_THESIS}")]),
+    ([_MS_LINE, f"{_PHD_LINE}, {_THESIS}"], [("Ph.D.", f"{_PHD_LINE}, {_THESIS}")]),
     # They do not: whose thesis it is cannot be told, so it goes under neither.
     ([_MS_LINE, _THESIS, _PHD_LINE], []),
 ])
-def test_prose_on_a_line_of_several_degrees_goes_under_its_own_or_none(segments, owners):
+def test_prose_on_a_line_of_several_degrees_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the degree's line as well as its thesis brings the degree, field,
+    institution and year along, and Reject All prints them a second time,
+    under the row that holds them (`test_a_thesis_on_its_degrees_own_line_
+    brings_the_line_with_it`)."""
     entry = _degree_line("\t".join(segments), ("M.S.", "2001"), ("Ph.D.", "2005"))
     gen, grouped = _render_grouped_education([entry], supplementary_subpoints=True)
 
     assert LAST_STAGE4_RECORD in grouped["B1"][-1] and len(grouped["B1"]) == 2
-    rows = _subpoint_rows(gen)
-    assert [_row_text(row.getprevious()).split(",")[0] for row in rows] == owners
-    assert _deleted_texts(gen).count(_THESIS) == len(owners)
+    assert [(_row_text(row.getprevious()).split(",")[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def test_a_thesis_on_its_degrees_own_line_brings_the_line_with_it():
+    """A fragment splits only on tabs, line breaks and pipes, so a thesis in
+    the same sentence run as its degree is offered with the degree's line,
+    the shape every family has (#1673's honors, #1935's mentees): Reject All
+    prints the degree, field, institution and year again, under the row
+    that holds them. The CV's line as written is the shape the owner
+    approved (#1205, 2026-10-09)."""
+    line = f"{_PHD_LINE}. {_THESIS}"
+    entry = _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+    entry["text"] = line
+    gen = _render_education([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == f"Ph.D., {_DEGREE_FIELD}Norvale University2005"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == line
 
 
 def test_the_doctor_matches_a_degree_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):

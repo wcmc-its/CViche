@@ -370,6 +370,61 @@ def test_plan_places_a_degree_only_under_a_row_written_for_it():
                                  rows_written=rows_written) == []
 
 
+def test_plan_takes_a_degrees_one_own_row_whatever_its_words():
+    # "PhD", a four-letter name and a year hold no distinctive word: the
+    # word test finds no anchor, and the writer's record alone says the row
+    # is the entry's (#1205 review: the prose reached the document in
+    # neither arm).
+    table, lines = _degree_rows(["PhD", "Vaux", "2010"])
+    entry = _entry(f"PhD, Vaux, 2010\t{PROSE}", code="B1", degree="PhD", institution="Vaux",
+                   year="2010")
+    spans = {"B1": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "B1"), lines[1:]) is None
+    (planned,) = sp.plan_subpoints({"B1": [entry]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+    # Two rows recorded for one entry: its words choose between them.
+    table, lines = _degree_rows(["M.S.", "Norvale University", "2001"],
+                                ["M.S., Example Marine Studies", "Norvale University", "2001"])
+    (planned,) = sp.plan_subpoints({"B1": [_master()]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [row._tr for row in table.rows])
+    assert planned.anchor is lines[2]
+    # Any other code still needs the words, with one line in scope or more.
+    line = _candidate("Unrelated rendered line", position=0)
+    assert sp.plan_subpoints({"D1": [_appointment()]}, _haystack(), [line],
+                             {"D1": sp.SectionSpan(0, None)}) == []
+
+
+@pytest.mark.parametrize("fields, planned", [
+    ({"degree": "M.S."}, 1),
+    # Its row is a field or an institution alone (EBYSBC VGHNZD 1861: a
+    # thesis citation coded B1): its prose is of no degree there.
+    ({"degree": None}, 0),
+    ({"degree": "  "}, 0),
+    ({}, 0),
+])
+def test_plan_gives_an_entry_naming_no_degree_no_sub_point(fields, planned):
+    table, lines = _degree_rows(["Example Marine Studies", "Norvale University", "2001"])
+    entry = _master()
+    entry["extracted_fields"] = {**{k: v for k, v in entry["extracted_fields"].items()
+                                    if k != "degree"}, **fields}
+    assert len(sp.plan_subpoints({"B1": [entry]}, _haystack(), lines,
+                                 {"B1": sp.SectionSpan(0, None)},
+                                 rows_written=lambda e: [table.rows[0]._tr])) == planned
+    # Fields that are not a mapping name no degree either.
+    entry["extracted_fields"] = ["M.S."]
+    assert not sp._names_degree(entry)
+
+
+@pytest.mark.parametrize("field", sp._DEGREE_CELL_FIELDS)
+def test_a_degrees_cell_fields_count_as_its_rendered_values(field):
+    # The degree's cell prints them, though `_RENDERED_FIELDS` cannot list
+    # them (no B1 schema field is any of them). Another code's are its own.
+    entry = _entry("M.S.", code="B1", degree="M.S.", **{field: "Estuarine Sediment Geochemistry"})
+    assert {"estuarine", "sediment", "geochemistry"} <= sp._value_tokens(entry, "B1")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="H"), "H")
+
+
 def _degree_record(text, index, count):
     """Record `index` of `count` that fan-out made of one source line."""
     entry = dict(_master(text), element_idx_start=7)
