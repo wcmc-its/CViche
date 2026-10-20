@@ -280,6 +280,9 @@ def test_a_template_label_split_by_its_value_yields_the_value():
     "Type of Supervision Type of Supervision ((rresearch, clinical, teaching, leadership)esearch",  # EH4XXA
     "Type of Supervision (Research, clinical, teaching, leadership)\t",
     "Type of Supervision (research, clinical, teaching, leadership) |",
+    "Type of Supervision\tCurrent Position:",  # next label, not a value
+    "Type of Supervision: N/A",
+    "Type of Supervision -",
 ])
 def test_a_supervision_label_without_a_value_falls_back_to_inference(text):
     entry = {"text": text, "extracted_fields": {"mentee_level": "Resident"}}

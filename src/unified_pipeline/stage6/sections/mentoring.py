@@ -136,6 +136,11 @@ _SUPERVISION_INLINE_RE = re.compile(
 _SUPERVISION_SPLIT_LABEL_RE = re.compile(
     r'Type of Supervision \(Research, ([^\t\n]+?)\tclinical, teaching, leadership\)', re.I)
 
+#: A captured value that is not one: the next template label ("Current
+#: Position:"), N/A, or punctuation with no letters ("-"). Found by the #1973
+#: verifier's probes; none is in the corpus, so this is preventive.
+_NOT_A_SUPERVISION_VALUE_RE = re.compile(r':\s*$|^\s*n/?a\s*$|^[^A-Za-z]*$', re.I)
+
 #: Tried in this order: the pipe row first, as before #1973.
 _SUPERVISION_SOURCE_RES = (_SUPERVISION_ROW_RE, _SUPERVISION_SPLIT_LABEL_RE, _SUPERVISION_INLINE_RE)
 
@@ -770,7 +775,7 @@ def _source_supervision_type(text: str) -> str:
     """The Type of Supervision value the entry's own source text states, or ''."""
     for pattern in _SUPERVISION_SOURCE_RES:
         match = pattern.search(text)
-        if match:
+        if match and not _NOT_A_SUPERVISION_VALUE_RE.search(match.group(1)):
             return match.group(1).strip()
     return ''
 
