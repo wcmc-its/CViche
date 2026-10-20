@@ -19,11 +19,11 @@ does not count.
 Recording happens in two places. `_add_entry_comments` is the shared hook
 that most renderers already call with the entry for the row they just wrote,
 so it records with the entry in hand. Renderers that write rows without that
-hook (honors, the Q service tables) mark the entry they are on with
-`begin_entry`, and their row writers record against it. Each such renderer
-calls `end_entry` when its loop ends, and the generator also ends the cursor
-after every section, so a row written outside an entry loop is never
-attributed to a stale entry.
+hook (honors, the Q service tables, leadership) mark the entry they are on
+with `begin_entry`, and their row writers record against it. Each such
+renderer calls `end_entry` when its loop ends, and the generator also ends
+the cursor after every section, so a row written outside an entry loop is
+never attributed to a stale entry.
 
 The lint over these receipts lives in the doctor (`doctor/lints/render.py`,
 `lint_renderer_row_receipts`); this module only produces them. No docx
@@ -189,7 +189,8 @@ class RowReceiptLedger:
     def elements_for(self, entry: Mapping[str, object]) -> list[_Element]:
         """The rows and paragraphs recorded for `entry` itself, by identity and
         in write order: not a fan-out sibling's, which shares its index. The
-        #1205 sub-point pass anchors a degree's prose only under one of them."""
+        #1205 sub-point pass anchors a degree's or a leadership role's prose
+        only under one of them."""
         return [element for _section, owner, element in self._written if owner is entry]
 
     def _live(self, appendix_section: str) -> tuple[_EntrySet, _EntrySet]:
