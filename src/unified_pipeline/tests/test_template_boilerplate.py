@@ -9,6 +9,7 @@ so the bulk of these tests pin the false-positive surface (NEGATIVES) that an
 adversarial review of the first implementation found to be over-broad.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -565,3 +566,19 @@ def test_near_match_builds_no_matcher_for_a_phrase_of_the_wrong_length(monkeypat
                   if 2 * min(n, len(k)) / (n + len(k)) >= tb._NEAR_MATCH_MIN_RATIO]
     assert sorted(built) == sorted(compatible)
     assert len(built) < len(tb._INSTRUCTION_SET) // 4
+
+
+def test_unreadable_phrase_file_logs_the_class_and_keeps_the_text_at_debug(tmp_path, caplog):
+    """#639: the fail-safe WARNING names the exception class; the raw text,
+    which can quote the file's content, goes to DEBUG only."""
+    from unified_pipeline.core.template_boilerplate import _load_phrases
+
+    bad = tmp_path / "phrases.json"
+    bad.write_text('{"instructions": "SENTINEL-not-a-list", "section_headers": []}')
+    with caplog.at_level(logging.DEBUG, logger="unified_pipeline.core.template_boilerplate"):
+        assert _load_phrases(bad) == (frozenset(), frozenset())
+    above_debug = [r.getMessage() for r in caplog.records if r.levelno > logging.DEBUG]
+    assert any("unavailable" in m and ": ValueError;" in m for m in above_debug)
+    assert not any("is not a list of strings" in m for m in above_debug)
+    assert any(r.levelno == logging.DEBUG and "is not a list of strings" in r.getMessage()
+               for r in caplog.records)
