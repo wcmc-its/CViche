@@ -238,6 +238,12 @@ def _same_work(pubmed_title: str, cv_title: str) -> bool:
     return bool(pubmed and cv) and (pubmed in cv or cv in pubmed)
 
 
+#: A year inside a stage-4 publisher value: stage 4 ran on past the publisher
+#: into the line's own citation tail ("Humana Press, Inc., Totowa, NJ. Methods
+#: Mol Biol. 2001;165:257-67. PMID: 11217392", ECXGAT 297).
+_YEAR_IN_PUBLISHER_RE = re.compile(r"\b(?:19|20)\d\d\b")
+
+
 def _chapter_series(fields: dict, enrichment: dict) -> str:
     """The PubMed journal, when it is the series of the chapter stage 4 read.
 
@@ -249,10 +255,16 @@ def _chapter_series(fields: dict, enrichment: dict) -> str:
     an article. And PubMed's record must be that chapter. One stored CV
     line holds two chapters, PubMed matched the first and stage 4 read the
     book of the second (2054_Opresko_Cv 396). Without the title check its
-    citation would join one chapter's title to the other's book.
+    citation would join one chapter's title to the other's book. A publisher
+    that carries a year is a citation tail stage 4 swept in, not a
+    publisher; the book trailer would print it whole, so the PubMed journal
+    form stays.
     """
     series = _text(enrichment.get('pubmed_journal'))
-    if not (series and _text(fields.get('book_title')) and _text(fields.get('publisher'))):
+    publisher = _text(fields.get('publisher'))
+    if not (series and _text(fields.get('book_title')) and publisher):
+        return ''
+    if _YEAR_IN_PUBLISHER_RE.search(publisher):
         return ''
     cv_title = _text(fields.get('chapter_title')) or _text(fields.get('title'))
     return series if _same_work(_text(enrichment.get('pubmed_title')), cv_title) else ''

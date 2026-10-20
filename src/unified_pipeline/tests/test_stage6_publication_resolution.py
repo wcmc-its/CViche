@@ -464,6 +464,8 @@ def test_a_chapter_pubmed_indexed_under_its_series_resolves_the_series():
      {}, {'pubmed_title': ''}),
     ('no PubMed journal',
      {}, {'pubmed_journal': ''}),
+    ('a publisher carrying the line\'s citation tail (ECXGAT 297): not a publisher',
+     {'publisher': 'Example Press, Totowa, NJ. Methods Example Sci. 2001;165:257-67.'}, {}),
 ])
 def test_series_is_resolved_only_for_that_shape(case, fields, enrichment):
     entry = {
