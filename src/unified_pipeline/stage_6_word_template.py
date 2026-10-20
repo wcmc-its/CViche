@@ -4229,6 +4229,7 @@ Now analyze the text above:"""
                                  for part in tab_record_segments(text_line)}
                     deferred: list[str] = []
                     siblings = render_check.record_siblings(records)
+                    twins = render_check.record_twins(records)
                     for line in records:
                         if code == 'T' and t_line_is_scaffolding(line, entry):
                             continue
@@ -4238,7 +4239,7 @@ Now analyze the text above:"""
                         else:
                             rendered = render_check.sibling_record_rendered(
                                 line, siblings.get(line), haystack, line_token_sets,
-                                t_line_token_sets)
+                                t_line_token_sets, twins.get(line))
                         if rendered is None and line in tab_parts:
                             # Too few words for the overlap test (#1243).
                             rendered = short_tab_part_rendered(
