@@ -37,7 +37,6 @@ from unified_pipeline.stage6.normalization.citation_matching import (  # noqa: E
     _owner_words,
     _prints_junk_author,
     _restore_stage5d_owner,
-    _split_publisher_place,
     _stage5d_author_segment,
     _value_referenced,
 )
@@ -268,10 +267,6 @@ _APPEND_ROWS = [
     ('no "In: " to follow: editors at the end',
      'Ash A. A book. Nova; 2007.', 'Birch B', '',
      'Ash A. A book. Nova; 2007. Birch B, eds.'),
-    ('publisher named, its place dropped: the place goes in front of the name',
-     'Ash A. A chapter. In: Book. Humana Press; 1992:97-104.',
-     '', 'Humana Press, Totowa, New Jersey',
-     'Ash A. A chapter. In: Book. Totowa, New Jersey: Humana Press; 1992:97-104.'),
     ('publisher named with a place of its own already: left as 5d wrote it',
      'Ash A. A chapter. In: Book. New York: Saunders; 2003.',
      '', 'Saunders (New York)',
@@ -289,95 +284,71 @@ _APPEND_ROWS = [
      'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368.',
      '', 'Zenith House',
      'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368. Zenith House.'),
-    # Round 2 of #481's review: shapes that must not be read as name + place.
-    ('publisher with no name before its parenthesised place: at the end, '
-     'never spliced into the first ";"',
-     'Ash A, Doe K. A study. J Foo. 2010;3:1-5.', '', '(New York) Saunders',
-     'Ash A, Doe K. A study. J Foo. 2010;3:1-5. (New York) Saunders.'),
-    ('publisher that starts with a comma: no empty name, at the end',
-     'Ash A, Doe K. A study. J Foo. 2010;3:1-5.', '', ', Totowa, New Jersey',
-     'Ash A, Doe K. A study. J Foo. 2010;3:1-5. , Totowa, New Jersey.'),
-    ('a two-part publisher name is not a name plus a place: at the end, whole',
-     'Ash A. A chapter. In: Book. Lippincott; 2001:1-9.', '', 'Lippincott, Williams Wilkins',
-     'Ash A. A chapter. In: Book. Lippincott; 2001:1-9. Lippincott, Williams Wilkins.'),
-    ('a place followed by more of the value: the whole value at the end, '
-     'nothing of it dropped',
-     'Ash A. A chapter. In: Book. Humana Press; 1992.', '',
-     'Humana Press, Totowa, New Jersey; Zenith House, Berlin',
-     'Ash A. A chapter. In: Book. Humana Press; 1992. '
-     'Humana Press, Totowa, New Jersey; Zenith House, Berlin.'),
-    ('a place-shaped publisher whose name already has a place in front: '
-     'the whole value at the end, as before',
-     'Ash A. A chapter. In: Book. Philadelphia: Humana Press; 1992.', '',
+    # A publisher value that carries a place is never split (#481's review,
+    # round 4): each row below is what origin/dev prints. 5d prints a split
+    # name as the tail of a longer one ("John Wiley;"), or in the title, so
+    # a search for "Name;" would put the place inside a name. Names real,
+    # citations invented.
+    ('a name printed, its place dropped: the whole value at the end, as before',
+     'Ash A. A chapter. In: Book. Humana Press; 1992:97-104.', '',
      'Humana Press, Totowa, New Jersey',
-     'Ash A. A chapter. In: Book. Philadelphia: Humana Press; 1992. '
-     'Humana Press, Totowa, New Jersey.'),
-    # Round 3 of #481's review: stored-corpus publisher values (names real,
-    # citation invented) that do not end in a region, or whose city part is a
-    # company. None is read as name plus place: the whole value at the end.
-    ('not a name plus a place, a corporate suffix then a city: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Mosby; 2004:81-99.', '', 'Mosby, Inc, St. Louis',
-     'Ash A. A chapter. Vitamins and Hormones. Mosby; 2004:81-99. Mosby, Inc, St. Louis.'),
-    ('not a name plus a place, a "Verlag" suffix then a city: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Springer; 2004:81-99.', '', 'Springer, Verlag, Heidelberg',
-     'Ash A. A chapter. Vitamins and Hormones. Springer; 2004:81-99. Springer, Verlag, Heidelberg.'),
-    ('not a name plus a place, an "Inc." suffix then a city: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. B.C. Decker; 2004:81-99.', '', 'B.C. Decker, Inc., Toronto',
-     'Ash A. A chapter. Vitamins and Hormones. B.C. Decker; 2004:81-99. B.C. Decker, Inc., Toronto.'),
-    ('not a name plus a place, a "Limited" suffix then a city: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Butterworth & Co; 2004:81-99.', '', 'Butterworth & Co, Limited, London',
-     'Ash A. A chapter. Vitamins and Hormones. Butterworth & Co; 2004:81-99. Butterworth & Co, Limited, London.'),
-    ('not a name plus a place, a second publisher before a state: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Academic Press; 2004:81-99.', '', 'Academic Press, Elsevier Science, New York',
-     'Ash A. A chapter. Vitamins and Hormones. Academic Press; 2004:81-99. Academic Press, Elsevier Science, New York.'),
-    ('not a name plus a place, a series and its publisher before a state: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Serono Symposia Series; 2004:81-99.', '', 'Serono Symposia Series, Raven Press, New York',
-     'Ash A. A chapter. Vitamins and Hormones. Serono Symposia Series; 2004:81-99. Serono Symposia Series, Raven Press, New York.'),
-    ('not a name plus a place, a place first, a company last: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Pittsburgh; 2004:81-99.', '', 'Pittsburgh, Esun Technologies, LLC',
-     'Ash A. A chapter. Vitamins and Hormones. Pittsburgh; 2004:81-99. Pittsburgh, Esun Technologies, LLC.'),
-    ('not a name plus a place, a three-part name then a city: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Lippincott; 2004:81-99.', '', 'Lippincott, Williams Wilkins, Philadelphia',
-     'Ash A. A chapter. Vitamins and Hormones. Lippincott; 2004:81-99. Lippincott, Williams Wilkins, Philadelphia.'),
-    ('not a name plus a place, a parenthesised imprint: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Mosby; 2004:81-99.', '', 'Mosby (Elsevier Health Sciences)',
-     'Ash A. A chapter. Vitamins and Hormones. Mosby; 2004:81-99. Mosby (Elsevier Health Sciences).'),
-    ('not a name plus a place, a parenthesised place: at the end, whole',
-     'Ash A. A chapter. Vitamins and Hormones. Saunders; 2004:81-99.', '', 'Saunders (New York)',
-     'Ash A. A chapter. Vitamins and Hormones. Saunders; 2004:81-99. Saunders (New York).'),
-    ('a city and a country: the place goes in front of the name',
+     'Ash A. A chapter. In: Book. Humana Press; 1992:97-104. Humana Press, Totowa, New Jersey.'),
+    ('a city and a country: the whole value at the end, as before',
      'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith, Berlin, Germany',
-     'Ash A. A chapter. In: Book. Berlin, Germany: Zenith; 2004.'),
-    ('a city part that is not a city name (a second value after ";"): at the end, whole',
-     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith, Totowa; Other House, New York',
-     'Ash A. A chapter. In: Book. Zenith; 2004. Zenith, Totowa; Other House, New York.'),
-    ('a region alone is not a name plus a place: at the end, whole',
-     'Ash A. A chapter. In: Book. 2004.', '', 'New York',
-     'Ash A. A chapter. In: Book. New York; 2004.'),
-    ('a dotted state code counts as a region',
-     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '',
-     'Zenith Press, Upper Saddle River, N.J.',
-     'Ash A. A chapter. In: Book. Upper Saddle River, N.J.: Zenith Press; 2004.'),
-    ('a state and a country after the city: all three are the place',
-     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '',
-     'Zenith Press, Chicago, Illinois, USA',
-     'Ash A. A chapter. In: Book. Chicago, Illinois, USA: Zenith Press; 2004.'),
-    ('a colon between the name and its place',
-     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '',
-     'Zenith Press: Upper Saddle River, New Jersey',
-     'Ash A. A chapter. In: Book. Upper Saddle River, New Jersey: Zenith Press; 2004.'),
-    ('regions alone after a company name are the place',
-     'Ash A. A chapter. In: Book. Zen Co; 2004.', '', 'Zen Co, Pennsylvania, USA',
-     'Ash A. A chapter. In: Book. Pennsylvania, USA: Zen Co; 2004.'),
-    ('a city part that is also a region, with nothing before it: at the end, whole',
-     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith Bridge, New York, NY',
-     'Ash A. A chapter. In: Book. Zenith; 2004. Zenith Bridge, New York, NY.'),
-    ('"Hill" in a city is not a company word',
-     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '', 'Zenith Press, Chapel Hill, North Carolina',
-     'Ash A. A chapter. In: Book. Chapel Hill, North Carolina: Zenith Press; 2004.'),
-    ('a one-part name a city could have: no name left, at the end, whole',
-     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith, Pennsylvania, USA',
-     'Ash A. A chapter. In: Book. Zenith; 2004. Zenith, Pennsylvania, USA.'),
+     'Ash A. A chapter. In: Book. Zenith; 2004. Zenith, Berlin, Germany.'),
+    ('the name is the tail of "John Wiley": at the end, not inside it',
+     'Ash A. A chapter. In: Book. John Wiley; 2004.', '', 'Wiley, Hoboken, New Jersey',
+     'Ash A. A chapter. In: Book. John Wiley; 2004. Wiley, Hoboken, New Jersey.'),
+    ('the name is the tail of "Elsevier Mosby": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Elsevier Mosby; 2006.', '', 'Mosby, St. Louis, Missouri',
+     'Ash A. A chapter. In: Book. Elsevier Mosby; 2006. Mosby, St. Louis, Missouri.'),
+    ('the name is the tail of "Mosby Elsevier", which has a place: at the end',
+     'Ash A. A chapter. In: Book. Philadelphia: Mosby Elsevier; 2009.', '',
+     'Elsevier, St. Louis, Missouri',
+     'Ash A. A chapter. In: Book. Philadelphia: Mosby Elsevier; 2009. '
+     'Elsevier, St. Louis, Missouri.'),
+    ('the name is the tail of "JB Lippincott": at the end, not inside it',
+     'Ash A. A chapter. In: Book. JB Lippincott; 2001.', '',
+     'Lippincott, Philadelphia, Pennsylvania',
+     'Ash A. A chapter. In: Book. JB Lippincott; 2001. Lippincott, Philadelphia, Pennsylvania.'),
+    ('the name follows a "/": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Elsevier/Academic Press; 2015.', '',
+     'Academic Press, San Diego, California',
+     'Ash A. A chapter. In: Book. Elsevier/Academic Press; 2015. '
+     'Academic Press, San Diego, California.'),
+    ('the name follows "Springer Nature/": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Springer Nature/Humana Press; 2019.', '',
+     'Humana Press, Totowa, New Jersey',
+     'Ash A. A chapter. In: Book. Springer Nature/Humana Press; 2019. '
+     'Humana Press, Totowa, New Jersey.'),
+    ('the name is the tail of "Lippincott Williams & Wilkins": at the end',
+     'Ash A. A chapter. In: Book. Lippincott Williams & Wilkins; 2005.', '',
+     'Williams & Wilkins, Baltimore, Maryland, USA',
+     'Ash A. A chapter. In: Book. Lippincott Williams & Wilkins; 2005. '
+     'Williams & Wilkins, Baltimore, Maryland, USA.'),
+    ('the name is the tail of "W.B. Saunders": at the end, not inside it',
+     'Ash A. A chapter. In: Book. W.B. Saunders; 2000.', '',
+     'Saunders, Philadelphia, Pennsylvania',
+     'Ash A. A chapter. In: Book. W.B. Saunders; 2000. Saunders, Philadelphia, Pennsylvania.'),
+    ('the name is the tail of "Wiley-Blackwell": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Wiley-Blackwell; 2012.', '',
+     'Blackwell, Oxford, United Kingdom',
+     'Ash A. A chapter. In: Book. Wiley-Blackwell; 2012. Blackwell, Oxford, United Kingdom.'),
+    ('the name also printed in the title: at the end, the title untouched',
+     'Smith J. Springer; a history. In: Book. Springer; 2004.', '',
+     'Springer, New York, New York',
+     'Smith J. Springer; a history. In: Book. Springer; 2004. Springer, New York, New York.'),
+    # The publisher-before-year slot is the closing year alone, never a
+    # name: it matches neither inside a printed name nor in the title.
+    ('publisher absent, the year follows "John Wiley; ": at the end',
+     'John Wiley; 2004.', '', 'Wiley, Hoboken, New Jersey',
+     'John Wiley; 2004. Wiley, Hoboken, New Jersey.'),
+    ('publisher absent, a "Name;" in the title: before the closing year only',
+     'Smith J. Springer; a history. In: Book. 2004.', '', 'Zenith House',
+     'Smith J. Springer; a history. In: Book. Zenith House; 2004.'),
+    ('publisher absent, a title that starts with a year: before the closing year only',
+     'Smith J. 2004 in review. In: Book. 2010.', '', 'Zenith House',
+     'Smith J. 2004 in review. In: Book. Zenith House; 2010.'),
     ('editors clause written "(Ed.)": present, no second clause',
      'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.', 'Rasim Somer Diler', '',
      'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.'),
@@ -411,24 +382,6 @@ def test_append_missing_stage5d_values_table(
     case, citation, editors, publisher, expected
 ):
     assert _append_missing_stage5d_values(citation, editors, publisher) == expected, case
-
-
-@pytest.mark.parametrize('publisher,expected', [
-    ('Humana Press, Totowa, NJ', ('Humana Press', 'Totowa, NJ')),
-    ('Nova Science Publishers Inc, New York, N.Y., U.S.A.',
-     ('Nova Science Publishers Inc', 'New York, N.Y., U.S.A.')),
-    # Every part can be a place: no name left, so no split (a negative
-    # slice once returned the whole value as the place). The first is
-    # really "Fry Communications" in "New York, NY": a known gap.
-    ('Fry Communications, New York, NY', None),
-    ('Madrid, Spain', None),
-    ('New York', None),
-])
-def test_split_publisher_place(publisher, expected):
-    """#481: the name/place split on corpus-shaped values, read directly
-    because a wrong split with no matching "Name;" slot never reaches the
-    citation."""
-    assert _split_publisher_place(publisher) == expected
 
 
 # ---------------------------------------------------------------------------
