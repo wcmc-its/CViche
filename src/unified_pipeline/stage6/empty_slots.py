@@ -165,11 +165,25 @@ def _ends_scope(element: BaseOxmlElement, snapshot: TemplateSnapshot) -> bool:
             or normalize_template_text(heading) in _SECTION_HEADERS)
 
 
-def _is_template_as_shipped(element: BaseOxmlElement, snapshot: TemplateSnapshot) -> bool:
-    """True for a body element the template shipped and nothing has changed.
-    Anything that is neither a paragraph nor a table (a bookmark, `w:sectPr`)
-    holds no content and counts as shipped."""
+#: What a paragraph with no text can still show: a picture or an embedded object.
+_PARAGRAPH_CONTENT_TAGS = (qn("w:drawing"), qn("w:pict"), qn("w:object"))
+
+
+def _is_blank_paragraph(paragraph: BaseOxmlElement) -> bool:
+    """No text and nothing else to show: a spacer a section writer added
+    (WG6JFG's Abstracts slot had one more than the template), not content."""
+    return not _text(paragraph).strip() and next(
+        paragraph.iter(*_PARAGRAPH_CONTENT_TAGS), None) is None
+
+
+def _holds_nothing_written(element: BaseOxmlElement, snapshot: TemplateSnapshot) -> bool:
+    """True for a body element that holds nothing a section wrote: one the
+    template shipped and nothing has changed, or a blank paragraph. Anything
+    that is neither a paragraph nor a table (a bookmark, `w:sectPr`) holds no
+    content either."""
     if element.tag == qn("w:p"):
+        if _is_blank_paragraph(element):
+            return True
         return element in snapshot.paragraphs and _text(element) == snapshot.paragraphs[element]
     if element.tag == qn("w:tbl"):
         return element in snapshot.tables and _table_grid(element) == snapshot.tables[element]
@@ -182,7 +196,7 @@ def paragraph_slot_is_empty(heading: BaseOxmlElement, snapshot: TemplateSnapshot
     for element in heading.itersiblings():
         if _ends_scope(element, snapshot):
             return True
-        if not _is_template_as_shipped(element, snapshot):
+        if not _holds_nothing_written(element, snapshot):
             return False
     return True
 

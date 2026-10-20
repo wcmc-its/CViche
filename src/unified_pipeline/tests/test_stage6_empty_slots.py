@@ -6,6 +6,7 @@ invented entries.
 import json
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
@@ -87,6 +88,28 @@ def test_content_after_the_instruction_line_still_counts_as_the_slots_own():
     fill_empty_slots(doc.element.body, snapshot)
 
     assert ('p', NOT_APPLICABLE) not in _body_texts(doc)
+
+
+def test_an_added_blank_spacer_is_not_content():
+    doc = _template("Abstracts (optional)", "", "Other (media, podcasts, etc.):")
+    snapshot = snapshot_template(doc.element.body)
+    _insert_after_heading(doc, "Abstracts (optional)", "")
+
+    fill_empty_slots(doc.element.body, snapshot)
+
+    assert _after(doc, "Abstracts (optional)", 1) == [('p', NOT_APPLICABLE)]
+
+
+def test_an_added_picture_with_no_text_is_content():
+    doc = _template("Abstracts (optional)", "", "Other (media, podcasts, etc.):")
+    snapshot = snapshot_template(doc.element.body)
+    _insert_after_heading(doc, "Abstracts (optional)", "")
+    picture = next(p for p in doc.paragraphs[1:] if p.text == "")
+    picture.add_run()._r.append(OxmlElement('w:drawing'))
+
+    fill_empty_slots(doc.element.body, snapshot)
+
+    assert _after(doc, "Abstracts (optional)", 1) != [('p', NOT_APPLICABLE)]
 
 
 def test_a_changed_template_line_counts_as_content():
