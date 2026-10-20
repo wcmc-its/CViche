@@ -1124,8 +1124,12 @@ def _dated_on_own_line(record: Mapping[str, Any], records: Sequence[Mapping[str,
     Member of ..." for the co-leader's 2020-2021, though the segments are
     out of step with the records above it (OIEPQD TVQZIP 116, #1342). A name
     further into a line ("Member" in "Executive Committee Member 2010-2012")
-    does not make it that record's line."""
+    does not make it that record's line. Never when a sibling carries the
+    same dates: a date copied from a sibling always equals the sibling's, so
+    such a record falls back to the nearest-line rule and loses it (#1342)."""
     dates = _date_tokens(record, code)
+    if any(_date_tokens(other, code) == dates for other in records if other is not record):
+        return False
     own = _names_of_record(record, records)
     return any(dates <= set(_tokens(segment)) and any(_begins_with_name(segment, name) for name in own)
                for segment in segments)

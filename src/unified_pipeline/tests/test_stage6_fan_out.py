@@ -1885,8 +1885,15 @@ class TestStage4RecordDates:
         ([_q1_record('Vice President', None, None), _q1_record('Treasurer', '2014', None),
           _q1_record('President', '2010', None)],
          '2010 Vice President\t2014 Treasurer\tPresident'),
+        # The sibling's reply left out the words its line opens with, so the
+        # later record's organization opens that line; its dates equal the
+        # sibling's, so they are a copy.
+        ([_q1_record('Council Chair', '2010', '2012'), _q1_record('Treasurer', '2014', '2015'),
+          _q1_record('Member', '2010', '2012', 'American Heart Association')],
+         'American Heart Association Council Chair 2010-2012\tTreasurer 2014-2015\tMember'),
     ], ids=['inside-a-sibling-name', 'end-of-a-sibling-line', 'start-of-a-sibling-value',
-            'sibling-spelled-otherwise', 'hyphenated-word', 'date-first-sibling-line'])
+            'sibling-spelled-otherwise', 'hyphenated-word', 'date-first-sibling-line',
+            'sibling-dates-equal'])
     def test_a_name_on_a_siblings_line_does_not_keep_its_copied_date(self, records, text):
         # #1342 round 3: each last record's 2010-2012 is copied from the
         # first line, which names a sibling; dev clears it, and so must this.
