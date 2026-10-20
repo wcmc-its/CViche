@@ -1,6 +1,7 @@
 """One module per domain a lint inspects.
 
     classification.py whether stage 3b's codes agree with their own headings
+    completeness.py   template fields the submitter left blank or "N/A"
     enrichment.py     stage-5 citation enrichment and the cap-25 owner gate
     contact.py        office contact values vs the rendered Personal Data rows
     coverage.py       source text that reached neither the page nor the Appendix
@@ -12,6 +13,6 @@
     segmentation.py   how stages 1a/1b/2 cut the source into a hierarchy
     summary.py        claims the stage-4.5 research summary makes that the CV lacks
 
-Every lint in `run_doctor.KNOWN_LINTS` now lives in one of these eleven; what
+Every lint in `run_doctor.KNOWN_LINTS` now lives in one of these twelve; what
 stays in `run_doctor.py` is orchestration, artifact discovery and the report.
 """

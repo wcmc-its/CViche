@@ -2345,6 +2345,7 @@ def test_an_honor_whose_award_the_pii_pass_withheld_gets_no_sub_point():
     withheld = _honor()
     del withheld["extracted_fields"]["award_name"]
     withheld["_pii_dropped_fields"] = ["award_name"]
+    withheld["_pii_withheld"] = True  # the pass sets both
     gen = _render_honors([other, withheld], supplementary_subpoints=True)
 
     assert "Young Investigator Award" not in "".join(_texts_of(gen.doc.element.body))
@@ -2595,6 +2596,7 @@ def test_a_mentee_whose_field_the_pii_pass_withheld_gets_no_sub_point():
     own table or the postdoc's."""
     withheld = _mentee()
     withheld["_pii_dropped_fields"] = ["site_position"]
+    withheld["_pii_withheld"] = True  # the pass sets both
     gen = _render_mentoring({"N3B": [_other_postdoc(), withheld]}, supplementary_subpoints=True)
 
     assert "Ana Li" in "".join(_texts_of(gen.doc.element.body))
@@ -2687,6 +2689,906 @@ def test_one_mentees_two_periods_on_one_line_keep_its_prose():
     assert sorted(_mentee_names(gen)) == ["Ana Li", "Ana Li", "Casey Sample"]
     (row,) = _subpoint_rows(gen)
     assert _mentee_named_by(row) == "Ana Li" and _deleted_texts(gen) == line
+
+
+# --- #1205: B1 degrees, the next code family ----------------------------------
+# The education section writes every B1 entry as a row of its four-column
+# table, so the prose is a deleted row under the degree's own row: the row the
+# education writer recorded for that entry (the row-receipt ledger).
+
+_THESIS = ("Thesis: Seasonal variation of nitrogen fixation in coastal wetland soils "
+           "under experimental warming")
+_DEGREE_FIELD = "Example Marine Studies"
+
+
+def _degree(idx=19, degree="M.S.", year="2001", prose=_THESIS, code="B1", *,
+            discipline=_DEGREE_FIELD, institution="Norvale University", **fields):
+    """A degree whose source line goes on past the degree, field, institution
+    and year into its thesis, as YUYVIG FMIGLR 19's did. "M.S." and "Ph.D."
+    hold no five-letter word, so another degree of the same field and
+    institution shares every distinctive word of its row (`_doctorate`). A
+    value passed as None is in neither the line nor the fields."""
+    named = {"degree": degree, "discipline": discipline, "institution": institution, "year": year}
+    line = ", ".join(value for value in named.values() if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _doctorate():
+    """A later degree of the same field and institution, with no prose: it
+    renders first, reverse chronologically."""
+    return _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+
+
+def _render_education(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_education(entries)
+    gen._add_supplementary_subpoints({"B1": entries})
+    return gen
+
+
+def _row_text(tr):
+    return "".join(t.text or "" for t in tr.iter(qn("w:t")))
+
+
+def _degree_table_row():
+    """The same degree read from a source table: stage 2 joins the row's
+    cells with pipes, and its position names the row ("96.3")."""
+    entry = _degree()
+    entry["element_idx_start"] = "96.3"
+    entry["text"] = entry["text"].replace(", ", " | ").replace("\t", " | ")
+    return entry
+
+
+@pytest.mark.parametrize("entry", [_degree, _degree_table_row])
+def test_degree_prose_is_a_deleted_row_under_the_degree_row(entry):
+    gen = _render_education([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == f"M.S., {_DEGREE_FIELD}Norvale University2001"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _THESIS
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "4"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_degree_prose_goes_under_its_own_row_among_degrees_of_one_institution():
+    """The Ph.D. row renders first and holds every distinctive word of the
+    M.S. row, so words alone put the M.S. thesis under the Ph.D. (YUYVIG
+    FMIGLR 19). Only the row the writer recorded for the M.S. entry takes it."""
+    gen = _render_education([_doctorate(), _degree()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert _row_text(above).startswith("M.S.,")
+    assert _row_text(above.getprevious()).startswith("Ph.D.,")
+    assert row.getnext() is None
+
+
+def test_degree_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_education([_doctorate(), _degree()], supplementary_subpoints=False)
+    on = _render_education([_doctorate(), _degree()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _THESIS in rejected
+    assert _THESIS not in "".join(_texts_of(off.doc.element.body))
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+@pytest.mark.parametrize("field, value, line", [
+    # The degree's honors print in parentheses in the degree cell.
+    ("honors", "summa cum laude, with highest departmental honors",
+     "Graduated summa cum laude with highest departmental honors"),
+    # Stage 4 put the thesis title in `major`, which the degree cell prints.
+    ("major", _THESIS.removeprefix("Thesis: "), _THESIS),
+])
+def test_degree_prose_already_in_its_row_is_not_offered_again(field, value, line):
+    """The degree cell prints these, and the document holds most of each
+    line's words (`_record_rendered`), so neither prints twice. A line with
+    more words of its own than that is judged by its share of the printed
+    field values (`test_a_degree_line_mostly_restating_its_cell_is_not_offered`),
+    and one with more new words still is offered whole
+    (`test_degree_prose_restating_part_of_its_cell_is_offered_as_written`)."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _degree(prose=line, **{field: value})
+    gen = _render_education([entry], supplementary_subpoints=True)
+    assert value in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry, "B1", haystack) == []
+
+
+def test_every_degree_cell_field_the_pass_counts_is_printed_in_the_degree_cell():
+    """`supplementary._DEGREE_CELL_FIELDS` restates the education writer's
+    degree cell as literals (`_RENDERED_FIELDS` marks schema fields only):
+    each one, alone on an entry, reaches that cell."""
+    from unified_pipeline.stage6 import supplementary
+
+    for field in supplementary._DEGREE_CELL_FIELDS:
+        marker = f"Zq{field.replace('_', 'x')}Z"
+        gen = _render_education([_degree(prose="", **{field: marker})], supplementary_subpoints=True)
+        (row,) = [tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+                  if _row_text(tr).startswith("M.S.,")]
+        assert marker in _row_text(row.find(qn("w:tc"))), field
+
+
+_ADVISOR = "Orrin Halvard Vellacott"
+
+
+@pytest.mark.parametrize("field, value, line", [
+    ("major", "Estuarine Sediment Geochemistry",
+     "Concentration: Estuarine Sediment Geochemistry and Coastal Processes"),
+    ("field_of_study", "Estuarine Sediment Geochemistry",
+     "Concentration: Estuarine Sediment Geochemistry and Coastal Processes"),
+    ("honors", "summa cum laude with distinction",
+     "Awarded summa cum laude with distinction in research"),
+    ("major_professor", _ADVISOR, f"Research supervised by {_ADVISOR}"),
+    ("mentor", _ADVISOR, f"Research supervised by {_ADVISOR}"),
+    # The minor is new, but half the line's words are the printed major: the
+    # share rule every family uses (`SUBPOINT_FIELD_TOKEN_MAX_SHARE`) reads it
+    # as the row, so it is not offered.
+    ("major", "Estuarine Sediment Geochemistry",
+     "Major in Estuarine Sediment Geochemistry with minor in Chemistry"),
+])
+def test_a_degree_line_mostly_restating_its_cell_is_not_offered(field, value, line):
+    """The degree cell prints `major` or `field_of_study`, the honors and an
+    advisor under any of its names, though no B1 schema field is any of them
+    (`_DEGREE_CELL_FIELDS`). A line at least half of whose words are theirs
+    restates the row; the document holds too few of its words for
+    `_record_rendered` to see that."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _degree(prose=line, **{field: value})
+    gen = _render_education([entry], supplementary_subpoints=True)
+    assert value in _row_text(next(tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+                                   if _row_text(tr).startswith("M.S.,")))
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary._record_rendered(line, haystack.text, haystack.line_tokens) is False
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("field, value, line", [
+    ("advisor", _ADVISOR, f"Dissertation advisor: Professor {_ADVISOR}, Department of Oceanography"),
+    ("honors", "magna cum laude", "Graduated magna cum laude with departmental distinction honors"),
+])
+def test_degree_prose_restating_part_of_its_cell_is_offered_as_written(field, value, line):
+    """More of the line's words are its own than the cell's, so it is
+    offered, and as the CV wrote it: Reject All prints the advisor or the
+    honors again, under the row that holds them."""
+    gen = _render_education([_degree(prose=line, **{field: value})], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert value in _row_text(row.getprevious())
+    assert _deleted_texts(gen) == line
+
+
+def _short_degree(kind):
+    """A degree whose row holds too few distinctive (5+ letter) words for the
+    word anchor: "PhD", "MD", a year and a four-letter name hold none, and a
+    stage-5b name the row prints may share none with stage 4's field."""
+    if kind == "one word":
+        return _degree(degree="PhD", discipline=None, institution="Kell University", year="2010")
+    if kind == "no word":
+        return _degree(degree="MD", discipline=None, institution="Vaux", year=None)
+    entry = _degree(degree="Ph.D.", discipline=None,
+                    institution="Norvale Graduate School of Biomedical Sciences", year="2008")
+    entry["institution_enrichment"] = {"cleaned_name": "Halbrook Medical College"}
+    return entry
+
+
+@pytest.mark.parametrize("kind", ["one word", "no word", "renamed"])
+def test_a_short_degrees_prose_goes_under_its_own_row(kind):
+    """The writer's record says which row is the entry's, so the row is
+    taken as it is (`_pick_anchor`), however few words it shares with the
+    fields. Before, the word test found no anchor, and the prose reached
+    the document in neither arm. Accept All is still the flag-off render."""
+    off = _render_education([_short_degree(kind)], supplementary_subpoints=False)
+    on = _render_education([_short_degree(kind)], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(on)
+    assert _row_text(row.getprevious()).startswith(_short_degree(kind)["extracted_fields"]["degree"])
+    assert _deleted_texts(on) == _THESIS
+    assert _THESIS not in "".join(_texts_of(off.doc.element.body))
+    row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_a_thesis_citation_on_a_row_naming_no_degree_gets_no_sub_point():
+    """Stage 4 coded a thesis citation B1 with a field and an institution but
+    no degree (EBYSBC VGHNZD 1861). The section writes it a row of its own,
+    the field alone in the degree cell, beside the master's degree the
+    thesis was for; the prose is of no degree on that row, so it gets none."""
+    citation = _degree(idx=23, degree=None, year="2001", prose="",
+                       author="Example AB", title=_THESIS.removeprefix("Thesis: "))
+    citation["text"] = f"Example AB. {_THESIS.removeprefix('Thesis: ')}. Norvale University, 2001."
+    gen = _render_education([_degree(prose=""), citation], supplementary_subpoints=True)
+
+    assert any(_row_text(tr).startswith(f"{_DEGREE_FIELD}Norvale University")
+               for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_degree_the_section_skips_gets_no_sub_point_under_another_row():
+    """An entry naming no degree and no institution is not written (`_fill_
+    education`), so it has no row of its own; its field's words would put
+    its prose under the other degree's row."""
+    skipped = _degree(idx=21, degree=None, institution=None,
+                      prose="Completed coursework in estuarine ecology and coastal sediment chemistry")
+    gen = _render_education([_degree(prose=""), skipped], supplementary_subpoints=True)
+
+    assert len([tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+                if _row_text(tr).startswith("M.S.,")]) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _render_grouped_education(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_education(grouped.get("B1", []))
+    gen._fill_other_education(grouped.get("B2", []))
+    gen._fill_postdoc_training(grouped, [e for group in grouped.values() for e in group])
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def test_a_degree_rerouted_out_of_b1_follows_its_destination_and_gets_no_sub_point():
+    """B2 is excluded: a school with no degree renders under Other
+    Educational Experiences (`_route_precollegiate_education`). C is not
+    offered either, and its heading lookup finds the title block, not its
+    section: a training row stage 3b coded B1 under a postdoctoral heading
+    renders as C. Neither the degree row of the same institution nor any
+    other carries their prose."""
+    school = _degree(idx=32, degree=None, discipline=None, institution="Example Preparatory School",
+                     prose="Completed the advanced laboratory sequence in marine field methods")
+    training = _rerouted(_degree(idx=31, degree=None, year=None, discipline=None,
+                                 prose="Trained in quantitative methods for estuarine monitoring "
+                                       "programmes", dates_attended="2002-2004"),
+                         "C", "POSTDOCTORAL TRAINING")
+    gen, grouped = _render_grouped_education([_degree(prose=""), school, training],
+                                             supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["B2"]] == [32]
+    assert [e["element_idx_start"] for e in grouped["C"]] == [31]
+    assert "Example Preparatory School" in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_record_rerouted_into_b1_follows_the_degree_rule():
+    """A degree programme stage 3b coded C under an education heading renders
+    as a degree row: its thesis is a deleted row under that row."""
+    gen, grouped = _render_grouped_education(
+        [_rerouted(_degree(idx=30, code="C"), "B1", "EDUCATION")], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["B1"]] == [30]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()).startswith("M.S.,")
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _THESIS
+
+
+def test_a_degree_whose_field_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass dropped one of the degree's fields. What is left
+    still describes what was withheld, so none of it is offered."""
+    withheld = _degree()
+    withheld["_pii_dropped_fields"] = ["advisor"]
+    withheld["_pii_withheld"] = True  # the pass sets both
+    gen = _render_education([_doctorate(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_text(tr).startswith("M.S.,") for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _degree_line(text, *degrees):
+    """One source line stage 4 returned as a record per (degree, year), the
+    entry's own fields being the last record's. Fan-out gives every earlier
+    record a line of its own and the last one the whole line."""
+    records = [{"degree": degree, "discipline": _DEGREE_FIELD, "institution": "Norvale University",
+                "year": year} for degree, year in degrees]
+    return {"element_idx_start": 25, "taxonomy_code": "B1", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_MS_LINE = f"M.S., {_DEGREE_FIELD}, Norvale University, 2001"
+_PHD_LINE = f"Ph.D., {_DEGREE_FIELD}, Norvale University, 2005"
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own degree.
+    ([f"{_MS_LINE}, {_THESIS}", _PHD_LINE], [("M.S.", f"{_MS_LINE}, {_THESIS}")]),
+    ([_MS_LINE, f"{_PHD_LINE}, {_THESIS}"], [("Ph.D.", f"{_PHD_LINE}, {_THESIS}")]),
+    # They do not: whose thesis it is cannot be told, so it goes under neither.
+    ([_MS_LINE, _THESIS, _PHD_LINE], []),
+])
+def test_prose_on_a_line_of_several_degrees_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the degree's line as well as its thesis brings the degree, field,
+    institution and year along, and Reject All prints them a second time,
+    under the row that holds them (`test_a_thesis_on_its_degrees_own_line_
+    brings_the_line_with_it`)."""
+    entry = _degree_line("\t".join(segments), ("M.S.", "2001"), ("Ph.D.", "2005"))
+    gen, grouped = _render_grouped_education([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["B1"][-1] and len(grouped["B1"]) == 2
+    assert [(_row_text(row.getprevious()).split(",")[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def test_a_thesis_on_its_degrees_own_line_brings_the_line_with_it():
+    """A fragment splits only on tabs, line breaks and pipes, so a thesis in
+    the same sentence run as its degree is offered with the degree's line,
+    the shape every family has (#1673's honors, #1935's mentees): Reject All
+    prints the degree, field, institution and year again, under the row
+    that holds them. The CV's line as written is the shape the owner
+    approved (#1205, 2026-10-09)."""
+    line = f"{_PHD_LINE}. {_THESIS}"
+    entry = _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+    entry["text"] = line
+    gen = _render_education([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == f"Ph.D., {_DEGREE_FIELD}Norvale University2005"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == line
+
+
+def test_the_doctor_matches_a_degree_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the M.S. entry's sub-point
+    under its own index and B1, and the doctor's per-entry match counts it for
+    that entry, not for the Ph.D. that shares its words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "T1205B", "cv_owner": {"full_name": "Quenby Marblegate"},
+               "entries": [_doctorate(), _degree()]}
+    input_path = tmp_path / "T1205B_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+
+    sidecar = json.loads((tmp_path / "T1205B_render_warnings.json").read_text())
+    assert [(p["element_idx_start"], p["code"], p["paragraphs"])
+            for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(19, "B1", [_THESIS])]
+    subpoints = subpoint_text(docx_subpoint_lines(Document(out)), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_THESIS, subpoints, element_idx=19)
+    assert not offered_as_subpoint(_THESIS, subpoints, element_idx=17)
+
+
+# --- #1205: O institutional leadership, the next code family -----------------
+# The leadership section writes every O entry as a row of its three-column
+# table, so the prose is a deleted row under the role's own row: the row the
+# leadership writer recorded for that entry (the row-receipt ledger).
+
+_ROLE_PROSE = ("Oversaw an annual operating budget and twelve clinical staff, and launched "
+               "the regional outreach programme for community clinics")
+_ROLE_TITLE = "Director, Example Outreach Programme"
+_ROLE_INSTITUTION = "Norvale University"
+
+
+def _role(idx=57, title=_ROLE_TITLE, start="2008", end="2012", prose=_ROLE_PROSE, code="O", *,
+          institution=_ROLE_INSTITUTION, **fields):
+    """A leadership role whose source line goes on past its dates, title and
+    institution into what it oversaw, as EBYSBC SEKQUI 75's did. Another
+    role of the same title and institution shares every distinctive word of
+    its row, and so does a later title holding its words ("Assistant
+    Director, ..."): only the dates, which are digits, tell them apart. A
+    value passed as None is in neither the line nor the fields."""
+    named = {"leadership_role": title, "institution": institution, "start_date": start,
+             "end_date": end}
+    dates = "-".join(value for value in (start, end) if value)
+    line = "\t".join(part for part in (dates, ", ".join(v for v in (title, institution) if v)) if part)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _later_role(title=_ROLE_TITLE):
+    """A later role of the same institution, with no prose: it renders first,
+    reverse chronologically."""
+    return _role(idx=55, title=title, start="2016", end="2020", prose="")
+
+
+def _render_leadership(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_leadership(entries)
+    gen._add_supplementary_subpoints({"O": entries})
+    return gen
+
+
+def _role_table_row():
+    """The same role read from a source table: stage 2 joins the row's cells
+    with pipes, and its position names the row ("41.2")."""
+    entry = _role()
+    entry["element_idx_start"] = "41.2"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+_ROLE_ROW = f"{_ROLE_TITLE}{_ROLE_INSTITUTION}2008-2012"
+
+
+@pytest.mark.parametrize("entry", [_role, _role_table_row])
+def test_leadership_prose_is_a_deleted_row_under_the_role_row(entry):
+    gen = _render_leadership([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _ROLE_ROW
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _ROLE_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "3"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_a_roles_several_prose_lines_are_one_row_of_paragraphs_in_source_order():
+    lines = (_ROLE_PROSE, "Chaired the programme steering group and its annual quality review")
+    gen = _render_leadership([_role(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _ROLE_ROW
+    assert ["".join(t.text for t in p.iter(qn("w:delText"))) for p in row.iter(qn("w:p"))] \
+        == list(lines)
+
+
+@pytest.mark.parametrize("later", [
+    # One title held twice at one institution: the rows differ in their dates only.
+    _ROLE_TITLE,
+    # A later title at the same institution holding every word of this one.
+    f"Assistant {_ROLE_TITLE}",
+])
+def test_leadership_prose_goes_under_its_own_row_among_roles_of_one_institution(later):
+    """The later role renders first and holds every distinctive word of the
+    earlier one's row, so words alone put the earlier role's prose under the
+    later row. Only the row the writer recorded for the earlier entry takes it."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_leadership([_later_role(later), _role()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert _row_text(above) == _ROLE_ROW
+    assert _row_text(above.getprevious()) == f"{later}{_ROLE_INSTITUTION}2016-2020"
+    assert row.getnext() is None
+    # Words alone would have taken the later role's row.
+    lines = list(supplementary.anchor_candidates(_render_leadership(
+        [_later_role(later), _role()], supplementary_subpoints=False).doc))
+    rows = [line for line in lines if _ROLE_INSTITUTION in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(_role(), "O"), rows) is rows[0]
+    assert rows[0].text.startswith(later)
+
+
+def test_leadership_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_leadership([_later_role(), _role()], supplementary_subpoints=False)
+    on = _render_leadership([_later_role(), _role()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _ROLE_PROSE in rejected
+    assert _ROLE_PROSE not in "".join(_texts_of(off.doc.element.body))
+    assert len(_subpoint_rows(on)) == 1
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def _role_in_division():
+    """Stage 4 put the programme's description in `division_department`,
+    which the institution cell prints."""
+    return _role(division_department=_ROLE_PROSE)
+
+
+def _role_with_no_role_or_institution():
+    """No role and no institution: the role cell prints the entry's text."""
+    return _role(title=None, institution=None)
+
+
+def _wrapped_role_row():
+    """One source table row whose cells wrap (#987): the rejoined text is the row."""
+    entry = _role(title=None, institution=None, start=None, end=None, prose="")
+    entry.update(element_type="table_row", element_idx_start=41, element_idx_end=41,
+                 text=f"{_ROLE_TITLE} | {_ROLE_INSTITUTION}\n{_ROLE_PROSE} | 2008 -\n2012")
+    return entry
+
+
+@pytest.mark.parametrize("entry", [_role_in_division, _role_with_no_role_or_institution,
+                                   _wrapped_role_row])
+def test_leadership_prose_already_in_its_row_is_not_offered_again(entry):
+    """The row prints it (`_record_rendered`), so it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_leadership([entry()], supplementary_subpoints=True)
+    assert _ROLE_PROSE in "".join(_row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "O", haystack) == []
+
+
+def test_every_leadership_row_field_the_pass_counts_is_printed_in_the_role_row():
+    """`supplementary._LEADERSHIP_ROW_FIELDS`, the off-schema names among the
+    fields the leadership writer reads its cells from (`_RENDERED_FIELDS`
+    marks schema fields only): each one, alone on an entry with the schema's
+    field empty, reaches the row."""
+    from unified_pipeline.stage6 import supplementary
+
+    for field in supplementary._LEADERSHIP_ROW_FIELDS:
+        marker = f"Zq{field}Z"
+        entry = _role(title=None, institution=None, prose="", **{field: marker})
+        gen = _render_leadership([entry], supplementary_subpoints=True)
+        assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
+
+
+def test_every_field_the_role_row_prints_is_one_the_pass_counts():
+    """The other direction: a field the row prints that `_value_tokens` does
+    not count would offer a fragment restating the row. The names are the
+    role and organization fields of the codes an entry is rerouted into O
+    from (D1-D3, L3, P, Q1, Q2), each alone on an entry."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    counted = _RENDERED_FIELDS["O"] | set(supplementary._LEADERSHIP_ROW_FIELDS)
+    names = set().union(*(_RENDERED_FIELDS[code] for code in ("D1", "D2", "D3", "L3", "P", "Q1", "Q2")))
+    for field in sorted(names - {"start_date", "end_date"}):
+        marker = f"Zq{field}Z"
+        entry = {"element_idx_start": 57, "taxonomy_code": "O", "text": "2008-2012",
+                 "extracted_fields": {field: marker, "start_date": "2008", "end_date": "2012"}}
+        gen = _render_leadership([entry], supplementary_subpoints=True)
+        printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+        assert not printed or field in counted, field
+
+
+@pytest.mark.parametrize("field", ["role", "position", "organization"])
+def test_a_leadership_line_mostly_restating_its_row_is_not_offered(field):
+    """Stage 4 named the role or the organization under an off-schema key,
+    which the row prints when the schema's is empty. A line at least half
+    of whose words restate it is the row (`SUBPOINT_FIELD_TOKEN_MAX_SHARE`);
+    the document holds too few of its words for `_record_rendered` to see that."""
+    from unified_pipeline.stage6 import supplementary
+
+    value = "Regional Outreach Clinics Director"
+    line = f"{value}: expanded statewide pediatric services"
+    emptied = {"institution": None} if field == "organization" else {"title": None}
+    entry = _role(prose=line, **emptied, **{field: value})
+    gen = _render_leadership([entry], supplementary_subpoints=True)
+    assert any(value in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary._record_rendered(line, haystack.text, haystack.line_tokens) is False
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_flattened_leadership_table_prints_every_line_as_a_row_and_offers_nothing():
+    """Three or more lines are a source table flattened into one entry: the
+    writer prints each line as a row of its own (`_add_multiline_leadership_
+    rows`), a prose line included, so nothing is left to offer. Every row is
+    the entry's own (the ledger), and none of them gets a sub-point."""
+    block = (f"Chair, Example Admissions Committee | {_ROLE_INSTITUTION} | 2001-2004\n"
+             f"Director, Example Outreach Programme | {_ROLE_INSTITUTION} | 2005-2010\n"
+             f"{_ROLE_PROSE}")
+    entry = {"element_idx_start": 60, "taxonomy_code": "O", "text": block,
+             "extracted_fields": {"leadership_role": "Chair, Example Admissions Committee",
+                                  "institution": _ROLE_INSTITUTION,
+                                  "start_date": "2001", "end_date": "2004"}}
+    gen = _render_leadership([entry], supplementary_subpoints=True)
+
+    rows = gen._row_receipts.elements_for(entry)
+    assert len(rows) == 3 and _ROLE_PROSE in _row_text(rows[2])
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_leadership_entry_the_section_cannot_place_gets_no_sub_point():
+    """The leadership writer binds only to its own table (#625, #664). With
+    none, it writes no row, so no row is the entry's own: its prose goes
+    under no other line of the document, however many of its words that
+    line holds."""
+    gen = _generator(supplementary_subpoints=True)
+    table = gen._find_table_after_paragraph(gen._find_paragraph_exact(
+        "INSTITUTIONAL LEADERSHIP ACTIVITIES"))
+    # No longer the leadership table's header, and a line of the section
+    # holding every distinctive word of the role's fields.
+    table.rows[0].cells[0].text = f"{_ROLE_TITLE}, {_ROLE_INSTITUTION}"
+    role = _role()
+    gen._fill_leadership([role])
+    gen._add_supplementary_subpoints({"O": [role]})
+
+    assert gen._row_receipts.elements_for(role) == []
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _render_grouped_leadership(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_leadership(grouped.get("O", []))
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def _role_line(text, *roles):
+    """One source line stage 4 returned as a record per (role, start, end),
+    the entry's own fields being the last record's. Fan-out gives every
+    earlier record a line of its own and the last one the whole line."""
+    records = [{"leadership_role": role, "institution": _ROLE_INSTITUTION, "start_date": start,
+                "end_date": end} for role, start, end in roles]
+    return {"element_idx_start": 63, "taxonomy_code": "O", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_CHAIR = ("Chair, Example Admissions Committee", "2001", "2004")
+_CHAIR_LINE = f"Chair, Example Admissions Committee, {_ROLE_INSTITUTION}, 2001-2004"
+_DIRECTOR = (_ROLE_TITLE, "2005", "2010")
+_DIRECTOR_LINE = f"{_ROLE_TITLE}, {_ROLE_INSTITUTION}, 2005-2010"
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own role.
+    ([f"{_CHAIR_LINE}. {_ROLE_PROSE}", _DIRECTOR_LINE],
+     [("Chair", f"{_CHAIR_LINE}. {_ROLE_PROSE}")]),
+    ([_CHAIR_LINE, f"{_DIRECTOR_LINE}. {_ROLE_PROSE}"],
+     [("Director", f"{_DIRECTOR_LINE}. {_ROLE_PROSE}")]),
+    # They do not: which role the prose is about cannot be told, so neither takes it.
+    ([_CHAIR_LINE, _ROLE_PROSE, _DIRECTOR_LINE], []),
+])
+def test_prose_on_a_line_of_several_roles_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the role's line as well as its prose brings the role, institution
+    and dates along, and Reject All prints them a second time, under the
+    row that holds them (the shape every family has; #1205, 2026-10-09)."""
+    entry = _role_line("\t".join(segments), _CHAIR, _DIRECTOR)
+    gen, grouped = _render_grouped_leadership([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["O"][-1] and len(grouped["O"]) == 2
+    assert [(_row_text(row.getprevious()).split(",")[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def test_generic_list_fan_out_children_offer_nothing_their_fields_do_not_hold():
+    """Fan-out splits a record list stage 4 filed under a key the schema does
+    not define only when the fields hold every word of the text, and each
+    child's text is then the line built from its fields: nothing is prose.
+    With prose in the text the list is not split, the entry prints its whole
+    text in the role cell, and nothing is left to offer either."""
+    records = [{"leadership_role": "Chair, Example Admissions Committee",
+                "institution": _ROLE_INSTITUTION, "start_date": "2001", "end_date": "2004"},
+               {"leadership_role": _ROLE_TITLE, "institution": _ROLE_INSTITUTION,
+                "start_date": "2005", "end_date": "2010"}]
+    for text, children in ((f"{_CHAIR_LINE}\t{_DIRECTOR_LINE}", 2),
+                           (f"{_CHAIR_LINE}\t{_DIRECTOR_LINE}\t{_ROLE_PROSE}", 1)):
+        entry = {"element_idx_start": 64, "taxonomy_code": "O", "text": text,
+                 "extracted_fields": {"leadership_roles": copy.deepcopy(records)}}
+        gen, grouped = _render_grouped_leadership([entry], supplementary_subpoints=True)
+        assert len(grouped["O"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["O"])
+        assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_leadership_role_rerouted_out_of_o_follows_its_destination_and_gets_no_sub_point():
+    """N1 is excluded: a role under a mentoring-programmes heading renders as
+    N1. C is not offered, and its heading lookup finds the title block, not
+    its section: a record holding only an institution and a start date under
+    a training heading renders as C. Neither the role row of the same
+    institution nor any other carries their prose."""
+    programme = _rerouted(_role(idx=70), "N1", "MENTORING PROGRAMS")
+    training = _rerouted(_role(idx=71, title=None, end=None,
+                               prose="Trained in quantitative methods for community outreach "
+                                     "programme evaluation"), "C", "POSTDOCTORAL TRAINING")
+    gen, grouped = _render_grouped_leadership([_later_role(), programme, training],
+                                              supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["N1"]] == [70]
+    assert [e["element_idx_start"] for e in grouped["C"]] == [71]
+    assert [e["element_idx_start"] for e in grouped["O"]] == [55]
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_refused_reroute_keeps_the_leadership_rule():
+    """A role rerouted to I keeps its O code: I's renderer writes none of its
+    fields (`_cross_family_refusal`). It renders as an O row and its prose is
+    a deleted row under that row."""
+    gen, grouped = _render_grouped_leadership([_rerouted(_role(), "I", "MEMBERSHIPS")],
+                                              supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["O"]] == [57]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _ROLE_ROW
+
+
+def test_a_record_rerouted_into_o_follows_the_leadership_rule():
+    """A clinical leadership role stage 3b coded L3 under the institutional
+    leadership heading renders as an O row: its prose is a deleted row under
+    that row."""
+    gen, grouped = _render_grouped_leadership(
+        [_rerouted(_role(code="L3"), "O", "INSTITUTIONAL LEADERSHIP")], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["O"]] == [57]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _ROLE_ROW
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _ROLE_PROSE
+
+
+def test_a_leadership_role_whose_field_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass dropped one of the role's fields. What is left
+    still describes what was withheld, so none of it is offered."""
+    withheld = _role()
+    withheld["_pii_dropped_fields"] = ["division_department"]
+    withheld["_pii_withheld"] = True  # the pass sets both
+    gen = _render_leadership([_later_role(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_text(tr) == _ROLE_ROW for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_leadership_role_dedup_drops_offers_its_prose_once_under_the_kept_row():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no row, so its
+    prose goes only under the row of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_role(idx=57), _role(idx=58)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["O"]) == 2 and len(kept["O"]) == 1
+    gen._fill_leadership(kept["O"])
+    gen._add_supplementary_subpoints(before)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _ROLE_ROW
+    assert _deleted_texts(gen) == _ROLE_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["O"][0]["element_idx_start"]
+
+
+def test_leadership_and_appointment_prose_each_stay_under_their_own_section_row():
+    """An appointment and a leadership role can share a title and an
+    institution: each one's prose goes under its own section's row, never
+    under the other's."""
+    appointment_prose = ("Supervised the example clinic's residents and its weekly "
+                         "interdisciplinary case conference")
+    appointment = {"element_idx_start": 29, "taxonomy_code": "D1",
+                   "text": f"2008-2012\t{_ROLE_TITLE}, {_ROLE_INSTITUTION}\t{appointment_prose}",
+                   "extracted_fields": {"title": _ROLE_TITLE, "institution": _ROLE_INSTITUTION,
+                                        "start_date": "2008", "end_date": "2012"}}
+    gen = _generator(supplementary_subpoints=True)
+    role = _role()
+    gen._fill_positions({"D1": [appointment]})
+    gen._fill_leadership([role])
+    gen._add_supplementary_subpoints({"D1": [appointment], "O": [role]})
+
+    by_text = {"".join(t.text for t in row.iter(qn("w:delText"))): row for row in _subpoint_rows(gen)}
+    assert set(by_text) == {appointment_prose, _ROLE_PROSE}
+    leadership_header = "Role(s)/Position"
+    assert _row_text(by_text[_ROLE_PROSE].getparent().find(qn("w:tr"))).startswith(leadership_header)
+    assert not _row_text(by_text[appointment_prose].getparent().find(qn("w:tr"))).startswith(
+        leadership_header)
+    assert by_text[_ROLE_PROSE].getparent() is not by_text[appointment_prose].getparent()
+
+
+def test_the_doctor_matches_a_leadership_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier role's sub-point
+    under its own index and O, and the doctor's per-entry match counts it for
+    that entry, not for the later role that shares its words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "T1205O", "cv_owner": {"full_name": "Quenby Marblegate"},
+               "entries": [_later_role(), _role()]}
+    input_path = tmp_path / "T1205O_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+
+    sidecar = json.loads((tmp_path / "T1205O_render_warnings.json").read_text())
+    assert [(p["element_idx_start"], p["code"], p["paragraphs"])
+            for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(57, "O", [_ROLE_PROSE])]
+    subpoints = subpoint_text(docx_subpoint_lines(Document(out)), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_ROLE_PROSE, subpoints, element_idx=57)
+    assert not offered_as_subpoint(_ROLE_PROSE, subpoints, element_idx=55)
+
+
+def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P"):
+    """Through `run_stage6`, so the PII pass and the date-led split (#983)
+    run as in a real render: the document and its sidecar's placements."""
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    input_path = tmp_path / f"{uid}_fields.json"
+    input_path.write_text(json.dumps({"document_uid": uid,
+                                      "cv_owner": {"full_name": "Quenby Marblegate"},
+                                      "entries": entries}))
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+    sidecar = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
+    return Document(out), [p["paragraphs"] for p in sidecar[SUBPOINT_PLACEMENTS_KEY]]
+
+
+_SPOUSE = "Zelphine Qorvath"
+_HOME_PHONE = "212-555-0147"
+
+
+def _naming_the_spouse(entry, prose):
+    """The spouse under a field named for it, and in the prose with no label."""
+    entry["extracted_fields"]["spouse_name"] = _SPOUSE
+    entry["text"] = entry["text"].replace(prose, f"{prose}, with my spouse {_SPOUSE}")
+    return entry
+
+
+def _with_a_home_phone(entry, prose):
+    """A home phone number in the middle of the prose's line."""
+    entry["text"] = entry["text"].replace(prose, f"{prose}. Home phone: {_HOME_PHONE}")
+    return entry
+
+
+@pytest.mark.parametrize("make, prose", [(_role, _ROLE_PROSE), (_honor, _HONOR_PROSE)],
+                         ids=["O", "H"])
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, make, prose, protect, value):
+    """#1205 review, probes P7 and P9. The PII pass drops a field named for
+    protected data and marks the entry withheld, but lists no
+    `_pii_dropped_fields`; and no scope withholds a phone number in the
+    middle of a line. Both printed in the entry's sub-point on Reject All,
+    while the Appendix said the spouse was withheld. The same entry without
+    them still has its sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [make()])
+    assert placements == [[prose]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch, [protect(make(), prose)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+_CHAIR_PROSE = ("Established the departmental mentoring scheme and doubled faculty retention "
+                "across affiliated hospitals")
+
+
+def test_a_line_of_two_dated_roles_offers_neither_ones_prose(tmp_path, monkeypatch):
+    """#1205 review, probe P12. One source line holds two roles, each opening
+    with its dates and followed by its prose, and stage 4 returned the second.
+    Both prose lines went under the second role's row on Reject All, the
+    first role's achievement with them. Which role a line is about cannot be
+    told, so neither is offered; the second role alone on its line still is."""
+    first = f"2001-2004 Chair, Example Admissions Committee, {_ROLE_INSTITUTION}"
+    second = f"2005-2010 {_ROLE_TITLE}, {_ROLE_INSTITUTION}"
+
+    def role(text):
+        return {"element_idx_start": 90, "taxonomy_code": "O", "text": text,
+                "extracted_fields": {"leadership_role": _ROLE_TITLE, "institution": _ROLE_INSTITUTION,
+                                     "start_date": "2005", "end_date": "2010"}}
+
+    _doc, placements = _stage6_render(tmp_path / "one", monkeypatch, [role(f"{second}\t{_ROLE_PROSE}")])
+    assert placements == [[_ROLE_PROSE]]
+
+    doc, placements = _stage6_render(
+        tmp_path / "two", monkeypatch, [role(f"{first}\t{_CHAIR_PROSE}\t{second}\t{_ROLE_PROSE}")])
+    assert placements == []
+    deleted = "".join(t.text or "" for t in doc.element.body.iter(qn("w:delText")))
+    assert _CHAIR_PROSE not in deleted and _ROLE_PROSE not in deleted
 
 
 # ------------------------------------------- date-led sibling records (#983)

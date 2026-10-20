@@ -55,7 +55,9 @@ variant). Then one code family at a time, each the one a stage-6 replay
 measured losing the most prose of those left: Q1-Q2 extramural service next
 (the remit, the meeting or the session title behind a committee or panel
 row), then H honors (an award's criteria, or the paper it was for), then
-N3A-N3B mentees (the mentee's awards and outputs, the owner's part). The
+N3A-N3B mentees (the mentee's awards and outputs, the owner's part), then
+B1 degrees (the thesis or dissertation, a minor, a research topic), then O
+institutional leadership (what a role oversaw or achieved). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -66,7 +68,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from typing import NamedTuple
 
 from docx.document import Document
@@ -84,9 +86,11 @@ from unified_pipeline.core.template_boilerplate import (
 from .dedup import _is_sibling_of
 from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
 from .formatting import plain_entry_left_twips, plain_entry_level
-from .normalization import _squash
+from .normalization import _pii_fragments, _squash
+from .normalization.pii import _BARE_PHONE_SHAPE
 from .parsing import _refold_shattered
-from .pii_pass import PII_DROPPED_FIELDS_KEY
+from .parsing.text import DATE_LED_MIN_RECORDS, _opens_dated_record
+from .pii_pass import PII_WITHHELD_KEY
 from .render_check import (
     _RECORD_DATE_PREFIX_RE,
     _RENDER_TOKEN_RE,
@@ -133,10 +137,53 @@ HONOR_CODES = frozenset({'H'})
 #: follows its rule (N1 is excluded); one rerouted into N3A or N3B follows
 #: this one.
 MENTEE_CODES = frozenset({'N3A', 'N3B'})
+#: Academic degrees: the thesis or dissertation, a minor, a research topic.
+#: The degree's cell already prints its field, honors and advisor, so a
+#: fragment mostly restating them is not offered (`_DEGREE_CELL_FIELDS`). The
+#: education section writes each B1 entry as a row of
+#: its four-column table, so a sub-point is a deleted row under the degree's
+#: row. Only a row the education writer recorded for that entry can anchor
+#: it (`_own_degree_rows`, the row-receipt ledger): two degrees of one
+#: institution share every distinctive word of their rows, and an entry the
+#: section skips (no degree and no institution) writes no row. That one row
+#: is taken without a word test (`_pick_anchor`). An entry naming no degree
+#: gets none: its row is an institution or a field alone. The last of
+#: stage 4's records offers only its own segment of the line, and a line
+#: holding several dated records offers none (`_own_record_line`). An entry
+#: rerouted to another code before rendering is grouped under that code and
+#: follows its rule (B2 is excluded, and C is not offered: its heading lookup
+#: finds the title block, not its section); one rerouted into B1 follows
+#: this one.
+EDUCATION_CODES = frozenset({'B1'})
+#: Institutional leadership (WCM table 20): what the role oversaw or
+#: achieved -- the programmes led, a budget, the staff, an initiative and its
+#: outcome, the scope of a directorship. The leadership section writes each O
+#: entry as a row of its three-column table (role, the division and
+#: institution, dates), so a sub-point is a deleted row under the role's row.
+#: The row also prints stage 4's off-schema role and organization when the
+#: schema's are empty (`LEADERSHIP_ROLE_FIELDS`). As for a degree, only a row
+#: the leadership writer recorded for that entry can anchor it (`_own_rows`,
+#: the row-receipt ledger): one title held twice at one institution shares
+#: every distinctive word of its rows, as does a later title holding an
+#: earlier one's words ("Assistant Director" over "Director"), and the dates
+#: that tell them apart are digits. One such row is taken without a word test
+#: (`_pick_anchor`), and the several rows the writer splits a flattened table
+#: into are read by words. An entry the section wrote no row for (a dedup
+#: loser, a table it would not bind to) gets none. The last of stage 4's
+#: records offers only its own segment of the line, and a line holding
+#: several dated records offers none (`_own_record_line`). An entry rerouted
+#: to another code before rendering is grouped under that code and follows
+#: its rule (N1 is excluded, and C, F2 and I are not offered: their heading
+#: lookup finds the title block, not their section); one rerouted into O
+#: follows this one.
+LEADERSHIP_CODES = frozenset({'O'})
+#: The families whose writer records each entry's rows in the row-receipt
+#: ledger, and whose prose goes only under one of those rows (`_anchor_scope`).
+_OWN_ROW_CODES = EDUCATION_CODES | LEADERSHIP_CODES
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
-                  | HONOR_CODES | MENTEE_CODES)
+                  | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -166,10 +213,13 @@ SUBPOINT_AUTHOR = 'CViche: source text with no template field'
 #: matching every sub-point in the document.
 SUBPOINT_PLACEMENTS_KEY = 'subpoint_placements'
 
-#: A link or an e-mail address -- a contact line fused into a position entry,
-#: a webinar's tracking URL (EBYSBC) -- is not prose, and an address is not
-#: offered back to the reader in a review pane.
-_LINK_OR_ADDRESS_RE = re.compile(r'https?://|www\.|mailto:|HYPERLINK|\S@\S+\.\w', re.IGNORECASE)
+#: A link, an e-mail address or a phone number -- a contact line fused into a
+#: position entry, a webinar's tracking URL (EBYSBC) -- is not prose, and an
+#: address or a number is not offered back to the reader in a review pane. A
+#: routed code's PII scope withholds no phone number in the middle of a line
+#: ("... staff. Home phone: <number>"), so the shape is read here.
+_LINK_OR_CONTACT_RE = re.compile(rf'https?://|www\.|mailto:|HYPERLINK|\S@\S+\.\w|{_BARE_PHONE_SHAPE}',
+                                 re.IGNORECASE)
 
 #: The entry text's own line and cell separators.
 _FRAGMENT_SEPARATORS = ('\t', '\n', '|')
@@ -185,7 +235,34 @@ _LABEL_SUFFIX = ':'
 _MENTEE_NAME_LABEL = 'Name:'
 _MENTEE_NAME_FIELDS = ('name', 'mentee_name')
 
+#: The fields the education writer prints in a degree's cell that
+#: `_RENDERED_FIELDS` cannot list, as its probe marks only schema fields:
+#: `major` or `field_of_study`, stage 4's off-schema `honors` (#817), and the
+#: advisor under its two off-schema names (#1245, `ADVISOR_LABELS`). A
+#: fragment restating them is the degree's row reformatted
+#: (`_holds_field_values`). Literals, as `_MENTEE_NAME_FIELDS` are: importing
+#: `sections.education` here imports `sections.positions`, which imports this
+#: module.
+_DEGREE_CELL_FIELDS = ('major', 'field_of_study', 'honors', 'major_professor', 'mentor')
+#: The fields the leadership writer reads a role's role cell and its
+#: institution cell from, each the first that holds text: the schema's, then
+#: stage 4's off-schema names. The writer reads them from here, so the row
+#: and `_value_tokens` cannot drift apart.
+LEADERSHIP_ROLE_FIELDS = ('leadership_role', 'role', 'position')
+LEADERSHIP_INSTITUTION_FIELDS = ('institution', 'organization')
+#: The off-schema ones among them, which `_RENDERED_FIELDS` cannot list (its
+#: probe marks only schema fields): `_value_tokens` adds them for O.
+_LEADERSHIP_ROW_FIELDS = tuple(name for name in (*LEADERSHIP_ROLE_FIELDS,
+                                                 *LEADERSHIP_INSTITUTION_FIELDS)
+                               if name not in _RENDERED_FIELDS['O'])
+
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
+
+#: The elements a section writer recorded for an entry, by identity
+#: (`RowReceiptLedger.elements_for`): its rows, or its first cells'
+#: paragraphs. Read for the families that anchor only on those
+#: (`_OWN_ROW_CODES`).
+RowsWritten = Callable[[Mapping], Iterable[BaseOxmlElement]]
 
 
 class AnchorCandidate(NamedTuple):
@@ -280,7 +357,7 @@ def prose_fragments(text: str) -> list[str]:
     return [fragment for fragment in _refold_shattered(_split_fragments(text))
             if len(_tokens(fragment)) >= SUBPOINT_MIN_TOKENS
             and not _RECORD_DATE_PREFIX_RE.match(fragment)
-            and not _LINK_OR_ADDRESS_RE.search(fragment)
+            and not _LINK_OR_CONTACT_RE.search(fragment)
             and not is_template_instruction(fragment)
             and not is_source_boilerplate(fragment)]
 
@@ -340,12 +417,17 @@ class _Haystack(NamedTuple):
 
 def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
-    (`_RENDERED_FIELDS`), or of every scalar field for a code rendered from
-    its text."""
+    (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
+    leadership role `_LEADERSHIP_ROW_FIELDS`), or of every scalar field for a
+    code rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
     names = _RENDERED_FIELDS.get(code) or fields.keys()
+    if code in EDUCATION_CODES:
+        names = (*names, *_DEGREE_CELL_FIELDS)
+    elif code in LEADERSHIP_CODES:
+        names = (*names, *_LEADERSHIP_ROW_FIELDS)
     values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
                          if isinstance(value, (str, int, float)) and value))
@@ -407,65 +489,184 @@ def _own_mentee_rows(entry: Mapping, candidates: list[AnchorCandidate]) -> list[
     return [c for c in candidates if _in_tables(c, tables)]
 
 
-def _own_mentee_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
-    """The text a mentee's prose is read from: its own, except for the last
-    of stage 4's records (`LAST_STAGE4_RECORD`). That one keeps its source
-    line's whole text, the other records' mentees in it, though each of them
-    renders as a table of its own (YUYVIG XNWSZN 188: twelve postdocs on one
-    line, offered under the twelfth). It reads its own tab segment when the
-    line's segments pair one to one with its records, as fan-out pairs the
-    others; the whole line when every record names its mentee (one mentee's
-    two periods, YUYVIG ECXGAT 1479); and nothing otherwise, as which mentee
-    a word is about cannot be told."""
+def _own_segment(entry: Mapping) -> str | None:
+    """The entry's own text, except for the last of stage 4's records
+    (`LAST_STAGE4_RECORD`). That one keeps its source line's whole text, the
+    other records in it, though each of them renders on its own. It reads its
+    own tab segment when the line's segments pair one to one with its records,
+    as fan-out pairs the others, and is None when they do not: its family's
+    rule decides (`_own_mentee_line`, `_own_record_line`)."""
     text = str(entry.get('text') or '')
     marker = entry.get(LAST_STAGE4_RECORD)
     if not isinstance(marker, Mapping):
         return text
     segments = _segments(text)
-    if len(segments) == marker.get('count'):
-        return segments[-1]
+    return segments[-1] if len(segments) == marker.get('count') else None
+
+
+def _own_mentee_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a mentee's prose is read from (`_own_segment`). The last of a
+    line's records whose segments do not pair with them (YUYVIG XNWSZN 188:
+    twelve postdocs on one line, offered under the twelfth) reads the whole
+    line when every record names its mentee (one mentee's two periods, YUYVIG
+    ECXGAT 1479), and nothing otherwise, as which mentee a word is about
+    cannot be told."""
+    own = _own_segment(entry)
+    if own is not None:
+        return own
     others = [other for group in entries_by_code.values() for other in group
               if _is_sibling_of(other, entry)]
+    text = str(entry.get('text') or '')
     return text if all(_mentee_name(other) == _mentee_name(entry) for other in others) else ''
+
+
+def _row_of(element: BaseOxmlElement) -> BaseOxmlElement | None:
+    """`element` when it is a table row, else the nearest row holding it."""
+    return element if element.tag == qn('w:tr') else next(element.iterancestors(qn('w:tr')), None)
+
+
+def _names_degree(entry: Mapping) -> bool:
+    """Whether stage 4's `degree` for the entry holds any text."""
+    fields = entry.get('extracted_fields')
+    return isinstance(fields, Mapping) and bool(str(fields.get('degree') or '').strip())
+
+
+def _own_rows(entry: Mapping, candidates: list[AnchorCandidate],
+              rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """The candidates that are a row a writer recorded for `entry` itself
+    (`rows_written`, the row-receipt ledger): none when it recorded none, or
+    with no ledger. Words cannot tell apart two rows that share every
+    distinctive word: two degrees of one institution ("Ph.D." and "M.S."
+    hold no distinctive token, nor does a year; YUYVIG FMIGLR 19, an M.S.
+    thesis under the Ph.D. row), or two leadership roles of one title and
+    institution held in different years. Nor can they see that a section
+    skipped an entry, which leaves that entry no row."""
+    if rows_written is None:
+        return []
+    rows = [row for row in map(_row_of, rows_written(entry)) if row is not None]
+    return [c for c in candidates if any(_row_of(c.paragraph._p) is row for row in rows)]
+
+
+def _own_degree_rows(entry: Mapping, candidates: list[AnchorCandidate],
+                     rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """A degree's own rows (`_own_rows`): the education section skips an
+    entry naming no degree and no institution.
+
+    An entry naming no degree (`_names_degree`) has none either. Its row is
+    an institution or a field alone, and its prose is of no degree there: a
+    thesis citation stage 4 coded B1, whose master's degree renders as a row
+    of its own (EBYSBC VGHNZD 1861)."""
+    return _own_rows(entry, candidates, rows_written) if _names_degree(entry) else []
+
+
+def _holds_dated_records(text: str) -> bool:
+    """Whether `DATE_LED_MIN_RECORDS` or more of `text`'s parts each open a
+    dated record (`_opens_dated_record`, #983): one source line holding two
+    roles or two degrees, each with its own dates, of which stage 4
+    extracted one."""
+    return sum(map(_opens_dated_record, _split_fragments(text))) >= DATE_LED_MIN_RECORDS
+
+
+def _own_record_line(entry: Mapping) -> str:
+    """The text a degree's or a leadership role's prose is read from
+    (`_own_segment`), and nothing for the last of a line's records whose
+    segments do not pair with them, or for a line holding several dated
+    records (`_holds_dated_records`): which degree a thesis is of, or which
+    role a line is about, cannot be told, and the other record's prose would
+    go under the entry's row."""
+    own = _own_segment(entry)
+    return '' if own is None or _holds_dated_records(own) else own
+
+
+def _prose_text(code: str, entry: Mapping,
+                entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
+    """The text `code`'s rule reads the entry's prose from; None for its own."""
+    if code in MENTEE_CODES:
+        return _own_mentee_line(entry, entries_by_code)
+    if code in _OWN_ROW_CODES:
+        return _own_record_line(entry)
+    return None
+
+
+def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
+                  rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """The candidates of the entry's section that `code`'s rule lets it
+    anchor under."""
+    if code in MENTEE_CODES:
+        return _own_mentee_rows(entry, in_section)
+    if code in EDUCATION_CODES:
+        return _own_degree_rows(entry, in_section, rows_written)
+    if code in LEADERSHIP_CODES:
+        return _own_rows(entry, in_section, rows_written)
+    return in_section
+
+
+def _pick_anchor(code: str, entry_tokens: set[str],
+                 scope: list[AnchorCandidate]) -> AnchorCandidate | None:
+    """The line of `scope` the entry's prose goes under. A degree's or a
+    leadership role's one own row (`_own_rows`) is taken as it is: the
+    writer's record already says whose it is, and a short row ("PhD", "Kell
+    University", "2010"; a "Dean" of an acronym) holds too few distinctive
+    words for `best_anchor`, as does a degree's row whose stage-5b
+    institution name shares few words with the field. Any other scope is
+    read by words."""
+    if code in _OWN_ROW_CODES and len(scope) == 1:
+        return scope[0]
+    return best_anchor(entry_tokens, scope)
+
+
+def _withholds_prose(entry: Mapping) -> bool:
+    """Whether the entry's prose is kept off the page as protected data. The
+    PII pass touched the entry (`PII_WITHHELD_KEY`): it cut a fragment of its
+    text, or dropped a field named for protected data ("spouse_name") or one
+    holding it (#892). What is left can still name the withheld item, which
+    is why the honors writer renders no row for an award it emptied, and its
+    words could anchor it under another record's line. Or its text holds a
+    fragment the full Personal Data / Appendix scope withholds
+    (`_pii_fragments`), as `_split_date_led_siblings` reads it: a routed
+    code's scope cuts only the rows unambiguous as a label, enough while its
+    section prints only fields, but a sub-point prints text no section did,
+    as the Appendix does."""
+    return bool(entry.get(PII_WITHHELD_KEY)) or bool(_pii_fragments(str(entry.get('text') or '')))
 
 
 def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Haystack,
                    candidates: list[AnchorCandidate],
                    spans: Mapping[str, SectionSpan],
-                   excluded_tables: Collection[BaseOxmlElement] = ()) -> list[SubPoint]:
+                   excluded_tables: Collection[BaseOxmlElement] = (),
+                   rows_written: RowsWritten | None = None) -> list[SubPoint]:
     """One `SubPoint` per entry of a `SUBPOINT_CODES` code that has unrendered
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
     the first entry that carries it (fan-out children and dedup survivors
     share their parent's text). A mentee's prose is read from its own line
     (`_own_mentee_line`), and its line must be a row of its own table
-    (`_own_mentee_rows`), under either mentee heading.
+    (`_own_mentee_rows`), under either mentee heading. A degree's or a
+    leadership role's prose is read from its own line (`_own_record_line`),
+    and its line must be a row its writer recorded for it (`rows_written`,
+    `_own_rows`), which it takes with no word test when it is the only one
+    (`_pick_anchor`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
     still carries Q2), so what rendered decides, not the code. Its prose is
     not offered under any later entry either.
 
-    Nor does an entry the PII pass dropped a field from
-    (`PII_DROPPED_FIELDS_KEY`, #892): what is left of it still describes the
-    withheld item, which is why the honors writer renders no row for it, and
-    its tokens could otherwise anchor it under another record's line."""
+    Nor does an entry holding protected data (`_withholds_prose`)."""
     planned, offered = [], set()
     for code in sorted(entries_by_code):
         if code not in SUBPOINT_CODES or code not in spans:
             continue
         in_section = _section_candidates(code, candidates, spans)
         for entry in entries_by_code[code]:
-            if entry.get(PII_DROPPED_FIELDS_KEY):
-                continue
-            text = _own_mentee_line(entry, entries_by_code) if code in MENTEE_CODES else None
+            text = _prose_text(code, entry, entries_by_code)
             fragments = [f for f in unrendered_prose(entry, code, haystack, text) if f not in offered]
-            if not fragments:
+            if not fragments or _withholds_prose(entry):
                 continue
             anchor_tokens = _value_tokens(entry, code) or (
                 _tokens(entry.get('text') or '') - set().union(*(_tokens(f) for f in fragments)))
-            in_scope = _own_mentee_rows(entry, in_section) if code in MENTEE_CODES else in_section
-            anchor = best_anchor(anchor_tokens, in_scope)
+            anchor = _pick_anchor(code, anchor_tokens,
+                                  _anchor_scope(code, entry, in_section, rows_written))
             if anchor is None:
                 continue
             offered.update(fragments)

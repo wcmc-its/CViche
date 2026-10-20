@@ -566,7 +566,10 @@ def test_recovered_rows_dropped_when_their_values_already_rendered(tmp_path):
     assert full_text.count("Synthetic Tools for Data Curation") == 1
     assert full_text.count("$15,000.00") == 1
     assert full_text.count("A. Researcher") == 1
-    assert full_text.count("Your percent (%) effort") == 1
+    # Twice, both in tables: the M2B grant's own, and the Current Research
+    # Funding placeholder this CV leaves empty, which stays with N/A (#1942).
+    # The recovered row adds no third copy.
+    assert full_text.count("Your percent (%) effort") == 2
     # The Duration row's raw "00/2021-00/2022" never renders verbatim (the
     # grant table shows the reformatted "2021-2022"), so it stays -- one
     # duplicate line, not zero, and the Appendix exists because of it.
@@ -752,7 +755,7 @@ def test_recovered_row_dropped_when_confirmed_only_by_a_different_records_render
         "text": ("Award Source: | Fictional Research Foundation\n"
                  "Project title: | Synthetic Tools for Data Curation\n"
                  "Duration of support: | 2021-2022"),
-        "taxonomy_code": "M2B",
+        "taxonomy_code": "M2C",  # past tables omit the effort row (#1944)
         "element_idx_start": 500,
         "element_idx_end": 500,
         "extracted_fields": {
@@ -767,7 +770,7 @@ def test_recovered_row_dropped_when_confirmed_only_by_a_different_records_render
     row = {"text": "Your percent (%) effort: | 5%",
            "taxonomy_code": "T", "recovered_row": True,
            "parent_idx": 500, "element_idx_start": "500.0",
-           "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+           "extracted_fields": {}, "hierarchy": ["Pending Funding"]}
     entries = [_RECOVERY_OWNER_ENTRY, grant_entry, row]
 
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)

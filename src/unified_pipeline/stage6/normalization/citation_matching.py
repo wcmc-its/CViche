@@ -20,6 +20,7 @@ its own text omitted -- so the dependency runs `publication` ->
     _append_missing_stage5d_values   top a stage-5d citation up with what it omits
     _insert_missing_stage5d_year     put back a group-filled year 5d never saw (#1810)
     _restore_stage5d_owner           give back the CV owner 5d's "et al." cut (#1259)
+    _complete_stage5d_trailer        Crossref's issue and last page for a 5d "Vol:Page" (#1872)
 
 All take text and return text. None reads an entry, a field dict or any
 pipeline key: the caller resolves those first (that is `publication.py`'s
@@ -154,6 +155,30 @@ def _insert_missing_stage5d_year(formatted_citation: str, year: str, location: s
     if trailer:
         return f"{formatted_citation[:trailer.start()]}{year};{trailer.group()}"
     return f"{formatted_citation} {year}."
+
+
+def _complete_stage5d_trailer(formatted_citation: str, volume: str, issue: str, pages: str) -> str:
+    """Fill in the issue and the last page of a stage-5d citation's
+    "Vol:Page" from Crossref's record of the article (#1872).
+
+    Stage 5 keeps Crossref's record for an article PubMed does not index;
+    5d formats the CV's own line, which often gives the volume and first
+    page alone ("1985;23:689."). Only a trailer whose volume and first page
+    are Crossref's own is touched, so a wrong match changes nothing. A range
+    the CV gives is kept as written ("227-38"), and so is an issue.
+    """
+    first_page = pages.split('-')[0]
+    trailer = re.compile(rf"(?P<volume>;\s*{re.escape(volume)})(?P<issue>\([^)]*\))?:{re.escape(first_page)}"
+                         r"(?P<range>[-–]\w+)?(?![\w-])")
+    match = trailer.search(formatted_citation)
+    if not match:
+        return formatted_citation
+    new_issue = match['issue'] or (f"({issue})" if issue else '')
+    # Crossref writes a one-page article as "342-342".
+    last_page = pages[len(first_page):] if pages[len(first_page) + 1:] != first_page else ''
+    new_pages = first_page + (match['range'] or last_page)
+    return (f"{formatted_citation[:match.start()]}{match['volume']}{new_issue}:{new_pages}"
+            f"{formatted_citation[match.end():]}")
 
 
 #: The "et al." that closes a Vancouver author list.

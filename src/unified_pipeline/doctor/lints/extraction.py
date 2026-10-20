@@ -7,7 +7,8 @@ their text, taxonomy codes that vanished between classification and render,
 dedup drops that were not duplicates, records fabricated from the template's
 own scaffolding, values filed under a key no renderer reads, years given the
 wrong century, entries holding several records that stage 4 returned as
-one, grant lists cut into records at the wrong line, grants filed under a
+one, grant lists cut into records at the wrong line, one record cut into
+two neighbouring entries, grants filed under a
 funding heading their own record contradicts, separate years rendered as
 one range over them, stage-3b fragments whose text no record holds, and
 grant numbers and amounts a grant's table shows that its text lacks, or
@@ -45,6 +46,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
+    is_unanswered_prompt,
 )
 from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
@@ -220,9 +222,20 @@ def _entry_status(entry: dict) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def _is_unfilled_placeholder(text: str) -> bool:
+    """True for a block holding only template labels and N/A: the Current
+    Research Funding placeholder stage 6 keeps when that heading has no
+    grants (#1942). Its labels ("Project title", "Annual direct costs") are
+    every grant's labels, so in a haystack they would vouch for any grant
+    written in the WCM template's own shape."""
+    lines = [line for line in str(text).split("\n") if line.strip()]
+    return bool(lines) and all(is_template_label_line(line) or is_unanswered_prompt(line)
+                               for line in lines)
+
+
 def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     """Per-bucket Haystack of everything rendered under each of stage 6's
-    funding subsection headers."""
+    funding subsection headers, less any unfilled placeholder."""
     segments: dict[str, list[tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
     current = None
     for kind, text in blocks:
@@ -236,7 +249,7 @@ def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
             if normed in _FUNDING_BOUNDARY_TITLES or _output_section_header(stripped):
                 current = None
                 continue
-        if current:
+        if current and not _is_unfilled_placeholder(text):
             segments[current].append((kind, text))
     return {code: _haystacks(seg) for code, seg in segments.items()}
 
@@ -3208,6 +3221,18 @@ def _orphans(grants: list[ListEntry]) -> dict[int, str]:
     return reasons
 
 
+def _grant_boundary_reasons(grants: list[ListEntry]) -> dict[int, list[str]]:
+    """Every shape `grant_boundary` finds in one grant list, by the entry's
+    position in it, in the order its finding names them. Pure, so
+    `record_cut_in_two` can leave the entries named here to this lint."""
+    reasons: dict[int, list[str]] = {}
+    for shape in (_split_pairs, _personnel_heads, _head_label_drift, _line_order_drift,
+                  _orphans):
+        for i, reason in shape(grants).items():
+            reasons.setdefault(i, []).append(reason)
+    return reasons
+
+
 def lint_grant_boundary(stage4: dict) -> list[dict]:
     """A grant list stage 2 cut one line or row off (#1226; EBYSBC class E5):
     neighbours that split one record between them (`_split_pairs`), an entry
@@ -3219,11 +3244,7 @@ def lint_grant_boundary(stage4: dict) -> list[dict]:
     as such, since stage 2 records no batch cuts."""
     findings = []
     for grants in _grant_lists(stage4):
-        reasons: dict[int, list[str]] = {}
-        for shape in (_split_pairs, _personnel_heads, _head_label_drift, _line_order_drift,
-                      _orphans):
-            for i, reason in shape(grants).items():
-                reasons.setdefault(i, []).append(reason)
+        reasons = _grant_boundary_reasons(grants)
         for i in sorted(reasons):
             grant = grants[i]
             findings.append(_finding(
@@ -3284,6 +3305,285 @@ def lint_record_boundary(stage4: dict) -> list[dict]:
                 f"entry {entry.element_idx} ({entry.code}): record boundary off -- {reason}",
                 [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
+
+
+# --- record_cut_in_two ------------------------------------------------------------
+#
+# The same stage-2 cut with no label to read: one record's lines cut into two
+# neighbouring entries, so each renders as a partial record (#1226). Its two
+# shapes: the halves of one record, each filling some of the fields the
+# list's other records carry and together nearly all of them, and a record's
+# closing sentence filed as a record of its own. The dates do not move and
+# every line renders whole, so neither `record_date_shift` nor the coverage
+# lints can see it, and no labelled line opens the second half, which is
+# what `record_boundary` reads. Report-only: nothing is re-cut.
+
+#: One finding's severity, set in one place. WARN: 17 of 23 held-out hits
+#: were judged true, blind (CUT-1 in doctor/PRECISION.md).
+RECORD_CUT_SEVERITY = "WARN"
+#: A heading's records of one kind: the grant codes pool (a split grant's
+#: halves can be coded M2A and M2B), and any other code groups with the
+#: codes that share its first two characters (N3A with N3B, M2D alone).
+_GRANT_FAMILY = "grant"
+_FAMILY_PREFIX_CHARS = 2
+#: A family judged has this many entries in its list: with fewer, the other
+#: records cannot say which fields a record carries.
+RECORD_CUT_MIN_FAMILY = 4
+#: Prose fields: a record's sentences, which a half may hold either way.
+RECORD_CUT_PROSE_KEYS = frozenset({"notes", "description", "narrative"})
+#: The list's usual fields are those this share of the family's other
+#: entries fill, and at least this many of them (with RECORD_CUT_MIN_FAMILY
+#: entries, the share alone already asks for two).
+RECORD_CUT_USUAL_SHARE = 0.6
+RECORD_CUT_USUAL_MIN_HOLDERS = 2
+#: A list judged carries at least this many usual fields: the fewer there
+#: are, the more often two small whole records fill complementary ones. At
+#: four the prototype fired on 47 runs of its 191-run corpus, at five on 23,
+#: before leaving entries to the boundary lints (2026-10-19).
+RECORD_CUT_MIN_USUAL_FIELDS = 5
+#: Two halves of one record: the smaller fills at most this share of the
+#: usual fields, the two share at most this many, and together they leave
+#: at most this many unfilled.
+RECORD_CUT_FRAGMENT_MAX_SHARE = 0.5
+RECORD_CUT_MAX_SHARED_FIELDS = 1
+RECORD_CUT_MAX_UNFILLED_FIELDS = 1
+#: A list whose other records open the same way, on at least this share of
+#: them, starts a record with each such line: a second half opening that
+#: way is a record of its own.
+RECORD_CUT_OPENING_SHARE = 2 / 3
+#: A closing sentence fills at most this many fields, prose aside, and
+#: follows a record filling at least this share of the usual fields.
+RECORD_CUT_TAIL_MAX_FIELDS = 1
+RECORD_CUT_TAIL_HEAD_MIN_SHARE = 0.5
+#: A sentence has at least this many words; one that neither opens with a
+#: sentence opener nor ends in sentence punctuation reads as a title, and
+#: one with fewer than this share of its 4+-letter words lowercase reads as
+#: a title or a name list.
+RECORD_CUT_TAIL_MIN_WORDS = 12
+RECORD_CUT_TAIL_LOWERCASE_SHARE = 0.6
+_SENTENCE_OPENERS = frozenset({"this", "these", "to"})
+_SENTENCE_ENDS = (".", "!", "?")
+#: Closing quotes, brackets and whitespace after a sentence's last mark.
+_TRAILING_CLOSERS_RE = re.compile(r"[\s\"'\u201d\u2019)\]]+$")
+#: How an entry's first line opens: a date (a year, "9/2004", "Sept. 2004",
+#: "May 3, 2004", "Fall 04"), a list number ("3." or "(3)"), a label
+#: (`ListEntry.head_label`), or none of them.
+_DATE_OPENING_RE = re.compile(
+    rf"^\(?(?:(?:19|20)\d{{2}}\b|\d{{1,2}}[/.\-]\d{{1,4}}"
+    rf"|{_MONTH_PATTERN}\s*,?\s*(?:\d{{1,2}},?\s*)?(?:19|20)?\d{{2}})",
+    re.IGNORECASE)
+_NUMBERED_OPENING_RE = re.compile(r"^(?:\d{1,3}\.|\(\d{1,3}\))\s")
+OPENING_DATE = "date"
+OPENING_NUMBERED = "numbered"
+OPENING_OTHER = "other"
+_OPENING_LABEL_PREFIX = "label:"
+
+
+class FamilyEntry(NamedTuple):
+    """One entry of a family in a heading list, as `record_cut_in_two` reads it:
+    its position in the list (neighbours are one apart), its position among
+    stage 4's entries (the findings' order), and the fields it fills less
+    stage-4 bookkeeping and prose."""
+    entry: ListEntry
+    slot: int
+    order: int
+    fields: frozenset[str]
+
+
+class CutFragment(NamedTuple):
+    """An entry `record_cut_in_two` reports, the neighbour it was cut from, and
+    the finding's message."""
+    order: int
+    fragment: ListEntry
+    partner: ListEntry
+    message: str
+
+
+def _hierarchy_runs(stage4: dict) -> list[list[tuple[int, ListEntry]]]:
+    """Runs of consecutive stage-4 entries with one heading path, whatever
+    their codes, each entry with its position among stage 4's entries."""
+    runs: list[list[tuple[int, ListEntry]]] = []
+    heading: tuple | None = None
+    for order, raw in enumerate(stage4.get("entries", [])):
+        this = tuple(raw.get("hierarchy") or [])
+        if not runs or this != heading:
+            runs.append([])
+        heading = this
+        runs[-1].append((order, _list_entry(raw)))
+    return runs
+
+
+def _record_family(code: str) -> str | None:
+    # The codes `multi_record_coverage` skips, for the same reasons: a
+    # section that renders the entry's text, a formatter that rewrites it
+    # whole, and Personal Data, whose entries are one value each.
+    if not code or code in _MULTI_RECORD_SKIPPED_CODES:
+        return None
+    return _GRANT_FAMILY if code in GRANT_CODES else code[:_FAMILY_PREFIX_CHARS]
+
+
+def _record_fields(entry: ListEntry) -> frozenset[str]:
+    unread = {STAGE4_RECORDS_KEY, *_stage4_bookkeeping_keys(entry.code), *RECORD_CUT_PROSE_KEYS}
+    return frozenset(key for key in entry.fields
+                     if key not in unread and _filled(entry.fields, key))
+
+
+def _code_families(run: list[tuple[int, ListEntry]]) -> list[list[FamilyEntry]]:
+    """A heading list's families of at least RECORD_CUT_MIN_FAMILY entries."""
+    families: dict[str, list[FamilyEntry]] = {}
+    for slot, (order, entry) in enumerate(run):
+        family = _record_family(entry.code)
+        if family:
+            families.setdefault(family, []).append(
+                FamilyEntry(entry, slot, order, _record_fields(entry)))
+    return [members for members in families.values() if len(members) >= RECORD_CUT_MIN_FAMILY]
+
+
+def _usual_fields(members: list[FamilyEntry], left_out: tuple[int, ...]) -> frozenset[str]:
+    """The fields the family's entries other than `left_out` carry."""
+    others = [member.fields for i, member in enumerate(members) if i not in left_out]
+    counts = Counter(key for fields in others for key in fields)
+    floor = max(RECORD_CUT_USUAL_MIN_HOLDERS, RECORD_CUT_USUAL_SHARE * len(others))
+    return frozenset(key for key, holders in counts.items() if holders >= floor)
+
+
+def _record_opening(entry: ListEntry) -> str:
+    text = entry.text.strip()
+    if _DATE_OPENING_RE.match(text):
+        return OPENING_DATE
+    if _NUMBERED_OPENING_RE.match(text):
+        return OPENING_NUMBERED
+    if entry.head_label:
+        return _OPENING_LABEL_PREFIX + entry.head_label
+    return OPENING_OTHER
+
+
+def _opens_own_record(members: list[FamilyEntry], first: int) -> bool:
+    """The second of the pair at `first` opens the way the family's other
+    entries mostly do, so it starts a record of its own."""
+    openings = [_record_opening(member.entry) for i, member in enumerate(members)
+                if i not in (first, first + 1)]
+    shared = Counter(opening for opening in openings if opening != OPENING_OTHER).most_common(1)
+    return bool(shared) and (shared[0][1] >= RECORD_CUT_OPENING_SHARE * len(openings)
+                             and _record_opening(members[first + 1].entry) == shared[0][0])
+
+
+def _splits_usual_fields(part: frozenset[str], rest: frozenset[str],
+                         usual: frozenset[str]) -> bool:
+    """`part` and `rest`, the usual fields two neighbours fill, are the halves
+    of one record. That `part` fills a usual field `rest` lacks also means
+    that `rest` does not fill them all and that the fragment fills a field."""
+    return (len(part) <= RECORD_CUT_FRAGMENT_MAX_SHARE * len(usual)
+            and len(part & rest) <= RECORD_CUT_MAX_SHARED_FIELDS
+            and len(part | rest) >= len(usual) - RECORD_CUT_MAX_UNFILLED_FIELDS
+            and bool(part - rest))
+
+
+def _field_list(fields: frozenset[str]) -> str:
+    return ", ".join(sorted(fields))
+
+
+def _complement_fragment(members: list[FamilyEntry], first: int) -> CutFragment | None:
+    """The pair at `first` and `first + 1` holds one record's halves: report
+    the half filling fewer usual fields (the first, on a tie)."""
+    usual = _usual_fields(members, (first, first + 1))
+    if len(usual) < RECORD_CUT_MIN_USUAL_FIELDS:
+        return None
+    fragment, whole = members[first], members[first + 1]
+    if len(whole.fields & usual) < len(fragment.fields & usual):
+        fragment, whole = whole, fragment
+    part, rest = fragment.fields & usual, whole.fields & usual
+    if (not _splits_usual_fields(part, rest, usual)
+            or fragment.entry.text.rstrip().endswith(":")
+            or _opens_own_record(members, first)):
+        return None
+    return CutFragment(fragment.order, fragment.entry, whole.entry, (
+        f"entry {fragment.entry.element_idx} ({fragment.entry.code}): one record split over "
+        f"two entries -- it holds {_field_list(part)}, entry {whole.entry.element_idx} holds "
+        f"{_field_list(rest - part)}; together they fill {len(part | rest)} of the "
+        f"{len(usual)} fields this list's records carry, and each renders as a partial "
+        f"record (#1226)"))
+
+
+def _reads_as_sentence(text: str) -> bool:
+    """A record's closing sentence rather than a title: long enough, and
+    opening with "This", "These" or "To", or ending in sentence punctuation
+    with its 4+-letter words mostly lowercase."""
+    text = text.strip()
+    words = text.split()
+    if len(words) < RECORD_CUT_TAIL_MIN_WORDS or text.endswith(":"):
+        return False
+    if words[0].lower() in _SENTENCE_OPENERS:
+        return True
+    long_words = _PROSE_WORD_RE.findall(text)
+    lowercase = sum(word[0].islower() for word in long_words)
+    return (_TRAILING_CLOSERS_RE.sub("", text).endswith(_SENTENCE_ENDS) and bool(long_words)
+            and lowercase >= RECORD_CUT_TAIL_LOWERCASE_SHARE * len(long_words))
+
+
+def _tail_fragment(members: list[FamilyEntry], second: int) -> CutFragment | None:
+    """The entry at `second` is a sentence cut off the record before it."""
+    head, tail = members[second - 1], members[second]
+    usual = _usual_fields(members, (second,))
+    if (len(usual) < RECORD_CUT_MIN_USUAL_FIELDS
+            or len(tail.fields) > RECORD_CUT_TAIL_MAX_FIELDS
+            or len(head.fields & usual) < RECORD_CUT_TAIL_HEAD_MIN_SHARE * len(usual)
+            or not _reads_as_sentence(tail.entry.text)):
+        return None
+    return CutFragment(tail.order, tail.entry, head.entry, (
+        f"entry {tail.entry.element_idx} ({tail.entry.code}): a sentence split off the record "
+        f"before it (entry {head.entry.element_idx}) -- it fills {len(tail.fields & usual)} of "
+        f"the {len(usual)} fields this list's records carry and renders as a record of its own "
+        f"(#1226)"))
+
+
+def _family_fragments(members: list[FamilyEntry]) -> list[CutFragment]:
+    """Every fragment one family shows: halves first, then closing sentences,
+    each over the pairs of entries next to each other in the list."""
+    pairs = [i for i in range(len(members) - 1) if members[i + 1].slot == members[i].slot + 1]
+    found = [_complement_fragment(members, i) for i in pairs]
+    found += [_tail_fragment(members, i + 1) for i in pairs]
+    return [fragment for fragment in found if fragment]
+
+
+def _boundary_named(stage4: dict) -> frozenset[tuple[object, str]]:
+    """The entries `grant_boundary` or `record_boundary` already report."""
+    named = {(grants[i].element_idx, grants[i].text)
+             for grants in _grant_lists(stage4) for i in _grant_boundary_reasons(grants)}
+    named |= {(entries[i].element_idx, entries[i].text)
+              for entries in _heading_lists(stage4, grants=False)
+              for i in _inner_label_heads(entries)}
+    return frozenset(named)
+
+
+def lint_record_cut_in_two(stage4: dict) -> list[dict]:
+    """One record stage 2 cut into two neighbouring entries of a list (#1226),
+    read off the fields stage 4 filled: two neighbours of one code family
+    that together fill all but at most one of the fields the list's other
+    records carry and share at most one, the smaller filling at most half of
+    them and the larger not all, unless the second opens the way the list's
+    records do (IZABPD 832, JFGZFT 92, VYRDHN 286, WWSEWY 193); or a sentence
+    of twelve or more words filling at most one field, after a record filling
+    at least half of them (XYXIQJ 193, 246). WARN, one finding per fragment
+    entry, quoting it and its partner. Reads stage 4 only, so it also runs on
+    a PDF upload and without the docx. Leaves to `grant_boundary` and
+    `record_boundary` the entries they report, but not a fragment whose
+    partner they report: it adds the other half. Not judged: a list whose
+    records carry fewer than five usual fields, a stub that fills no usual
+    field its partner lacks, a sentence repeating two of the record's
+    fields, and which neighbour a fragment belongs to: a fragment that halves
+    a record with either neighbour names the one before it."""
+    named = _boundary_named(stage4)
+    fragments: dict[int, CutFragment] = {}
+    for run in _hierarchy_runs(stage4):
+        for members in _code_families(run):
+            for fragment in _family_fragments(members):
+                if (fragment.fragment.element_idx, fragment.fragment.text) not in named:
+                    fragments.setdefault(fragment.order, fragment)
+    return [_finding("record_cut_in_two", RECORD_CUT_SEVERITY, fragment.message,
+                     [fragment.fragment.text[:FIELD_EVIDENCE_VALUE_CHARS],
+                      fragment.partner.text[:FIELD_EVIDENCE_VALUE_CHARS]])
+            for _order, fragment in sorted(fragments.items())]
 
 
 # --- grant_bucket ------------------------------------------------------------

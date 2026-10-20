@@ -605,6 +605,15 @@ class DimensionScore(BaseModel):
     detail: str
 
 
+class QualityBlocker(BaseModel):
+    """One reason a run must not be delivered as is (#823), as
+    ``quality_score.Blocker`` writes it: the gate (its doctor lint), the cap
+    it applies to the score, and the scorer's detail line."""
+    gate: str
+    cap: int
+    detail: str
+
+
 class QualityScoreResult(BaseModel):
     """Per-run quality score detail (advisory, computed from artifacts)."""
     run_id: str
@@ -617,6 +626,10 @@ class QualityScoreResult(BaseModel):
     # missing_evidence names each one. None only for a pre-#724 result.
     data_complete: bool | None = None
     missing_evidence: list[str] = []
+    # #823: False when a blocker gate fired, and the blockers that did. None
+    # for a score cached before the field existed.
+    deliverable: bool | None = None
+    blockers: list[QualityBlocker] = []
 
 
 class AdminRunsResponse(BaseModel):

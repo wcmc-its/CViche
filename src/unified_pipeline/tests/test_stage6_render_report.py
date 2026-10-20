@@ -13,6 +13,8 @@ Self-contained: no DB, no LLM, no template — documents are built in-test.
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -63,9 +65,11 @@ def test_dedup_no_decisions_recorded_when_nothing_dropped():
 # ------------------------------------------------------- _validate_output dicts
 
 def _generator_for(doc: Document) -> WCMTemplateGenerator:
-    """_validate_output only reads self.doc; skip the heavyweight ctor."""
+    """_validate_output only reads self.doc and the render's declined record
+    lists (#1187, none here); skip the heavyweight ctor."""
     gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
     gen.doc = doc
+    gen._declined_lists = []
     return gen
 
 
@@ -86,6 +90,29 @@ def test_validate_output_returns_structured_semicolon_warning():
     assert w["message"] == ("K3 (Administrative teaching): Content appears "
                             "combined with semicolons instead of separate bullets")
     assert w["evidence"] == [fused[:200]]
+
+
+def _sub_award_declined():
+    from unified_pipeline.stage6.fan_out import DeclinedList
+    return DeclinedList('M2A', 'sub_awards', ('sub_title',), (
+        {'sub_title': 'Glade Anxiety Study', 'pi_name': 'Dr Quillon', 'funding': '$867,002'},))
+
+
+@pytest.mark.parametrize('form_table,warned', [(True, False), (False, True)])
+def test_validate_output_finds_a_declined_record_in_a_form_table(form_table, warned):
+    # #1187 (web26): a grant block writes one field per row, so only the
+    # table's whole text holds the record; without the block it is missing.
+    doc = Document()
+    doc.add_paragraph("Glade Program, Program Director")
+    if form_table:
+        table = doc.add_table(rows=3, cols=2)
+        for row, (label, value) in zip(table.rows, [('Project title:', 'Glade Anxiety Study'),
+                                                    ('PI:', 'Dr Quillon'), ('Amount:', '$867,002')], strict=True):
+            row.cells[0].text, row.cells[1].text = label, value
+    gen = _generator_for(doc)
+    gen._declined_lists = [_sub_award_declined()]
+    checks = [w['check'] for w in gen._validate_output()]
+    assert ('fan_out_record_list_rejected' in checks) is warned
 
 
 def test_validate_output_clean_doc_returns_empty_list():

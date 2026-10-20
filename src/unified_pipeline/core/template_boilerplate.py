@@ -295,27 +295,32 @@ def is_near_template_instruction(text: str) -> bool:
     return False
 
 
+# A line's pieces for `is_unanswered_prompt` and `is_template_label_line`: its
+# table cells, and the tab- or newline-separated parts inside them.
+_LABEL_PIECE_SPLIT_RE = re.compile(r"[|\t\n]")
+
+
 def is_unanswered_prompt(text: str) -> bool:
     """True if *text* says only that a prompt has nothing to report: "N/A",
     "Not Applicable |  |", or a known template label whose answer cell is
     one of those ("Primary Hospital Affiliation: | N/A").
 
-    At least one cell must be an _UNANSWERED value; every other non-empty
-    cell must be a known template label. A cell nobody recognises is
-    faculty data, and keeps the line.
+    At least one piece must be an _UNANSWERED value; every other non-empty
+    piece must be a known template label. A piece nobody recognises is
+    faculty data, and keeps the line. Pieces are split as
+    `is_template_label_line` splits them -- table cells, and the tab- or
+    newline-separated parts inside them -- so a whole template table
+    answered only "N/A" (one multi-row entry, "Award Source: ... | N/A" over
+    "Project title: |" ...) is unanswered too, and stays out of the
+    Appendix (#1942, XAXVYB).
     """
     if not text:
         return False
-    cells = [c for c in (_normalize(c) for c in text.split("|")) if c]
-    if not any(c in _UNANSWERED for c in cells):
+    pieces = [p for p in (_normalize(x) for x in _LABEL_PIECE_SPLIT_RE.split(text)) if p]
+    if not any(p in _UNANSWERED for p in pieces):
         return False
-    return all(c in _UNANSWERED or c in _INSTRUCTION_SET or c in _PROTECTED
-               for c in cells)
-
-
-# A line's pieces for `is_template_label_line`: its table cells, and the
-# tab- or newline-separated parts inside them.
-_LABEL_PIECE_SPLIT_RE = re.compile(r"[|\t\n]")
+    return all(p in _UNANSWERED or p in _INSTRUCTION_SET or p in _PROTECTED
+               for p in pieces)
 
 
 def is_template_label_line(text: str) -> bool:

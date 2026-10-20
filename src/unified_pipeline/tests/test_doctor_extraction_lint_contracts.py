@@ -64,6 +64,10 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     MULTI_RECORD_MIN_NEW,
     MULTI_RECORD_NEW_SHARE,
     MULTI_RECORD_PROSE_MIN_LOWERCASE,
+    OPENING_DATE,
+    OPENING_NUMBERED,
+    OPENING_OTHER,
+    RECORD_CUT_SEVERITY,
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
@@ -71,7 +75,10 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _entry_rendered,
     _entry_status,
     _is_invented_record,
+    _list_entry,
     _nonempty_field_values,
+    _reads_as_sentence,
+    _record_opening,
     _rendered_row_value_sets,
     _shared_entry_pieces,
     _short_end_year,
@@ -95,6 +102,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_grant_facts,
     owner_pi_role_empty_tables,
     lint_span_count,
+    lint_record_cut_in_two,
     lint_under_extraction,
     lint_wrong_start_date,
     lint_year_not_in_source,
@@ -4180,6 +4188,414 @@ def test_record_boundary_leaves_grant_lists_to_grant_boundary():
         return _mentee(idx, text, code="M2B")
     assert _record(grant(10, "Agency: Fund\tTitle: Study"), grant(12, "Agency: Fund\tTitle: Study"),
                    grant(14, "Title: Study\tAgency: Fund")) == []
+
+
+# ==========================================================================
+# record_cut_in_two (#1226) -- one record cut into two neighbouring entries, read
+# off the fields stage 4 filled. Invented trainees, grants and positions; no
+# corpus text.
+
+_SPLIT_HEADING = ["Training", "Example Trainees"]
+_TRAINEE = dict(mentee_name="Trainee Example", level="Postdoctoral fellow", site="Example Lab",
+                start_date="2001", end_date="2003", current_position="Example Professor")
+_TRAINEE_TEXT = "Trainee Example, Postdoctoral fellow, Example Lab, 2001-2003, Example Professor"
+#: `percent_effort` is stage 4's own bookkeeping on M2 codes, no usual field.
+_GRANT = dict(agency="Example Fund", grant_number="EX-0001", title="Study of example things",
+              pi_role="PI", start_date="2001", end_date="2004", percent_effort="10%")
+_GRANT_TEXT = "Example Fund EX-0001, Study of example things, PI, 2001-2004"
+#: A record's closing sentence: 30 words, its long words lowercase.
+_CLOSING_SENTENCE = (
+    "the project followed a small group of example volunteers for several years and "
+    "reported how their measures changed, which in turn later shaped the design of two "
+    "further example studies.")
+
+
+def _split_entry(idx, text, code="N3B", heading=_SPLIT_HEADING, **fields):
+    return {"element_idx_start": idx, "taxonomy_code": code, "hierarchy": list(heading),
+            "text": text, "extracted_fields": fields}
+
+
+def _whole_trainee(idx, code="N3B", **fields):
+    return _split_entry(idx, _TRAINEE_TEXT, code, **{**_TRAINEE, **fields})
+
+
+def _whole_grant(idx, code="M2B"):
+    return _split_entry(idx, _GRANT_TEXT, code, **_GRANT)
+
+
+def _trainee_halves(first, code="N3B"):
+    """Case 1's pair: the trainee's name, then the rest of its record."""
+    head = {key: value for key, value in _TRAINEE.items() if key != "mentee_name"}
+    return (_split_entry(first, "Trainee Example", code, mentee_name="Trainee Example"),
+            _split_entry(first + 1, "Postdoctoral fellow, Example Lab, 2001-2003", code, **head))
+
+
+def _split(*entries):
+    return lint_record_cut_in_two({"entries": list(entries)})
+
+
+def test_record_cut_in_two_flags_a_name_cut_off_its_trainee_record():
+    """Case 1: an N3B list of six, an entry holding only the name and the
+    next the other five of the six fields its siblings fill. The siblings'
+    `stage4_records` is bookkeeping, not a seventh field."""
+    name, rest = _trainee_halves(14)
+    records = {STAGE4_RECORDS_KEY: [{"mentee_name": "Trainee Example"}]}
+    findings = _split(_whole_trainee(10, **records), _whole_trainee(12, **records), name, rest,
+                      _whole_trainee(16, **records), _whole_trainee(18, **records))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("record_cut_in_two",
+                                                                RECORD_CUT_SEVERITY)]
+    assert RECORD_CUT_SEVERITY == "WARN"
+    assert findings[0]["message"] == (
+        "entry 14 (N3B): one record split over two entries -- it holds mentee_name, entry 15 "
+        "holds current_position, end_date, level, site, start_date; together they fill 6 of "
+        "the 6 fields this list's records carry, and each renders as a partial record (#1226)")
+    assert findings[0]["evidence"] == [name["text"], rest["text"]]
+
+
+def test_record_cut_in_two_pools_the_grant_codes_and_counts_a_dated_head_half():
+    """Case 2: the head half (M2B) holds the number and the period, the next
+    entry (M2A) the sponsor, title, role and notes. On a tie the first is the
+    fragment; notes, a prose field, is no usual field."""
+    findings = _split(_whole_grant(10), _whole_grant(12),
+                      _split_entry(14, "EX-0014, 2001-2004", "M2B", grant_number="EX-0014",
+                                   start_date="2001", end_date="2004"),
+                      _split_entry(15, "Example Fund, Study of example things, PI", "M2A",
+                                   agency="Example Fund", title="Study of example things",
+                                   pi_role="PI", notes="A note on the study"),
+                      _whole_grant(16), _whole_grant(18))
+    assert _flagged(findings) == [14]
+    assert findings[0]["message"].startswith(
+        "entry 14 (M2B): one record split over two entries -- it holds end_date, grant_number, "
+        "start_date, entry 15 holds agency, pi_role, title; together they fill 6 of the 6")
+
+
+def test_record_cut_in_two_flags_a_tail_that_shares_one_field_with_its_head():
+    """Case 3: a whole grant but its role, then an entry with the title again
+    and the role: the second is the fragment."""
+    head = {key: value for key, value in _GRANT.items() if key != "pi_role"}
+    findings = _split(_whole_grant(10), _whole_grant(12),
+                      _split_entry(20, "Example Fund EX-0020, Study of example things, 2001-2004",
+                                   "M2B", **head),
+                      _split_entry(22, "Study of example things, PI", "M2B",
+                                   title="Study of example things", pi_role="PI"),
+                      _whole_grant(24), _whole_grant(26))
+    assert _flagged(findings) == [22]
+    assert ("it holds pi_role, title, entry 20 holds agency, end_date, grant_number, "
+            "start_date; together they fill 6 of the 6" in findings[0]["message"])
+
+
+def test_record_cut_in_two_flags_a_closing_sentence_filed_as_a_record():
+    """Case 4: five whole grants, and between two of them an entry filling
+    only a title whose text is a lowercase sentence ending in a period."""
+    assert len(_CLOSING_SENTENCE.split()) == 30
+    findings = _split(_whole_grant(10), _whole_grant(12), _whole_grant(14),
+                      _split_entry(15, _CLOSING_SENTENCE, "M2B", title=_CLOSING_SENTENCE),
+                      _whole_grant(16), _whole_grant(18))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("record_cut_in_two", "WARN")]
+    assert findings[0]["message"] == (
+        "entry 15 (M2B): a sentence split off the record before it (entry 14) -- it fills 1 "
+        "of the 6 fields this list's records carry and renders as a record of its own (#1226)")
+    assert findings[0]["evidence"] == [_CLOSING_SENTENCE[:FIELD_EVIDENCE_VALUE_CHARS],
+                                       _GRANT_TEXT]
+
+
+def test_record_cut_in_two_flags_a_sentence_opening_with_this_and_no_final_period():
+    """Case 5: a title-plus-notes entry opening with "This", after a whole
+    record; notes is prose, so it fills one field."""
+    text = "This study will examine how example measures change over time in a large cohort"
+    findings = _split(_whole_grant(10), _whole_grant(12), _whole_grant(14),
+                      _split_entry(15, text, "M2B", title=text, notes="Example notes"),
+                      _whole_grant(16))
+    assert _flagged(findings) == [15]
+    assert "a sentence split off the record before it (entry 14)" in findings[0]["message"]
+
+
+_POSITION = dict(title="Example Title", department="Example Department",
+                 institution="Example University", location="Example City",
+                 start_date="2001", end_date="2003")
+_POSITION_TEXT = "2001 - 2003 Example Title, Example Department, Example University, Example City"
+
+
+def _position(idx, text=_POSITION_TEXT, **fields):
+    return _split_entry(idx, text, "D1", ["Appointments"], **(fields or _POSITION))
+
+
+def test_record_cut_in_two_spares_a_second_entry_opening_as_the_lists_records_do():
+    """Case 6: a D1 list whose entries all open with a year; of two sparse
+    neighbours, the second opens with a year too, so it starts its own
+    record. Opening any other way, the pair is reported."""
+    period = _position(14, "2004 - 2006", start_date="2004", end_date="2006")
+    rest = dict(title="Example Title", department="Example Department",
+                institution="Example University", location="Example City")
+    dated = _position(15, "2004 Example Title, Example Department, Example University", **rest)
+    undated = _position(15, "Example Title, Example Department, Example University", **rest)
+    wholes = [_position(idx) for idx in (10, 11, 12, 13)]
+    assert _split(*wholes, period, dated) == []
+    assert _flagged(_split(*wholes, period, undated)) == [14]
+    # Two of the four records opening with a year is under two thirds.
+    mixed = [*wholes[:2], *(_position(idx, _POSITION_TEXT[12:]) for idx in (12, 13))]
+    assert _flagged(_split(*mixed, period, dated)) == [14]
+
+
+def test_record_cut_in_two_spares_an_entry_ending_in_a_colon():
+    """Case 7: an entry ending in ":" that fills one field is a lead line,
+    not a record's half, whatever the record after it lacks."""
+    rest = {key: value for key, value in _TRAINEE.items() if key != "site"}
+    wholes = [_whole_trainee(idx) for idx in (10, 11, 12, 13)]
+    after = _split_entry(15, "Trainee Example, Postdoctoral fellow, 2001-2003", **rest)
+    assert _split(*wholes, _split_entry(14, "Example Lab trainees:", site="Example Lab"),
+                  after) == []
+    assert _flagged(_split(*wholes, _split_entry(14, "Example Lab trainees", site="Example Lab"),
+                           after)) == [14]
+
+
+@pytest.mark.parametrize("usual, expected", [(4, []), (5, [14])])
+def test_record_cut_in_two_needs_five_usual_fields(usual, expected):
+    """Case 8: case 1's pair, or a closing sentence, in a list whose records
+    carry four fields is not judged; with five it is."""
+    keys = list(_TRAINEE)[:usual]
+    record = {key: _TRAINEE[key] for key in keys}
+    wholes = [_split_entry(idx, _TRAINEE_TEXT, **record) for idx in (10, 11, 12, 13)]
+    name = _split_entry(14, "Trainee Example", mentee_name="Trainee Example")
+    rest = _split_entry(15, "Postdoctoral fellow, 2001-2003",
+                        **{key: record[key] for key in keys[1:]})
+    assert _flagged(_split(*wholes, name, rest)) == expected
+    sentence = _split_entry(14, _CLOSING_SENTENCE)
+    assert _flagged(_split(*wholes, sentence, _split_entry(15, _TRAINEE_TEXT, **record))) == expected
+
+
+def _complement_pair(head, tail):
+    """Two neighbours filling `head` and `tail` of the six trainee fields,
+    after four whole trainee records."""
+    wholes = [_whole_trainee(idx) for idx in (10, 11, 12, 13)]
+    return _split(*wholes, _split_entry(14, "Trainee Example A",
+                                        **{key: _TRAINEE[key] for key in head}),
+                  _split_entry(15, "Trainee Example B", **{key: _TRAINEE[key] for key in tail}))
+
+
+_NAME, _LEVEL, _SITE, _START, _END, _NOW = _TRAINEE
+
+
+@pytest.mark.parametrize("head, tail, flagged", [
+    # Halves: the smaller fills 2 of the 6, the two share none, fill all 6.
+    ((_NAME, _LEVEL), (_SITE, _START, _END, _NOW), [14]),
+    # Two records sharing two fields: a whole record's tail (#1226 not covered).
+    ((_NAME, _LEVEL, _SITE), (_LEVEL, _SITE, _START, _END, _NOW), []),
+    # Two small records that together leave two fields unfilled.
+    ((_NAME,), (_LEVEL, _SITE, _START), []),
+    # A stub whose one field its neighbour also fills adds nothing of its own.
+    ((_NAME,), (_NAME, _LEVEL, _SITE, _START, _END), []),
+])
+def test_record_cut_in_two_reads_halves_by_their_usual_fields(head, tail, flagged):
+    assert _flagged(_complement_pair(head, tail)) == flagged
+
+
+def test_record_cut_in_two_needs_the_smaller_half_to_fill_at_most_half():
+    """Of five usual fields, two records of three sharing one fill all five
+    but neither is the smaller part of one record."""
+    record = {key: _TRAINEE[key] for key in (_NAME, _LEVEL, _SITE, _START, _END)}
+    wholes = [_split_entry(idx, _TRAINEE_TEXT, **record) for idx in (10, 11, 12, 13)]
+    first = _split_entry(14, "Trainee A", **{key: record[key] for key in (_NAME, _LEVEL, _SITE)})
+    second = _split_entry(15, "Trainee B", **{key: record[key] for key in (_SITE, _START, _END)})
+    assert _split(*wholes, first, second) == []
+    first = _split_entry(14, "Trainee A", **{key: record[key] for key in (_NAME, _LEVEL)})
+    assert _flagged(_split(*wholes, first, second)) == [14]
+
+
+def test_record_cut_in_two_reads_a_patent_as_no_grant():
+    """M2D groups as M2, apart from the grant codes: a patent beside a grant
+    half is no other half."""
+    number = _split_entry(14, "EX-0014, 2001-2004", "M2B", grant_number="EX-0014",
+                          start_date="2001", end_date="2004")
+    rest = dict(agency="Example Fund", title="Study of example things", pi_role="PI")
+    wholes = [_whole_grant(idx) for idx in (10, 11, 12, 13)]
+    assert _split(*wholes, number, _split_entry(15, "Example Fund", "M2D", **rest)) == []
+    assert _flagged(_split(*wholes, number, _split_entry(15, "Example Fund", "M2A",
+                                                          **rest))) == [14]
+
+
+def test_record_cut_in_two_needs_a_closing_sentence_to_fill_one_field_after_a_record():
+    """A sentence filling two fields is a record's own text, and one after a
+    sparse entry has no record to close. A sentence filling none counts."""
+    wholes = [_whole_grant(idx) for idx in (10, 11, 12, 13)]
+    two = _split_entry(15, _CLOSING_SENTENCE, "M2B", title="Example title", agency="Example Fund")
+    assert _split(*wholes, two, _whole_grant(16)) == []
+    trainees = [_whole_trainee(idx) for idx in (10, 11, 12, 13)]
+    sparse = _split_entry(14, "Trainee Example", mentee_name="Trainee Example", level="Fellow")
+    sentence = _split_entry(15, _CLOSING_SENTENCE)
+    assert _split(*trainees, sparse, sentence, _whole_trainee(16)) == []
+    assert _flagged(_split(*trainees, _whole_trainee(14), sentence, _whole_trainee(16))) == [15]
+
+
+def test_record_cut_in_two_reads_a_title_without_a_final_period_as_a_title():
+    """Case 9: a title-only grant of 14 words with no final period is a
+    title, not a sentence; the same words ending in a period are one."""
+    text = ("Title: Example measures of example outcomes in a long running study of "
+            "example volunteers")
+    assert len(text.split()) == 14
+    wholes = (_whole_grant(10), _whole_grant(12), _whole_grant(14))
+    assert _split(*wholes, _split_entry(15, text, "M2B", title=text), _whole_grant(16)) == []
+    sentence = text + "."
+    assert _flagged(_split(*wholes, _split_entry(15, sentence, "M2B", title=sentence),
+                           _whole_grant(16))) == [15]
+
+
+def test_record_cut_in_two_reads_a_question_mark_as_a_sentence_end():
+    question = _CLOSING_SENTENCE[:-1] + "?"
+    assert _flagged(_split(*(_whole_grant(idx) for idx in (10, 11, 12, 13)),
+                           _split_entry(15, question, "M2B", title=question),
+                           _whole_grant(16))) == [15]
+
+
+@pytest.mark.parametrize("code, flagged", [("N3B", [14]), ("K1", []), ("S1", []), ("A", [])])
+def test_record_cut_in_two_skips_teaching_publication_and_personal_data_codes(code, flagged):
+    """Case 10: the pair of case 1 coded K1 (teaching, rewritten by stage 5c),
+    S1 (a publication, rewritten by stage 5d) or A (Personal Data, one value
+    per entry). N3B is the control: the same pair is flagged."""
+    assert _flagged(_split(*(_whole_trainee(idx, code) for idx in (10, 12)),
+                           *_trainee_halves(14, code),
+                           *(_whole_trainee(idx, code) for idx in (16, 18)))) == flagged
+
+
+def test_record_cut_in_two_reads_an_empty_or_null_field_as_unfilled():
+    """Stage 4 often writes every key of the schema, the missing ones empty."""
+    blanks = {key: "" for key in _TRAINEE if key != "mentee_name"}
+    name = _split_entry(14, "Trainee Example", mentee_name="Trainee Example",
+                        **{**blanks, "site": None})
+    rest = _split_entry(15, "Postdoctoral fellow, Example Lab, 2001-2003",
+                        **{**_TRAINEE, "mentee_name": None})
+    assert _flagged(_split(_whole_trainee(10), _whole_trainee(12), name, rest,
+                           _whole_trainee(16), _whole_trainee(18))) == [14]
+
+
+def test_record_cut_in_two_pools_the_n3_codes():
+    """N3A and N3B are one family: a cut trainee coded N3A among N3B siblings."""
+    assert _flagged(_split(_whole_trainee(10), _whole_trainee(12), *_trainee_halves(14, "N3A"),
+                           _whole_trainee(16), _whole_trainee(18))) == [14]
+
+
+def test_record_cut_in_two_flags_halves_that_leave_one_usual_field_unfilled():
+    """Together the halves may miss one of the list's usual fields."""
+    name, rest = _trainee_halves(14)
+    rest["extracted_fields"].pop("current_position")
+    assert _flagged(_split(_whole_trainee(10), _whole_trainee(12), name, rest,
+                           _whole_trainee(16), _whole_trainee(18))) == [14]
+
+
+def test_record_cut_in_two_needs_four_entries_in_a_family():
+    """Case 10: in a family of three, a closing sentence between two whole
+    records is not judged; with one more whole record it is. (A title-only
+    entry closing a grant list is `grant_boundary`'s, so it sits inside.)"""
+    sentence = _split_entry(13, _CLOSING_SENTENCE, "M2B", title=_CLOSING_SENTENCE)
+    assert _split(_whole_grant(12), sentence, _whole_grant(14)) == []
+    assert _flagged(_split(_whole_grant(10), _whole_grant(12), sentence,
+                           _whole_grant(14))) == [13]
+    assert _split(_whole_trainee(12), *_trainee_halves(14)) == []
+
+
+def test_record_cut_in_two_leaves_a_grant_boundary_split_pair_to_grant_boundary():
+    """Case 10: a sponsor-and-number half beside a title half is
+    `grant_boundary`'s split pair, which names the first entry of the pair;
+    record_cut_in_two leaves it there. A fragment whose partner it names is kept:
+    the first entry of the pair is then the larger half."""
+    source = _split_entry(14, "Example Fund EX-0014", "M2B", agency="Example Fund",
+                          grant_number="EX-0014")
+    title = _split_entry(15, "Study of example things, PI, 2001-2004", "M2B",
+                         title="Study of example things", pi_role="PI", start_date="2001",
+                         end_date="2004")
+    wholes = (_whole_grant(10), _whole_grant(12))
+    entries = [*wholes, source, title, _whole_grant(16), _whole_grant(18)]
+    assert _flagged(lint_grant_boundary({"entries": entries})) == [14]
+    assert _split(*entries) == []
+    reversed_pair = [*wholes, {**title, "element_idx_start": 14},
+                     {**source, "element_idx_start": 15}, _whole_grant(16), _whole_grant(18)]
+    assert _flagged(lint_grant_boundary({"entries": reversed_pair})) == [14]
+    assert _flagged(_split(*reversed_pair)) == [15]
+
+
+def test_record_cut_in_two_leaves_an_inner_label_head_to_record_boundary():
+    labelled = {key: value for key, value in _TRAINEE.items() if key != "current_position"}
+    wholes = [_split_entry(idx, f"Trainee {idx}, PhD\tCurrent position: Example Professor",
+                           **_TRAINEE) for idx in (10, 11, 12, 13)]
+    rest = _split_entry(15, "Trainee Example, Postdoctoral fellow, Example Lab, 2001-2003",
+                        **labelled)
+
+    def cut(text):
+        return _split_entry(14, text, current_position="Example Professor")
+
+    head = cut("Current position: Example Professor")
+    assert _flagged(lint_record_boundary({"entries": [*wholes, head, rest]})) == [14]
+    assert _split(*wholes, head, rest) == []
+    assert _flagged(_split(*wholes, cut("Example Professor"), rest)) == [14]
+
+
+def test_record_cut_in_two_reports_a_fragment_once_naming_the_neighbour_before_it():
+    """A name between two entries that each lack it halves a record with
+    either: one finding, naming the entry before it."""
+    rest = {key: value for key, value in _TRAINEE.items() if key != "mentee_name"}
+    findings = _split(_whole_trainee(10), _whole_trainee(12),
+                      _split_entry(14, "Postdoctoral fellow, Example Lab, 2001-2003", **rest),
+                      _split_entry(15, "Trainee Example", mentee_name="Trainee Example"),
+                      _split_entry(16, "Postdoctoral fellow, Example Lab, 2004-2006", **rest))
+    assert _flagged(findings) == [15]
+    assert "entry 14 holds" in findings[0]["message"]
+
+
+def test_record_cut_in_two_pairs_only_entries_next_to_each_other():
+    """An entry of another code between the halves keeps them apart, and a
+    heading change closes the list."""
+    name, rest = _trainee_halves(14)
+    wholes = [_whole_trainee(idx) for idx in (10, 11, 12, 13)]
+    between = _split_entry(15, "Example Lab", "D1", site="Example Lab")
+    assert _split(*wholes, name, between, {**rest, "element_idx_start": 16}) == []
+    moved = {**rest, "hierarchy": ["Training", "Other Trainees"]}
+    assert _split(*wholes, name, moved) == []
+    assert _flagged(_split(*wholes, name, rest)) == [14]
+
+
+@pytest.mark.parametrize("text, opening", [
+    ("2004 - 2006 Example Title", OPENING_DATE),
+    ("(2004) Example Title", OPENING_DATE),
+    ("9/2004 Example Title", OPENING_DATE),
+    ("Sept. 2004 Example Title", OPENING_DATE),
+    ("May 3, 2004 Example Title", OPENING_DATE),
+    ("3. Example Title", OPENING_NUMBERED),
+    ("(3) Example Title", OPENING_NUMBERED),
+    ("Mentor: Example Person", "label:mentor"),
+    ("J. Example, PhD", OPENING_OTHER),
+    ("Mayoral Example Title 2004", OPENING_OTHER),
+    ("Example Title, 2004", OPENING_OTHER),
+])
+def test_record_cut_in_two_reads_how_an_entry_opens(text, opening):
+    assert _record_opening(_list_entry({"text": text})) == opening
+
+
+_TWELVE_LOWERCASE = "the work went on for years with small groups of example volunteers."
+
+
+@pytest.mark.parametrize("text, sentence", [
+    (_TWELVE_LOWERCASE, True),
+    (_TWELVE_LOWERCASE[:-1] + '."', True),
+    (_TWELVE_LOWERCASE[:-1] + ".)", True),
+    (_TWELVE_LOWERCASE[:-1] + ".\u201d", True),
+    (" ".join(_TWELVE_LOWERCASE.split()[1:]), False),
+    (_TWELVE_LOWERCASE[:-1], False),
+    (_TWELVE_LOWERCASE[:-1] + ":", False),
+    ("These " + _TWELVE_LOWERCASE[4:-1], True),
+    ("To " + _TWELVE_LOWERCASE[4:-1], True),
+    ("This: " + _TWELVE_LOWERCASE[4:-1], False),
+    ("These " + _TWELVE_LOWERCASE[4:-1] + ":", False),
+    ("a an the of in on at by up so is it.", False),
+    ("The Work Went On For Years With Small Groups Of Example Volunteers.", False),
+    ("The Work Went On For Years With small groups of example volunteers.", False),
+    ("The Work Went On For Years with small groups of example volunteers.", True),
+])
+def test_record_cut_in_two_reads_a_sentence(text, sentence):
+    """Twelve words; "This", "These" or "To" first, or a final mark after
+    closing quotes and brackets with 60% of the 4+-letter words lowercase
+    (5 of 8 in the last case, 4 of 8 in the one before it)."""
+    assert len(_TWELVE_LOWERCASE.split()) == 12
+    assert _reads_as_sentence(text) is sentence
 
 
 # ==========================================================================
