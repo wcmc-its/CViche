@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
+from docx.shared import Twips  # noqa: E402
 
 from unified_pipeline.stage6 import supplementary as sp  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
@@ -399,6 +400,40 @@ def _reject_all_texts(body):
 
 def _subpoint(paragraph, *texts):
     return sp.SubPoint(_candidate(paragraph.text, paragraph=paragraph), texts, 0, "D1", 0)
+
+
+def _plain_entry_paragraph(doc, text, left_twips):
+    para = doc.add_paragraph(text)
+    para.paragraph_format.left_indent = Twips(left_twips)
+    return para
+
+
+@pytest.mark.parametrize(("anchor_left", "expected_left"), [(1080, "1800"), (1800, "2520")])
+def test_a_sub_point_under_an_unbulleted_entry_goes_one_indent_step_deeper(anchor_left,
+                                                                           expected_left):
+    # #1943: a teaching entry has no w:numPr, only a left indent on the
+    # bullet-text grid, so the sub-point deepens that indent instead of ilvl.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", anchor_left)
+    doc.add_paragraph("Next line")
+
+    sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(40, _DATE))
+
+    new = anchor._p.getnext()
+    assert new.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
+    assert new.find(f"{qn('w:pPr')}/{qn('w:ind')}").get(qn("w:left")) == expected_left
+    assert anchor._p.pPr.find(qn("w:ind")).get(qn("w:left")) == str(anchor_left)
+
+
+def test_a_sub_point_under_an_off_grid_indent_keeps_the_anchor_indent():
+    # Only the unbulleted-entry grid deepens; any other indent is copied as is.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 720)
+    doc.add_paragraph("Next line")
+
+    sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(40, _DATE))
+
+    assert anchor._p.getnext().find(f"{qn('w:pPr')}/{qn('w:ind')}").get(qn("w:left")) == "720"
 
 
 @pytest.mark.parametrize("anchor_kind", ["bullet", "citation"])
