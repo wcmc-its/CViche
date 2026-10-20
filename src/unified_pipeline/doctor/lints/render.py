@@ -1383,21 +1383,58 @@ def _field_label(text: str) -> str | None:
     return m.group(1).casefold() if m else None
 
 
-def _field_record_bounds(labels: list[str | None]) -> tuple[list[bool], list[bool]]:
-    """Where each per-field record starts and ends, over a block sequence's
-    field labels (None for a block that is not a labelled line). A record is a
-    run of labelled lines; it starts after a non-labelled block, or where a
-    label already seen in the current record comes round again (the next
-    record's "Title:")."""
-    starts = [False] * len(labels)
-    seen: set[str] = set()
+# A label counts as opening (closing) a record form once it opens (closes) at
+# least this many labelled runs in the document -- one run is one record seen,
+# two are a form that recurs (#1966).
+FIELD_FORM_MIN_RECORDS = 2
+
+
+def _field_form_edges(labels: list[str | None]) -> tuple[frozenset[str], frozenset[str]]:
+    """The labels that open and that close a record form in this document,
+    learned from its maximal runs of labelled lines: a run's first label opens
+    a record and its last closes one, and a label that follows itself ("Journal:"
+    after "Journal:") is a one-line form that opens every record it is in."""
+    opens: Counter[str] = Counter()
+    closes: Counter[str] = Counter()
     for t, label in enumerate(labels):
         if label is None:
             continue
-        if t == 0 or labels[t - 1] is None or label in seen:
-            starts[t] = True
-            seen = set()
-        seen.add(label)
+        before = labels[t - 1] if t else None
+        if before is None or before == label:
+            opens[label] += 1
+        if t + 1 == len(labels) or labels[t + 1] is None:
+            closes[label] += 1
+    openers = frozenset(label for label, count in opens.items() if count >= FIELD_FORM_MIN_RECORDS)
+    closers = frozenset(label for label, count in closes.items() if count >= FIELD_FORM_MIN_RECORDS)
+    return openers, closers
+
+
+def _field_record_bounds(labels: list[str | None]) -> tuple[list[bool], list[bool]]:
+    """Where each per-field record starts and ends, over a block sequence's
+    field labels (None for a block that is not a labelled line). A record is a
+    run of labelled lines; it starts after a non-labelled block, at a label
+    that opens a form (`_field_form_edges`), or where a label already seen in
+    the current record comes round again. In that last case the record can
+    also start just after the latest line between the two occurrences whose
+    label closes a form -- a "Course:/Role:/Dates:" record after a
+    "Title:/.../Dates:" one starts at "Course:", not at its own "Dates:"
+    (#1966). Labels alone cannot tell which of the two is meant
+    ("Course:/Role:/Dates:" then a second "Role:" has the same shape), so both
+    are marked as starts, and the record read on from the closer's side."""
+    openers, closers = _field_form_edges(labels)
+    starts = [False] * len(labels)
+    seen: dict[str, int] = {}
+    for t, label in enumerate(labels):
+        if label is None:
+            continue
+        if t == 0 or labels[t - 1] is None or label in openers:
+            starts[t], seen = True, {}
+        elif label in seen:
+            start = next((k + 1 for k in range(t - 1, seen[label] - 1, -1)
+                          if labels[k] in closers), t)
+            starts[start] = starts[t] = True
+            seen = {labels[k]: k for k in range(start, t)}
+        seen[label] = t
     ends = [label is not None and (t + 1 == len(labels) or labels[t + 1] is None
                                    or starts[t + 1])
             for t, label in enumerate(labels)]

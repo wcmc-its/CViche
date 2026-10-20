@@ -5462,6 +5462,58 @@ def test_duplicate_passages_reports_a_whole_record_inside_a_shared_field_stretch
     assert findings[0]["evidence"][0].startswith("blocks 5-8 repeat at 14-17: Title: Anatomy")
 
 
+def test_duplicate_passages_flags_a_record_right_after_a_record_of_another_form():
+    """#1966: a duplicated record directly after a record of ANOTHER field form,
+    no heading between, is still reported. The record start comes from the
+    form edges the document shows -- "Dates:" closes both forms, "Title:" opens
+    one, a "Journal:" line that follows itself is a one-line form -- so the
+    differing "Dates:"/"Course:"/"Title:" just outside both copies belongs to
+    the neighbouring record and the copies are trimmed to nothing less."""
+    head, tail = [("p", "Educational Contributions")], [("p", "Other Section")]
+
+    def talk(title, dates):
+        return _field_record(title, "Medical students", "Riverside Medical Center", dates)
+    lead = (head + talk("Pharmacology", "2001") + _course_record("Anatomy", "2015")
+            + tail + talk("Neuroscience", "2002") + _course_record("Anatomy", "2015"))
+    assert lint_duplicate_passages(lead)[0]["evidence"][0].startswith(
+        "blocks 5-7 repeat at 13-15: Course: Anatomy")
+    trail = (head + talk("Anatomy", "2015-2019") + _course_record("Biochemistry", "2001")
+             + tail + talk("Anatomy", "2015-2019") + _course_record("Microbiology", "2002"))
+    assert lint_duplicate_passages(trail)[0]["evidence"][0].startswith(
+        "blocks 1-4 repeat at 9-12: Title: Anatomy")
+    short = (head + [("p", "Title: Seminar P"), ("p", "Dates: 2001")] + _course_record("Anatomy", "2015")
+             + tail + [("p", "Title: Seminar Q"), ("p", "Dates: 2002")] + _course_record("Anatomy", "2015"))
+    assert lint_duplicate_passages(short)[0]["evidence"][0].startswith(
+        "blocks 3-5 repeat at 9-11: Course: Anatomy")
+    journals = [("p", "Journal: Annals of Medicine 2019. A."), ("p", "Journal: Clinical Reports 2020. B.")]
+    cites = head + talk("Pharmacology", "2015-2019") + journals + tail + talk("Neuroscience", "2015-2019") + journals
+    assert lint_duplicate_passages(cites)[0]["evidence"][0].startswith(
+        "blocks 5-6 repeat at 12-13: Journal: Annals of Medicine")
+    # "Role:" closing both runs makes "Course:/Role:" then "Dates:/Role:" a
+    # possible reading, but so is a second "Role:" after a whole record, and
+    # labels cannot tell those apart -- the record is still reported, as on dev
+    roles = (head + _course_record("Anatomy", "2015") + [("p", "Role: Lecturer")]
+             + tail + _course_record("Anatomy", "2015") + [("p", "Role: Tutor")])
+    assert lint_duplicate_passages(roles)[0]["evidence"][0].startswith(
+        "blocks 1-3 repeat at 6-8: Course: Anatomy")
+
+    # a form edge needs two records: one lone "Institution:" line elsewhere
+    # does not make Institution open a record, so the shared fields of the
+    # XAXVYB shape stay a shared stretch and nothing is reported
+    shared = (head + talk("Pharmacology", "2015-2019") + talk("Physiology", "2015-2019")
+              + talk("Neuroscience", "2015-2019") + tail + [("p", "Institution: Lakeview College")])
+    assert lint_duplicate_passages(shared) == []
+    # a record started just after a closing "Dates:" holds the "Course:" and
+    # "Role:" before the next "Dates:", so the "Title:" after it is the next
+    # record's -- the stretch from a shared "Dates:" into two distinct records
+    # is not a duplicate
+    lecture = [("p", "Title: Lecture"), ("p", "Audience: Fellows")]
+    crossing = (head + [("p", "Title: Seminar"), ("p", "Audience: Residents"), ("p", "Dates: 2015")]
+                + _course_record("Anatomy", "2015") + lecture + [("p", "Dates: 2015")]
+                + lecture + [("p", "Dates: ongoing")] + tail + [("p", "Audience: Fellows"), ("p", "Dates: ongoing")])
+    assert lint_duplicate_passages(crossing) == []
+
+
 def test_duplicate_passages_flags_a_repeated_pair_of_colon_titles():
     """#1940 review: talk or citation titles that open "Topic: subtitle" match
     the field-line shape, but the lines just outside the two copies carry
