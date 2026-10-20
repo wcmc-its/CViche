@@ -37,6 +37,7 @@ from unified_pipeline.stage6.normalization.citation_matching import (  # noqa: E
     _owner_words,
     _prints_junk_author,
     _restore_stage5d_owner,
+    _split_publisher_place,
     _stage5d_author_segment,
     _value_referenced,
 )
@@ -354,11 +355,29 @@ _APPEND_ROWS = [
      'Ash A. A chapter. In: Book. 2004.', '', 'New York',
      'Ash A. A chapter. In: Book. New York; 2004.'),
     ('a dotted state code counts as a region',
-     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith, New York, N.Y.',
-     'Ash A. A chapter. In: Book. New York, N.Y.: Zenith; 2004.'),
-    ('a country alone after the name is the place',
-     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith, United Kingdom',
-     'Ash A. A chapter. In: Book. United Kingdom: Zenith; 2004.'),
+     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '',
+     'Zenith Press, Upper Saddle River, N.J.',
+     'Ash A. A chapter. In: Book. Upper Saddle River, N.J.: Zenith Press; 2004.'),
+    ('a state and a country after the city: all three are the place',
+     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '',
+     'Zenith Press, Chicago, Illinois, USA',
+     'Ash A. A chapter. In: Book. Chicago, Illinois, USA: Zenith Press; 2004.'),
+    ('a colon between the name and its place',
+     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '',
+     'Zenith Press: Upper Saddle River, New Jersey',
+     'Ash A. A chapter. In: Book. Upper Saddle River, New Jersey: Zenith Press; 2004.'),
+    ('regions alone after a company name are the place',
+     'Ash A. A chapter. In: Book. Zen Co; 2004.', '', 'Zen Co, Pennsylvania, USA',
+     'Ash A. A chapter. In: Book. Pennsylvania, USA: Zen Co; 2004.'),
+    ('a city part that is also a region, with nothing before it: at the end, whole',
+     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith Bridge, New York, NY',
+     'Ash A. A chapter. In: Book. Zenith; 2004. Zenith Bridge, New York, NY.'),
+    ('"Hill" in a city is not a company word',
+     'Ash A. A chapter. In: Book. Zenith Press; 2004.', '', 'Zenith Press, Chapel Hill, North Carolina',
+     'Ash A. A chapter. In: Book. Chapel Hill, North Carolina: Zenith Press; 2004.'),
+    ('a one-part name a city could have: no name left, at the end, whole',
+     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith, Pennsylvania, USA',
+     'Ash A. A chapter. In: Book. Zenith; 2004. Zenith, Pennsylvania, USA.'),
     ('editors clause written "(Ed.)": present, no second clause',
      'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.', 'Rasim Somer Diler', '',
      'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.'),
@@ -392,6 +411,24 @@ def test_append_missing_stage5d_values_table(
     case, citation, editors, publisher, expected
 ):
     assert _append_missing_stage5d_values(citation, editors, publisher) == expected, case
+
+
+@pytest.mark.parametrize('publisher,expected', [
+    ('Humana Press, Totowa, NJ', ('Humana Press', 'Totowa, NJ')),
+    ('Nova Science Publishers Inc, New York, N.Y., U.S.A.',
+     ('Nova Science Publishers Inc', 'New York, N.Y., U.S.A.')),
+    # Every part can be a place: no name left, so no split (a negative
+    # slice once returned the whole value as the place). The first is
+    # really "Fry Communications" in "New York, NY": a known gap.
+    ('Fry Communications, New York, NY', None),
+    ('Madrid, Spain', None),
+    ('New York', None),
+])
+def test_split_publisher_place(publisher, expected):
+    """#481: the name/place split on corpus-shaped values, read directly
+    because a wrong split with no matching "Name;" slot never reaches the
+    citation."""
+    assert _split_publisher_place(publisher) == expected
 
 
 # ---------------------------------------------------------------------------

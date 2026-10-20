@@ -159,12 +159,20 @@ _PLACE_REGION_CODES = frozenset({
 _CORPORATE_WORDS = frozenset({
     'inc', 'ltd', 'limited', 'llc', 'co', 'corp', 'corporation', 'company',
     'gmbh', 'sa', 'sl', 'verlag', 'press', 'publishers', 'publishing',
-    'publications', 'books', 'group', 'sons', 'series', 'media', 'science',
-    'sciences', 'health', 'elsevier', 'springer', 'wiley', 'lippincott',
-    'williams', 'wilkins', 'saunders', 'mosby', 'karger', 'thieme', 'humana',
-    'raven', 'blackwell', 'decker', 'butterworth', 'churchill', 'livingstone',
-    'mcgraw', 'hill', 'academic', 'taylor', 'francis', 'routledge', 'sage',
+    'publications', 'pub', 'books', 'group', 'sons', 'series', 'symposia',
+    'symposium', 'media', 'science', 'sciences', 'health', 'healthcare',
+    'society', 'association', 'institute', 'university', 'academy',
+    'laboratory', 'laboratories', 'editorial', 'ediciones',
+    'elsevier', 'springer', 'wiley', 'lippincott', 'williams', 'wilkins',
+    'saunders', 'mosby', 'karger', 'thieme', 'humana', 'raven', 'blackwell',
+    'decker', 'butterworth', 'churchill', 'livingstone', 'mcgraw',
+    'academic', 'taylor', 'francis', 'routledge', 'sage', 'kluwer', 'dekker',
 })
+#: What separates the parts of a stage-4 publisher value: "Humana Press,
+#: Totowa, NJ", "Prentice Hall: Columbus, Ohio".
+_PUBLISHER_PART_SEPARATOR_RE = re.compile(r"(\s*[,:]\s*)")
+#: At most this many region parts end a place: "Chicago, Illinois, USA".
+_MAX_PLACE_REGIONS = 2
 #: A book trailer with no publisher: the year (and pages) alone after a
 #: sentence break, closing the citation -- "Welcome to parenting. 2010." The
 #: publisher goes in front of it, as Vancouver and `_book_trailer_parts`
@@ -229,34 +237,49 @@ def _is_region(part: str) -> bool:
             or part.replace('.', '') in _PLACE_REGION_CODES)
 
 
+def _has_corporate_word(part: str) -> bool:
+    """True when a word of `part` is one only a company's name has."""
+    return bool(_CORPORATE_WORDS.intersection(re.findall(r"[^\W_]+", part.casefold())))
+
+
 def _is_city(part: str) -> bool:
     """True when `part` can be a city: capitalised words, none of them a
     company's."""
-    words = re.findall(r"[^\W_]+", part.casefold())
-    return bool(_CITY_NAME_RE.fullmatch(part)) and not _CORPORATE_WORDS.intersection(words)
+    return bool(_CITY_NAME_RE.fullmatch(part)) and not _has_corporate_word(part)
+
+
+def _place_part_count(parts: list[str]) -> int:
+    """How many of `parts`, from the end, are a place: one or two regions
+    ("NJ", "Illinois, USA"), then the city before them if there is one.
+    0 when the last part is not a region."""
+    regions = 0
+    while (regions < min(_MAX_PLACE_REGIONS, len(parts))
+           and _is_region(parts[len(parts) - 1 - regions])):
+        regions += 1
+    has_city = regions and len(parts) > regions and _is_city(parts[len(parts) - 1 - regions])
+    return regions + bool(has_city)
 
 
 def _split_publisher_place(publisher: str) -> tuple[str, str] | None:
     """`publisher` as (name, place), or None when it does not end in a place.
 
-    The place is the last comma part when that is a region ("Springer,
-    Germany"), with the part before it when that can be a city ("Humana
-    Press, Totowa, New Jersey"). A city part with a company's word in it is
-    a second publisher, so the value is refused whole. The name must keep
-    at least one part.
+    The place is one or two regions, a US state or a country, with the
+    city before them ("Humana Press, Totowa, New Jersey"). A part with a
+    company's word in it is never the city: "Academic Press, Elsevier
+    Science, New York" names two publishers, so it stays one name and the
+    place is "New York". The name must be left non-empty, so a value that
+    is all place ("Madrid, Spain", "Philadelphia, PA") is refused, and so is
+    a one-part name a city could have ("Guilford, New York").
     """
-    parts = [p.strip() for p in publisher.split(',')]
-    if not _is_region(parts[-1]):
+    tokens = _PUBLISHER_PART_SEPARATOR_RE.split(publisher.strip())
+    parts = tokens[0::2]
+    count = _place_part_count(parts)
+    if not 0 < count < len(parts):
         return None
-    place_len = 1
-    if len(parts) >= 3:
-        if not _is_city(parts[-2]):
-            return None
-        place_len = 2
-    name = ', '.join(parts[:-place_len])
+    name = "".join(tokens[:2 * (len(parts) - count) - 1]).strip()
     if not name:
         return None
-    return name, ', '.join(parts[-place_len:])
+    return name, "".join(tokens[2 * (len(parts) - count):])
 
 
 def _with_publisher_place(citation: str, publisher: str) -> str | None:
