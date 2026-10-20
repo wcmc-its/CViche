@@ -41,6 +41,10 @@ then committee, then activity); and `_fill_administrative_activities` parses
 every entry into plain rows before it clears or writes a single Word table
 row, so an exception partway through parsing leaves the existing table
 content untouched instead of half-rewritten.
+
+Every row written is recorded in the row-receipt ledger against the entry it
+renders (#534), so the #1205 sub-point pass anchors a committee's prose only
+under that entry's own row.
 """
 import logging
 import re
@@ -59,6 +63,7 @@ from ..formatting import (
 from ..normalization import _committee_cell_text, _line_without_shown_role_and_dates
 from ..parsing import _looks_like_multiple_records, _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import ADMINISTRATIVE_ACTIVITY_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +88,9 @@ class _AdminActivityEntry(TypedDict, total=False):
 # place below that resolves one of the three uses this SAME order, so a
 # value under committee_name always wins over the same entry also being
 # populated under committee or activity (review threads 3850009796,
-# 3850014030).
-_COMMITTEE_ALIAS_KEYS = ('committee_name', 'committee', 'activity')
+# 3850014030). The order is `supplementary.ADMINISTRATIVE_ACTIVITY_FIELDS`:
+# the #1205 sub-point pass counts the same fields as the row's.
+_COMMITTEE_ALIAS_KEYS = ADMINISTRATIVE_ACTIVITY_FIELDS
 
 # "(Chair 2011-2013)" -- role text plus a year range.
 _ROLE_AND_YEAR_RANGE_RE = re.compile(
@@ -250,19 +256,23 @@ class AdministrativeActivitiesSection:
 
         self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
-        for activity, role, dates in rows:
+        for entry, (activity, role, dates) in rows:
+            self._row_receipts.begin_entry(entry)  # the row below is its receipt (#534, #1205)
             self._add_committee_row(table, activity, role, dates)
+        self._row_receipts.end_entry()  # a later row is not the last entry's (#534)
 
     def _parse_administrative_activity_rows(
         self, sorted_entries: list[_AdminActivityEntry]
-    ) -> list[tuple[str, str, str]]:
-        """Parse every entry into (activity, role, dates) rows.
+    ) -> list[tuple[_AdminActivityEntry, tuple[str, str, str]]]:
+        """Parse every entry into (activity, role, dates) rows, each paired
+        with the entry it renders: one entry can give several rows (a list
+        of records, a re-parsed block), and each is that entry's receipt.
 
         Pure with respect to the Word document -- nothing here touches a
         table. See `_fill_administrative_activities` for why that ordering
         matters (review thread 3850029915).
         """
-        rows: list[tuple[str, str, str]] = []
+        rows: list[tuple[_AdminActivityEntry, tuple[str, str, str]]] = []
 
         for entry in sorted_entries:
             # Guard the type, not just falsiness: a truthy non-dict here (a
@@ -285,10 +295,10 @@ class AdministrativeActivitiesSection:
                         record.start_date, record.end_date, taxonomy_code,
                         original_text) or ''
                     if record.activity:
-                        rows.append((
+                        rows.append((entry, (
                             _name_with_institution(
                                 record.activity, record.institution),
-                            record.role, dates))
+                            record.role, dates)))
                 continue
 
             record = _CommitteeRecord.from_raw(fields)
@@ -398,7 +408,7 @@ class AdministrativeActivitiesSection:
                 parsed_rows = []
 
             if parsed_rows:
-                rows.extend(parsed_rows)
+                rows.extend((entry, row) for row in parsed_rows)
             else:
                 if not activity:
                     # The Role and Dates cells already show those parts of
@@ -406,14 +416,17 @@ class AdministrativeActivitiesSection:
                     # KJJVVO 240 "<society> Advisor — 2018–Present").
                     activity = _line_without_shown_role_and_dates(
                         fallback_text(entry), role, record.start_date, record.end_date)
-                rows.append((
+                rows.append((entry, (
                     _name_with_institution(activity, record.institution),
-                    role, dates))
+                    role, dates)))
 
         return rows
 
     def _add_committee_row(self, table, activity: str, role: str, dates: str):
-        """Add a single committee row with proper column handling."""
+        """Add a single committee row with proper column handling, recorded
+        against the entry `_fill_administrative_activities` is on
+        (`begin_entry`): the row-receipt ledger, by which the #1205 sub-point
+        pass anchors a committee's prose only under its own row."""
         # Final serialization safeguard, not the primary validation
         # mechanism (review thread 3850017930): `_CommitteeRecord.from_raw`
         # already coerces every domain value to plain text where it is read
@@ -442,6 +455,7 @@ class AdministrativeActivitiesSection:
                 for run in para.runs:
                     _set_font(run)
         self.stats['entries_inserted'] += 1
+        self._row_receipts.wrote(row._tr)
 
     def _multiline_committee_rows(self, lines: list[str]) -> list[tuple[str, str, str]]:
         """Parse multiline content into (activity, role, dates) rows.

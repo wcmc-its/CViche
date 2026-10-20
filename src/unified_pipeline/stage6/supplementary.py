@@ -57,7 +57,8 @@ measured losing the most prose of those left: Q1-Q2 extramural service next
 row), then H honors (an award's criteria, or the paper it was for), then
 N3A-N3B mentees (the mentee's awards and outputs, the owner's part), then
 B1 degrees (the thesis or dissertation, a minor, a research topic), then O
-institutional leadership (what a role oversaw or achieved). The
+institutional leadership (what a role oversaw or achieved), then P
+institutional committees (a committee's remit, the member's part on it). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -88,7 +89,7 @@ from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
 from .formatting import plain_entry_left_twips, plain_entry_level
 from .normalization import _pii_fragments, _squash
 from .normalization.pii import _BARE_PHONE_SHAPE
-from .parsing import _refold_shattered
+from .parsing import _looks_like_multiple_records, _refold_shattered
 from .parsing.text import DATE_LED_MIN_RECORDS, _opens_dated_record
 from .pii_pass import PII_WITHHELD_KEY
 from .render_check import (
@@ -177,13 +178,36 @@ EDUCATION_CODES = frozenset({'B1'})
 #: lookup finds the title block, not their section); one rerouted into O
 #: follows this one.
 LEADERSHIP_CODES = frozenset({'O'})
+#: Institutional administrative activities and committee service (WCM table
+#: 21): what the committee or activity did and what the member did on it --
+#: its remit or purpose, the duties and terms, its sub-committees, the
+#: constituency represented, the cases heard. The administrative-activities
+#: section writes each P entry as a row of its three-column table (the
+#: committee with its institution folded in, the role, the dates), so a
+#: sub-point is a deleted row under the committee's row. The row prints stage
+#: 4's off-schema committee names when the schema's is empty
+#: (`ADMINISTRATIVE_ACTIVITY_FIELDS`). Only the one row the writer recorded
+#: for that entry can anchor it (`_own_committee_row`, the row-receipt
+#: ledger): committees of one institution, or held under one title, share
+#: their rows' words. An entry holding several records gets none, as which of
+#: them a line is about cannot be shown: one the writer prints as several
+#: rows (a list of records under a committee name, #208/#248; a block of
+#: dated lines it re-parses, #660), and one whose parts hold several dated
+#: records though one row prints (`_own_committee_line`). The last of stage
+#: 4's records offers only its own segment of the line. An entry rerouted to
+#: another code before rendering is grouped under that code and follows its
+#: rule (N1 is excluded, and C, F2 and I are not offered: their heading
+#: lookup finds the title block, not their section); one rerouted into P
+#: follows this one.
+ADMINISTRATIVE_CODES = frozenset({'P'})
 #: The families whose writer records each entry's rows in the row-receipt
 #: ledger, and whose prose goes only under one of those rows (`_anchor_scope`).
-_OWN_ROW_CODES = EDUCATION_CODES | LEADERSHIP_CODES
+_OWN_ROW_CODES = EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
-                  | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES)
+                  | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES
+                  | ADMINISTRATIVE_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -255,6 +279,15 @@ LEADERSHIP_INSTITUTION_FIELDS = ('institution', 'organization')
 _LEADERSHIP_ROW_FIELDS = tuple(name for name in (*LEADERSHIP_ROLE_FIELDS,
                                                  *LEADERSHIP_INSTITUTION_FIELDS)
                                if name not in _RENDERED_FIELDS['O'])
+#: The fields the administrative-activities writer reads a committee's name
+#: cell from, in its one precedence (#625): the schema's, then stage 4's two
+#: off-schema names. The writer reads them from here, so the row and
+#: `_value_tokens` cannot drift apart. The institution it folds into that
+#: cell (#985) is a schema field, which `_RENDERED_FIELDS` lists.
+ADMINISTRATIVE_ACTIVITY_FIELDS = ('committee_name', 'committee', 'activity')
+#: The off-schema ones among them: `_value_tokens` adds them for P.
+_ADMINISTRATIVE_ROW_FIELDS = tuple(name for name in ADMINISTRATIVE_ACTIVITY_FIELDS
+                                   if name not in _RENDERED_FIELDS['P'])
 
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
@@ -418,8 +451,9 @@ class _Haystack(NamedTuple):
 def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
     (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
-    leadership role `_LEADERSHIP_ROW_FIELDS`), or of every scalar field for a
-    code rendered from its text."""
+    leadership role `_LEADERSHIP_ROW_FIELDS`, for a committee
+    `_ADMINISTRATIVE_ROW_FIELDS`), or of every scalar field for a code
+    rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
@@ -428,6 +462,8 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
         names = (*names, *_DEGREE_CELL_FIELDS)
     elif code in LEADERSHIP_CODES:
         names = (*names, *_LEADERSHIP_ROW_FIELDS)
+    elif code in ADMINISTRATIVE_CODES:
+        names = (*names, *_ADMINISTRATIVE_ROW_FIELDS)
     values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
                          if isinstance(value, (str, int, float)) and value))
@@ -578,11 +614,37 @@ def _own_record_line(entry: Mapping) -> str:
     return '' if own is None or _holds_dated_records(own) else own
 
 
+def _own_committee_line(entry: Mapping) -> str:
+    """The text a committee's prose is read from (`_own_record_line`), and
+    nothing when its parts hold several dated records by the writer's own
+    #660 test (`_looks_like_multiple_records`), read per tab, line and pipe
+    part rather than per line. Stage 2 joins a list's paragraphs with tabs,
+    so committees each followed by their years reach stage 6 as one line,
+    which the writer prints as one row, of the record stage 4 extracted; the
+    others would be offered as its prose (EBYSBC YOXXOH 74: six committees,
+    two of them offered under the sixth's row)."""
+    own = _own_record_line(entry)
+    return '' if _looks_like_multiple_records(_split_fragments(own)) else own
+
+
+def _own_committee_row(entry: Mapping, candidates: list[AnchorCandidate],
+                       rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """A committee's own row (`_own_rows`) when the writer recorded exactly
+    one for it. Several are several records the entry held -- a list of
+    records under its committee name (#208/#248) or a block of dated lines
+    the writer re-parsed one row per line (#660, `_multiline_committee_rows`)
+    -- and which of them a prose line is about cannot be shown."""
+    rows = _own_rows(entry, candidates, rows_written)
+    return rows if len(rows) == 1 else []
+
+
 def _prose_text(code: str, entry: Mapping,
                 entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
     """The text `code`'s rule reads the entry's prose from; None for its own."""
     if code in MENTEE_CODES:
         return _own_mentee_line(entry, entries_by_code)
+    if code in ADMINISTRATIVE_CODES:
+        return _own_committee_line(entry)
     if code in _OWN_ROW_CODES:
         return _own_record_line(entry)
     return None
@@ -598,18 +660,20 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
         return _own_degree_rows(entry, in_section, rows_written)
     if code in LEADERSHIP_CODES:
         return _own_rows(entry, in_section, rows_written)
+    if code in ADMINISTRATIVE_CODES:
+        return _own_committee_row(entry, in_section, rows_written)
     return in_section
 
 
 def _pick_anchor(code: str, entry_tokens: set[str],
                  scope: list[AnchorCandidate]) -> AnchorCandidate | None:
-    """The line of `scope` the entry's prose goes under. A degree's or a
-    leadership role's one own row (`_own_rows`) is taken as it is: the
-    writer's record already says whose it is, and a short row ("PhD", "Kell
-    University", "2010"; a "Dean" of an acronym) holds too few distinctive
-    words for `best_anchor`, as does a degree's row whose stage-5b
-    institution name shares few words with the field. Any other scope is
-    read by words."""
+    """The line of `scope` the entry's prose goes under. A degree's, a
+    leadership role's or a committee's one own row (`_own_rows`) is taken as
+    it is: the writer's record already says whose it is, and a short row
+    ("PhD", "Kell University", "2010"; a "Dean" of an acronym) holds too few
+    distinctive words for `best_anchor`, as does a degree's row whose
+    stage-5b institution name shares few words with the field. Any other
+    scope is read by words."""
     if code in _OWN_ROW_CODES and len(scope) == 1:
         return scope[0]
     return best_anchor(entry_tokens, scope)
@@ -645,7 +709,10 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     leadership role's prose is read from its own line (`_own_record_line`),
     and its line must be a row its writer recorded for it (`rows_written`,
     `_own_rows`), which it takes with no word test when it is the only one
-    (`_pick_anchor`).
+    (`_pick_anchor`). A committee's is read the same way, and none is
+    offered when its parts hold several dated records
+    (`_own_committee_line`) or its writer recorded it several rows
+    (`_own_committee_row`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing

@@ -52,8 +52,9 @@ def _generator():
 def _rows(entry):
     """Run one entry through the pure parsing function (no python-docx
     needed -- `_parse_administrative_activity_rows` never touches a table,
-    see its own docstring / review thread 3850029915)."""
-    return _generator()._parse_administrative_activity_rows([entry])
+    see its own docstring / review thread 3850029915): its rows, each
+    without the entry it is paired with."""
+    return [row for _entry, row in _generator()._parse_administrative_activity_rows([entry])]
 
 
 class TestCompleteStructuredRecordSurvivesMultilineText:
@@ -773,3 +774,79 @@ class TestRawFallbackLeavesOutTheRoleAndDatesItsRowShows:
                                       "role": "Advisor", "start_date": "2018",
                                       "end_date": "present"}}
         assert _rows(entry) == [("Zqsociety Advisor — 2018", "Advisor", "2018-Present")]
+
+
+def _template_generator():
+    """A generator loaded against the actual WCM template, verbose off."""
+    from docx import Document
+
+    gen = _generator()
+    gen.doc = Document(gen.template_path)
+    return gen
+
+
+class TestEveryRowIsRecordedAgainstItsEntry:
+    """#534 / #1205: every row the writer adds, by any branch, is recorded in
+    the row-receipt ledger against the entry it renders, so the receipt says
+    the entry was written and the sub-point pass can anchor a committee's
+    prose only under its own row. A row written after the entry loop is no
+    entry's."""
+
+    @pytest.mark.parametrize("entry, rows", [
+        # One row from the fields.
+        ({"text": "Zorblax Curriculum Committee, Member, 2015-2020", "taxonomy_code": "P",
+          "extracted_fields": {"committee_name": "Zorblax Curriculum Committee", "role": "Member",
+                               "start_date": "2015", "end_date": "2020"}}, 1),
+        # A list of records under the committee name (#208/#248): a row each.
+        ({"text": "Alpha Board 2001-2003; Beta Panel 2004-2006", "taxonomy_code": "P",
+          "extracted_fields": {"committee_name": [
+              {"committee_name": "Alpha Board", "start_date": "2001", "end_date": "2003"},
+              {"name": "Beta Panel", "start_date": "2004", "end_date": "2006"}]}}, 2),
+        # The parenthetical repair: one row, its role and dates out of the text.
+        ({"text": "Frobnitz Safety Committee (Chair 2011-2013)", "taxonomy_code": "P",
+          "extracted_fields": {"committee_name": "Frobnitz Safety Committee"}}, 1),
+        # A block of dated lines (#660): a row per line.
+        ({"text": "Alpha Board 2001-2003\nBeta Panel 2004-2006\nGamma Council 2007-2009",
+          "taxonomy_code": "P",
+          "extracted_fields": {"committee_name": "Alpha Board", "start_date": "2001",
+                               "end_date": "2003"}}, 3),
+        # An unresolved pipe date column (#627): one re-parsed row.
+        ({"text": "Wibble Committee (Chair 2002-present) | 1996-Present", "taxonomy_code": "P",
+          "extracted_fields": {"committee_name": "Wibble Committee"}}, 1),
+        # No committee extracted: one row of the entry's line.
+        ({"text": "Quuxville Hospital Ethics Rounds", "taxonomy_code": "P",
+          "extracted_fields": {}}, 1),
+    ], ids=["fields", "record_list", "parenthetical", "dated_block", "pipe", "raw_line"])
+    def test_each_branch_records_its_rows(self, entry, rows):
+        gen = _template_generator()
+        other = {"text": "Zqother Review Panel, Member, 1990-1995", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Zqother Review Panel", "role": "Member",
+                                      "start_date": "1990", "end_date": "1995"}}
+        gen._row_receipts.begin_section("administrative_activities")
+        gen._fill_administrative_activities([entry, other])
+        table = gen._find_table_after_paragraph(gen._find_header_paragraph("INSTITUTIONAL ADMINISTRATIVE"))
+        stray = table.add_row()
+        gen._row_receipts.wrote(stray._tr)
+
+        mine = gen._row_receipts.elements_for(entry)
+        assert len(mine) == rows
+        assert len(gen._row_receipts.elements_for(other)) == 1
+        recorded = mine + gen._row_receipts.elements_for(other)
+        written = [row._tr for row in table.rows[1:-1]]  # not the header, nor the stray row
+        assert len(recorded) == len(written)
+        assert all(any(element is row for row in written) for element in recorded)
+        receipt, = gen._row_receipts.receipts({"administrative_activities": [entry, other]})
+        assert (receipt.given, receipt.written, receipt.lost) == (2, 2, ())
+
+    def test_a_record_with_no_name_writes_no_row_and_has_no_receipt(self):
+        """A list record naming no committee is skipped (#256): the entry
+        has no row of its own, and the next entry's row is not credited to it."""
+        gen = _template_generator()
+        nameless = {"text": "Member 2001-2003", "taxonomy_code": "P",
+                    "extracted_fields": {"committee_name": [{"role": "Member", "start_date": "2001"}]}}
+        named = {"text": "Alpha Board, 2004", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Alpha Board", "start_date": "2004"}}
+        gen._fill_administrative_activities([nameless, named])
+
+        assert gen._row_receipts.elements_for(nameless) == []
+        assert len(gen._row_receipts.elements_for(named)) == 1

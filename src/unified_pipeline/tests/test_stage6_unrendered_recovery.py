@@ -3591,6 +3591,558 @@ def test_a_line_of_two_dated_roles_offers_neither_ones_prose(tmp_path, monkeypat
     assert _CHAIR_PROSE not in deleted and _ROLE_PROSE not in deleted
 
 
+# --- #1205: P institutional committees, the next code family -----------------
+# The administrative-activities section writes every P entry as a row of its
+# three-column table, so the prose is a deleted row under the committee's own
+# row: the one row the writer recorded for that entry (the row-receipt
+# ledger). An entry holding several records offers none.
+
+_COMMITTEE_PROSE = ("Reviewed every proposed change to the core clerkship curriculum and drafted "
+                    "the annual assessment report for the faculty council")
+_COMMITTEE_NAME = "Example Curriculum Steering Committee"
+_COMMITTEE_INSTITUTION = "Norvale University"
+
+
+def _committee(idx=81, name=_COMMITTEE_NAME, role="Member", start="2008", end="2012",
+               prose=_COMMITTEE_PROSE, code="P", *, institution=_COMMITTEE_INSTITUTION, **fields):
+    """A committee whose source line goes on past its name, institution, role
+    and years into what it did, as EBYSBC MQSUIC 615's did. Another term of
+    the same committee shares every distinctive word of its row, and so does
+    a later committee holding its words ("Executive ..."): only the years,
+    which are digits, tell them apart. A value passed as None is in neither
+    the line nor the fields."""
+    named = {"committee_name": name, "role": role, "institution": institution,
+             "start_date": start, "end_date": end}
+    dates = "-".join(value for value in (start, end) if value)
+    line = ", ".join(value for value in (name, institution, role, dates) if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _later_committee(name=_COMMITTEE_NAME):
+    """A later term at the same institution, with no prose: it renders first,
+    reverse chronologically."""
+    return _committee(idx=79, name=name, start="2016", end="2020", prose="")
+
+
+def _render_committees(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_administrative_activities(entries)
+    gen._add_supplementary_subpoints({"P": entries})
+    return gen
+
+
+def _committee_table_row():
+    """The same committee read from a source table: stage 2 joins the row's
+    cells with pipes, and its position names the row ("41.2")."""
+    entry = _committee()
+    entry["element_idx_start"] = "41.2"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+_COMMITTEE_ROW = f"{_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}Member2008-2012"
+_COMMITTEE_HEADER = "Name of Committee"
+
+
+def _table_header(row):
+    return _row_text(row.getparent().find(qn("w:tr")))
+
+
+@pytest.mark.parametrize("entry", [_committee, _committee_table_row])
+def test_committee_prose_is_a_deleted_row_under_the_committee_row(entry):
+    gen = _render_committees([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _COMMITTEE_ROW
+    assert _table_header(row).startswith(_COMMITTEE_HEADER)
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _COMMITTEE_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "3"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_a_committees_several_prose_lines_are_one_row_of_paragraphs_in_source_order():
+    lines = (_COMMITTEE_PROSE, "Chaired its assessment sub-committee and the annual review of electives")
+    gen = _render_committees([_committee(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _COMMITTEE_ROW
+    assert ["".join(t.text for t in p.iter(qn("w:delText"))) for p in row.iter(qn("w:p"))] \
+        == list(lines)
+
+
+@pytest.mark.parametrize("later", [
+    # One committee in two terms at one institution: the rows differ in their years only.
+    _COMMITTEE_NAME,
+    # A later committee at the same institution holding every word of this one.
+    f"Executive {_COMMITTEE_NAME}",
+])
+def test_committee_prose_goes_under_its_own_row_among_committees_of_one_institution(later):
+    """The later committee renders first and holds every distinctive word of
+    the earlier one's row, so words alone put the earlier one's prose under
+    the later row. Only the row the writer recorded for the earlier entry
+    takes it."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_committees([_later_committee(later), _committee()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert _row_text(above) == _COMMITTEE_ROW
+    assert _row_text(above.getprevious()) == f"{later}, {_COMMITTEE_INSTITUTION}Member2016-2020"
+    assert row.getnext() is None
+    # Words alone would have taken the later committee's row.
+    lines = list(supplementary.anchor_candidates(_render_committees(
+        [_later_committee(later), _committee()], supplementary_subpoints=False).doc))
+    rows = [line for line in lines if _COMMITTEE_INSTITUTION in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(_committee(), "P"), rows) is rows[0]
+    assert rows[0].text.startswith(later)
+
+
+def test_committee_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_committees([_later_committee(), _committee()], supplementary_subpoints=False)
+    on = _render_committees([_later_committee(), _committee()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _COMMITTEE_PROSE in rejected
+    assert _COMMITTEE_PROSE not in "".join(_texts_of(off.doc.element.body))
+    assert len(_subpoint_rows(on)) == 1
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_a_short_committees_prose_goes_under_its_own_row():
+    """An acronym, an acronym's institution and a short role hold one
+    distinctive word, too few for the word test: the writer's record says
+    the one row is the entry's own (`_pick_anchor`)."""
+    gen = _render_committees([_committee(name="IRB", institution="NVU", role="Chair")],
+                             supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == "IRB, NVUChair2008-2012"
+    assert _deleted_texts(gen) == _COMMITTEE_PROSE
+
+
+def _committee_with_no_name():
+    """No committee name: the name cell prints the entry's line, its role
+    and years taken out (#1346)."""
+    return _committee(name=None, institution=None)
+
+
+def _committee_with_parenthetical_years():
+    """Nothing extracted: the writer reads the role and years out of the
+    line's parenthesis and prints the rest of the line (#660)."""
+    entry = _committee(name=None, role=None, start=None, end=None, institution=None)
+    entry["text"] = f"{_COMMITTEE_NAME} (Chair 2008-2012). {_COMMITTEE_PROSE}"
+    return entry
+
+
+def _committee_on_two_lines_with_nothing_extracted():
+    """Two lines, nothing extracted: the writer re-parses them, one row each."""
+    return {"element_idx_start": 81, "taxonomy_code": "P", "extracted_fields": {},
+            "text": f"{_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}, 2008-2012\n{_COMMITTEE_PROSE}"}
+
+
+@pytest.mark.parametrize("entry", [_committee_with_no_name, _committee_with_parenthetical_years,
+                                   _committee_on_two_lines_with_nothing_extracted])
+def test_committee_prose_already_in_its_row_is_not_offered_again(entry):
+    """The row prints it (`_record_rendered`), so it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_committees([entry()], supplementary_subpoints=True)
+    assert _COMMITTEE_PROSE in "".join(_row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "P", haystack) == []
+
+
+def test_every_committee_row_field_the_pass_counts_is_printed_in_the_committee_row():
+    """`supplementary._ADMINISTRATIVE_ROW_FIELDS`, the off-schema names among
+    the fields the writer reads its name cell from (`_RENDERED_FIELDS` marks
+    schema fields only): each one, alone on an entry with the schema's field
+    empty, reaches the row."""
+    from unified_pipeline.stage6 import supplementary
+
+    assert supplementary._ADMINISTRATIVE_ROW_FIELDS
+    for field in supplementary._ADMINISTRATIVE_ROW_FIELDS:
+        marker = f"Zq{field}Z"
+        entry = _committee(name=None, prose="", **{field: marker})
+        gen = _render_committees([entry], supplementary_subpoints=True)
+        assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
+
+
+def test_every_field_the_committee_row_prints_is_one_the_pass_counts():
+    """The other direction: a field the row prints that `_value_tokens` does
+    not count would offer a fragment restating the row. The names are the
+    fields of the codes an entry is rerouted into P from (K3, O, Q1, Q2, and
+    the positions D1-D3), each alone on an entry."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    counted = _RENDERED_FIELDS["P"] | set(supplementary._ADMINISTRATIVE_ROW_FIELDS)
+    names = set().union(*(_RENDERED_FIELDS[code] for code in ("D1", "D2", "D3", "O", "Q1", "Q2")),
+                        supplementary.ADMINISTRATIVE_ACTIVITY_FIELDS, {"name", "title", "position"})
+    for field in sorted(names - {"start_date", "end_date"}):
+        marker = f"Zq{field}Z"
+        entry = {"element_idx_start": 81, "taxonomy_code": "P", "text": "2008-2012",
+                 "extracted_fields": {field: marker, "start_date": "2008", "end_date": "2012"}}
+        gen = _render_committees([entry], supplementary_subpoints=True)
+        printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+        assert not printed or field in counted, field
+
+
+@pytest.mark.parametrize("field", ["committee", "activity"])
+def test_a_committee_line_mostly_restating_its_row_is_not_offered(field):
+    """Stage 4 named the committee under an off-schema key, which the row
+    prints when the schema's is empty. A line at least half of whose words
+    restate it is the row (`SUBPOINT_FIELD_TOKEN_MAX_SHARE`); the document
+    holds too few of its words for `_record_rendered` to see that."""
+    from unified_pipeline.stage6 import supplementary
+
+    value = "Regional Pharmacy Formulary Review Panel"
+    line = f"{value}: approved statewide pediatric dosing"
+    entry = _committee(name=None, prose=line, **{field: value})
+    gen = _render_committees([entry], supplementary_subpoints=True)
+    assert any(value in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary._record_rendered(line, haystack.text, haystack.line_tokens) is False
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+# The role first, as many CVs write it. A line opening with the name cell's
+# own text is read as that row, prose and all (`_record_rendered`'s verbatim
+# piece), and is not offered.
+_ADMISSIONS_LINE = f"Chair, Example Admissions Committee, {_COMMITTEE_INSTITUTION}, 2001-2004"
+_ADMISSIONS_PROSE = ("Interviewed every applicant shortlisted for the rural medicine track "
+                     "and chaired the appeals hearings")
+
+
+def test_a_list_of_committee_records_prints_a_row_each_and_offers_nothing():
+    """Stage 4 packed two committees as a list under the committee name
+    (#208/#248): the writer prints a row for each, both the entry's own (the
+    ledger), and which of them a prose line is about cannot be shown. The
+    line names no years, so the writer's rows alone say it holds two."""
+    entry = {"element_idx_start": 60, "taxonomy_code": "P",
+             "text": f"Chair, Example Admissions Committee; Member, {_COMMITTEE_NAME}"
+                     f"\t{_ADMISSIONS_PROSE}",
+             "extracted_fields": {"committee_name": [
+                 {"committee_name": "Example Admissions Committee", "role": "Chair",
+                  "start_date": "2001", "end_date": "2004"},
+                 {"committee_name": _COMMITTEE_NAME, "role": "Member",
+                  "start_date": "2008", "end_date": "2012"}]}}
+    gen = _render_committees([entry], supplementary_subpoints=True)
+
+    assert len(gen._row_receipts.elements_for(entry)) == 2
+    assert _ADMISSIONS_PROSE not in "".join(_row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_block_of_dated_committees_prints_a_row_each_and_offers_nothing():
+    """Two or more dated lines are a source table flattened into one entry
+    (#660): the writer prints each line as a row of its own
+    (`_multiline_committee_rows`), a prose line included, so nothing is left
+    to offer. Every row is the entry's own."""
+    block = (f"Example Admissions Committee | Chair | 2001-2004\n"
+             f"{_COMMITTEE_NAME} | Member | 2008-2012\n"
+             f"{_COMMITTEE_PROSE}")
+    entry = {"element_idx_start": 60, "taxonomy_code": "P", "text": block,
+             "extracted_fields": {"committee_name": "Example Admissions Committee",
+                                  "role": "Chair", "start_date": "2001", "end_date": "2004"}}
+    gen = _render_committees([entry], supplementary_subpoints=True)
+
+    rows = gen._row_receipts.elements_for(entry)
+    assert len(rows) == 3 and _COMMITTEE_PROSE in _row_text(rows[2])
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _fused_committees():
+    """Three committees each followed by its years, which stage 2 joined with
+    tabs (EBYSBC YOXXOH 74's shape): one line, so the writer prints one row,
+    of the record stage 4 extracted, the last; the other two are its records,
+    not its prose."""
+    parts = ["Alpha Questionnaire Working Group, Kestrel Medical Society, 1979-1980",
+             "Bravo Strategic Planning Group, Osprey Regional Council, 1980-1982",
+             f"{_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}, Steering Group, 1986"]
+    return {"element_idx_start": 74, "taxonomy_code": "P", "text": "\t".join(parts),
+            "extracted_fields": {"committee_name": _COMMITTEE_NAME, "role": "Steering Group",
+                                 "institution": _COMMITTEE_INSTITUTION, "start_date": "1986"}}
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_a_line_of_several_dated_committees_offers_none_and_its_records_are_recovered(flag):
+    """#1205 comment 6275741663: the #221 recovery reads every sub-point
+    line as rendered, so a committee record offered as another's prose would
+    be in the accepted document nowhere and still not be recovered. None is
+    offered, and the recovery re-emits the same records with sub-points on
+    as off."""
+    entry = _fused_committees()
+    gen = _render_committees([entry], supplementary_subpoints=flag)
+    assert len(gen._row_receipts.elements_for(entry)) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+    gen._recover_unrendered_records({"P": [entry]})
+
+    assert gen.stats["unrendered_records_recovered"] == 2
+    page = "".join(_texts_of(gen.doc.element.body))
+    assert "Alpha Questionnaire Working Group" in page and "Bravo Strategic Planning Group" in page
+
+
+def test_a_committee_the_section_writes_no_row_for_gets_no_sub_point():
+    """A record naming no committee is skipped (#256), so no row is the
+    entry's own: its prose goes under no other line of the document, though
+    the other committee's row holds every distinctive word of its line."""
+    nameless = _committee(name=None)
+    nameless["extracted_fields"] = {"committee_name": [{"role": "Member", "start_date": "2008"}]}
+    later = _later_committee()
+    gen = _render_committees([later, nameless], supplementary_subpoints=True)
+
+    assert gen._row_receipts.elements_for(nameless) == []
+    assert gen._row_receipts.elements_for(later)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _render_grouped_committees(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_administrative_activities(grouped.get("P", []))
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def _committee_line(text, *committees):
+    """One source line stage 4 returned as a record per (name, role, start,
+    end), the entry's own fields being the last record's. Fan-out gives every
+    earlier record a line of its own and the last one the whole line."""
+    records = [{"committee_name": name, "role": role, "institution": _COMMITTEE_INSTITUTION,
+                "start_date": start, "end_date": end} for name, role, start, end in committees]
+    return {"element_idx_start": 63, "taxonomy_code": "P", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_ADMISSIONS = ("Example Admissions Committee", "Chair", "2001", "2004")
+_STEERING = (_COMMITTEE_NAME, "Member", "2005", "2010")
+_STEERING_LINE = f"Member, {_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}, 2005-2010"
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own committee.
+    ([f"{_ADMISSIONS_LINE}. {_ADMISSIONS_PROSE}", _STEERING_LINE],
+     [("Example Admissions Committee", f"{_ADMISSIONS_LINE}. {_ADMISSIONS_PROSE}")]),
+    ([_ADMISSIONS_LINE, f"{_STEERING_LINE}. {_COMMITTEE_PROSE}"],
+     [(_COMMITTEE_NAME, f"{_STEERING_LINE}. {_COMMITTEE_PROSE}")]),
+    # They do not: which committee the prose is about cannot be told, so neither takes it.
+    ([_ADMISSIONS_LINE, _COMMITTEE_PROSE, _STEERING_LINE], []),
+])
+def test_prose_on_a_line_of_several_committees_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the committee's line as well as its prose brings the name,
+    institution, role and years along, and Reject All prints them a second
+    time, under the row that holds them (the shape every family has; #1205,
+    2026-10-09)."""
+    entry = _committee_line("\t".join(segments), _ADMISSIONS, _STEERING)
+    gen, grouped = _render_grouped_committees([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["P"][-1] and len(grouped["P"]) == 2
+    assert [(_row_text(row.getprevious()).split(",")[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def test_a_committee_line_opening_with_its_name_cell_is_read_as_its_row():
+    """The name cell folds the institution in ("Committee, Institution"), so
+    a line that opens with that text holds the row's own text verbatim, and
+    `_record_rendered` reads the whole line as rendered: none of it is
+    offered, its prose included. A line opening with the role is offered
+    whole, as the CV wrote it."""
+    name_first = f"{_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}, Member, 2005-2010. {_COMMITTEE_PROSE}"
+    role_first = f"{_STEERING_LINE}. {_COMMITTEE_PROSE}"
+    for line, offered in ((name_first, ""), (role_first, role_first)):
+        entry = _committee(start="2005", end="2010", prose=None)
+        entry["text"] = line
+        gen = _render_committees([entry], supplementary_subpoints=True)
+        assert _deleted_texts(gen) == offered
+
+
+def test_generic_list_fan_out_children_of_committees_offer_nothing_their_fields_do_not_hold():
+    """Fan-out splits a record list stage 4 filed under a key the schema does
+    not define only when the fields hold every word of the text, and each
+    child's text is then the line built from its fields: nothing is prose.
+    With prose in the text the list is not split, the entry prints its whole
+    line in the name cell, and nothing is left to offer either."""
+    records = [{"committee_name": "Example Admissions Committee", "role": "Chair",
+                "institution": _COMMITTEE_INSTITUTION, "start_date": "2001", "end_date": "2004"},
+               {"committee_name": _COMMITTEE_NAME, "role": "Member",
+                "institution": _COMMITTEE_INSTITUTION, "start_date": "2005", "end_date": "2010"}]
+    for text, children in ((f"{_ADMISSIONS_LINE}\t{_STEERING_LINE}", 2),
+                           (f"{_ADMISSIONS_LINE}\t{_STEERING_LINE}\t{_COMMITTEE_PROSE}", 1)):
+        entry = {"element_idx_start": 64, "taxonomy_code": "P", "text": text,
+                 "extracted_fields": {"committees": copy.deepcopy(records)}}
+        gen, grouped = _render_grouped_committees([entry], supplementary_subpoints=True)
+        assert len(grouped["P"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["P"])
+        assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_committee_rerouted_out_of_p_follows_its_destination_and_gets_no_sub_point():
+    """N1 is excluded: a committee under a mentoring-programmes heading
+    renders as N1. C is not offered, and its heading lookup finds the title
+    block, not its section: a record holding only an institution and a start
+    year under a training heading renders as C. Neither the committee row of
+    the same institution nor any other carries their prose."""
+    programme = _rerouted(_committee(idx=70), "N1", "MENTORING PROGRAMS")
+    training = _rerouted(_committee(idx=71, name=None, role=None, end=None,
+                                    prose="Trained in quantitative methods for clerkship "
+                                          "curriculum evaluation"), "C", "POSTDOCTORAL TRAINING")
+    gen, grouped = _render_grouped_committees([_later_committee(), programme, training],
+                                              supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["N1"]] == [70]
+    assert [e["element_idx_start"] for e in grouped["C"]] == [71]
+    assert [e["element_idx_start"] for e in grouped["P"]] == [79]
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_refused_reroute_keeps_the_committee_rule():
+    """A committee rerouted to I keeps its P code: I's renderer would drop
+    its committee name (`_fields_lost_in_reroute`). It renders as a P row and
+    its prose is a deleted row under that row."""
+    gen, grouped = _render_grouped_committees([_rerouted(_committee(), "I", "MEMBERSHIPS")],
+                                              supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["P"]] == [81]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _COMMITTEE_ROW
+
+
+@pytest.mark.parametrize("code", ["Q2", "K3"])
+def test_a_record_rerouted_into_p_follows_the_committee_rule(code):
+    """A board seat stage 3b coded Q2, or an administrative teaching role it
+    coded K3, under the institutional administrative heading renders as a P
+    row: its prose is a deleted row under that row."""
+    gen, grouped = _render_grouped_committees(
+        [_rerouted(_committee(code=code), "P", "INSTITUTIONAL ADMINISTRATIVE ACTIVITIES")],
+        supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["P"]] == [81]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _COMMITTEE_ROW
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _COMMITTEE_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.code == "P"
+
+
+def test_a_committee_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass touched the entry. What is left can still describe
+    what was withheld, so none of it is offered."""
+    withheld = _committee()
+    withheld["_pii_withheld"] = True
+    gen = _render_committees([_later_committee(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_text(tr) == _COMMITTEE_ROW for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_committee_dedup_drops_offers_its_prose_once_under_the_kept_row():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no row, so its
+    prose goes only under the row of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_committee(idx=81), _committee(idx=82)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["P"]) == 2 and len(kept["P"]) == 1
+    gen._fill_administrative_activities(kept["P"])
+    gen._add_supplementary_subpoints(before)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _COMMITTEE_ROW
+    assert _deleted_texts(gen) == _COMMITTEE_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["P"][0]["element_idx_start"]
+
+
+def test_committee_leadership_and_appointment_prose_each_stay_under_their_own_section_row():
+    """A committee, the leadership role of chairing it and an appointment can
+    share a title and an institution: each one's prose goes under its own
+    section's row, never under another's."""
+    title = f"Chair, {_COMMITTEE_NAME}"
+    appointment_prose = ("Supervised the example clinic's residents and its weekly "
+                         "interdisciplinary case conference")
+    role_prose = ("Oversaw an annual operating budget and twelve clinical staff, and launched "
+                  "the regional outreach programme for community clinics")
+    appointment = {"element_idx_start": 29, "taxonomy_code": "D1",
+                   "text": f"2008-2012\t{title}, {_COMMITTEE_INSTITUTION}\t{appointment_prose}",
+                   "extracted_fields": {"title": title, "institution": _COMMITTEE_INSTITUTION,
+                                        "start_date": "2008", "end_date": "2012"}}
+    role = {"element_idx_start": 57, "taxonomy_code": "O",
+            "text": f"2008-2012\t{title}, {_COMMITTEE_INSTITUTION}\t{role_prose}",
+            "extracted_fields": {"leadership_role": title, "institution": _COMMITTEE_INSTITUTION,
+                                 "start_date": "2008", "end_date": "2012"}}
+    committee = _committee(role="Chair")
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_positions({"D1": [appointment]})
+    gen._fill_leadership([role])
+    gen._fill_administrative_activities([committee])
+    gen._add_supplementary_subpoints({"D1": [appointment], "O": [role], "P": [committee]})
+
+    by_text = {"".join(t.text for t in row.iter(qn("w:delText"))): row for row in _subpoint_rows(gen)}
+    assert set(by_text) == {appointment_prose, role_prose, _COMMITTEE_PROSE}
+    assert _table_header(by_text[_COMMITTEE_PROSE]).startswith(_COMMITTEE_HEADER)
+    assert _table_header(by_text[role_prose]).startswith("Role(s)/Position")
+    assert not _table_header(by_text[appointment_prose]).startswith(
+        (_COMMITTEE_HEADER, "Role(s)/Position"))
+    assert len({id(row.getparent()) for row in by_text.values()}) == 3
+
+
+def test_the_doctor_matches_a_committee_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier term's sub-point
+    under its own index and P, and the doctor's per-entry match counts it for
+    that entry, not for the later term that shares its words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+
+    doc, placements = _stage6_render(tmp_path, monkeypatch, [_later_committee(), _committee()],
+                                     uid="T1205C")
+    assert placements == [[_COMMITTEE_PROSE]]
+    sidecar = json.loads((tmp_path / "T1205C_render_warnings.json").read_text())
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    assert [(p["element_idx_start"], p["code"]) for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(81, "P")]
+    subpoints = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_COMMITTEE_PROSE, subpoints, element_idx=81)
+    assert not offered_as_subpoint(_COMMITTEE_PROSE, subpoints, element_idx=79)
+
+
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_committee_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, protect, value):
+    """The PII pass drops a field named for protected data and marks the
+    entry withheld; no scope withholds a phone number in the middle of a
+    line (#1205 review of O). The same committee without them still has its
+    sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [_committee()])
+    assert placements == [[_COMMITTEE_PROSE]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
+                                     [protect(_committee(), _COMMITTEE_PROSE)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
 # ------------------------------------------- date-led sibling records (#983)
 # Stage 2 joins an entry's paragraphs with tabs, so three society records that
 # each open with their own date reach stage 6 as one line. Stage 4 extracted
