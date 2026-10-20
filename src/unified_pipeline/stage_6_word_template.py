@@ -93,9 +93,11 @@ from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
+    DeclinedList,
     fan_out_multi_record_entries,
     record_scope,
     record_text,
+    unrendered_list_warnings,
 )
 
 # Every name below is re-exported from this module by being imported here: it is
@@ -1635,6 +1637,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
 
+        # Record lists fan-out kept whole that `_validate_output` checks
+        # against the rendered document (#1187). Set by
+        # `_group_entries_by_code`, declared here for typing/reuse.
+        self._declined_lists: list[DeclinedList] = []
+
         # Grant entries `_create_grant_table` declined as too sparse (#839),
         # and mentee entries named only by an award title (#1702) --
         # appended to `unmapped_entries` at `generate()`'s Appendix fill so
@@ -1989,9 +1996,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         precollegiate_moved: list[object] = []
         bare_mentees_resolved: list[tuple[object, str]] = []
         leadership_moved: list[tuple[object, tuple[int, int]]] = []
+        self._declined_lists = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
-            records_key=STAGE4_RECORDS_KEY)
+            records_key=STAGE4_RECORDS_KEY, declined=self._declined_lists)
         mentee_siblings = _mentee_sibling_codes(entries)
         coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
@@ -4980,7 +4988,22 @@ Now analyze the text above:"""
                     "evidence": [],
                 })
 
+        # Check 4: a record list fan-out kept whole, a record of which is not
+        # in the document (#1187, stage6/fan_out.py `DeclinedList`).
+        if self._declined_lists:
+            issues.extend(unrendered_list_warnings(
+                self._declined_lists, self._rendered_output_lines(include_tracked_insertions=True),
+                self._declined_list_table_rows()))
+
         return issues
+
+    def _declined_list_table_rows(self) -> list[list[str]]:
+        """Each table's rows' text, nested tables included, for Check 4: a
+        grant or mentee block writes one record one field per row, so no one
+        line holds it (#1187: web26's M2A sub-awards)."""
+        return [[' '.join(t.text or '' for t in row.iter(qn('w:t')))
+                 for row in table._tbl.iterchildren(qn('w:tr'))]
+                for table in self.doc.tables]
 
 
 def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = True,

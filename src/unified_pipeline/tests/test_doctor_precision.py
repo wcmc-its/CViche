@@ -238,6 +238,9 @@ def test_stage6_shape_names_each_emitter_message():
         "output": "fanout_list_not_split",
         "1 B1 entry: `degrees` was split into separate rows, but the entry's text names a year "
         "no record holds; a record may be missing from the output": "fanout_year_not_listed",
+        "1 K1 entry: `stage4_records` holds records that were not split into separate rows "
+        "(stage 4's records were kept whole and only the last one renders); a record may be "
+        "missing from the output": "fanout_list_not_split",
         "2 geographic scope classification(s) failed and defaulted to National; the Regional/"
         "National/International split may be wrong": "geo_scope_failed",
         "1 appendix entry reclassification(s) failed or came back incomplete; those entries "
