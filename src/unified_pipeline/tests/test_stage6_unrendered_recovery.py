@@ -2345,6 +2345,7 @@ def test_an_honor_whose_award_the_pii_pass_withheld_gets_no_sub_point():
     withheld = _honor()
     del withheld["extracted_fields"]["award_name"]
     withheld["_pii_dropped_fields"] = ["award_name"]
+    withheld["_pii_withheld"] = True  # the pass sets both
     gen = _render_honors([other, withheld], supplementary_subpoints=True)
 
     assert "Young Investigator Award" not in "".join(_texts_of(gen.doc.element.body))
@@ -2595,6 +2596,7 @@ def test_a_mentee_whose_field_the_pii_pass_withheld_gets_no_sub_point():
     own table or the postdoc's."""
     withheld = _mentee()
     withheld["_pii_dropped_fields"] = ["site_position"]
+    withheld["_pii_withheld"] = True  # the pass sets both
     gen = _render_mentoring({"N3B": [_other_postdoc(), withheld]}, supplementary_subpoints=True)
 
     assert "Ana Li" in "".join(_texts_of(gen.doc.element.body))
@@ -2979,6 +2981,7 @@ def test_a_degree_whose_field_the_pii_pass_withheld_gets_no_sub_point():
     still describes what was withheld, so none of it is offered."""
     withheld = _degree()
     withheld["_pii_dropped_fields"] = ["advisor"]
+    withheld["_pii_withheld"] = True  # the pass sets both
     gen = _render_education([_doctorate(), withheld], supplementary_subpoints=True)
 
     assert any(_row_text(tr).startswith("M.S.,") for tr in gen.doc.element.body.iter(qn("w:tr")))
@@ -3221,9 +3224,10 @@ def test_leadership_prose_already_in_its_row_is_not_offered_again(entry):
 
 
 def test_every_leadership_row_field_the_pass_counts_is_printed_in_the_role_row():
-    """`supplementary._LEADERSHIP_ROW_FIELDS` restates the leadership writer's
-    fallbacks as literals (`_RENDERED_FIELDS` marks schema fields only): each
-    one, alone on an entry with the schema's field empty, reaches the row."""
+    """`supplementary._LEADERSHIP_ROW_FIELDS`, the off-schema names among the
+    fields the leadership writer reads its cells from (`_RENDERED_FIELDS`
+    marks schema fields only): each one, alone on an entry with the schema's
+    field empty, reaches the row."""
     from unified_pipeline.stage6 import supplementary
 
     for field in supplementary._LEADERSHIP_ROW_FIELDS:
@@ -3231,6 +3235,25 @@ def test_every_leadership_row_field_the_pass_counts_is_printed_in_the_role_row()
         entry = _role(title=None, institution=None, prose="", **{field: marker})
         gen = _render_leadership([entry], supplementary_subpoints=True)
         assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
+
+
+def test_every_field_the_role_row_prints_is_one_the_pass_counts():
+    """The other direction: a field the row prints that `_value_tokens` does
+    not count would offer a fragment restating the row. The names are the
+    role and organization fields of the codes an entry is rerouted into O
+    from (D1-D3, L3, P, Q1, Q2), each alone on an entry."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    counted = _RENDERED_FIELDS["O"] | set(supplementary._LEADERSHIP_ROW_FIELDS)
+    names = set().union(*(_RENDERED_FIELDS[code] for code in ("D1", "D2", "D3", "L3", "P", "Q1", "Q2")))
+    for field in sorted(names - {"start_date", "end_date"}):
+        marker = f"Zq{field}Z"
+        entry = {"element_idx_start": 57, "taxonomy_code": "O", "text": "2008-2012",
+                 "extracted_fields": {field: marker, "start_date": "2008", "end_date": "2012"}}
+        gen = _render_leadership([entry], supplementary_subpoints=True)
+        printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+        assert not printed or field in counted, field
 
 
 @pytest.mark.parametrize("field", ["role", "position", "organization"])
@@ -3406,6 +3429,7 @@ def test_a_leadership_role_whose_field_the_pii_pass_withheld_gets_no_sub_point()
     still describes what was withheld, so none of it is offered."""
     withheld = _role()
     withheld["_pii_dropped_fields"] = ["division_department"]
+    withheld["_pii_withheld"] = True  # the pass sets both
     gen = _render_leadership([_later_role(), withheld], supplementary_subpoints=True)
 
     assert any(_row_text(tr) == _ROLE_ROW for tr in gen.doc.element.body.iter(qn("w:tr")))
@@ -3482,6 +3506,89 @@ def test_the_doctor_matches_a_leadership_sub_point_to_its_own_entry_only(tmp_pat
     subpoints = subpoint_text(docx_subpoint_lines(Document(out)), subpoint_placements(sidecar))
     assert offered_as_subpoint(_ROLE_PROSE, subpoints, element_idx=57)
     assert not offered_as_subpoint(_ROLE_PROSE, subpoints, element_idx=55)
+
+
+def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P"):
+    """Through `run_stage6`, so the PII pass and the date-led split (#983)
+    run as in a real render: the document and its sidecar's placements."""
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    input_path = tmp_path / f"{uid}_fields.json"
+    input_path.write_text(json.dumps({"document_uid": uid,
+                                      "cv_owner": {"full_name": "Quenby Marblegate"},
+                                      "entries": entries}))
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+    sidecar = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
+    return Document(out), [p["paragraphs"] for p in sidecar[SUBPOINT_PLACEMENTS_KEY]]
+
+
+_SPOUSE = "Zelphine Qorvath"
+_HOME_PHONE = "212-555-0147"
+
+
+def _naming_the_spouse(entry, prose):
+    """The spouse under a field named for it, and in the prose with no label."""
+    entry["extracted_fields"]["spouse_name"] = _SPOUSE
+    entry["text"] = entry["text"].replace(prose, f"{prose}, with my spouse {_SPOUSE}")
+    return entry
+
+
+def _with_a_home_phone(entry, prose):
+    """A home phone number in the middle of the prose's line."""
+    entry["text"] = entry["text"].replace(prose, f"{prose}. Home phone: {_HOME_PHONE}")
+    return entry
+
+
+@pytest.mark.parametrize("make, prose", [(_role, _ROLE_PROSE), (_honor, _HONOR_PROSE)],
+                         ids=["O", "H"])
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, make, prose, protect, value):
+    """#1205 review, probes P7 and P9. The PII pass drops a field named for
+    protected data and marks the entry withheld, but lists no
+    `_pii_dropped_fields`; and no scope withholds a phone number in the
+    middle of a line. Both printed in the entry's sub-point on Reject All,
+    while the Appendix said the spouse was withheld. The same entry without
+    them still has its sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [make()])
+    assert placements == [[prose]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch, [protect(make(), prose)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+_CHAIR_PROSE = ("Established the departmental mentoring scheme and doubled faculty retention "
+                "across affiliated hospitals")
+
+
+def test_a_line_of_two_dated_roles_offers_neither_ones_prose(tmp_path, monkeypatch):
+    """#1205 review, probe P12. One source line holds two roles, each opening
+    with its dates and followed by its prose, and stage 4 returned the second.
+    Both prose lines went under the second role's row on Reject All, the
+    first role's achievement with them. Which role a line is about cannot be
+    told, so neither is offered; the second role alone on its line still is."""
+    first = f"2001-2004 Chair, Example Admissions Committee, {_ROLE_INSTITUTION}"
+    second = f"2005-2010 {_ROLE_TITLE}, {_ROLE_INSTITUTION}"
+
+    def role(text):
+        return {"element_idx_start": 90, "taxonomy_code": "O", "text": text,
+                "extracted_fields": {"leadership_role": _ROLE_TITLE, "institution": _ROLE_INSTITUTION,
+                                     "start_date": "2005", "end_date": "2010"}}
+
+    _doc, placements = _stage6_render(tmp_path / "one", monkeypatch, [role(f"{second}\t{_ROLE_PROSE}")])
+    assert placements == [[_ROLE_PROSE]]
+
+    doc, placements = _stage6_render(
+        tmp_path / "two", monkeypatch, [role(f"{first}\t{_CHAIR_PROSE}\t{second}\t{_ROLE_PROSE}")])
+    assert placements == []
+    deleted = "".join(t.text or "" for t in doc.element.body.iter(qn("w:delText")))
+    assert _CHAIR_PROSE not in deleted and _ROLE_PROSE not in deleted
 
 
 # ------------------------------------------- date-led sibling records (#983)

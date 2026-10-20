@@ -35,6 +35,7 @@ from ..formatting import (
 from ..normalization import _committee_cell_text
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import LEADERSHIP_INSTITUTION_FIELDS, LEADERSHIP_ROLE_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,11 @@ _DIVISION_WORD_RE = re.compile(r"[^\W_]+")
 # Cardiology" is already said by "Chief, Cardiology Division". The same set
 # sibling P uses to fold its institution into a name cell (#985).
 _DIVISION_STOPWORDS = frozenset({'of', 'the', 'for', 'and', 'at', 'in'})
+
+
+def _first_held(fields: dict, keys: tuple[str, ...]) -> object:
+    """The value of the first of `keys` that holds anything in `fields`, else ''."""
+    return next((fields[key] for key in keys if fields.get(key)), '')
 
 
 def _division_words(text: str) -> set[str]:
@@ -176,11 +182,11 @@ class LeadershipSection:
             taxonomy_code = entry.get('taxonomy_code', 'O')
             original_text = entry.get('text', '')
 
-            # Check for leadership_role field (O code schema) as well as generic role/position
-            role = fields.get('leadership_role') or fields.get('role') or fields.get('position') or ''
-            institution = _with_division(
-                fields.get('institution') or fields.get('organization') or '',
-                fields.get('division_department'), role)
+            # The schema's leadership_role, then stage 4's off-schema names; the
+            # sub-point pass counts the same fields as the row's (#1205).
+            role = _first_held(fields, LEADERSHIP_ROLE_FIELDS)
+            institution = _with_division(_first_held(fields, LEADERSHIP_INSTITUTION_FIELDS),
+                                         fields.get('division_department'), role)
             start_date = fields.get('start_date') or ''
             end_date = fields.get('end_date') or ''
             dates = with_extra_date_spans(

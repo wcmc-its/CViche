@@ -319,6 +319,7 @@ def test_plan_reads_the_last_record_of_a_paired_line_from_its_own_segment():
     first_line, last_line = f"Ana Li, Postdoctoral Associate, {PROSE}", "Casey Sample, Postdoc"
     first = _record_of_line("Ana Li", first_line, 0, 2)
     first["_pii_dropped_fields"] = ["site_position"]
+    first["_pii_withheld"] = True  # the pass sets both
     lines = _mentee_tables("Ana Li", "Casey Sample")
     spans = {"N3B": sp.SectionSpan(0, None)}
     last = _record_of_line("Casey Sample", f"{first_line}\t{last_line}", 1, 2)
@@ -536,6 +537,79 @@ def test_a_leadership_role_reads_its_prose_from_its_own_line(segments, index, re
     entry = _degree_record("\t".join(segments), index, 2)
     entry["taxonomy_code"] = "O"
     assert sp._prose_text("O", entry, {}) == read
+
+
+_CHAIR = "Chair, Example Admissions Committee"
+
+
+@pytest.mark.parametrize("text, records", [
+    # A bare date column is a neighbouring part's date, not a record.
+    (f"2008-2012\t{_ROLE}, Norvale University\t{PROSE}", False),
+    (f"2005-2010 {_ROLE}, Norvale University\t{PROSE}", False),
+    (f"2001-2004 {_CHAIR}, Norvale University\t{OTHER_PROSE}\n"
+     f"2005-2010 {_ROLE}, Norvale University\t{PROSE}", True),
+    (f"2001 MS, Example Marine Studies\t{OTHER_PROSE}\t2005 PhD, Example Marine Studies", True),
+], ids=["date_column", "one_record", "two_roles", "two_degrees"])
+def test_a_line_holds_dated_records_when_two_parts_open_with_their_dates(text, records):
+    assert sp._holds_dated_records(text) is records
+
+
+@pytest.mark.parametrize("code, first, second, fields, row", [
+    # Two roles on one line, each opening with its dates and followed by its
+    # prose; stage 4 returned the second (#1205 review, probe P12).
+    ("O", f"2001-2004 {_CHAIR}, Norvale University", f"2005-2010 {_ROLE}, Norvale University",
+     {"leadership_role": _ROLE, "institution": "Norvale University", "start_date": "2005",
+      "end_date": "2010"},
+     [_ROLE, "Norvale University", "2005-2010"]),
+    # Two degrees, the same way.
+    ("B1", "2001 MS, Example Marine Studies, Norvale University",
+     "2005 PhD, Example Marine Studies, Norvale University",
+     {"degree": "PhD", "discipline": "Example Marine Studies", "institution": "Norvale University",
+      "year": "2005"},
+     ["PhD, Example Marine Studies", "Norvale University", "2005"]),
+], ids=["O", "B1"])
+def test_plan_offers_no_prose_from_a_line_of_two_dated_records(code, first, second, fields, row):
+    # Which record a prose line is about cannot be told: the first record's
+    # would go under the second's row, with the second's own.
+    table, lines = _role_rows(row)
+    spans = {code: sp.SectionSpan(0, None)}
+
+    def plan(text):
+        return sp.plan_subpoints({code: [_entry(text, code=code, **fields)]}, _haystack(), lines,
+                                 spans, rows_written=lambda e: [table.rows[0]._tr])
+
+    (planned,) = plan(f"{second}\t{PROSE}")
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+    two_records = f"{first}\t{OTHER_PROSE}\t{second}\t{PROSE}"
+    assert sp._own_record_line(_entry(two_records, code=code, **fields)) == ""
+    assert plan(two_records) == []
+
+
+_SPOUSE = "Zelphine Qorvath"
+
+
+@pytest.mark.parametrize("protect", [
+    # The PII pass dropped a field named for protected data ("spouse_name"):
+    # it marks the entry withheld and lists no `_pii_dropped_fields`, and the
+    # prose names the spouse with no label (#1205 review, probe P7).
+    lambda e: e.update(_pii_withheld=True, text=e["text"] + f", with my spouse {_SPOUSE}"),
+    # Prose the full Personal Data / Appendix scope withholds, which a routed
+    # code's scope leaves in the text.
+    lambda e: e.update(text=e["text"] + f"\tMarried ({_SPOUSE}), co-founded the outreach clinics"),
+    # A phone number in the middle of a line, which no scope withholds (probe P9).
+    lambda e: e.update(text=e["text"] + ". Home phone: 212-555-0147"),
+], ids=["withheld", "full_scope", "home_phone"])
+def test_plan_offers_no_prose_of_an_entry_holding_protected_data(protect):
+    table, lines = _role_rows([_ROLE, "Norvale University", "2008-2012"])
+    spans = {"O": sp.SectionSpan(0, None)}
+    entry = _leadership_role()
+    (planned,) = sp.plan_subpoints({"O": [entry]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.paragraphs == (PROSE,)
+
+    protect(entry)
+    assert sp.plan_subpoints({"O": [entry]}, _haystack(), lines, spans,
+                             rows_written=lambda e: [table.rows[0]._tr]) == []
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():

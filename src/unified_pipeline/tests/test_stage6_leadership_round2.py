@@ -654,3 +654,31 @@ class TestEveryRowIsRecordedAgainstItsEntry:
         assert all(any(element is row for row in written) for element in recorded)
         receipt, = gen._row_receipts.receipts({"leadership": [entry, other]})
         assert (receipt.given, receipt.written, receipt.lost) == (2, 2, ())
+
+
+class TestTheSchemaFieldWinsOverItsFallbacks:
+    """#1205 review: the role cell reads `leadership_role`, then stage 4's
+    off-schema `role`, then `position`; the institution cell reads
+    `institution`, then `organization` (`supplementary.LEADERSHIP_ROLE_FIELDS`,
+    `LEADERSHIP_INSTITUTION_FIELDS`). The first that holds text wins: an
+    empty one is passed over."""
+
+    @pytest.mark.parametrize("fields, role", [
+        ({"leadership_role": "Program Director", "role": "Zorblax Chair", "position": "Dean"},
+         "Program Director"),
+        ({"leadership_role": "", "role": "Zorblax Chair", "position": "Dean"}, "Zorblax Chair"),
+        ({"role": "", "position": "Dean"}, "Dean"),
+    ])
+    def test_the_role_cell_reads_the_first_role_field_holding_text(self, fields, role):
+        rows = _o_rows(_o_entry(institution="Quuxville General Hospital", **fields))
+        assert rows == [(role, "Quuxville General Hospital", _O_DATES)]
+
+    @pytest.mark.parametrize("fields, institution", [
+        ({"institution": "Quuxville General Hospital", "organization": "Frobnitz Society"},
+         "Quuxville General Hospital"),
+        ({"institution": "", "organization": "Frobnitz Society"}, "Frobnitz Society"),
+    ])
+    def test_the_institution_cell_reads_the_first_institution_field_holding_text(self, fields,
+                                                                                 institution):
+        rows = _o_rows(_o_entry(leadership_role="Program Director", **fields))
+        assert rows == [("Program Director", institution, _O_DATES)]
