@@ -89,15 +89,16 @@ from unified_pipeline.core.template_boilerplate import (
 from .dedup import _is_sibling_of
 from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
 from .formatting import (
-    DATE_SPAN_SEPARATOR,
-    format_date_list,
-    further_date_spans,
+    PRESENTATION_DATE_FIELDS,
+    PRESENTATION_END_DATE_FIELD,
     plain_entry_left_twips,
     plain_entry_level,
+    presentation_date_spans,
 )
 from .normalization import _pii_fragments, _squash
 from .normalization.pii import _BARE_PHONE_SHAPE
 from .parsing import _looks_like_multiple_records, _refold_shattered
+from .parsing.dates import YEAR
 from .parsing.text import (
     _RECORD_DATE_MONTH,
     _RECORD_YEAR,
@@ -353,14 +354,13 @@ _OWN_COMMITTEE_MIN_SHARE = 0.5
 #: `location`, then `venue`), the meeting it folds into the venue (R's own,
 #: then S8's, for an abstract a hierarchy mismatch moved here, #1570), and
 #: the talk's own date (the first that holds one, which an `end_date` makes
-#: a range). The writer reads them from here, so the row and `_value_tokens`
-#: cannot drift apart. Its `role` is a schema field, which `_RENDERED_FIELDS`
-#: lists.
+#: a range). The writer reads the first three from here, and its Dates cell
+#: from `formatting` (`presentation_date_spans`), which defines the date
+#: fields, so the row and `_value_tokens` cannot drift apart. Its `role` is a
+#: schema field, which `_RENDERED_FIELDS` lists.
 PRESENTATION_TITLE_FIELDS = ('title', 'presentation_title')
 PRESENTATION_VENUE_FIELDS = ('institution', 'location', 'venue')
 PRESENTATION_EVENT_FIELDS = ('event_name', 'conference_name')
-PRESENTATION_DATE_FIELDS = ('year', 'date', 'start_date')
-PRESENTATION_END_DATE_FIELD = 'end_date'
 #: The off-schema ones among them: `_value_tokens` adds them for R.
 _PRESENTATION_ROW_FIELDS = tuple(
     name for name in (*PRESENTATION_TITLE_FIELDS, *PRESENTATION_VENUE_FIELDS,
@@ -373,6 +373,10 @@ _PRESENTATION_ROW_FIELDS = tuple(
 #: ("2003 <venue>: <title>, <city> 2003 <venue>: <title>") reaches stage 6 as
 #: one part, which stage 2's tabs never split.
 _BEFORE_A_DATE_RE = re.compile(rf'\s+(?={_RECORD_DATE_MONTH}{_RECORD_YEAR})')
+#: A part ending in its year in brackets ("<title>, <venue> (2014)."), which
+#: `_line_carries_record_date` does not read: it reads a year that ends the
+#: part bare, and a range in brackets anywhere.
+_BRACKETED_YEAR_END_RE = re.compile(rf'\(\s*{YEAR}\s*\)[.,;\s]*$')
 #: A title as a line quotes it, in curly or straight quotes.
 _QUOTED_RE = re.compile(r'“([^”]+)”|"([^"]+)"')
 #: A quoted phrase of at least this many distinctive words can be a title;
@@ -795,26 +799,24 @@ def _own_committee_row(entry: Mapping, candidates: list[AnchorCandidate],
 def _talk_records(line: str) -> int:
     """How many talks the dates of a talk's line mark: its tab, line and pipe
     parts the writer-side #660 test reads as dated
-    (`_line_carries_record_date`, a list of talks each ending in its date),
-    or the pieces a date opens (`_opens_dated_record`, read before each date
-    of a part, `_BEFORE_A_DATE_RE`), whichever is more."""
+    (`_line_carries_record_date`, a list of talks each ending in its date)
+    or that end in a bracketed year (`_BRACKETED_YEAR_END_RE`), or the
+    pieces a date opens (`_opens_dated_record`, read before each date of a
+    part, `_BEFORE_A_DATE_RE`), whichever is more."""
     parts = _split_fragments(line)
-    dated_parts = sum(map(_line_carries_record_date, parts))
+    dated_parts = sum(bool(_line_carries_record_date(part) or _BRACKETED_YEAR_END_RE.search(part))
+                      for part in parts)
     opened = sum(_opens_dated_record(piece) for part in parts
                  for piece in _BEFORE_A_DATE_RE.split(part))
     return max(dated_parts, opened)
 
 
 def _talk_dates(fields: Mapping, code: str) -> int:
-    """How many dates the talk's Dates cell prints, as the presentations
-    writer builds it (`_talk_date_cell`): the talk's own date
-    (`PRESENTATION_DATE_FIELDS`), or each of a list of them under one key
-    (`format_date_list`), and each further span stage 4 kept
-    (`further_date_spans`)."""
-    own = next((fields[name] for name in PRESENTATION_DATE_FIELDS if fields.get(name)), None)
-    listed = format_date_list(own, code) if own is not None else ''
-    own_dates = len(listed.split(DATE_SPAN_SEPARATOR)) if listed else int(own is not None)
-    return own_dates + len(further_date_spans(fields, code))
+    """How many dates the talk's Dates cell prints: those the presentations
+    writer joins into it (`presentation_date_spans`), read from the one
+    builder, so a date the cell drops (a further span repeating the talk's
+    own, a "None" string) is not counted."""
+    return len(presentation_date_spans(fields, code))
 
 
 def _quotes_another_talk(line: str, fields: Mapping) -> bool:
@@ -860,8 +862,12 @@ def _own_talk_line(entry: Mapping, code: str) -> str:
     - it quotes another title than the talk's own (`_quotes_another_talk`);
     - stage 4 listed several talks under one entry (`_lists_talks`).
 
-    A talk the line names with no date and no quotes ("<title A>, <venue>.
-    <title B>, <venue>, 2012") is not seen."""
+    Not seen: a talk the line names with no date and no quotes ("<title A>,
+    <venue>. <title B>, <venue>, 2012"), and one whose date neither ends nor
+    opens a part: inside it ("<title A> (2014), <venue>"), or in a part
+    joined by semicolons ("<title A>, 2014; <title B>, 2016"). Read at its
+    semicolons, a talk whose line opens with its year and ends in its full
+    date ("2016 <title>; <venue>, May 2016") would read as two."""
     own = _own_segment(entry)
     fields = entry.get('extracted_fields')
     fields = fields if isinstance(fields, Mapping) else {}

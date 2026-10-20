@@ -917,6 +917,7 @@ from unified_pipeline.stage6.formatting import (  # noqa: E402
     extra_date_spans,
     format_date_list,
     further_date_spans,
+    presentation_date_spans,
     with_extra_date_spans,
 )
 
@@ -1255,6 +1256,24 @@ def test_format_date_list_formats_each_date_of_a_list(value, expected):
     {"start_date": "2001", "end_date": "2003"}])
 def test_format_date_list_is_empty_for_anything_but_a_list_of_dates(value):
     assert format_date_list(value, "R") == ""
+
+
+@pytest.mark.parametrize("fields, spans", [
+    ({}, []),
+    ({"date": "2016"}, ["2016"]),
+    # The first date field holding one is the talk's; "None" is no date.
+    ({"year": "None", "date": "2016-03-01", "start_date": "2010"}, ["2016"]),
+    # A list under one field is each of its dates.
+    ({"date": "2014; 2016"}, ["2014", "2016"]),
+    # An end date makes it a range.
+    ({"date": "2006", "end_date": "present"}, ["2006-Present"]),
+    # Further spans follow it, less one that repeats it.
+    ({"date": "2016", "additional_dates": ["2014", "2016"]}, ["2016", "2014"]),
+    # With no date of its own, its further spans are the cell (X6 VPMMFM 531).
+    ({"year": "None", "additional_dates": ["2014", "2016"]}, ["2014", "2016"]),
+], ids=["none", "one", "first_field", "list", "range", "further", "spans_only"])
+def test_presentation_date_spans_are_the_dates_a_talks_cell_prints(fields, spans):
+    assert presentation_date_spans(fields, "R") == spans
 
 
 # --- #1342: a season after the year, and a year start with a month end -------

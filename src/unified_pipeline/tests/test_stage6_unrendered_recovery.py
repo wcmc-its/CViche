@@ -4782,7 +4782,16 @@ def _talks_each_ending_in_its_year():
     return entry
 
 
-@pytest.mark.parametrize("make", [_talks_in_one_paragraph, _talks_each_ending_in_its_year])
+def _talks_each_ending_in_its_bracketed_year():
+    """The same, each year in brackets, which ends no part for the #660 test."""
+    entry = _talk(prose=None)
+    entry["text"] = (f"{_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE} (2016)\t{_OTHER_TALK} (2014)"
+                     f"\t{_TALK_PROSE}")
+    return entry
+
+
+@pytest.mark.parametrize("make", [_talks_in_one_paragraph, _talks_each_ending_in_its_year,
+                                  _talks_each_ending_in_its_bracketed_year])
 @pytest.mark.parametrize("flag", [True, False])
 def test_a_line_of_several_dated_talks_offers_none_and_its_records_are_recovered(make, flag):
     """#1205 comment 6275741663: the #221 recovery reads every sub-point
@@ -4822,13 +4831,22 @@ def test_one_talk_given_on_two_dates_is_one_record_and_offers_its_prose(dates):
     assert _deleted_texts(gen) == _TALK_PROSE
 
 
-def test_the_same_line_with_one_date_kept_is_two_talks_and_offers_none():
+@pytest.mark.parametrize("dates", [
+    {},
+    # A further span repeating the talk's own date, which the cell drops.
+    {"additional_dates": ["2016"]},
+    # Its one date only under a further span, the string "None" its own.
+    {"date": None, "year": "None", "additional_dates": ["2016"]},
+], ids=["one_date", "span_repeats_its_date", "none_string"])
+def test_the_same_line_with_one_date_kept_is_two_talks_and_offers_none(dates):
     """With one date kept, the row prints one occasion: the other dated part
     is a talk the row does not print."""
-    entry = _talk(prose=None)
+    entry = _talk(prose=None, **dates)
     entry["text"] = (f"2014 {_TALK_TITLE}, {_TALK_EVENT}, Kestrel Institute\t"
                      f"2016 {_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE}\t{_TALK_PROSE}")
     gen = _render_talks([entry], supplementary_subpoints=True)
+    (row,) = gen._row_receipts.elements_for(entry)
+    assert _row_texts_of(row)[-1] == "2016"
     assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
 
 

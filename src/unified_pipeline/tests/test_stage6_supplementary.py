@@ -942,6 +942,7 @@ def test_a_talk_rows_fallback_fields_count_as_its_rendered_values(field):
 
 def test_the_talk_row_fields_are_the_writers_cells_and_their_off_schema_names():
     # The writer's precedence per cell, and the names the schema does not define.
+    from unified_pipeline.stage6 import formatting
     from unified_pipeline.stage6.sections import presentations
 
     assert sp.PRESENTATION_TITLE_FIELDS == ("title", "presentation_title")
@@ -952,7 +953,9 @@ def test_the_talk_row_fields_are_the_writers_cells_and_their_off_schema_names():
                                            "conference_name", "year", "start_date", "end_date")
     assert presentations._TALK_DATE_KEYS is sp.PRESENTATION_DATE_FIELDS
     assert presentations._TALK_EVENT_KEYS is sp.PRESENTATION_EVENT_FIELDS
-    assert presentations._TALK_END_DATE_KEY is sp.PRESENTATION_END_DATE_FIELD
+    # The Dates cell's fields are the ones its builder reads.
+    assert sp.PRESENTATION_DATE_FIELDS is formatting.PRESENTATION_DATE_FIELDS
+    assert sp.PRESENTATION_END_DATE_FIELD is formatting.PRESENTATION_END_DATE_FIELD
 
 
 @pytest.mark.parametrize("segments, index, read", [
@@ -985,8 +988,10 @@ _OTHER_TALK = "Estuary Sediment Transport in Tidal Marshes, Kestrel Institute"
     (f"2014 {_OTHER_TALK}: {OTHER_PROSE} 2016 {_TALK}, Norvale University. {PROSE}", False),
     # The same with a month before each year.
     (f"May 2014 {_OTHER_TALK}. {OTHER_PROSE} March 2016 {_TALK}. {PROSE}", False),
+    # Each ending in its year in brackets.
+    (f"{_OTHER_TALK}, Osprey Bay (2014)\t{_TALK}, Norvale University (2016).\t{PROSE}", False),
 ], ids=["one_talk", "year_then_date", "trailing_years", "leading_years", "one_paragraph",
-        "month_years"])
+        "month_years", "bracketed_years"])
 def test_a_talk_line_holding_several_dated_talks_offers_none(text, own):
     """Which talk a prose line is about cannot be told: the other's text
     would be offered as the extracted one's prose, under its row."""
@@ -1023,14 +1028,39 @@ def test_one_talk_given_on_several_dates_is_one_record(dates, own):
     assert sp._own_talk_line(entry, "R") == (text if own is True else "")
 
 
-def test_a_talks_dates_are_counted_as_its_dates_cell_prints_them():
-    assert sp._talk_dates({}, "R") == 0
-    assert sp._talk_dates({"date": "2016"}, "R") == 1
-    assert sp._talk_dates({"year": "2016", "date": "2010"}, "R") == 1
-    assert sp._talk_dates({"date": "2014; 2016"}, "R") == 2
+@pytest.mark.parametrize("fields, dates", [
+    ({}, 0),
+    ({"date": "2016"}, 1),
+    ({"year": "2016", "date": "2010"}, 1),
+    ({"date": "2014; 2016"}, 2),
     # A list repeating one year prints it once.
-    assert sp._talk_dates({"date": "2016-03-01; 2016-05-02"}, "R") == 1
-    assert sp._talk_dates({"start_date": "2016", "additional_dates": ["2014", "2018"]}, "R") == 3
+    ({"date": "2016-03-01; 2016-05-02"}, 1),
+    ({"start_date": "2016", "additional_dates": ["2014", "2018"]}, 3),
+    # A further span repeating the talk's own date is not printed again.
+    ({"date": "2016", "additional_dates": ["2016"]}, 1),
+    # The string "None" is no date.
+    ({"year": "None", "additional_dates": ["2016"]}, 1),
+    ({"year": "None"}, 0),
+])
+def test_a_talks_dates_are_counted_as_its_dates_cell_prints_them(fields, dates):
+    from unified_pipeline.stage6.sections import presentations
+
+    assert sp._talk_dates(fields, "R") == dates
+    cell = presentations._talk_date_cell(fields)
+    assert (len(cell.split(", ")) if cell else 0) == dates
+
+
+@pytest.mark.parametrize("dates", [
+    {"date": "2016", "additional_dates": ["2016"]},
+    {"year": "None", "date": None, "additional_dates": ["2016"]},
+], ids=["span_repeats_its_date", "none_string"])
+def test_a_date_its_dates_cell_does_not_print_marks_no_talk_of_its_own(dates):
+    # The cell prints one date, so the other dated talk is not this one.
+    text = "\t".join([f"{_OTHER_TALK}, 2014", f"{_TALK}, Norvale University, 2016", PROSE])
+    entry = _talk(text, **dates)
+    entry["extracted_fields"] = {k: v for k, v in entry["extracted_fields"].items() if v is not None}
+    assert sp._own_talk_line(entry, "R") == ""
+    assert _plan_talk(entry) == []
 
 
 @pytest.mark.parametrize("line, records", [
@@ -1046,6 +1076,13 @@ def test_a_talks_dates_are_counted_as_its_dates_cell_prints_them():
     ("11/2014 Example lecture, Kestrel Institute 1/2016 Example seminar", 2),
     # A range opens one record, whatever its two years.
     ("2010 - 2012 Example lecture series", 1),
+    # A year in brackets ending a part, before a full stop or not; a range in
+    # brackets, anywhere.
+    ("Example lecture, Norvale University (2016)", 1),
+    ("Example lecture, Kestrel Institute (2014)\tExample seminar, Norvale University (2016).", 2),
+    ("Example lecture series (2010-2012)\tExample seminar, 2016", 2),
+    # A bracketed year inside a part does not end it.
+    ("Example lecture (2014), Kestrel Institute\tExample seminar, 2016", 1),
 ])
 def test_a_talk_lines_dates_mark_its_records(line, records):
     assert sp._talk_records(line) == records

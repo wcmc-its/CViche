@@ -62,6 +62,7 @@ from unified_pipeline.stage6.sections.licensure import (
     _license_record,
     _normalize_licensure_entry,
 )
+from unified_pipeline.stage6.supplementary import PRESENTATION_TITLE_FIELDS
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
     TAXONOMY_TO_SECTION,
@@ -4890,8 +4891,9 @@ SESSION_TITLE_SHAPE_Q2 = "q2_quoted_title_unheld"
 SESSION_TITLE_SHAPE_R = "r_raw_line_title"
 #: The committee field a Q2 row's Name of Committee cell shows.
 _SESSION_COMMITTEE_FIELD = "committee_name"
-#: The stage-4 fields an R row's Title cell shows (`_fill_presentations`).
-_TALK_TITLE_FIELDS = ("title", "presentation_title")
+#: The stage-4 fields an R row's Title cell shows: the ones
+#: `_fill_presentations` reads it from.
+_TALK_TITLE_FIELDS = PRESENTATION_TITLE_FIELDS
 #: The R tables' header row, as the template writes it (Regional, National and
 #: International all share it).
 _TALK_TABLE_HEADER = ("title", "institution/location", "dates (yyyy)")
