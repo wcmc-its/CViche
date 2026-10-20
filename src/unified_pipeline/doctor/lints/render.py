@@ -1431,7 +1431,7 @@ def _recurring_field_labels(labels: list[str | None], keys: list[str]) -> list[s
     records = _field_records(labels)
     forms = [{labels[t]: keys[t] for t in record} for record in records]
     kept: list[str | None] = [None] * len(labels)
-    for record, form in zip(records, forms):
+    for record, form in zip(records, forms, strict=True):
         if any(other is not form and _same_form(form, other) for other in forms):
             for t in record:
                 kept[t] = labels[t]
