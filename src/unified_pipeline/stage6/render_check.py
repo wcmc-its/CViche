@@ -610,29 +610,72 @@ def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack
     """`_record_rendered` for a record line of an entry that holds its sibling
     rows (`record_siblings`), counted one output line per row (#1230).
 
-    `_record_rendered` lets any output line with `RENDER_TOKEN_OVERLAP` of the
-    line's letter tokens vouch for it, and ignores numbers. One committee in
-    two terms renders as one row, and that row then vouches for the other
-    term too. Here, past `_record_rendered`, the line must sit in the output
-    verbatim, or ONE output line must hold that overlap of its letter tokens
-    AND, against each sibling, a letter or number token the sibling lacks, so
-    a sibling's row cannot vouch for it. For the same row in another term,
-    that token is one of the line's own numbers. `line_token_sets` are the output
-    lines' letter tokens, for `_record_rendered`; `record_token_sets` are
-    `_record_tokens` of the output lines that may vouch here (the recovery
-    pass passes its uncut lines plus the lines it has recovered so far). A
-    line with no siblings gets `_record_rendered` unchanged.
+    `_record_rendered` lets an output line vouch for the line through one
+    verbatim piece (`record_pieces`) or `RENDER_TOKEN_OVERLAP` of one chunk's
+    letter tokens (`record_chunks`), and ignores numbers. One committee in two
+    terms renders as one row, and that row then vouches for the other term
+    too. Here a `_record_rendered` True is turned to False only when the
+    line is not in the output verbatim, no output line that vouches for it
+    the same way (a squashed `haystack` line holding one of its pieces, or a
+    `record_token_sets` line holding that overlap of one of its chunks) holds,
+    against each sibling, a letter or number token the sibling lacks
+    (`_holds_own_token`), and one of those vouching lines does hold a token
+    of a sibling's own: it is positively that sibling's row. For the same
+    row in another term, those tokens are the rows' own numbers. Measuring
+    the vouching as `_record_rendered` does keeps the verdict for a render
+    that writes only some cells of each row on its line ("Admissions
+    Committee | Member | 2010-2012"); a render that drops the numbers of
+    every term leaves no line positively a sibling's, and keeps it too.
+    `line_token_sets` are the output lines' letter tokens, for
+    `_record_rendered`; `record_token_sets` are `_record_tokens` of the
+    output lines that may vouch here (the recovery pass passes its uncut
+    lines plus the lines it has recovered so far). A line with no siblings
+    gets `_record_rendered` unchanged, and this never turns a False or None
+    into True.
     """
     rendered = _record_rendered(line, haystack, line_token_sets)
     if not rendered or not siblings or _squash(line) in haystack:
         return rendered
-    letters = set(_RENDER_TOKEN_RE.findall(_norm(line)))
-    if len(letters) < RENDER_TOKEN_MIN_COUNT:
-        return None
     tokens = _sibling_record_tokens(line)
-    return any(len(letters & out) / len(letters) >= RENDER_TOKEN_OVERLAP
-               and all((tokens - sibling) & out for sibling in siblings)
-               for out in record_token_sets)
+    own = [tokens - sibling for sibling in siblings]
+    pieces = record_pieces(line)
+    chunks = [chunk for chunk in (set(_RENDER_TOKEN_RE.findall(_norm(text)))
+                                  for text in record_chunks(line))
+              if len(chunk) >= RENDER_TOKEN_MIN_COUNT]
+    vouching = ([(out, True) for out in haystack.split("\x00")
+                 if any(piece in out for piece in pieces)]
+                + [(out, False) for out in record_token_sets
+                   if any(len(chunk & out) / len(chunk) >= RENDER_TOKEN_OVERLAP
+                          for chunk in chunks)])
+    if any(_holds_own_token(own, out, squashed) for out, squashed in vouching):
+        return True
+    # No vouching line is a sibling's row either (a render that dropped the
+    # years of every term): nothing tells the rows apart, keep the verdict.
+    return not any(_holds_own_token([sibling - tokens], out, squashed, whole=True)
+                   for sibling in siblings for out, squashed in vouching)
+
+
+_CENTURY_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+def _holds_own_token(own: list[set[str]], out: str | set[str], squashed: bool = False,
+                     whole: bool = False) -> bool:
+    """Whether output line `out` holds a token of each set in `own`: the
+    tokens a record line has and one of its siblings lacks, or the reverse
+    (#1230). `out` is
+    a `_squash`ed line when `squashed`, else its `_record_tokens`. A year
+    also counts by its last two digits standing alone ("2012" in "2010-12" or
+    "'10-'12"), so a render that shortens a range keeps `_record_rendered`'s
+    verdict; with `whole`, only the token itself counts, and in a squashed
+    line a number counts only standing alone."""
+    def held(token: str) -> bool:
+        short = None if whole or not _CENTURY_YEAR_RE.fullmatch(token) else token[2:]
+        if not squashed:
+            return token in out or short in out
+        if whole and token.isdigit():
+            return bool(re.search(rf"(?<!\d){token}(?!\d)", out))
+        return token in out or bool(short and re.search(rf"(?<!\d){short}(?!\d)", out))
+    return all(any(held(token) for token in distinct) for distinct in own)
 
 
 def _entry_pieces(text) -> list[str]:

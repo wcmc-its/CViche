@@ -2011,6 +2011,111 @@ def test_non_t_sibling_rows_sharing_a_month_name_are_still_told_apart():
     assert bullets == [rows[1].replace(" | ", " \u2014 ")]
 
 
+def _recovered_terms(rows, out):
+    """The bullets the recovery pass re-inserts for P `rows` with `out` on the
+    page, one paragraph per item."""
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for text in out:
+        gen.doc.add_paragraph(text)
+    gen._recover_unrendered_records({"P": [entry]})
+    return [t for t in _bulleted_texts(gen.doc.paragraphs) if "Committee" in t]
+
+
+def _one_committee_two_terms(place="Weill Cornell Medicine"):
+    return [f"Member | Admissions Committee | {place} | {term}"
+            for term in ("2010-2012", "2014-2016")]
+
+
+def test_non_t_two_terms_rendered_as_table_rows_without_the_place_are_kept():
+    """Both terms on the page in the committee table's form, the place left
+    out: each line holds half the row's words, so no line held the share of
+    the whole row, and both rows were re-inserted. The line holding the
+    row's committee cell and its own years vouches for it (#1230)."""
+    rows = _one_committee_two_terms()
+    assert not _recovered_terms(rows, [f"Admissions Committee | Member | {term}"
+                                       for term in ("2010-2012", "2014-2016")])
+    assert _recovered_terms(rows, ["Admissions Committee | Member | 2010-2012"]) == [
+        rows[1].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_two_terms_under_a_place_heading_are_kept():
+    """Both terms on the page under the place written once as a heading:
+    neither row is re-inserted (#1230)."""
+    rows = _one_committee_two_terms("Weill Cornell Medical College")
+    assert not _recovered_terms(rows, ["Weill Cornell Medical College",
+                                       "Member, Admissions Committee, 2010-2012",
+                                       "Member, Admissions Committee, 2014-2016"])
+
+
+def test_non_t_two_terms_with_the_years_dropped_are_kept():
+    """Both terms on the page without their years: no line is either term's
+    row, so nothing tells them apart and the verdict stands (#1230)."""
+    rows = _one_committee_two_terms()
+    assert not _recovered_terms(rows, ["Member, Admissions Committee, Weill Cornell Medicine"] * 2)
+
+
+@pytest.mark.parametrize("years, recovered", [
+    (("2010-12", "2014-16"), True),
+    (("'10-'12", "'14-'16"), False),
+])
+def test_non_t_two_terms_with_shortened_years_are_kept(years, recovered):
+    """Both terms on the page with each range's end written in two digits: a
+    year counts by its last two digits standing alone, so neither row is
+    re-inserted. With one term on the page, the other is recovered only when
+    the line spells a year of its sibling whole, as "2010-12" does; "'10-'12"
+    is no line positively the sibling's, and keeps the verdict (#1230)."""
+    rows = _one_committee_two_terms()
+    line = "Member, Admissions Committee, Weill Cornell Medicine, {}"
+    assert not _recovered_terms(rows, [line.format(y) for y in years])
+    assert _recovered_terms(rows, [line.format(years[0])]) == (
+        [rows[1].replace(" | ", " \u2014 ")] if recovered else [])
+
+
+@pytest.mark.parametrize("line", [
+    "Member, Admissions Committee, Example State Medical College, {}",
+    "Committee on Admissions, Member, Example State Med. College, {}",
+])
+def test_non_t_consecutive_terms_with_shortened_years_are_kept(line):
+    """Terms 2010-2012 and 2012-2014 on the page as "2010-12" and "2012-14",
+    with a verbatim cell or reworded: the second term's own year is on its
+    line only as "14", and the first term's line spells its sibling's 2010
+    whole, so without the two-digit form it was re-inserted (#1230)."""
+    rows = [f"Member | Admissions Committee | Example State Medical College | {term}"
+            for term in ("2010-2012", "2012-2014")]
+    assert not _recovered_terms(rows, [line.format(y) for y in ("2010-12", "2012-14")])
+
+
+def test_non_t_a_year_inside_another_number_does_not_tell_terms_apart():
+    """A missing term's year as two digits inside a longer number ("10014")
+    or its sibling's year inside one ("20101") is not that year (#1230)."""
+    rows = _one_committee_two_terms()
+    place = "Member, Admissions Committee, Weill Cornell Medicine, New York, NY 10014"
+    assert _recovered_terms(rows, [f"{place}, 2010-2012"]) == [rows[1].replace(" | ", " \u2014 ")]
+    room = "Member, Admissions Committee, Weill Cornell Medicine, room 20101"
+    assert not _recovered_terms(rows, [room, room])
+
+
+def test_non_t_a_line_sharing_one_cell_word_does_not_vouch_for_a_term():
+    """An unrelated line holding the missing term's years and one word of its
+    row ("Member") does not vouch for it: a chunk too short for the overlap
+    test is skipped, as `_record_rendered` skips it (#1230)."""
+    rows = _one_committee_two_terms()
+    assert _recovered_terms(rows, ["Member, Admissions Committee, Weill Cornell Medicine, 2010-2012",
+                                   "Member, Faculty Council, 2014-2016"]) == [
+        rows[1].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_row_whose_years_hold_its_siblings_is_kept_with_a_short_range():
+    """'2010' and '2010-2012' rows, both on the page, the range written
+    '2010-12': the range's row is not re-inserted (#1230)."""
+    rows = [f"Member | Admissions Committee | Weill Cornell Medicine | {term}"
+            for term in ("2010", "2010-2012")]
+    assert not _recovered_terms(rows, [f"Member, Admissions Committee, Weill Cornell Medicine, {y}"
+                                       for y in ("2010", "2010-12")])
+
+
 def test_sibling_record_rendered_without_siblings_is_record_rendered():
     """A line with no sibling rows keeps `_record_rendered`'s verdict, and a
     sibling row on the page verbatim is rendered (#1230)."""
