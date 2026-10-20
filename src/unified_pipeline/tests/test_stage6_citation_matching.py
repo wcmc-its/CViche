@@ -287,6 +287,50 @@ _APPEND_ROWS = [
      'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368.',
      '', 'Zenith House',
      'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368. Zenith House.'),
+    # Round 2 of #481's review: shapes that must not be read as name + place.
+    ('publisher with no name before its parenthesised place: at the end, '
+     'never spliced into the first ";"',
+     'Ash A, Doe K. A study. J Foo. 2010;3:1-5.', '', '(New York) Saunders',
+     'Ash A, Doe K. A study. J Foo. 2010;3:1-5. (New York) Saunders.'),
+    ('publisher that starts with a comma: no empty name, at the end',
+     'Ash A, Doe K. A study. J Foo. 2010;3:1-5.', '', ', Totowa, New Jersey',
+     'Ash A, Doe K. A study. J Foo. 2010;3:1-5. , Totowa, New Jersey.'),
+    ('a two-part publisher name is not a name plus a place: at the end, whole',
+     'Ash A. A chapter. In: Book. Lippincott; 2001:1-9.', '', 'Lippincott, Williams Wilkins',
+     'Ash A. A chapter. In: Book. Lippincott; 2001:1-9. Lippincott, Williams Wilkins.'),
+    ('a place followed by more of the value: the whole value at the end, '
+     'nothing of it dropped',
+     'Ash A. A chapter. In: Book. Humana Press; 1992.', '',
+     'Humana Press, Totowa, New Jersey; Zenith House, Berlin',
+     'Ash A. A chapter. In: Book. Humana Press; 1992. '
+     'Humana Press, Totowa, New Jersey; Zenith House, Berlin.'),
+    ('a place-shaped publisher whose name already has a place in front: '
+     'the whole value at the end, as before',
+     'Ash A. A chapter. In: Book. Philadelphia: Humana Press; 1992.', '',
+     'Humana Press, Totowa, New Jersey',
+     'Ash A. A chapter. In: Book. Philadelphia: Humana Press; 1992. '
+     'Humana Press, Totowa, New Jersey.'),
+    ('a parenthesised place goes in front of the name',
+     'Ash A. A chapter. In: Book. Saunders; 2003.', '', 'Saunders (New York)',
+     'Ash A. A chapter. In: Book. New York: Saunders; 2003.'),
+    ('editors clause written "(Ed.)": present, no second clause',
+     'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.', 'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.'),
+    ('editors clause written ", Ed.": present, no second clause',
+     'Ash A. A chapter. In: Diler RS, Ed. Book. Nova; 2007.', 'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Diler RS, Ed. Book. Nova; 2007.'),
+    ('editors clause written "(Eds.)": present, no second clause',
+     'Ash A. A chapter. In: Diler RS, Rey J (Eds.). Book. Nova; 2007.',
+     'Rasim Somer Diler, Joseph Rey', '',
+     'Ash A. A chapter. In: Diler RS, Rey J (Eds.). Book. Nova; 2007.'),
+    ('an "(eds)" clause naming fewer than half: the rest at the end, not inline',
+     'Ash A. A chapter. In: Rey J (eds). Book.',
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O', '',
+     'Ash A. A chapter. In: Rey J (eds). Book. '
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O, eds.'),
+    ('", 2nd ed." is an edition, not an editors clause: editors go after "In: "',
+     'Ash A. A chapter. In: Book, 2nd ed. Nova; 2007.', 'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Rasim Somer Diler, eds. Book, 2nd ed. Nova; 2007.'),
 ]
 
 

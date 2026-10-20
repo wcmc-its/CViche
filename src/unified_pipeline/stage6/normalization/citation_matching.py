@@ -109,16 +109,26 @@ def _word_in(token: str, text: str) -> bool:
     return bool(re.search(rf"\b{re.escape(token)}\b", text.casefold()))
 
 
-#: The editors clause stage 5d writes for a chapter, "In: Diler RS, ed." or
-#: "In: Cabanyes J, Monge MA, eds.": "In:", names with no sentence break,
-#: then ", ed(s)." (or ", editor(s)"). ", 2nd ed." is not this clause: the
-#: comma must sit directly before "ed".
-_EDITORS_CLAUSE_RE = re.compile(r"\bIn:\s(?:(?!\.\s).)+?,\s*(?:eds?\.|editors?\b)")
+#: The editors clause stage 5d writes for a chapter, "In: Diler RS, ed.",
+#: "In: Cabanyes J, Monge MA, eds." or "In: Diler RS (Ed.)": "In:", names
+#: with no sentence break, then "ed", "eds" or "editor(s)" after a comma or
+#: an opening parenthesis, in any case. ", 2nd ed." is not this clause: the
+#: comma or parenthesis must sit directly before "ed".
+_EDITORS_CLAUSE_RE = re.compile(
+    r"\bIn:\s(?:(?!\.\s).)+?(?:,\s*|\s*\()(?:eds?\b|editors?\b)", re.IGNORECASE)
 #: What separates two people in a stage-4 editors value.
 _EDITOR_SEPARATOR_RE = re.compile(r"\s*(?:[;,&]|\band\b)\s*")
-#: Where a publisher's own name ends and its place begins: "Humana Press,
-#: Totowa, New Jersey", "Saunders (New York)".
-_PUBLISHER_PLACE_RE = re.compile(r"\s*[,(]")
+#: One place name: up to three capitalised words, "Totowa", "New York", "St. Louis".
+_PLACE_NAME = r"[A-Z][\w.'-]*(?: [A-Z][\w.'-]*){0,2}"
+#: A stage-4 publisher that carries its place after its own name, in a shape
+#: only a place has: "Humana Press, Totowa, New Jersey" (a "City, Region"
+#: pair after the comma) or "Saunders (New York)" (in parentheses). The name
+#: must be non-empty. "Lippincott, Williams Wilkins" does not match: the part
+#: after its comma is more of the name, not a "City, Region" pair, and
+#: relabelling it as a place would misstate the publisher (#481).
+_PUBLISHER_WITH_PLACE_RE = re.compile(
+    rf"(?P<name>[^,(]*[^,(\s])\s*"
+    rf"(?:\((?P<paren>{_PLACE_NAME}(?:, {_PLACE_NAME})?)\)|,\s*(?P<comma>{_PLACE_NAME}, {_PLACE_NAME}))")
 #: A book trailer with no publisher: the year (and pages) alone after a
 #: sentence break, closing the citation -- "Welcome to parenting. 2010." The
 #: publisher goes in front of it, as Vancouver and `_book_trailer_parts`
@@ -140,8 +150,10 @@ def _editors_referenced(editors: str, citation: str) -> bool:
     "Diler RS": one token in three), so the token test alone read them as
     absent and printed them a second time after the year: 6 of the 16
     citations the safety net changed across the stored corpus (#481). The
-    editors clause is required so that a chapter author who shares an
-    editor's surname does not stand in for the missing editors.
+    person-wise test requires the editors clause, so it never lets a chapter
+    author who shares an editor's surname stand in for the editors. The
+    token test before it has no such requirement and still can: "Doe J. A
+    chapter. In: Book." reads editors "Doe J, Roe R" as present.
     """
     if _value_referenced(editors, citation):
         return True
@@ -175,13 +187,18 @@ def _with_publisher(citation: str, publisher: str) -> str:
     return f"{citation[:trailer.start()]}{publisher.rstrip('.')}; {trailer.group()}"
 
 
-def _with_publisher_place(citation: str, name: str, place: str) -> str | None:
-    """`citation` with `place` put in front of the publisher `name` it already
-    prints ("Totowa, New Jersey: Humana Press; 1992."), or None when it has
-    no free slot for one: no "Name;" to stand before, or a place already
-    there, or no place to put."""
-    slot = re.search(rf"(?<!: ){re.escape(name)};", citation, re.IGNORECASE)
-    if not (slot and place):
+def _with_publisher_place(citation: str, publisher: str) -> str | None:
+    """`citation` with the place of stage 4's `publisher` put in front of the
+    publisher name it already prints ("Totowa, New Jersey: Humana Press;
+    1992."), or None when there is nothing safe to move: `publisher` is not
+    a name followed by a place (`_PUBLISHER_WITH_PLACE_RE`), or the citation
+    has no "Name;" to stand before, or a place already there."""
+    parts = _PUBLISHER_WITH_PLACE_RE.fullmatch(publisher)
+    if not parts:
+        return None
+    place = parts["paren"] or parts["comma"]
+    slot = re.search(rf"(?<!: ){re.escape(parts['name'])};", citation, re.IGNORECASE)
+    if not slot:
         return None
     return f"{citation[:slot.start()]}{place}: {citation[slot.start():]}"
 
@@ -192,8 +209,10 @@ def _with_missing_publisher(citation: str, publisher: str) -> str:
     Stage 4 writes a publisher with its place ("Humana Press, Totowa, New
     Jersey"). When 5d printed the name and dropped the place, the place
     goes in front of the name, where Vancouver puts it; printing the whole
-    value again after the year named the publisher twice (#481). Any other
-    shape keeps the whole value, positioned by `_with_publisher`.
+    value again after the year named the publisher twice (#481). Only a
+    value whose tail has a place's shape counts as name plus place
+    (`_PUBLISHER_WITH_PLACE_RE`); any other value keeps the whole of it,
+    positioned by `_with_publisher`.
 
     Past the first test, a citation printing the name followed by ";" lacks
     the place: the whole value's token ratio lies between its name's and its
@@ -201,8 +220,7 @@ def _with_missing_publisher(citation: str, publisher: str) -> str:
     """
     if _value_referenced(publisher, citation):
         return citation
-    name, *rest = _PUBLISHER_PLACE_RE.split(publisher, maxsplit=1)
-    placed = _with_publisher_place(citation, name, "".join(rest).strip(" ,()"))
+    placed = _with_publisher_place(citation, publisher)
     return placed if placed is not None else _with_publisher(citation, publisher)
 
 
