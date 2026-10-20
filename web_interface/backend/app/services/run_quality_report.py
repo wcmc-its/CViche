@@ -702,7 +702,11 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: and measured on four held-out CVs only (PRECISION.md, GF-1), so it is a
 #: comment on the grant's table, never a run-page row, until a run-page
 #: wording is approved.
-REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts"})
+#: mentee_field_incomplete (#1941) is a mentee field the submitter left blank or
+#: "N/A": a request to complete it, not a CViche problem, so it is a comment on
+#: the blank cell, never a run-page row.
+REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts",
+                                    "mentee_field_incomplete"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 

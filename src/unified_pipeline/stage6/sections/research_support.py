@@ -87,6 +87,8 @@ RESEARCH_SUPPORT_SECTIONS = (
 )
 # The bucket whose amounts are requests, not awards (#1299, #1343).
 PENDING_GRANT_CODE = 'M2C'
+# The bucket of grants that have ended (Past (Completed) Funding).
+PAST_GRANT_CODE = 'M2B'
 
 
 class GrantFields(TypedDict, total=False):
@@ -1317,6 +1319,13 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
 # direct costs:"; a total award amount gets its own label instead, because a
 # total under "Annual" states a false fact (#982).
 ANNUAL_COSTS_LABEL = 'Annual direct costs:'
+NON_FINANCIAL_SUPPORT_LABEL = 'Non-financial support:'
+PERCENT_EFFORT_LABEL = 'Your percent (%) effort:'
+# The rows WCM does not ask for under Past (Completed) Funding: the template
+# asks only for "source-type, project title, dates, your role" there, and the
+# reviewer of run XAXVYB highlighted exactly these two rows in a past grant's
+# table (#1944). Current and pending tables keep them.
+PAST_FUNDING_OMITTED_LABELS = frozenset({NON_FINANCIAL_SUPPORT_LABEL, PERCENT_EFFORT_LABEL})
 # The rows the doctor's role_consistency lint reads back off a rendered grant
 # table (#1403): the PI cell, the owner's role, and the title it names the
 # grant by. grant_facts (#1588) reads the grant number off the Award Source
@@ -1701,6 +1710,9 @@ class ResearchSupportSection:
         - Your percent (%) effort
         - Major goals (optional)
 
+        Past (Completed) Funding (M2B) tables leave out Non-financial support
+        and Your percent (%) effort (`PAST_FUNDING_OMITTED_LABELS`, #1944).
+
         Grants are organized under WCM template headers:
         - Current Research Funding (M2A)
         - Past (Completed) Funding (M2B)
@@ -1978,14 +1990,16 @@ class ResearchSupportSection:
             (AWARD_SOURCE_LABEL, agency),
             (PROJECT_TITLE_LABEL, title),
             *cost_rows,
-            ('Non-financial support:', fields.get('non_financial_support', '')),
+            (NON_FINANCIAL_SUPPORT_LABEL, fields.get('non_financial_support', '')),
             (DURATION_LABEL, self._format_grant_duration(fields, code, raw_text)),
             (PI_NAME_LABEL, pi_name),
             (YOUR_ROLE_LABEL, role),
-            ('Your percent (%) effort:', percent_effort),
+            (PERCENT_EFFORT_LABEL, percent_effort),
             *_optional_grant_rows(fields, title, pi_name, cost_rows),
             *protocol_rows,
         ]
+        if code == PAST_GRANT_CODE:
+            rows = [row for row in rows if row[0] not in PAST_FUNDING_OMITTED_LABELS]
 
         # Create a new table with 2 columns
         table = self.doc.add_table(rows=len(rows), cols=2)

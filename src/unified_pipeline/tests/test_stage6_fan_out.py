@@ -475,13 +475,23 @@ def _rendered_body(tmp_path, code, fields):
         '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
 
 
+# Fields the map keeps although a probe entry of the code does not render
+# them. A Past (Completed) Funding table leaves out the effort row (#1944),
+# but an M2B record re-bucketed into Current or Pending still renders it, and
+# the supplementary pass reads the map to tell a grant's own record line from
+# its prose: dropping `percent_effort` here offered six record and goals lines
+# on three corpus CVs as new sub-points.
+_KEPT_THOUGH_UNRENDERED = {'M2B': {'percent_effort'}}
+
+
 @pytest.mark.parametrize('code', sorted(fan_out._RENDERED_FIELDS))
 def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
     """`_RENDERED_FIELDS[code]` is exactly the set of fields the code's section
     writes: a field the map claims but the renderer skips would let the
     coverage test pass on content the output drops (web240's `institution`),
     and one it omits would needlessly keep entries whole."""
-    assert _rendered_markers(tmp_path, code) == (set(fan_out._RENDERED_FIELDS[code]), False)
+    expected = set(fan_out._RENDERED_FIELDS[code]) - _KEPT_THOUGH_UNRENDERED.get(code, set())
+    assert _rendered_markers(tmp_path, code) == (expected, False)
 
 
 def _offschema_date_fields(code):
