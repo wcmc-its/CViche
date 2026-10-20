@@ -591,3 +591,91 @@ def test_a_rest_without_text_joins_without_crashing(monkeypatch):
 
     assert updated[1].get("is_fragment") is True
     assert updated[0]["text"].strip() == _MENTEE_ROW
+
+
+# ---------------------------------------------------------------------------
+# A line between mentee rows n and n + 1 joins row n (#1702: YIXQFB 2413, 2564)
+# ---------------------------------------------------------------------------
+
+_ROW_13 = "13. Jane Example, MD"
+_ROW_13_POSITION = "Attending\tPhysician, Example\tChildren's Hosp."
+_ROW_14 = "14. Rowan Placeholder, MD"
+
+
+def _mentee(text, code="N3B", hierarchy=("Mentees",)):
+    return {"text": text, "hierarchy": list(hierarchy), "taxonomy_code": code}
+
+
+def _recode(monkeypatch, entry_index, reasoning=_FRAGMENT_REASONING):
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {"content": json.dumps([
+        {"entry_index": entry_index, "new_code": "N3B", "confidence": 0.8, "reasoning": reasoning}])})
+
+
+def _row_13_split(next_row=_ROW_14, award_code="N4", award_hierarchy=("Mentees",), row_code="N3B"):
+    """YIXQFB's row 13 as stage 2 cut it: the name, the dates and site, an
+    award line coded N4, then the current position (entry 3, still T)."""
+    return [
+        _mentee(_ROW_13, row_code),
+        _mentee("2010-2020\tPediatric GI Fellow,\tExample School of Medicine"),
+        _mentee("2011-Example travel\taward", award_code, award_hierarchy),
+        _mentee(_ROW_13_POSITION, "T"),
+        _mentee(next_row, "N3A"),
+    ]
+
+
+def test_a_rest_past_an_award_line_joins_the_row_it_sits_inside(monkeypatch):
+    _recode(monkeypatch, 3)
+    entries = _row_13_split()
+    between = [dict(e) for e in entries[1:3]]
+
+    updated, _ = _validate(entries)
+
+    assert updated[3]["is_fragment"] is True and updated[3]["fragment_merged"] is True
+    assert updated[3]["fragment_of"] == 0
+    assert updated[0]["text"] == f"{_ROW_13} {_ROW_13_POSITION}"
+    assert updated[1:3] == between
+    assert updated[4]["text"] == _ROW_14
+
+
+@pytest.mark.parametrize("case", [
+    {"next_row": "15. Rowan Placeholder, MD"},
+    {"next_row": "1. Rowan Placeholder, MD"},
+    {"next_row": "Rowan Placeholder, MD"},
+    {"award_hierarchy": ("Awards",)},
+    {"row_code": "H"},
+], ids=["next-row-skips-a-number", "next-list-restarts", "no-next-row-number",
+        "another-hierarchy-between", "row-not-mentee"])
+def test_a_rest_not_inside_consecutive_mentee_rows_stays_its_own_entry(monkeypatch, case):
+    _recode(monkeypatch, 3)
+
+    updated, _ = _validate(_row_13_split(**case))
+
+    assert "is_fragment" not in updated[3]
+    assert updated[3]["taxonomy_code"] == "N3B"
+    assert updated[0]["text"] == _ROW_13
+
+
+def test_an_organisation_line_between_two_rows_joins_the_first(monkeypatch):
+    """YIXQFB 2564: row 27's employer wraps onto its own line before row 28.
+    Between consecutive rows it is no sub-heading, so the guard is waived."""
+    _recode(monkeypatch, 1)
+    row_27 = "27. Jane Example,\tMD\tAssistant Prof\tExample State Medical\tSchool"
+    entries = [_mentee(row_27), _mentee("Example Children's Hospital", "T"),
+               _mentee("28. Rowan Placeholder,\tPhD", "N3A")]
+
+    updated, _ = _validate(entries)
+
+    assert updated[1]["is_fragment"] is True and updated[1]["fragment_of"] == 0
+    assert updated[0]["text"] == f"{row_27} Example Children's Hospital"
+
+
+def test_the_waiver_keeps_the_other_merge_guards(monkeypatch):
+    _recode(monkeypatch, 1)
+    row = "27. Jane Example, MD\tCurrent position: Instructor, Example College"
+    entries = [_mentee(row), _mentee("Current position: Fellow, Example Hospital", "T"),
+               _mentee("28. Rowan Placeholder, PhD", "N3A")]
+
+    updated, _ = _validate(entries)
+
+    assert {"is_fragment", "fragment_of", "fragment_reasoning"}.isdisjoint(updated[1])
+    assert updated[0]["text"] == row

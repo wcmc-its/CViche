@@ -25,6 +25,7 @@ from unified_pipeline.stage3b.fragment_merge import (  # noqa: E402
     SKIPPED_FIELD,
     fragment_text_in_parent,
     merge_fragment_text,
+    merge_into_parent,
     merge_skip_reason,
     resolve_parent,
 )
@@ -144,6 +145,28 @@ def test_an_organisation_line_stays_out_of_a_coded_record():
     merge_fragment_text(entries)
     assert entries[0]["text"] == "Pharmacotherapy course, 2018"
     assert entries[1][SKIPPED_FIELD] == SKIP_ORGANIZATION
+
+
+def test_a_waived_organisation_guard_lets_the_line_join():
+    """T-validation's fold waives the organisation guard for a line between
+    two consecutive mentee rows (#1702, YIXQFB 2564); only that guard."""
+    entries = [
+        _entry("27. Jane Example, MD\tAssistant Prof\tExample State Medical School", "N3B"),
+        _fragment("Example Children's Hospital", 0, "N3B"),
+    ]
+    assert merge_into_parent(entries, 1, frozenset({SKIP_ORGANIZATION})) is None
+    assert entries[0]["text"].endswith("Medical School Example Children's Hospital")
+    assert entries[1][MERGED_FLAG] is True
+
+
+def test_a_waiver_leaves_every_other_guard_standing():
+    entries = [
+        _entry("Current position: Instructor, Example College 2018", "N3B"),
+        _fragment("Current position: Fellow, Example Hospital", 0, "N3B"),
+    ]
+    assert merge_into_parent(entries, 1, frozenset({SKIP_ORGANIZATION})) == SKIP_REPEATED_FIELD
+    assert entries[0]["text"] == "Current position: Instructor, Example College 2018"
+    assert MERGED_FLAG not in entries[1]
 
 
 def test_an_organisation_line_joins_an_unclassified_parent():
