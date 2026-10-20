@@ -69,10 +69,10 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_and_degrees_only():
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_and_leadership():
     assert sorted(sp.SUBPOINT_CODES) == ["B1", "D1", "D2", "D3", "H", "K1", "K2", "K3", "K4",
-                                         "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B", "Q1",
-                                         "Q2"]
+                                         "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B", "O",
+                                         "Q1", "Q2"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -447,9 +447,95 @@ def _degree_record(text, index, count):
 ])
 def test_a_degree_reads_its_prose_from_its_own_line(segments, index, read):
     entry = _degree_record("\t".join(segments), index, 2)
-    assert sp._own_degree_line(entry) == read
+    assert sp._own_record_line(entry) == read
     assert sp._prose_text("B1", entry, {}) == read
     assert sp._prose_text("D1", entry, {}) is None
+
+
+_ROLE = "Director, Example Outreach Programme"
+
+
+def _role_rows(*rows):
+    """A line naming the role and institution, then a leadership table, one
+    row of cells per item; and their anchor candidates."""
+    doc = Document()
+    doc.add_paragraph(f"{_ROLE} at Norvale University")
+    table = doc.add_table(rows=len(rows), cols=3)
+    for row, cells in zip(table.rows, rows, strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    return table, list(sp.anchor_candidates(doc))
+
+
+def _leadership_role(text=f"2008-2012\t{_ROLE}, Norvale University\t{PROSE}", **fields):
+    return _entry(text, code="O", **{"leadership_role": _ROLE, "institution": "Norvale University",
+                                     "start_date": "2008", "end_date": "2012", **fields})
+
+
+def test_plan_places_a_leadership_role_only_under_a_row_written_for_it():
+    # One title held twice at one institution: the rows differ only in their
+    # dates, which are digits, and words alone take the first line holding them.
+    table, lines = _role_rows([_ROLE, "Norvale University", "2016-2020"],
+                              [_ROLE, "Norvale University", "2008-2012"])
+    entry, spans = _leadership_role(), {"O": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "O"), lines) is lines[0]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({"O": [entry]}, _haystack(), lines, spans,
+                                   rows_written=written([table.rows[1]._tr]))
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+    assert (planned.code, planned.entry_id) == ("O", id(entry))
+    # No row recorded for it, a paragraph outside any table, or no ledger: none.
+    stray = Document().add_paragraph(_ROLE)._p
+    for rows_written in (written([]), written([stray]), None):
+        assert sp.plan_subpoints({"O": [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_takes_a_roles_one_own_row_whatever_its_words():
+    # "Dean" and an acronym hold no distinctive word: the word test finds no
+    # anchor, and the writer's record alone says the row is the entry's.
+    table, lines = _role_rows(["Dean", "NVU", "2010"])
+    entry = _entry(f"2010\tDean, NVU\t{PROSE}", code="O", leadership_role="Dean",
+                   institution="NVU", start_date="2010")
+    spans = {"O": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "O"), lines[1:]) is None
+    (planned,) = sp.plan_subpoints({"O": [entry]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+    # Several rows recorded for one entry (a flattened table the writer split):
+    # its words choose between them.
+    table, lines = _role_rows(["Chair, Example Admissions Committee", "Norvale University", "2001"],
+                              [_ROLE, "Norvale University", "2008-2012"])
+    (planned,) = sp.plan_subpoints({"O": [_leadership_role()]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [row._tr for row in table.rows])
+    assert planned.anchor is lines[2]
+
+
+@pytest.mark.parametrize("field", sp._LEADERSHIP_ROW_FIELDS)
+def test_a_leadership_rows_fallback_fields_count_as_its_rendered_values(field):
+    # The row prints them when the schema's role or institution is empty,
+    # though `_RENDERED_FIELDS` cannot list them. Another code's are its own.
+    entry = _entry("Dean", code="O", **{field: "Estuarine Sediment Geochemistry"})
+    assert {"estuarine", "sediment", "geochemistry"} <= sp._value_tokens(entry, "O")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="H"), "H")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="B1"), "B1")
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its own.
+    (["Chair line", f"Director line, {PROSE}"], 1, f"Director line, {PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    (["Chair line", PROSE, "Director line"], 1, ""),
+    # An earlier record: the line fan-out gave it, whatever it holds.
+    ([f"Chair line, {PROSE}", "Director line"], 0, f"Chair line, {PROSE}\tDirector line"),
+])
+def test_a_leadership_role_reads_its_prose_from_its_own_line(segments, index, read):
+    entry = _degree_record("\t".join(segments), index, 2)
+    entry["taxonomy_code"] = "O"
+    assert sp._prose_text("O", entry, {}) == read
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():
