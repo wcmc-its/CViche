@@ -38,6 +38,7 @@ from .dedup import (
     _ordered_words,
     _part_numbers,
     _rank_qualifiers,
+    _singular,
 )
 from .fan_out import FANNED_OUT_FROM
 from .normalization.publication import ResolvedPublication, resolve_publication
@@ -93,9 +94,14 @@ _GENERIC_INSTITUTION_WORDS = frozenset({
 _TITLE_ABBREVIATIONS = MappingProxyType({
     'prof': 'professor', 'assoc': 'associate', 'asst': 'assistant',
     'clin': 'clinical', 'univ': 'university', 'dept': 'department'})
-# A plural ending, dropped so "Health Sciences Center" reads as "Health Science
-# Center" (OTBUCZ-03). Words this short or shorter keep their final s.
-_PLURAL_MIN_CHARS = 4
+# The training level a record's type names: an intern year and a residency of
+# one programme agree on specialty, years and institution and are still two
+# records (#666, WWRSAL 31: stage 4 split one row naming both years into an
+# intern record and a resident record, and the intern one was dropped). A type
+# naming no level ("Postdoctoral Research Associate") says nothing.
+_TRAINING_LEVELS = MappingProxyType({
+    'intern': 'intern', 'internship': 'intern', 'resident': 'resident',
+    'residency': 'resident', 'fellow': 'fellow', 'fellowship': 'fellow'})
 _OPEN_END_WORDS = frozenset({'present', 'current', 'now', 'ongoing'})
 _TITLE_PIECE_SEPARATOR = ';'
 
@@ -126,10 +132,10 @@ def _same_date(first: str, second: str) -> bool:
 
 
 def _norm_words(text: str) -> list[str]:
-    """`_ordered_words` with abbreviations spelled out and plural s dropped."""
-    words = [_TITLE_ABBREVIATIONS.get(word, word) for word in _ordered_words(text)]
-    return [word[:-1] if len(word) > _PLURAL_MIN_CHARS and word.endswith('s') else word
-            for word in words]
+    """`_ordered_words` with abbreviations spelled out and plural s dropped
+    (`dedup._singular`: "Health Sciences Center" reads as "Health Science
+    Center", OTBUCZ-03)."""
+    return [_singular(_TITLE_ABBREVIATIONS.get(word, word)) for word in _ordered_words(text)]
 
 
 def _filled_count(entry: dict) -> int:
@@ -264,9 +270,28 @@ def _same_span(first: dict, second: dict) -> bool:
                for key in ('start_date', 'end_date'))
 
 
+def _training_levels(entry: dict) -> set[str]:
+    """The `_TRAINING_LEVELS` the entry's training type names, a plural as
+    its singular (`_norm_words`: "Residents" names the resident level)."""
+    return {_TRAINING_LEVELS[word] for word in _norm_words(_field(entry, 'training_type'))
+            if word in _TRAINING_LEVELS}
+
+
+def _levels_cover(kept: dict, dropped: dict) -> bool:
+    """True when the kept copy's training type names every level the dropped
+    copy's names, or names none (no evidence either way)."""
+    kept_levels = _training_levels(kept)
+    return not kept_levels or _training_levels(dropped) <= kept_levels
+
+
 def _same_training(first: dict, second: dict) -> dict | None:
     """The copy with the shorter specialty when one specialty is a run of the
-    other's words, the years are the same and the institutions affiliated."""
+    other's words, the years are the same, the institutions affiliated and
+    the other copy's type names every level this one's names. With equal
+    specialties the less full copy goes, or the fuller one when only the
+    less full one names every level: a row naming an internship and a
+    residency holds a resident copy, and a resident row does not hold that
+    row."""
     (short, dropped), (long, kept) = sorted(
         ((_norm_words(_field(e, 'specialty')), e) for e in (first, second)),
         key=lambda pair: len(pair[0]))
@@ -274,7 +299,12 @@ def _same_training(first: dict, second: dict) -> dict | None:
         return None
     if not (_same_span(first, second) and _affiliated(first, second)):
         return None
-    return dropped if len(short) < len(long) else _fuller_first(first, second)[1]
+    if len(short) < len(long):
+        return dropped if _levels_cover(kept, dropped) else None
+    kept, dropped = _fuller_first(first, second)
+    if _levels_cover(kept, dropped):
+        return dropped
+    return kept if _levels_cover(dropped, kept) else None
 
 
 def _same_leadership(first: dict, second: dict) -> dict | None:

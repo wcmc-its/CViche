@@ -16,6 +16,7 @@ import `stage_6_word_template`.
 """
 import re
 from types import MappingProxyType
+from typing import NamedTuple
 
 from unified_pipeline.core.text_norm import is_placeholder_title
 
@@ -201,34 +202,91 @@ def _part_numbers(text: str) -> set[str]:
 # word, where a dash, an open parenthesis or another capitalised word follows
 # ("Pharmacology I - Section Lead", "Pharmacology I (Fall 2019)",
 # "Pharmacology I Lecturer"); never before a lower-case word ("I taught"), and
-# never after one ("where I Lectured"). A byline of two or more "Surname
-# INITIALS" authors is blanked first, so an author's lone initial is not read
-# as one ("Kim I, Lee J." beside "Kim IS, Lee J."). A numeral after "Part" or
-# "Phase" is left to those readers, which also read a listing ("Parts I and
-# II") as a whole. Shared with the doctor's `dedup_drops` lint, which reads a
-# drop the same way.
+# never after one ("where I Lectured"). A lone "I" before a slash, an
+# ampersand or "and" and another numeral is read too, so a listing names each
+# of its marks ("Pharmacology I/II" and "Pharmacology I and II" are {I, II}:
+# a kept listing covers a copy naming either, a kept "II" does not cover a
+# dropped listing). A byline of two or more
+# "Surname INITIALS" authors is blanked first, so an author's lone initial is
+# not read as one ("Kim I, Lee J." beside "Kim IS, Lee J."). A numeral after
+# "Part" or "Phase" is left to those readers, which also read a listing
+# ("Parts I and II") as a whole. Shared with the doctor's `dedup_drops` lint,
+# which reads a drop the same way.
 _NUMERAL_DATE_FOLLOWS = (
     r'\s+(?:(?:19|20)\d{2}\b|\d{1,2}/|(?:'
     + '|'.join(sorted((month.capitalize() for month in _MONTH_NAME_TO_NUM),
                       key=len, reverse=True))
     + r')\b)')
 _MULTI_LETTER_NUMERALS = r'II|III|IV|VI|VII|VIII|IX'
+_NUMERAL_LISTING_FOLLOWS = rf'(?:\s*[/&]\s*|\s+and\s+)(?:{_MULTI_LETTER_NUMERALS})\b'
 _STANDALONE_NUMERAL_RE = re.compile(
     rf'\b(?:{_MULTI_LETTER_NUMERALS})\b'
-    rf'|\bI(?=\s*(?:$|[\t,.;:)"”’])|{_NUMERAL_DATE_FOLLOWS})')
+    rf'|\bI(?=\s*(?:$|[\t,.;:)"”’])|{_NUMERAL_DATE_FOLLOWS}|{_NUMERAL_LISTING_FOLLOWS})')
 _TITLE_WORD_LONE_I_RE = re.compile(
     r"\b[A-Z][\w'’-]*\s+(I)(?=\s*[(\-–—]|\s+[A-Z][a-z])")
 _BYLINE_AUTHOR = rf"[A-Z][\w'’-]+\s+(?!(?:{_MULTI_LETTER_NUMERALS})\b)[A-Z]{{1,3}}\b"
 _BYLINE_RE = re.compile(
     rf"{_BYLINE_AUTHOR}(?:\s*,\s*(?:(?:and|&)\s+)?{_BYLINE_AUTHOR})+")
+# #666 (IZJADE 942): a single capital letter marks a member of a series the
+# same way, where it stands after a capitalised word and a title segment ends
+# after it, or a dash or a hyphen after a space follows it ("Committee Q,"
+# beside "Committee R,"; "Group B - Lead"), and is as invisible to token
+# containment (a one-letter word is not a significant word). The article "A"
+# is never one: a word follows it. Nor is a letter a hyphen joins to a word
+# ("B-cell"), nor one before a period: an initial ends with one ("Smith J.").
+# "I" is the numeral reader's. But a capital letter is also an initial, and a
+# byline the byline blank cannot read is shaped the same ("Plover M, Quill,
+# MB, ..."), so a letter is read with the word it marks and tells two records
+# apart only beside another letter on that word (`_uncovered_letters`). A kept
+# text naming the dropped letter anywhere on its own covers it: a listing
+# joins its members in more ways than a reader can name ("Committee R and
+# Committee Q", "Hepatitis B and C", "Committee R - Chair; Committee Q"), and
+# doubt drops. A comma listing ("Committee R, Committee Q") is read as a
+# byline and blanked, so it letters no word and refuses nothing.
+_LETTER_MARK_RE = re.compile(
+    r'\b([A-Z][a-z]+)\s+([A-HJ-Z])(?=\s*(?:$|[\t,;:)–—])|\s+-)')
+_LONE_LETTER_RE = re.compile(r'\b[A-HJ-Z]\b')
+
+
+class _SeriesMarks(NamedTuple):
+    """The series marks of a text (`_series_marks`)."""
+    numerals: frozenset[str]
+    # (the word the letter marks, lower-cased; the letter)
+    letters: frozenset[tuple[str, str]]
+
+
+def _series_marks(text: str) -> _SeriesMarks:
+    """Every series mark `text` names outside a byline and a part or phase
+    listing: each Roman numeral standing on its own (`_STANDALONE_NUMERAL_RE`,
+    `_TITLE_WORD_LONE_I_RE`) and each letter marking a word (`_LETTER_MARK_RE`)."""
+    bare = _BYLINE_RE.sub(' ', _TRIAL_PHASE_RE.sub(' ', _PART_NUMBER_RE.sub(' ', text)))
+    numerals = set(_STANDALONE_NUMERAL_RE.findall(bare)) | set(_TITLE_WORD_LONE_I_RE.findall(bare))
+    letters = {(word.lower(), letter) for word, letter in _LETTER_MARK_RE.findall(bare)}
+    return _SeriesMarks(frozenset(numerals), frozenset(letters))
 
 
 def _standalone_numerals(text: str) -> set[str]:
-    """Every Roman numeral `text` names on its own (`_STANDALONE_NUMERAL_RE`,
-    `_TITLE_WORD_LONE_I_RE`), outside a byline and a part or phase listing."""
-    bare = _BYLINE_RE.sub(' ', _TRIAL_PHASE_RE.sub(' ', _PART_NUMBER_RE.sub(' ', text)))
-    return (set(_STANDALONE_NUMERAL_RE.findall(bare))
-            | set(_TITLE_WORD_LONE_I_RE.findall(bare)))
+    """Every Roman numeral `text` names on its own (`_series_marks`)."""
+    return set(_series_marks(text).numerals)
+
+
+def _uncovered_letters(dropped_text: str, kept_text: str) -> set[str]:
+    """Each letter the dropped text marks a word with (`_LETTER_MARK_RE`) where
+    the kept text marks that word with a letter too and names this one nowhere
+    on its own (`_LONE_LETTER_RE`): "Q" for "Committee Q" beside "Committee R"."""
+    kept_lettered = {word for word, _letter in _series_marks(kept_text).letters}
+    named = set(_LONE_LETTER_RE.findall(kept_text))
+    return {letter for word, letter in _series_marks(dropped_text).letters
+            if word in kept_lettered and letter not in named}
+
+
+def _other_series_member(dropped_text: str, kept_text: str) -> bool:
+    """True when the dropped text names a member of a series the kept text
+    does not: a numeral the kept text lacks ("Compounding I" beside
+    "Compounding II"), or an uncovered letter (`_uncovered_letters`). A kept
+    text listing both members covers either."""
+    return (not _standalone_numerals(dropped_text) <= _standalone_numerals(kept_text)
+            or bool(_uncovered_letters(dropped_text, kept_text)))
 
 
 # #666 (EBYSBC): a date stated to the month, or the day, tells two records
@@ -458,7 +516,8 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
     One more shape needs no such check: the fields say it is another record
     (`_distinct_record_label`: another institution, venue, rank or book, a
     companion title, a grant's title alone, a bare place; or
-    `_bare_occasion_apart`). Doubt drops, as it did before.
+    `_bare_occasion_apart`; or `_narrower_committee`, a committee name the
+    kept one qualifies). Doubt drops, as it did before.
     """
     rendered = _RENDERED_FIELDS.get(code or '', frozenset())
     dropped_fields = dropped_entry.get('extracted_fields') or {}
@@ -473,7 +532,8 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
               if entry is not dropped_entry and entry is not kept_entry
               and id(entry) not in dropped_ids]
     if (_distinct_record_label(code, dropped_fields, kept_fields)
-            or _bare_occasion_apart(code, dropped_entry, kept_entry)):
+            or _bare_occasion_apart(code, dropped_entry, kept_entry)
+            or _narrower_committee(code, dropped_entry, kept_entry)):
         return True
     if ((verbatim and not _significant_words(name) <= _rendered_words(kept_fields, rendered))
             or _names_a_sibling(kept_entry, kept_fields, rendered, name)
@@ -696,6 +756,77 @@ def _bare_occasion_apart(code: str | None, dropped_entry: dict,
             and dropped_entry.get('hierarchy') != kept_entry.get('hierarchy')):
         return fields['location']
     return None
+
+
+# #666 (JEFZWH 295, BLBVPD 94, WYMVGU 557): a committee whose name the kept
+# committee's name holds, in order, with a word added that the dropped row
+# states nowhere -- "Widget Committee" beside "Widget Planning Committee" or
+# "Widget Committee of the Department of Gizmos" -- is a narrower body, not a
+# copy: the qualifier is the one thing that tells the two apart, and token
+# containment cannot see a word the dropped side lacks. Words added only in
+# front ("Acme University, Clinic Services Committee") are where the committee
+# sits, and so are segments that follow the whole dropped name after a comma,
+# a semicolon, a dash or a hyphen after a space ("Clinic Services Committee,
+# Acme University": stage 4 folds a P row's institution into the name that
+# way, as P extracts no institution), or are its short name ("... Committee -
+# CSC"). An acronym in parentheses is its short name, and a plural is the same
+# word; none of these makes another committee. A word the dropped row states,
+# in its text or in a field its section renders, is no qualifier. A name of
+# one significant word ("Committee", a letter cut off) is a fragment, not a
+# narrower body.
+_COMMITTEE_NAME_FIELD = 'committee_name'
+_NARROWER_COMMITTEE_MIN_WORDS = 2
+_NAME_SEGMENT_SEPARATOR_RE = re.compile(r'[,;–—]|\s-')
+# A plural ending is dropped so "Committees" reads as "Committee". Words this
+# short or shorter keep their final s.
+_PLURAL_MIN_CHARS = 4
+
+
+def _singular(word: str) -> str:
+    """`word` without a plural s (`_PLURAL_MIN_CHARS`)."""
+    return word[:-1] if len(word) > _PLURAL_MIN_CHARS and word.endswith('s') else word
+
+
+def _singular_words(text: str) -> list[str]:
+    """`_ordered_words` of `text`, each `_singular`."""
+    return [_singular(word) for word in _ordered_words(text)]
+
+
+def _name_through(kept_name: str, words: list[str]) -> list[str] | None:
+    """`_singular_words` of `kept_name`, parentheses out, up to the end of the
+    segment (`_NAME_SEGMENT_SEPARATOR_RE`) where it has held all of `words` in
+    order; None when it never does."""
+    kept_words: list[str] = []
+    for segment in _NAME_SEGMENT_SEPARATOR_RE.split(_PARENTHETICAL_RE.sub(' ', kept_name)):
+        kept_words += _singular_words(segment)
+        if _is_subsequence(words, kept_words):
+            return kept_words
+    return None
+
+
+def _narrower_committee(code: str | None, dropped_entry: dict,
+                        kept_entry: dict) -> str | None:
+    """The dropped committee's name when its section renders a committee name
+    and the kept committee's name is the dropped one with words added, not
+    only in front of it or in segments after it (`_name_through`), of which
+    the dropped row states at least one nowhere."""
+    rendered = _RENDERED_FIELDS.get(code or '', frozenset())
+    if _COMMITTEE_NAME_FIELD not in rendered:
+        return None
+    dropped_fields = dropped_entry.get('extracted_fields') or {}
+    name = dropped_fields.get(_COMMITTEE_NAME_FIELD)
+    kept_name = (kept_entry.get('extracted_fields') or {}).get(_COMMITTEE_NAME_FIELD)
+    if not (isinstance(name, str) and isinstance(kept_name, str)):
+        return None
+    words = _singular_words(_PARENTHETICAL_RE.sub(' ', name))
+    if len(words) < _NARROWER_COMMITTEE_MIN_WORDS:
+        return None
+    kept_words = _name_through(kept_name, words)
+    if kept_words is None or kept_words[-len(words):] == words:
+        return None
+    stated = {_singular(word) for word in (_significant_words(dropped_entry.get('text') or '')
+                                           | _rendered_words(dropped_fields, rendered))}
+    return name if set(kept_words) - stated else None
 
 
 def _distinct_record_label(code: str | None, dropped_fields: dict,
@@ -1064,9 +1195,10 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
 
     #666 (EBYSBC): verbatim containment starts and ends on word boundaries
     (`_verbatim_contained`), the date test reads months and days, a differing
-    part number or standalone Roman numeral (`_standalone_numerals`) refuses
-    like a trial phase, and in a teaching or talk list a
-    group line between the two entries refuses (`_group_header_between`)."""
+    part number, standalone Roman numeral or lettered series member
+    (`_other_series_member`) refuses like a trial phase, and in a teaching or
+    talk list a group line between the two entries refuses
+    (`_group_header_between`)."""
     dropped_text = dropped_entry.get('text') or ''
     kept_text = kept_entry.get('text') or ''
     verbatim = _verbatim_contained(dropped_text, kept_text)
@@ -1099,8 +1231,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #1106: a different trial phase is a different trial
     if not _part_numbers(dropped_text) <= _part_numbers(kept_text):
         return False  # #666: a different part is a different record
-    if not _standalone_numerals(dropped_text) <= _standalone_numerals(kept_text):
-        return False  # #666: a different series numeral is a different record
+    if _other_series_member(dropped_text, kept_text):
+        return False  # #666: another numeral or letter of a series is another record
     if not _counts(dropped_text) <= _counts(kept_text):
         return False  # #666: a different hours or student count is another occasion
     dropped_sig = _entry_signature_words(dropped_entry)
