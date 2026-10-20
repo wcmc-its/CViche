@@ -120,12 +120,12 @@ from unified_pipeline.core.docx_structure_extractor import (
     get_paragraph_text,
     open_source_docx,
 )
-from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.core.render_check import (
     CELL_SEPARATOR,
     entry_lines,
     wrapped_row_text,
 )
+from unified_pipeline.log_redaction import redacted_error_label
 
 from ..formatting import (
     DATE_SPAN_SEPARATOR,
