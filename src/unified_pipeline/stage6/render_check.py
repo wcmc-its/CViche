@@ -578,14 +578,22 @@ def _sibling_record_tokens(text: str | None) -> set[str]:
     return _record_tokens(text) - _MONTH_WORDS
 
 
+# Words that end an open term ("2014-Present"): a term's date like a year
+# number, not a cell of the row (#1230). "now" and "to date" need no entry:
+# `_RENDER_TOKEN_RE` takes no word under five letters.
+_OPEN_TERM_WORDS = frozenset(('present', 'current', 'ongoing'))
+
+
 def _number_sibling(tokens: set[str], other: set[str]) -> bool:
     """Whether `other` has exactly the letter tokens of `tokens`, so it can
-    differ only in its number tokens: the same row in another term (#1230).
-    Such a pair can share less than `RECLASSIFY_MIN_TOKEN_COVERAGE` of its
-    tokens ("Member | Admissions Committee | <college> | 2010-2012" and its
-    2014-2016 row share 7 of 9)."""
-    return ({token for token in tokens if not token.isdigit()}
-            == {token for token in other if not token.isdigit()})
+    differ only in its number tokens and open-term words (`_OPEN_TERM_WORDS`):
+    the same row in another term (#1230). Such a pair can share less than
+    `RECLASSIFY_MIN_TOKEN_COVERAGE` of its tokens ("Member | Admissions
+    Committee | <college> | 2010-2012" and its 2014-2016 or 2014-Present row
+    share 7 of 9)."""
+    def cells(row: set[str]) -> set[str]:
+        return {token for token in row if not token.isdigit()} - _OPEN_TERM_WORDS
+    return cells(tokens) == cells(other)
 
 
 def record_siblings(records: list[str]) -> dict[str, list[set[str]]]:

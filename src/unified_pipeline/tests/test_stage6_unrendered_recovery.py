@@ -2140,6 +2140,21 @@ def test_non_t_two_terms_with_shortened_years_are_kept(years, recovered):
         [rows[1].replace(" | ", " \u2014 ")] if recovered else [])
 
 
+@pytest.mark.parametrize("open_term", [
+    "2014-Present", "2014-current", "2014-ongoing", "2014-now", "2014 to date"])
+def test_non_t_a_term_and_an_open_term_are_told_apart(open_term):
+    """One committee 2010-2012 and again in an open term ("2014-Present"):
+    the open-term word counts like a year, so with either row on the page the
+    other is recovered, and with both on the page neither is (#1230)."""
+    rows = [f"Member | Admissions Committee | Weill Cornell Medical College | {term}"
+            for term in ("2010-2012", open_term)]
+    line = "Member, Admissions Committee, Weill Cornell Medical College, {}"
+    terms = ("2010-2012", open_term)
+    assert not _recovered_terms(rows, [line.format(term) for term in terms])
+    assert _recovered_terms(rows, [line.format(terms[0])]) == [rows[1].replace(" | ", " \u2014 ")]
+    assert _recovered_terms(rows, [line.format(terms[1])]) == [rows[0].replace(" | ", " \u2014 ")]
+
+
 @pytest.mark.parametrize("line", [
     "Member, Admissions Committee, Example State Medical College, {}",
     "Committee on Admissions, Member, Example State Med. College, {}",
