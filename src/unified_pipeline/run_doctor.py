@@ -510,12 +510,13 @@ Lints, ranked by the severity of the failure class they catch:
                           section; with the docx, only lines that render
                           nowhere. Reads stage 2; stage 1a and the docx when
                           present
-14at. stage2_span_overlap a stage-2 record entry that shares two or more
-                          source elements (paragraphs or table rows) with an
-                          entry before it, so the shared lines render twice,
-                          often under the wrong section (#1433; ATUVAL
-                          867-869, web172 112.x). WARN, one per pair of
-                          sections. Reads stage 2 only
+14at. stage2_span_overlap a stage-2 record entry that shares source
+                          elements (paragraphs or table rows) with an entry
+                          before it, one element emitted twice excepted, so
+                          the shared lines render twice, often under the
+                          wrong section (#1433; ATUVAL 863-867/867-869,
+                          web172 112.x). WARN, one per pair of sections.
+                          Reads stage 2 only
 14au. cross_entry_value   a stage-4 value (a date's year, an amount, an
                           effort, a grant number, the owner's grant role or
                           a person's name) that its own entry's text lacks
@@ -1259,12 +1260,12 @@ LINT_PREVALENCE = {
     # measured 2026-10-12. Same mixed-corpus caveat as above; the old farm
     # runs carry far more text breaks than current ones.
     "stage2_text_break": 0.354,
-    # stage2_span_overlap (#1433; S2-SO in doctor/PRECISION.md): 19 of 278
-    # local stage-2 runs -- the 106 under src/unified_pipeline/outputs, the
-    # 2026-09-11 and 2026-09-17 _autopsy_artifacts batches (40 and 20) and
-    # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
-    # caveat as above.
-    "stage2_span_overlap": 0.068,
+    # stage2_span_overlap (#1433; S2-SO2 in doctor/PRECISION.md): 34 of 324
+    # distinct local stage-2 artifacts -- under src/unified_pipeline/outputs,
+    # the _autopsy_artifacts batches, analysis/ and the wave1 farm --
+    # measured 2026-10-20, once one-element overlaps were reported (19 of the
+    # same 324 before). Same mixed-corpus caveat as above.
+    "stage2_span_overlap": 0.105,
     # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 19 of 400
     # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15,
     # re-measured after #1840 (22 before it). Most predate #1609, which now

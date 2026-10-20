@@ -718,10 +718,66 @@ def test_stage2_span_overlap_reports_two_shared_lines_across_sections():
         "entry 868-869 shares 2 element(s) with entry 867-869: 1993\tWho's Who"]
 
 
-def test_stage2_span_overlap_quiet_on_one_shared_line():
-    # 863-867 and 867-869 share only line 867: under SPAN_OVERLAP_MIN_ELEMENTS.
-    assert lint_stage2_span_overlap({"entries": [_span(863, 867), _span(867, 869)]}) == []
-    assert lint_stage2_span_overlap({"entries": [_span(5, 5), _span(5, 5)]}) == []
+def test_stage2_span_overlap_reports_one_shared_line_when_the_spans_differ():
+    # ATUVAL 863-867 under HONORS and 867-869 under a committee heading share line 867.
+    stage2 = {"entries": [_span(863, 867), _span(867, 869, hierarchy=("COMMITTEES",))]}
+    findings = lint_stage2_span_overlap(stage2)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 867"]
+    assert findings[0]["evidence"][0].startswith("entry 867-869 shares 1 element(s) with entry 863-867")
+    # A one-line entry inside a longer one (web26 764 / 764-765), and a row range of one table.
+    assert len(lint_stage2_span_overlap({"entries": [_span(764, 764), _span(764, 765)]})) == 1
+    rows = {"entries": [_span("40.2", "40.4", etype="table_row"), _span("40.4", "40.5", etype="table_row")]}
+    assert len(lint_stage2_span_overlap(rows)) == 1
+
+
+def test_stage2_span_overlap_quiet_on_one_element_emitted_twice():
+    # Two one-element entries on one element: older stage-2 runs' duplicate copy.
+    assert lint_stage2_span_overlap({"entries": [_span(5, 5), _span(5, 5, hierarchy=("A",))]}) == []
+    assert lint_stage2_span_overlap({"entries": [_span("9.3", "9.3", etype="table_row"),
+                                                 _span("9.3", "9.3", etype="table_row")]}) == []
+    # The same two-element span twice is still reported.
+    assert len(lint_stage2_span_overlap({"entries": [_span(5, 6), _span(5, 6)]})) == 1
+
+
+def test_stage2_span_overlap_names_a_multi_element_overlap_before_a_one_element_one():
+    # 20-23 shares one line with 10-20 and three with 21-25: the pair named stays
+    # the multi-element one, as before one-element overlaps were reported.
+    stage2 = {"entries": [_span(10, 20, hierarchy=("A",)), _span(21, 25, hierarchy=("B",)),
+                          _span(20, 23, hierarchy=("C",))]}
+    evidence = [e.split(":")[0] for f in lint_stage2_span_overlap(stage2) for e in f["evidence"]]
+    assert evidence == ["entry 20-23 shares 3 element(s) with entry 21-25"]
+
+
+def test_stage2_span_overlap_leads_a_finding_with_its_multi_element_pairs():
+    # 20-21 shares one line with 10-20 before 35-37 shares three with 30-40, both
+    # A then B: the finding is led by 35, as when only two-line overlaps counted.
+    stage2 = {"entries": [_span(10, 20, hierarchy=("A",)), _span(30, 40, hierarchy=("A",)),
+                          _span(20, 21, hierarchy=("B",)), _span(35, 37, hierarchy=("B",))]}
+    [finding] = lint_stage2_span_overlap(stage2)
+    assert finding["message"].split(":")[0] == "entry 35"
+    assert [e.split(":")[0] for e in finding["evidence"]] == [
+        "entry 35-37 shares 3 element(s) with entry 30-40",
+        "entry 20-21 shares 1 element(s) with entry 10-20"]
+
+
+def test_stage2_span_overlap_needs_a_shared_line_for_one_shared_element():
+    # web30 1012.0-1012.1 holds only row 0's text, so row 1 is shared by span alone.
+    header = _span("1012.0", "1012.1", etype="table_row", text="Year (YYYY) | Person Months (##.##)")
+    row = _span("1012.1", "1012.1", hierarchy=("Refereed articles",), etype="table_row",
+                text="1.   2021 | 0.12 calendar")
+    assert lint_stage2_span_overlap({"entries": [header, row]}) == []
+    shared = {**row, "text": "Person Months (##.##) | 0.5"}
+    assert len(lint_stage2_span_overlap({"entries": [header, shared]})) == 1
+    # KYOPUV 27-29 / 29-30: a tab-separated part of one text inside the other's
+    # line, whichever of the two comes first.
+    left = _span(27, 29, text="Leon, Nicaragua\tJuly '92-June '96:")
+    right = _span(29, 30, hierarchy=("A",), text="July '92-June '96:  Clinical Fellow, Yale")
+    assert len(lint_stage2_span_overlap({"entries": [left, right]})) == 1
+    assert len(lint_stage2_span_overlap({"entries": [right, left]})) == 1
+    assert lint_stage2_span_overlap({"entries": [left, {**right, "text": "Clinical Fellow\t"}]}) == []
+    # A line of a multi-line text.
+    lines = [_span(1, 2, text="Award 1993\nWho's Who"), _span(2, 3, hierarchy=("A",), text="Who's Who in Nursing")]
+    assert len(lint_stage2_span_overlap({"entries": lines})) == 1
 
 
 def test_stage2_span_overlap_reads_table_row_spans_by_row_number():

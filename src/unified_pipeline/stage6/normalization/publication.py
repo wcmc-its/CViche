@@ -51,6 +51,7 @@ from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
 from .authors import _normalize_author_names, carry_cv_suffixes
 from .citation_matching import (
     _append_missing_stage5d_values,
+    _complete_stage5d_trailer,
     _insert_missing_stage5d_year,
     _restore_stage5d_owner,
 )
@@ -61,6 +62,9 @@ from .citation_matching import (
 #: assembled from its own fields (§8.2 -- the literal decided a branch and
 #: appeared in the renderer, `records.py` and the tests with no name).
 _STAGE_5D_FORMATTING_SOURCE = 'stage_5d_llm'
+#: Stage 5's record of an article PubMed does not index (#1872): Crossref's
+#: volume, issue and pages complete the trailer of 5d's citation.
+_CROSSREF_MATCH_KEY = 'crossref_match'
 
 
 class PublicationFields(TypedDict, total=False):
@@ -336,6 +340,11 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
             formatted_citation, editors, publisher)
         formatted_citation = _insert_missing_stage5d_year(
             formatted_citation, _group_filled_year(entry, fields), _text(fields.get('location')))
+        crossref = entry.get(_CROSSREF_MATCH_KEY)
+        if isinstance(crossref, dict):
+            formatted_citation = _complete_stage5d_trailer(
+                formatted_citation, _scalar_text(crossref.get('volume')),
+                _scalar_text(crossref.get('issue')), _scalar_text(crossref.get('pages')))
     else:
         formatted_citation = ''
 
