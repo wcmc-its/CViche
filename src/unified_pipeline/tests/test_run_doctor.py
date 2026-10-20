@@ -5465,10 +5465,11 @@ def test_duplicate_passages_reports_a_whole_record_inside_a_shared_field_stretch
 def test_duplicate_passages_flags_a_record_right_after_a_record_of_another_form():
     """#1966: a duplicated record directly after a record of ANOTHER field form,
     no heading between, is still reported. The record start comes from the
-    form edges the document shows -- "Dates:" closes both forms, "Title:" opens
-    one, a "Journal:" line that follows itself is a one-line form -- so the
-    differing "Dates:"/"Course:"/"Title:" just outside both copies belongs to
-    the neighbouring record and the copies are trimmed to nothing less."""
+    run the lines sit in -- "Dates:" ends the run, so a record starts just
+    after a "Dates:", and a "Journal:" line that follows itself is a one-line
+    record -- so the differing "Dates:"/"Course:"/"Title:" just outside both
+    copies belongs to the neighbouring record and the copies are trimmed to
+    nothing less."""
     head, tail = [("p", "Educational Contributions")], [("p", "Other Section")]
 
     def talk(title, dates):
@@ -5477,6 +5478,9 @@ def test_duplicate_passages_flags_a_record_right_after_a_record_of_another_form(
             + tail + talk("Neuroscience", "2002") + _course_record("Anatomy", "2015"))
     assert lint_duplicate_passages(lead)[0]["evidence"][0].startswith(
         "blocks 5-7 repeat at 13-15: Course: Anatomy")
+    # ...and the closing label is each run's own, not the document's last one
+    assert lint_duplicate_passages(lead + [("p", "Committees"), ("p", "Role: Member")])[0][
+        "evidence"][0].startswith("blocks 5-7 repeat at 13-15: Course: Anatomy")
     trail = (head + talk("Anatomy", "2015-2019") + _course_record("Biochemistry", "2001")
              + tail + talk("Anatomy", "2015-2019") + _course_record("Microbiology", "2002"))
     assert lint_duplicate_passages(trail)[0]["evidence"][0].startswith(
@@ -5489,7 +5493,7 @@ def test_duplicate_passages_flags_a_record_right_after_a_record_of_another_form(
     cites = head + talk("Pharmacology", "2015-2019") + journals + tail + talk("Neuroscience", "2015-2019") + journals
     assert lint_duplicate_passages(cites)[0]["evidence"][0].startswith(
         "blocks 5-6 repeat at 12-13: Journal: Annals of Medicine")
-    # "Role:" closing both runs makes "Course:/Role:" then "Dates:/Role:" a
+    # "Role:" ending both runs makes "Course:/Role:" then "Dates:/Role:" a
     # possible reading, but so is a second "Role:" after a whole record, and
     # labels cannot tell those apart -- the record is still reported, as on dev
     roles = (head + _course_record("Anatomy", "2015") + [("p", "Role: Lecturer")]
@@ -5497,9 +5501,8 @@ def test_duplicate_passages_flags_a_record_right_after_a_record_of_another_form(
     assert lint_duplicate_passages(roles)[0]["evidence"][0].startswith(
         "blocks 1-3 repeat at 6-8: Course: Anatomy")
 
-    # a form edge needs two records: one lone "Institution:" line elsewhere
-    # does not make Institution open a record, so the shared fields of the
-    # XAXVYB shape stay a shared stretch and nothing is reported
+    # a lone "Institution:" line in another section does not start a record
+    # inside the XAXVYB shape, so its shared fields stay a shared stretch
     shared = (head + talk("Pharmacology", "2015-2019") + talk("Physiology", "2015-2019")
               + talk("Neuroscience", "2015-2019") + tail + [("p", "Institution: Lakeview College")])
     assert lint_duplicate_passages(shared) == []
@@ -5512,6 +5515,45 @@ def test_duplicate_passages_flags_a_record_right_after_a_record_of_another_form(
                 + _course_record("Anatomy", "2015") + lecture + [("p", "Dates: 2015")]
                 + lecture + [("p", "Dates: ongoing")] + tail + [("p", "Audience: Fellows"), ("p", "Dates: ongoing")])
     assert lint_duplicate_passages(crossing) == []
+
+
+def test_duplicate_passages_quiet_when_another_section_ends_records_on_a_shared_label():
+    """#1966 review: where a record ends is read from its own run of labelled
+    lines, never from another section. An Education section whose entries
+    open on "Institution:", or a Committees section whose entries end on
+    "Role:", does not start a teaching record at its shared "Institution:" or
+    "Audience:" line, so the XAXVYB shape beside it stays quiet. Three forms in
+    one run, all ending on the same "Dates:", stay quiet too: their shared
+    "Role:"/"Sponsor:" and "Dates:" lines are fields, not a duplicate."""
+    def talk(title):
+        return _field_record(title, "Medical students", "Riverside Medical Center", "2015-2019")
+
+    def lecture(title):
+        return [("p", f"Title: {title}"), ("p", "Role: Lecturer"),
+                ("p", "Audience: Medical students"), ("p", "Dates: 2015-2019")]
+    teaching = [("p", "Teaching")] + talk("Anatomy") + talk("Physiology") + talk("Pharmacology")
+    lectures = [("p", "Teaching")] + lecture("Anatomy") + lecture("Physiology") + lecture("Pharmacology")
+    education = [("p", t) for t in (
+        "Education", "Doctor of Medicine", "Institution: Lakeview College", "Dates: 2001-2005",
+        "Bachelor of Arts", "Institution: Hillcrest University", "Dates: 1997-2001")]
+    assert lint_duplicate_passages(education + teaching) == []
+    committees = [("p", t) for t in (
+        "Committees", "Admissions committee", "Role: Member", "Curriculum committee", "Role: Chair")]
+    assert lint_duplicate_passages(committees + lectures) == []
+    opened = teaching + [("p", t) for t in (
+        "Other Section", "Institution: Lakeview College", "Dates: 2001",
+        "Third Section", "Institution: Hillcrest University", "Dates: 2002")]
+    assert lint_duplicate_passages(opened) == []
+    closed = lectures + [("p", t) for t in (
+        "Other Section", "Course: Anatomy", "Role: Director",
+        "Third Section", "Course: Biochemistry", "Role: Tutor")]
+    assert lint_duplicate_passages(closed) == []
+
+    def grant(number):
+        return [("p", f"Grant: {number}"), ("p", "Sponsor: NIH"), ("p", "Dates: 2015-2019")]
+    forms = ([("p", "Teaching")] + talk("Anatomy") + _course_record("Histology", "2015-2019") + grant("R01")
+             + talk("Physiology") + _course_record("Neurology", "2015-2019") + grant("K23"))
+    assert lint_duplicate_passages(forms) == []
 
 
 def test_duplicate_passages_flags_a_repeated_pair_of_colon_titles():
