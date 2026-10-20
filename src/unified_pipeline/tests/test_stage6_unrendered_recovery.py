@@ -59,6 +59,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     record_chunks,
     record_pieces,
     record_siblings,
+    record_twins,
     segment_held_by_fields,
     segments_cover_source,
     short_tab_part_rendered,
@@ -2032,6 +2033,100 @@ def test_non_t_one_committee_in_two_terms_recovers_the_missing_term():
     gen._recover_unrendered_records({"P": [entry]})
     bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
     assert bullets == [rows[1].replace(" | ", " \u2014 ")]
+
+
+def _twin_rows():
+    """Two rows told apart only by a word under five letters: `_record_tokens`
+    gives them one token set (#1956)."""
+    return [f"Member | Graduate Medical Education Committee | {site} | 2015-2018"
+            for site in ("NYP", "WCM")]
+
+
+def test_segments_cover_source_rejects_a_reply_that_drops_a_twin_row():
+    """Twin rows share one token set, so neither was a sibling of the other
+    and a reply that kept one carried every token of both. Each twin needs
+    its own copy of the tokens (#1956)."""
+    rows = _twin_rows()
+    source = "\n".join(rows)
+    assert _record_tokens(rows[0]) == _record_tokens(rows[1])
+    assert segments_cover_source(rows, source) is True
+    assert segments_cover_source(rows[:1], source) is False
+    assert segments_cover_source(rows[1:], source) is False
+
+
+def test_record_twins_maps_each_twin_row_to_the_other_squashed():
+    """`record_siblings` cannot hold twins: no token tells them apart. Their
+    squashed text does (#1956). A row with other words is no twin, and a row
+    repeated with other spacing is the same record, not a twin."""
+    rows = _twin_rows()
+    other = "Member | Graduate Medical Education Committee | Example Hospital | 2015-2018"
+    assert record_siblings(rows) == {}
+    assert record_twins(rows + [other]) == {rows[0]: [_squash(rows[1])],
+                                            rows[1]: [_squash(rows[0])]}
+    assert record_twins([rows[0], rows[0].replace(" | ", " |  ")]) == {}
+
+
+def test_non_t_twin_row_vouched_for_only_by_its_twin_is_recovered():
+    """One twin on the page vouched for the other through their shared words.
+    A row whose only vouching line is its twin's row verbatim is recovered
+    (#1956)."""
+    rows = _twin_rows()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen.doc.add_paragraph(rows[1])
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert bullets == [rows[0].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_twin_rows_neither_on_the_page_are_both_recovered():
+    """Neither twin on the page: the first is recovered, and then must not
+    vouch for the second (#1956)."""
+    rows = _twin_rows()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert sorted(bullets) == [row.replace(" | ", " \u2014 ") for row in rows]
+
+
+def test_non_t_twin_rendered_reformatted_beside_its_twin_verbatim_is_not_recovered():
+    """One twin on the page reformatted past every verbatim piece, the other
+    verbatim: the reformatted line vouches by its words and holds no twin, so
+    it may be the row itself and the verdict stands (#1956). Both rows on the
+    page verbatim re-insert nothing either."""
+    rows = _twin_rows()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    reformatted = "Graduate Medical Education (GME) Committee, NYP: Member, 2015 - 2018"
+    assert not any(piece in _squash(reformatted) for piece in record_pieces(rows[0]))
+    for page in ([reformatted, rows[1]], rows):
+        gen = _generator()
+        for line in page:
+            gen.doc.add_paragraph(line)
+        gen._recover_unrendered_records({"P": [entry]})
+        assert not [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+
+
+def test_sibling_record_rendered_keeps_a_twin_verdict_no_twin_line_overrules():
+    """A twin's verdict turns False only when output lines vouch for it and
+    every one is a twin's row verbatim (#1956). A line that holds one of its
+    verbatim pieces without most of its words still vouches; with no
+    haystack line vouching (a recovered tab part did), the verdict stands."""
+    head = "Member, Graduate Medical Education Committee"
+    rows = [f"{head} and Residency Curriculum Oversight Subcommittee, {site}, 2015-2018"
+            for site in ("NYP", "WCM")]
+    twins = record_twins(rows)[rows[0]]
+    for page in ([rows[1]], [head, rows[1]]):
+        haystack = "\x00".join(_squash(line) for line in page)
+        token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in page]
+        expected = len(page) > 1
+        assert sibling_record_rendered(rows[0], None, haystack, token_sets, [],
+                                       twins) is expected
+    token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(rows[0])))]
+    assert sibling_record_rendered(rows[0], None, "", token_sets, [], twins) is True
 
 
 def test_non_t_date_led_grid_row_rendered_only_through_its_siblings_is_recovered():
