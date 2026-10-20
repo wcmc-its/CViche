@@ -44,6 +44,12 @@ stage-4 extraction group that failed keeps a run out of GREEN (#1174). The
 nine content-loss caps at 84 (#822) are retired: their lints are doctor
 findings, so they now lower the estimate instead of flipping the band.
 
+Deliverability is reported beside the score (#823): ``deliverable`` is False
+when a blocker gate fired (``BLOCKER_GATE_BY_SCORER``: every cap above that
+drives a run RED), and ``blockers`` names each one. The blocker gates still
+cap ``totalScore``; ``raw_score_before_caps`` is the quality number without
+them.
+
 The result also says what the score was computed *without*: ``data_complete``
 is False and ``missing_evidence`` names each scored artifact that was absent,
 unreadable, or ambiguous (and a ``EVIDENCE INCOMPLETE`` flag repeats it), so a
@@ -72,12 +78,12 @@ import re
 import sys
 import zipfile
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from docx.document import Document as DocumentType
 
@@ -911,7 +917,7 @@ LINT_FIX_MINUTES = {
         "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "footer_in_record",
         "glyph_field", "grant_boundary", "grant_facts", "group_credit_dropped",
         "implausible_year", "institution_cleaned_name", "journal_name_joined",
-        "licensure_fallback_truncated",
+        "licensure_fallback_truncated", "mentee_field_incomplete",
         "owner_missing_from_citation",
         "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
         "session_title_missing", "shattered_prose", "span_count",
@@ -1146,6 +1152,35 @@ CAP_ONLY_GATES = [
 ]
 
 
+#: The gates whose firing means "do not deliver this run" (#823), keyed by
+#: their scorer so the set cannot drift from DIMENSIONS / CAP_ONLY_GATES. The
+#: value names the blocker: the doctor lint that reports the same condition.
+#: Every one caps below BAND_YELLOW (a test pins it), so today a run is
+#: undeliverable exactly when a gate drove it RED. The two caps at
+#: BAND_GREEN - 1 (not checked, a failed stage-4 group) are not blockers: they
+#: keep a run out of GREEN, they do not withhold it.
+BLOCKER_GATE_BY_SCORER = {
+    score_no_output: "no_output",
+    score_cv_owner: "owner_contact_missing",
+    score_protected_data: "protected_data_in_output",
+    score_pipeline_errors: "pipeline_errors_present",
+    score_stage3b_fallback_ratio: "stage3b_fallback_ratio",
+}
+
+
+@dataclass(frozen=True)
+class Blocker:
+    """One reason a run must not be delivered as is (#823): the gate that
+    fired, named by its doctor lint, the cap it applies to the score, and the
+    scorer's detail line."""
+    gate: str
+    cap: int
+    detail: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 def band_for(score: int) -> str:
     if score >= BAND_GREEN:
         return "GREEN (ship)"
@@ -1167,6 +1202,7 @@ def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
     dimension_scores = []
     penalty = 0.0
     hard_fail_caps = []
+    blockers: list[Blocker] = []
     flags = []
 
     for name, weight, scorer in DIMENSIONS:
@@ -1181,12 +1217,14 @@ def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
         })
         if cap is not None:
             hard_fail_caps.append(cap)
+            blockers.extend(_blocker(scorer, cap, detail))
             flags.append(f"HARD-FAIL cap={cap}: {name} (fraction={fraction:.2f})")
 
     for name, gate in CAP_ONLY_GATES:
         fraction, detail, cap = gate(outputs_dir)
         if cap is not None:
             hard_fail_caps.append(cap)
+            blockers.extend(_blocker(gate, cap, detail))
             flags.append(f"HARD-FAIL cap={cap}: {name} ({detail})")
 
     # A dimension of weight w costs w * fraction points. Not normalized by
@@ -1222,7 +1260,20 @@ def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
         "flags": flags,
         "data_complete": not missing,
         "missing_evidence": missing,
+        # #823: deliverability, beside the score rather than only through its
+        # cap. Additive: totalScore is still capped by the same gates.
+        "deliverable": not blockers,
+        "blockers": [b.to_dict() for b in blockers],
     }
+
+
+def _blocker(scorer: Callable[[Path], tuple[float, str, int | None]],
+             cap: int, detail: str) -> list[Blocker]:
+    """The blocker a fired gate's cap stands for: one when ``scorer`` is a
+    blocker gate (BLOCKER_GATE_BY_SCORER), none for a cap that only keeps a
+    run out of GREEN."""
+    gate = BLOCKER_GATE_BY_SCORER.get(scorer)
+    return [Blocker(gate, cap, detail)] if gate else []
 
 
 #: The only modes quality_gate accepts. A typo (e.g. "blok") must fail
@@ -1239,7 +1290,8 @@ def quality_gate(run_output_dir: str | Path, run_id: str | None = None, mode: st
     mode:
       "off"      -> always PASS (scorer not consulted for gating)
       "advisory" -> compute verdict but never block (default)
-      "block"    -> RED runs fail the gate (gate_passed=False)
+      "block"    -> an undeliverable run (a blocker fired, #823) fails the
+                    gate (gate_passed=False)
 
     Raises ValueError for any other mode -- validated before scoring runs, so
     a misconfigured caller fails fast instead of silently defaulting to
@@ -1255,7 +1307,9 @@ def quality_gate(run_output_dir: str | Path, run_id: str | None = None, mode: st
 
     result = score_run(run_output_dir, run_id)
     score = result["totalScore"]
-    if score >= BAND_GREEN:
+    if not result["deliverable"]:
+        verdict = "BLOCK"
+    elif score >= BAND_GREEN:
         verdict = "PASS"
     elif score >= BAND_YELLOW:
         verdict = "REVIEW"

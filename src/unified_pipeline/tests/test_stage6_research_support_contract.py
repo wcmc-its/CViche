@@ -2458,11 +2458,10 @@ def test_missing_section_header_renders_nothing_and_does_not_raise():
     assert gen.stats['tables_populated'] == 0
 
 
-def test_existing_template_table_is_removed_even_when_the_category_is_empty():
-    """The blank template table under a header goes even with no grants to add.
-
-    Leaving it behind ships an empty two-column stub in the finished CV.
-    """
+def test_existing_template_table_stays_when_the_category_is_empty():
+    """The blank template table under a header stays when there are no grants
+    to add (#1942): the WCM reviewer wants it kept, with N/A, which the
+    empty-slot pass writes after every section has rendered."""
     gen = _generator()
     gen.doc.add_paragraph().add_run(CURRENT).bold = True
     placeholder = gen.doc.add_table(rows=1, cols=2)
@@ -2472,7 +2471,7 @@ def test_existing_template_table_is_removed_even_when_the_category_is_empty():
 
     gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, as_of=TEST_AS_OF)
 
-    assert gen.doc.tables == []
+    assert [t._tbl for t in gen.doc.tables] == [placeholder._tbl]
 
 
 def test_existing_template_table_is_replaced_by_the_grant_tables():
@@ -2937,6 +2936,26 @@ def test_absent_values_render_as_empty_cells_not_missing_rows():
     assert _cells(table)['Non-financial support:'] == ''
 
 
+def test_past_funding_table_omits_the_rows_wcm_does_not_request():
+    """#1944: Past (Completed) Funding drops Non-financial support and Your
+    percent (%) effort, values and all; every other row keeps its order."""
+    table = _generator()._create_grant_table(dict(_CONTRACT_FIELDS), 'M2B')
+
+    assert _rows(table) == [row for row in _CONTRACT_ROWS
+                            if row[0] not in research_support.PAST_FUNDING_OMITTED_LABELS]
+    omitted = research_support.PAST_FUNDING_OMITTED_LABELS
+    assert omitted == {'Non-financial support:', 'Your percent (%) effort:'}
+
+
+@pytest.mark.parametrize('code', ['M2A', 'M2C'])
+def test_current_and_pending_tables_keep_the_past_omitted_rows(code):
+    """#1944 touches only the past bucket."""
+    cells = _cells(_generator()._create_grant_table(dict(_CONTRACT_FIELDS), code))
+
+    assert cells['Non-financial support:'] == 'Core facility access'
+    assert cells['Your percent (%) effort:'] == '20%'
+
+
 def _fields_get_keys():
     """Every literal key this module reads off a `fields` mapping."""
     tree = ast.parse(Path(research_support.__file__).read_text(encoding='utf-8'))
@@ -3011,7 +3030,7 @@ def test_status_and_notes_render_as_their_own_rows_after_the_effort_row():
     """web39's withdrawn grants lost the status word: no row named `status`."""
     fields = {'title': 'Withdrawn Cohort Study', 'agency': 'NIH', 'start_date': '01/2019',
               'percent_effort': '10%', 'status': 'withdrawn', 'notes': 'Sponsor closed the call'}
-    rows = _rows(_generator()._create_grant_table(fields, 'M2B'))
+    rows = _rows(_generator()._create_grant_table(fields, 'M2C'))
     labels = [label for label, _ in rows]
     assert rows[labels.index('Status:')] == ('Status:', 'withdrawn')
     assert rows[labels.index('Notes:')] == ('Notes:', 'Sponsor closed the call')

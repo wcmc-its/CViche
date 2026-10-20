@@ -614,3 +614,71 @@ class TestFurtherSpansReachTheDateCell:
                                 additional_dates=[{"start_date": "2020", "end_date": "2021"}]))
         assert rows == [("Interim Chair", "Quuxville General Hospital",
                          f"{_O_DATES}, 2020-2021")]
+
+
+class TestEveryRowIsRecordedAgainstItsEntry:
+    """#534 / #1205: every row the writer adds, by any branch, is recorded in
+    the row-receipt ledger against the entry it renders, so the receipt says
+    the entry was written and the sub-point pass can anchor a role's prose
+    only under its own row. A row written after the entry loop is no
+    entry's."""
+
+    @pytest.mark.parametrize("entry, rows", [
+        # One row from the fields.
+        (_leadership_entry(), 1),
+        # No role and no institution: one row of the entry's text.
+        ({"text": "Chair of the Zorblax Standing Committee", "extracted_fields": {},
+          "taxonomy_code": "O"}, 1),
+        # One source row whose cells wrap (#987): one rejoined row.
+        (_table_row_entry(TestWrappedRowRendersAsOneRecord.WRAPPED), 1),
+        # A flattened table (#572, #664): a row per line.
+        ({"text": "Chair, Alpha Board | Quuxville General Hospital | 2001-2003\n"
+                  "Director, Beta Center | Frobnitz Institute | 2004-2006\n"
+                  "Member, Gamma Panel | Wibble College | 2007-2009",
+          "extracted_fields": {}, "taxonomy_code": "O"}, 3),
+    ])
+    def test_each_branch_records_its_rows(self, entry, rows):
+        gen = _real_template_generator()
+        other = _o_entry(leadership_role="Interim Chair", institution="Wibble College")
+        gen._row_receipts.begin_section("leadership")
+        gen._fill_leadership([entry, other])
+        table = gen._find_table_after_paragraph(gen._find_paragraph_exact(CANONICAL_HEADER))
+        stray = table.add_row()
+        gen._row_receipts.wrote(stray._tr)
+
+        mine = gen._row_receipts.elements_for(entry)
+        assert len(mine) == rows
+        recorded = mine + gen._row_receipts.elements_for(other)
+        written = [row._tr for row in table.rows[1:-1]]  # not the header, nor the stray row
+        assert len(recorded) == len(written)
+        assert all(any(element is row for row in written) for element in recorded)
+        receipt, = gen._row_receipts.receipts({"leadership": [entry, other]})
+        assert (receipt.given, receipt.written, receipt.lost) == (2, 2, ())
+
+
+class TestTheSchemaFieldWinsOverItsFallbacks:
+    """#1205 review: the role cell reads `leadership_role`, then stage 4's
+    off-schema `role`, then `position`; the institution cell reads
+    `institution`, then `organization` (`supplementary.LEADERSHIP_ROLE_FIELDS`,
+    `LEADERSHIP_INSTITUTION_FIELDS`). The first that holds text wins: an
+    empty one is passed over."""
+
+    @pytest.mark.parametrize("fields, role", [
+        ({"leadership_role": "Program Director", "role": "Zorblax Chair", "position": "Dean"},
+         "Program Director"),
+        ({"leadership_role": "", "role": "Zorblax Chair", "position": "Dean"}, "Zorblax Chair"),
+        ({"role": "", "position": "Dean"}, "Dean"),
+    ])
+    def test_the_role_cell_reads_the_first_role_field_holding_text(self, fields, role):
+        rows = _o_rows(_o_entry(institution="Quuxville General Hospital", **fields))
+        assert rows == [(role, "Quuxville General Hospital", _O_DATES)]
+
+    @pytest.mark.parametrize("fields, institution", [
+        ({"institution": "Quuxville General Hospital", "organization": "Frobnitz Society"},
+         "Quuxville General Hospital"),
+        ({"institution": "", "organization": "Frobnitz Society"}, "Frobnitz Society"),
+    ])
+    def test_the_institution_cell_reads_the_first_institution_field_holding_text(self, fields,
+                                                                                 institution):
+        rows = _o_rows(_o_entry(leadership_role="Program Director", **fields))
+        assert rows == [("Program Director", institution, _O_DATES)]

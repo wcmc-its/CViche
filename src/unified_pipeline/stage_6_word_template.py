@@ -89,6 +89,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     deduplicate_entries,
     recovered_row_already_rendered,
 )
+from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE, TemplateSnapshot, fill_empty_slots, snapshot_template
 from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
     FANNED_OUT_FROM,
@@ -2254,8 +2255,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
             self._dedup_grouped_entries(entries_by_code)
 
-        # Load template
+        # Load template, and record it as shipped: which slots end up empty is read against this (#1942).
         self.doc = Document(self.template_path)
+        template_snapshot = snapshot_template(self.doc.element.body)
 
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
@@ -2355,21 +2357,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # inserts count as rendered) -- both bullet leftover content into the
         # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
         recovered_appendix_lines = self._recover_appendix_lines(written_appendix_entries, pre_dedup_entries_by_code, cv_owner)
-
-        # Finalize comments (add to comments.xml)
-        self._finalize_comments()
-
-        # Apply vertical middle alignment to ALL table cells
-        self._apply_vertical_alignment_to_all_tables()
-
-        # Apply table styling (header background color, borders)
-        self._apply_table_styling_to_all_tables()
-
-        # Drop the WCM template's gray instruction box last, after all
-        # content-search-based filling is done, so table removal can't shift
-        # anything the fill logic relied on.
-        if self.strip_template_instructions:
-            self._remove_instruction_box()
+        self._finish_document(template_snapshot)
 
         # Determine output path
         if output_path is None:
@@ -2401,6 +2389,30 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             self._log_generation_summary(output_path)
 
         return output_path
+
+    def _finish_document(self, template_snapshot: TemplateSnapshot) -> None:
+        """The passes over the whole document once every line is placed: N/A in
+        each template slot nothing filled, then comments, table formatting and
+        the instruction box."""
+        # Last content written, so a slot something above fills never says N/A (#1942).
+        filled = fill_empty_slots(self.doc.element.body, template_snapshot)
+        logger.info("Empty template slots marked %s: %d paragraph, %d table",
+                    NOT_APPLICABLE, filled.paragraphs, filled.tables)
+
+        # Finalize comments (add to comments.xml)
+        self._finalize_comments()
+
+        # Apply vertical middle alignment to ALL table cells
+        self._apply_vertical_alignment_to_all_tables()
+
+        # Apply table styling (header background color, borders)
+        self._apply_table_styling_to_all_tables()
+
+        # Drop the WCM template's gray instruction box last, after all
+        # content-search-based filling is done, so table removal can't shift
+        # anything the fill logic relied on.
+        if self.strip_template_instructions:
+            self._remove_instruction_box()
 
     def _log_generation_summary(self, output_path: str) -> None:
         """The verbose end-of-render stats block, lifted out of `generate`
@@ -3958,7 +3970,8 @@ Now analyze the text above:"""
         positions writer made sub-points (`_add_title_duties`); they join the
         haystack, so the same duties are not planned again from the entry's
         text. The row-receipt ledger says which rows each entry wrote: a
-        degree's prose goes only under its own (`supplementary._own_degree_rows`)."""
+        degree's or a leadership role's prose goes only under its own
+        (`supplementary._own_rows`)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(

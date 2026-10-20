@@ -86,6 +86,24 @@ N2_HEADING = "Institutional Training Grants and Mentored Trainee Grants"
 N2_INSTRUCTION = ("Duplicate table below as needed. Examples include serving "
                    "as PI or Mentor on T32, K01, K08, K23 or other mentored grants.")
 
+# A mentee table's label column, in template order (`_mentee_table_rows`).
+# The doctor's mentee_field_incomplete (#1941) reads a rendered table by these
+# labels, and asks for the two named here only where the template does: the
+# Project/Accomplishments row is optional ("**Optional: List publications
+# ..."), and Current Position is a Past Mentees row (a current mentee's table
+# asks for "Goals/expected Outcomes" there instead).
+MENTEE_NAME_LABEL = 'Name:'
+MENTEE_PROJECT_LABEL = 'Project/Accomplishments:'
+MENTEE_CURRENT_POSITION_LABEL = 'Current Position:'
+MENTEE_TABLE_LABELS = (
+    MENTEE_NAME_LABEL,
+    'Site/Position:',
+    'Mentoring Period:',
+    MENTEE_PROJECT_LABEL,
+    MENTEE_CURRENT_POSITION_LABEL,
+    'Type of Supervision:',
+)
+
 # Spacing paragraph between mentee tables: 6pt before and after, in
 # twentieths of a point (w:spacing units).
 MENTEE_TABLE_SPACING_TWIPS = '120'
@@ -828,14 +846,14 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
 def _mentee_table_rows(record: MenteeRecord) -> tuple[tuple[str, str], ...]:
     """The six (label, value) rows of a mentee table, in template order.
     Blank values are kept so every table has the same shape."""
-    return (
-        ('Name:', record.name),
-        ('Site/Position:', record.site_position),
-        ('Mentoring Period:', record.mentoring_period),
-        ('Project/Accomplishments:', record.project),
-        ('Current Position:', record.current_position),
-        ('Type of Supervision:', record.supervision_type),
-    )
+    return tuple(zip(MENTEE_TABLE_LABELS, (
+        record.name,
+        record.site_position,
+        record.mentoring_period,
+        record.project,
+        record.current_position,
+        record.supervision_type,
+    ), strict=True))
 
 
 def _first_table_after(anchor: BaseOxmlElement) -> BaseOxmlElement | None:
@@ -908,11 +926,11 @@ class MentoringSection:
         which entry goes where. A heading the template lacks is logged with
         the count it drops; nothing returns silently.
 
-        The mentee placeholder removal below is unconditional: a heading
-        with no mentees, or a CV with no mentees at all, still gets its
-        template placeholder(s) stripped, same as every other section
-        already strips its own empty placeholder -- the delivered document
-        is a finished record, not a form (#845).
+        A heading's mentee placeholder is removed only when that heading
+        has mentees or summary lines to render in its place. A heading with
+        none keeps the template's table, which the empty-slot pass fills
+        with N/A (#1942, reversing #845's unconditional removal: the WCM
+        reviewer reads a missing table as one CViche deleted).
 
         `current_year` is the year an N3A period must end before to render
         under Past Mentees (`_n3a_entry_has_ended`). It defaults to the
@@ -932,15 +950,18 @@ class MentoringSection:
         self._decline_award_title_mentees(partition.refused)
         current_anchor, past_anchor = self._mentoring_anchors()
 
-        # Placeholder removal happens before the empty-partition return
-        # below, and before anything renders: `_first_table_after` scans to
-        # the next table anywhere below its heading, so once one group has
-        # rendered, the other heading's scan would find those new tables
-        # instead of the template's. Once per distinct anchor, so a shared
-        # fallback anchor (both headings missing) is not cleared twice.
+        # Placeholder removal happens before anything renders:
+        # `_first_table_after` scans to the next table anywhere below its
+        # heading, so once one group has rendered, the other heading's scan
+        # would find those new tables instead of the template's. Only under
+        # a heading with something to render (#1942); once per distinct
+        # anchor, so a shared fallback anchor (both headings missing) is not
+        # cleared twice.
         cleared: list[BaseOxmlElement] = []
-        for anchor in (current_anchor, past_anchor):
-            if anchor is not None and not any(anchor is seen for seen in cleared):
+        for anchor, has_content in (
+                (current_anchor, bool(partition.current or partition.current_summaries)),
+                (past_anchor, bool(partition.past or partition.past_summaries))):
+            if anchor is not None and has_content and not any(anchor is seen for seen in cleared):
                 self._remove_template_table_after(anchor)
                 cleared.append(anchor)
 
@@ -979,8 +1000,7 @@ class MentoringSection:
         ]
 
         # Only warn about a missing heading when there was something to
-        # render under it; the placeholder removal above already ran for
-        # every anchor regardless of content.
+        # render under it.
         for mentees, summaries, anchor, heading, _ongoing in groups:
             if anchor is None:
                 logger.warning(
@@ -1081,13 +1101,10 @@ class MentoringSection:
         the template ships with (#529 round 2, F1). Falls back to the
         heading when the instruction paragraph is missing.
 
-        The placeholder removal is unconditional-but-guarded (#529 round 2,
-        F3): `_remove_training_grant_placeholder` runs whenever an anchor
-        is found at all, whether or not there are N2 entries to render, and
-        only ever deletes a table that actually looks like N2's own. On the
-        real pipeline this is a no-op either way: issue #836's cascade in
-        `research_support.py` has already removed the table before
-        `_fill_mentoring` runs, on every render, N2 content or not.
+        The placeholder is removed only when there are N2 entries to render
+        in its place, and only when it actually looks like N2's own (#529
+        round 2, F3). With no N2 entries it stays, and the empty-slot pass
+        fills it with N/A (#1942).
 
         A sparse entry (no title, agency or grant number -- nothing a table
         would show) renders as a plain line instead; N2 has no other route
@@ -1095,15 +1112,14 @@ class MentoringSection:
         fallback (only reached when there are entries to place) matches
         `_fill_program_leadership`.
         """
+        if not entries:
+            return
         anchor_idx = self._find_paragraph_exact(N2_INSTRUCTION)
         if anchor_idx is None:
             anchor_idx = self._find_paragraph_exact(N2_HEADING)
         anchor = self._paragraph_element(anchor_idx)
         if anchor is not None:
             self._remove_training_grant_placeholder(anchor)
-
-        if not entries:
-            return
 
         if anchor is None:
             logger.warning(
@@ -1124,8 +1140,8 @@ class MentoringSection:
 
     def _remove_training_grant_placeholder(self, anchor: BaseOxmlElement) -> None:
         """Remove the table after ``anchor`` only when its header row reads
-        N2's own placeholder label (#529 round 2, F3). Unconditional (called
-        whether or not N2 has entries to render) but guarded: never deletes
+        N2's own placeholder label (#529 round 2, F3). Called only when N2
+        has entries to render (#1942), and guarded: never deletes
         a table it does not recognize as its own -- the #836 cascade this
         guards against found and emptied an unrelated section's table on
         `web199` when the removal was unconditional AND unguarded."""

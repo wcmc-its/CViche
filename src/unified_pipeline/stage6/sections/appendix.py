@@ -227,6 +227,8 @@ from ...core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
+from ..empty_slots import APPENDIX_HEADING
+from ..fan_out import LAST_STAGE4_RECORD
 from ..formatting import (
     _set_font,
     add_cviche_box,
@@ -234,7 +236,6 @@ from ..formatting import (
     is_cviche_box,
     space_around_cviche_box,
 )
-from ..fan_out import LAST_STAGE4_RECORD
 from ..normalization import _clean_inline_tabs
 from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
 from ..parsing.text import DATE_LED_SOURCE_TEXT
@@ -1762,7 +1763,7 @@ class AppendixSection:
         self.doc.add_paragraph()
 
         appendix_para = self.doc.add_paragraph()
-        run = appendix_para.add_run("T. APPENDIX")
+        run = appendix_para.add_run(APPENDIX_HEADING)
         _set_font(run, bold=True)
         run.underline = True
 

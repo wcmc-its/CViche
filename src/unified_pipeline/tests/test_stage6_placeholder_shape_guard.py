@@ -332,17 +332,19 @@ def test_guard_is_safe_on_an_empty_table_in_the_render_flow():
 
 # --- real WCM template integration ------------------------------------------------
 
-def test_real_template_no_entries_removes_only_m2_own_placeholder():
+def test_real_template_no_entries_keeps_every_placeholder():
+    """#1942: with no grants, M2's own placeholder stays too (it was removed
+    "even with no entries" before), for the empty-slot pass to fill with N/A."""
     gen = _real_template_generator()
     before = _table_labels(gen)
 
     gen._fill_research_support({}, None, 'synthetic-uid', as_of=date(2026, 1, 1))
 
     after = _table_labels(gen)
-    assert len(after) == len(before) - 1
+    assert after == before
     assert N2_LABEL in after
     assert after.count('Name') == 2
-    assert not any(label.startswith('Award Source:') for label in after)
+    assert sum(label.startswith('Award Source:') for label in after) == 1
 
 
 def test_real_template_one_entry_leaves_n2_and_mentee_placeholders_in_place():
@@ -358,8 +360,8 @@ def test_real_template_one_entry_leaves_n2_and_mentee_placeholders_in_place():
     assert after.count('Name') == 2
 
 
-def test_real_template_l3_content_with_no_grants_or_mentees_removes_both_mentee_placeholders():
-    """Ticket D-836-R2, TASK 2 item 3 (updated for #845): the combined
+def test_real_template_l3_content_with_no_grants_or_mentees_keeps_both_mentee_placeholders():
+    """Ticket D-836-R2, TASK 2 item 3 (updated for #845, then #1942): the combined
     real-template proof -- #836's guards (research_support, mentoring) plus
     #841's clinical_practice guard, run in `generate()`'s own order, on a
     document with zero grants and zero mentees but one L3 entry.
@@ -371,9 +373,9 @@ def test_real_template_l3_content_with_no_grants_or_mentees_removes_both_mentee_
     the corpus population is exactly clinical L3/L2/L1 content with no
     grants and no current mentees). With both fixes, N2's placeholder stops
     the funding cascade and the L3 entry falls back to a bullet under
-    Clinical Leadership -- never written into either mentee table. #845
-    then removes both mentee placeholders on purpose (there are no mentee
-    entries at all in this fixture): a finished document is not a form.
+    Clinical Leadership -- never written into either mentee table. Both
+    mentee placeholders stay, empty, for the N/A pass (#1942 reverses
+    #845's removal), and L3 still writes into neither.
     """
     gen = _real_template_generator()
 
@@ -393,7 +395,8 @@ def test_real_template_l3_content_with_no_grants_or_mentees_removes_both_mentee_
     assert gen.stats['tables_populated'] == 0
 
     name_tables = [t for t in gen.doc.tables if t.rows[0].cells[0].text.strip() == 'Name']
-    assert len(name_tables) == 0
+    assert len(name_tables) == 2
+    assert not any(c.text.strip() for t in name_tables for row in t.rows for c in row.cells[1:])
 
     leadership_idx = gen._find_paragraph_with_text('Clinical Leadership')
     assert leadership_idx is not None

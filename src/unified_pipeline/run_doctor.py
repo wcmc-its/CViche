@@ -510,12 +510,13 @@ Lints, ranked by the severity of the failure class they catch:
                           section; with the docx, only lines that render
                           nowhere. Reads stage 2; stage 1a and the docx when
                           present
-14at. stage2_span_overlap a stage-2 record entry that shares two or more
-                          source elements (paragraphs or table rows) with an
-                          entry before it, so the shared lines render twice,
-                          often under the wrong section (#1433; ATUVAL
-                          867-869, web172 112.x). WARN, one per pair of
-                          sections. Reads stage 2 only
+14at. stage2_span_overlap a stage-2 record entry that shares source
+                          elements (paragraphs or table rows) with an entry
+                          before it, one element emitted twice excepted, so
+                          the shared lines render twice, often under the
+                          wrong section (#1433; ATUVAL 863-867/867-869,
+                          web172 112.x). WARN, one per pair of sections.
+                          Reads stage 2 only
 14au. cross_entry_value   a stage-4 value (a date's year, an amount, an
                           effort, a grant number, the owner's grant role or
                           a person's name) that its own entry's text lacks
@@ -557,6 +558,14 @@ Lints, ranked by the severity of the failure class they catch:
                           dropped (SXPHOG 56). WARN, one per entry. Reads
                           stage 5b and the docx's table rows; its paragraphs
                           when present
+14ba. mentee_field_incomplete a mentee table field the WCM template asks
+                          for (all but Project/Accomplishments; Current
+                          Position under Past Mentees only) left blank or
+                          "N/A" (#1941; XAXVYB, every past mentee's Current
+                          Position). A request to the submitter, not a
+                          CViche defect: INFO, review copy only, one per
+                          heading and field. Reads the docx's table rows;
+                          its paragraphs, for the heading, when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -627,6 +636,9 @@ from typing import NamedTuple
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
     lint_section_consistency,
+)
+from unified_pipeline.doctor.lints.completeness import (  # noqa: F401,E402
+    lint_mentee_field_incomplete,
 )
 from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
     lint_contact_slot_lost,
@@ -955,6 +967,7 @@ KNOWN_LINTS = (
     "group_credit_dropped",
     "institution_cleaned_name",
     "renderer_row_missing",
+    "mentee_field_incomplete",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1247,12 +1260,12 @@ LINT_PREVALENCE = {
     # measured 2026-10-12. Same mixed-corpus caveat as above; the old farm
     # runs carry far more text breaks than current ones.
     "stage2_text_break": 0.354,
-    # stage2_span_overlap (#1433; S2-SO in doctor/PRECISION.md): 19 of 278
-    # local stage-2 runs -- the 106 under src/unified_pipeline/outputs, the
-    # 2026-09-11 and 2026-09-17 _autopsy_artifacts batches (40 and 20) and
-    # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
-    # caveat as above.
-    "stage2_span_overlap": 0.068,
+    # stage2_span_overlap (#1433; S2-SO2 in doctor/PRECISION.md): 34 of 324
+    # distinct local stage-2 artifacts -- under src/unified_pipeline/outputs,
+    # the _autopsy_artifacts batches, analysis/ and the wave1 farm --
+    # measured 2026-10-20, once one-element overlaps were reported (19 of the
+    # same 324 before). Same mixed-corpus caveat as above.
+    "stage2_span_overlap": 0.105,
     # cross_entry_value (#1575; CEV-1 in doctor/PRECISION.md): 19 of 400
     # distinct stored stage-4 outputs (392 uids) on this machine, 2026-10-15,
     # re-measured after #1840 (22 before it). Most predate #1609, which now
@@ -1279,6 +1292,10 @@ LINT_PREVALENCE = {
     # runs, the EBYSBC/s7ab/pilot farm, OIEPQD and YUYVIG), 2026-10-15. The
     # 5b artifacts predate #1791, so source_place_replaced should fall.
     "institution_cleaned_name": 0.09,
+    # mentee_field_incomplete (#1941; MFI-1 in doctor/PRECISION.md): 151 of 300
+    # distinct CVs over the 465 S3 runs' stored delivered docx, 2026-10-19.
+    # Most CVs leave some mentee field blank; it is INFO and review-copy only.
+    "mentee_field_incomplete": 0.503,
 }
 
 
@@ -1902,6 +1919,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("institution_cleaned_name", lint_institution_cleaned_name,
              ("stage_5b", "table_rows"), optional=("blocks",)),
     LintSpec("renderer_row_missing", lint_renderer_row_receipts, ("stage_6_report",)),
+    # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
+    LintSpec("mentee_field_incomplete", lint_mentee_field_incomplete, ("table_rows",),
+             optional=("blocks",)),
 )
 
 #: The views read from the stage-6 docx.

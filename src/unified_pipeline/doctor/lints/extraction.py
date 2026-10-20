@@ -46,6 +46,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
+    is_unanswered_prompt,
 )
 from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
@@ -221,9 +222,20 @@ def _entry_status(entry: dict) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def _is_unfilled_placeholder(text: str) -> bool:
+    """True for a block holding only template labels and N/A: the Current
+    Research Funding placeholder stage 6 keeps when that heading has no
+    grants (#1942). Its labels ("Project title", "Annual direct costs") are
+    every grant's labels, so in a haystack they would vouch for any grant
+    written in the WCM template's own shape."""
+    lines = [line for line in str(text).split("\n") if line.strip()]
+    return bool(lines) and all(is_template_label_line(line) or is_unanswered_prompt(line)
+                               for line in lines)
+
+
 def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     """Per-bucket Haystack of everything rendered under each of stage 6's
-    funding subsection headers."""
+    funding subsection headers, less any unfilled placeholder."""
     segments: dict[str, list[tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
     current = None
     for kind, text in blocks:
@@ -237,7 +249,7 @@ def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
             if normed in _FUNDING_BOUNDARY_TITLES or _output_section_header(stripped):
                 current = None
                 continue
-        if current:
+        if current and not _is_unfilled_placeholder(text):
             segments[current].append((kind, text))
     return {code: _haystacks(seg) for code, seg in segments.items()}
 
