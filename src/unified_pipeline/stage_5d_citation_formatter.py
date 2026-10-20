@@ -296,8 +296,12 @@ def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str,
     return id_to_formatted
 
 
-# The extracted fields 5d copies onto an entry that lacks them.
-_COPIED_FIELDS = ('authors', 'title', 'journal', 'year', 'volume', 'issue', 'pages', 'doi', 'book_title')
+# The extracted fields 5d copies onto an entry that lacks them. `editors` and
+# `publisher` are copied like the rest (#481): a reply that extracted them for
+# a book or chapter stage 4 left without them otherwise dropped them, and
+# stage 6's safety net reads them from the entry.
+_COPIED_FIELDS = ('authors', 'title', 'journal', 'year', 'volume', 'issue', 'pages', 'doi',
+                  'book_title', 'editors', 'publisher')
 # Two or more periods with only spacing between: what removing a title leaves.
 _REPEATED_PERIODS_RE = re.compile(r'(?:\s*\.){2,}')
 

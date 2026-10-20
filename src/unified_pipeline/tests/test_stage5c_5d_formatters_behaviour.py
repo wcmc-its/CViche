@@ -2130,6 +2130,29 @@ def test_apply_formatted_fields_cuts_a_placeholder_whose_title_ends_in_a_period(
     assert "title" not in entry["extracted_fields"]
 
 
+@pytest.mark.parametrize("field", ["editors", "publisher"])
+def test_apply_formatted_fields_copies_editors_and_publisher_onto_an_entry_without_them(field):
+    # #481: the reply's editors/publisher used to be dropped, so stage 6's
+    # safety net had no value to place. Names are invented.
+    entry = {"text": "Quill A. A chapter. In: Rook B, ed. Book. Ruritan Press; 2001.",
+             "extracted_fields": {}}
+    reply = {"formatted_citation": "Quill A. A chapter. In: Rook B, ed. Book. Ruritan Press; 2001.",
+             "editors": "Rook B", "publisher": "Ruritan Press"}
+    assert s5d.apply_formatted_fields(entry, reply) is True
+    assert entry["extracted_fields"][field] == reply[field]
+
+
+def test_apply_formatted_fields_keeps_stage_4s_editors_and_publisher():
+    # Copied only where the entry has none, like every other copied field.
+    entry = {"text": "Quill A. A chapter.",
+             "extracted_fields": {"editors": "Brook Rook", "publisher": "Ruritan Press, Zenda"}}
+    reply = {"formatted_citation": "Quill A. A chapter.", "editors": "Rook B",
+             "publisher": "Ruritan"}
+    s5d.apply_formatted_fields(entry, reply)
+    assert entry["extracted_fields"]["editors"] == "Brook Rook"
+    assert entry["extracted_fields"]["publisher"] == "Ruritan Press, Zenda"
+
+
 def test_apply_formatted_fields_leaves_the_reply_unchanged():
     # The caller's reply dict is read, never edited.
     entry = {"text": "Ruritania.", "extracted_fields": {}}
