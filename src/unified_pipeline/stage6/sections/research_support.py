@@ -1798,19 +1798,19 @@ class ResearchSupportSection:
                     logger.warning("  Warning: Could not find section header '%s'", section_header)
                 continue
 
-            # Remove the existing template table after this section, if it is
-            # M2's own placeholder (even with no entries, to avoid leaving an
-            # empty template table). `_find_table_after_paragraph` has no
+            # A heading with no grants keeps the template's placeholder table,
+            # which the empty-slot pass fills with N/A (#1942, reversing the
+            # removal "even with no entries"). With grants, the placeholder
+            # makes way for theirs. `_find_table_after_paragraph` has no
             # section boundary and returns the first table anywhere below --
             # for Past/Pending, which have no placeholder of their own, that
             # was N2's table and a mentee placeholder (#836); the shape guard
             # is what keeps this removal inside M2.
+            if not entries:
+                continue
             existing_table = self._find_table_after_paragraph(section_idx)
             if existing_table and _looks_like_funding_placeholder(existing_table):
                 existing_table._element.getparent().remove(existing_table._element)
-
-            if not entries:
-                continue
 
             # Sort entries reverse chronologically (most recent first)
             sorted_entries = sort_entries_reverse_chronological(entries)
