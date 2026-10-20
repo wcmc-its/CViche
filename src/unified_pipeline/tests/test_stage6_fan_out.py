@@ -1359,6 +1359,55 @@ class TestDeclinedListCheckedAfterRender:
             {'mentee_name': 'Quillon', 'start_date': '2013-09', 'end_date': 'current'},))
         assert fan_out.unrendered_list_warnings([found], ['Quillon 2013-Present']) == []
 
+    def test_a_k1_or_s_list_beside_a_named_parent_is_handed_back(self):
+        # web204 S3 1802 / 1814: a book's chapters, kept whole beside its own
+        # title, which is all the row prints.
+        chapters = [{'authors': 'Gorman, B. S.', 'chapter': 'Glade Tides'},
+                    {'authors': 'Pellam, R.', 'chapter': 'Fern Lattice'}]
+        entry = {'taxonomy_code': 'S3', 'text': 'Glade Handbook. Chapters: Glade Tides; Fern Lattice',
+                 'extracted_fields': {'title': 'Glade Handbook', 'chapters_authored': chapters}}
+        warnings, declined = _declined(entry)
+        assert warnings == []
+        assert [(d.code, d.key, d.stray, d.stage4) for d in declined] == [
+            ('S3', 'chapters_authored', ('chapter',), False)]
+
+    def test_a_k1_list_is_handed_back_beside_its_declined_stage4_list(self):
+        # Stage 4's records list is handed back once, as itself.
+        records = [{'course_title': 'Glade Anatomy', 'role': 'Lecturer'}, {'institution': None}]
+        courses = [{'course': 'Fern Physiology'}, {'course': 'Moss Histology'}]
+        entry = _stage4_entry(records, code='K1', text='Glade Anatomy; Fern Physiology; Moss Histology',
+                              extracted_fields={**records[-1], _RECORDS: records, 'courses': courses})
+        _, declined = _declined(entry, records_key=_RECORDS)
+        assert sorted((d.key, d.stage4) for d in declined) == [('courses', False), (_RECORDS, True)]
+
+    def test_words_every_record_shares_do_not_vouch_for_one(self):
+        # web204 S3 1814: every chapter names the owner, so a publication line
+        # naming the owner and one title word does not print the chapter.
+        found = fan_out.DeclinedList('S3', 'chapters_authored', ('chapter',), (
+            {'authors': 'Allison Quillmere', 'chapter': 'Glade Tides'},
+            {'authors': 'Allison Quillmere', 'chapter': 'Fern Lattice Theory'}))
+        lines = ['Allison Quillmere. Glade Tides.', 'Allison Quillmere. Fern cohort. 2001']
+        (warning,) = fan_out.unrendered_list_warnings([found], lines)
+        assert warning['evidence'][0] == 'S3.chapters_authored: 1 entry'
+
+    def test_initials_do_not_vouch_for_a_record(self):
+        found = fan_out.DeclinedList('S3', 'chapters_authored', ('chapter',), (
+            {'authors': 'Gorman, B. S.', 'chapter': 'Glade Tides'},
+            {'authors': 'Pellam, R.', 'chapter': 'Fern Lattice'}))
+        lines = ['Pellam R. Fern Lattice.', 'Gorman B S. Moss cohort.']
+        assert len(fan_out.unrendered_list_warnings([found], lines)) == 1
+
+    @pytest.mark.parametrize('rows,missing', [
+        (['Title: Glade', 'PI: Quillon', 'Amount: Ashgrove'], False),
+        (['Title: Glade', 'Fern', 'Moss', 'PI: Quillon', 'Ashby', 'Pine', 'Amount: Ashgrove'], True),
+    ])
+    def test_a_record_written_one_field_per_row_spans_its_field_count(self, rows, missing):
+        # web26 M2A: a grant block writes one field per row; a whole table's
+        # text would vouch for words strewn over unrelated rows.
+        found = fan_out.DeclinedList('M2A', 'sub_awards', (), (
+            {'sub_title': 'Glade', 'pi_name': 'Quillon', 'funding': 'Ashgrove', 'notes': None},))
+        assert bool(fan_out.unrendered_list_warnings([found], [], [rows])) is missing
+
     def test_no_declined_argument_hands_nothing_back(self):
         entry = {'taxonomy_code': 'N3B', 'text': 'Zzunheld prose no field carries',
                  'extracted_fields': {'records': [{'mentee_name': 'Quillon'}] * 2}}
@@ -1486,65 +1535,6 @@ class TestGeneratorChecksDeclinedListsAfterRender:
                      {'journal_name': 'Quillmere Journal', 'start_date': '2009', 'end_date': '2012'},
                      {'journal_name': 'Ashgrove Review', 'start_date': '2010', 'end_date': '2014'}]}}
         assert self._render(tmp_path, entry) == []
-
-
-class TestB1DegreeLeftOutOfTheList:
-    """#1187 (IPXFBA ZGNARO): a degree the text names with no year, which
-    stage 4 left out of the list it fanned out, warns as a missing year does."""
-
-    def _warnings(self, entry):
-        warnings = []
-        fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings)
-        return warnings
-
-    def _entry(self, text):
-        entry = _two_degrees(_NESTED_DATES)
-        entry['text'] = text
-        return entry
-
-    @pytest.mark.parametrize('third', ['PhD Quillmere University', 'Ph.D., Quillmere University',
-                                       'M.P.H. Quillmere University'])
-    def test_a_third_degree_without_a_year_warns(self, third):
-        entry = self._entry('BSc Harrowfield University\tMSc Birch Hollow University\t' + third)
-        assert len(_fan(entry)) == 2
-        (warning,) = self._warnings(entry)
-        assert warning['evidence'] == ['B1.degrees: 1 entry']
-        assert "names a degree no record holds" in warning['message']
-        assert 'Quillmere' not in str(warning) and 'PhD' not in str(warning)
-
-    def test_a_state_after_a_comma_is_not_a_degree(self):
-        entry = self._entry('BSc Harrowfield University, Baltimore, MD\tMSc Birch Hollow University')
-        assert self._warnings(entry) == []
-
-    def test_a_degree_stage_4_spelled_out_is_not_an_extra_one(self):
-        entry = _two_degrees(_NESTED_DATES)
-        entry['extracted_fields']['degrees'][1]['degree'] = 'Master of Science'
-        entry['text'] = 'BSc Harrowfield University\tMSc Birch Hollow University'
-        assert self._warnings(entry) == []
-
-    def test_a_degree_word_a_rendered_field_holds_does_not_warn(self):
-        entry = _two_degrees(_NESTED_DATES)
-        entry['extracted_fields']['degrees'][1]['institution'] = 'MD Anderson Cancer Center'
-        entry['text'] = 'BSc Harrowfield University\tMSc MD Anderson Cancer Center'
-        assert self._warnings(entry) == []
-
-    def test_lowercase_words_are_not_degrees(self):
-        entry = self._entry('BSc Harrowfield University\tMSc Birch Hollow University, as we do')
-        assert self._warnings(entry) == []
-
-    def test_a_missing_year_is_reported_once_as_the_year(self):
-        entry = self._entry('BSc Harrowfield University\tMSc Birch Hollow University\tPhD Quillmere 2012')
-        (warning,) = self._warnings(entry)
-        assert "names a year no record holds" in warning['message']
-
-    def test_a_stage4_records_list_does_not_warn(self):
-        records = [{'degree': 'BS', 'institution': 'Harrowfield University', 'year': '1999'},
-                   {'degree': 'MD', 'institution': 'Birch Hollow University', 'year': '2003'}]
-        entry = _stage4_entry(records, code='B1', text=(
-            'BS Harrowfield University\tMD Birch Hollow University\tPhD Quillmere University'))
-        warnings = []
-        fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings, _RECORDS)
-        assert warnings == []
 
 
 class TestParentKeepsItsOwnPart:

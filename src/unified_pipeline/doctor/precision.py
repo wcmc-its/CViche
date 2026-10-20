@@ -103,7 +103,6 @@ _STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("grant_not_funded_application", r"is an application the source marks not funded"),
         ("fanout_list_not_split", r"holds (?:several )?records that were not split"),
         ("fanout_year_not_listed", r"was split into separate rows, but the entry's text names a year"),
-        ("fanout_degree_not_listed", r"was split into separate rows, but the entry's text names a degree"),
         ("geo_scope_failed", r"geographic scope classification"),
         ("appendix_reclassification_failed", r"appendix entry reclassification"),
         ("section_failed", r"^section .* failed:"),

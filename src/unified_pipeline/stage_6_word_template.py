@@ -4938,18 +4938,19 @@ Now analyze the text above:"""
         # Check 4: a record list fan-out kept whole, a record of which is not
         # in the document (#1187, stage6/fan_out.py `DeclinedList`).
         if self._declined_lists:
-            issues.extend(unrendered_list_warnings(self._declined_lists, self._declined_list_lines()))
+            issues.extend(unrendered_list_warnings(
+                self._declined_lists, self._rendered_output_lines(include_tracked_insertions=True),
+                self._declined_list_table_rows()))
 
         return issues
 
-    def _declined_list_lines(self) -> list[str]:
-        """The lines Check 4 looks for a declined list's records in: every
-        rendered line (`_rendered_output_lines`, tracked insertions included)
-        plus each table's whole text, because a grant or mentee block writes
-        one record one field per row (#1187: web26's M2A sub-awards)."""
-        tables = [' '.join(t.text or '' for t in table._tbl.iter(qn('w:t')))
-                  for table in self.doc.tables]
-        return self._rendered_output_lines(include_tracked_insertions=True) + tables
+    def _declined_list_table_rows(self) -> list[list[str]]:
+        """Each table's rows' text, nested tables included, for Check 4: a
+        grant or mentee block writes one record one field per row, so no one
+        line holds it (#1187: web26's M2A sub-awards)."""
+        return [[' '.join(t.text or '' for t in row.iter(qn('w:t')))
+                 for row in table._tbl.iterchildren(qn('w:tr'))]
+                for table in self.doc.tables]
 
 
 def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = True,

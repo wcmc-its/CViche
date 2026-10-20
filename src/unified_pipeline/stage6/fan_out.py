@@ -383,6 +383,11 @@ _H_OWN_DATE_KEYS = ('date', 'year', 'start_date', 'end_date')
 _STAGE4_LIST_CHECKED_AFTER_RENDER = frozenset({
     'K1', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'})
 
+# #1187: those codes are checked the same way for any other record list they
+# keep whole, such as an S3 book's `chapters_authored` beside its own title
+# (web204 S3 1802, 1814: the row prints the book and none of the chapters).
+_GENERIC_LIST_CHECKED_AFTER_RENDER = _LIST_CHECKED_AFTER_RENDER | _STAGE4_LIST_CHECKED_AFTER_RENDER
+
 # A record of a declined list is in the rendered document when one line of it
 # holds at least this share of the record's content words (`_tokens`;
 # `_record_in_document`). One line, not the document pooled: VYNARH's 19
@@ -391,6 +396,10 @@ _STAGE4_LIST_CHECKED_AFTER_RENDER = frozenset({
 # record a line prints only in part (a reformatted date, a name 5b cleaned)
 # still clears half.
 _MIN_RECORD_SHARE_IN_LINE = 0.5
+
+# A word shorter than this is an initial ("D. B."), which names no one, so
+# `_distinct_record_words` does not count it as evidence for a record.
+_MIN_DISTINCT_WORD_LENGTH = 2
 
 # #1187: a code whose section writes none of an entry's text and none of a
 # record list left whole, so `_fields_carry_text` has nothing to protect: the
@@ -401,21 +410,6 @@ _MIN_RECORD_SHARE_IN_LINE = 0.5
 # names a section label such as "Graduate:" or a country or city no B1 field
 # holds) were kept whole by that test and lost every degree in them.
 _NO_TEXT_COVERAGE_CODES = frozenset({'B1'})
-
-# #1187 (IPXFBA ZGNARO): the degree abbreviations a B1 entry's text can name
-# for a degree stage 4 left out of the list it fanned out, compared with
-# their dots dropped ('M.D.' -> 'MD') and case kept, so the words 'do' and
-# 'ma' are not degrees. `_lists_a_degree_no_record_holds` says when one is
-# unheld. A two-letter one right after a comma is skipped: there it is a
-# US state ("Baltimore, MD"), and a degree stage 4 kept is held anyway.
-_DEGREE_ABBREVIATIONS = frozenset({
-    'AB', 'AM', 'BA', 'BM', 'BMBS', 'BS', 'BSc', 'BSN', 'DDS', 'DMD', 'DNP',
-    'DNSc', 'DO', 'DPhil', 'DrPH', 'DSc', 'DVM', 'EdD', 'JD', 'MA', 'MBA',
-    'MBBS', 'MBChB', 'MD', 'MEd', 'MFA', 'MHA', 'MPA', 'MPH', 'MPhil', 'MPP',
-    'MS', 'MSc', 'MSN', 'MSW', 'PharmD', 'PhD', 'PsyD', 'RN', 'SB', 'ScD', 'SM'})
-_STATE_CODE_LENGTH = 2
-_ABBREVIATION_DOT_RE = re.compile(r'(?<=[A-Za-z])\.(?=[A-Za-z])')
-_WORD_RE = re.compile(r'[A-Za-z]+')
 
 # Date fields a section writes on top of its `_RENDERED_FIELDS`, which names
 # schema fields only: stage 4 emits these from the active (config-file) schema
@@ -897,21 +891,16 @@ def _stage4_decline_warnings(declined: Mapping[tuple[str, str], int]) -> list[di
         for (code, key), count in sorted(declined.items())]
 
 
-# What a fanned-out B1 entry's text names that no record holds (#1187).
-_UNLISTED_YEAR = 'year'
-_UNLISTED_DEGREE = 'degree'
-
-
-def _unlisted_warnings(unlisted: Mapping[tuple[str, str, str], int]) -> list[dict[str, Any]]:
-    """One sidecar WARN per (code, list key, what) for entries that fanned
-    out without the text coverage test (`_NO_TEXT_COVERAGE_CODES`) while their
-    text names a year, or a degree, that no record holds: a record stage 4
-    left out of the list (#1187). Not raised for stage 4's own records list."""
+def _unlisted_year_warnings(unlisted: Mapping[tuple[str, str], int]) -> list[dict[str, Any]]:
+    """One sidecar WARN per (code, list key) for entries that fanned out
+    without the text coverage test (`_NO_TEXT_COVERAGE_CODES`) while their text
+    names a year no record holds: a dated record stage 4 left out of the list
+    (#1187). Not raised for stage 4's own records list."""
     return [_list_warning(
         code, key, count,
         f"`{key}` was split into separate rows, but the entry's text names a "
-        f"{what} no record holds; a record may be missing from the output")
-        for (code, key, what), count in sorted(unlisted.items())]
+        "year no record holds; a record may be missing from the output")
+        for (code, key), count in sorted(unlisted.items())]
 
 
 def _lists_a_year_no_record_holds(entry: Mapping[str, Any],
@@ -922,55 +911,16 @@ def _lists_a_year_no_record_holds(entry: Mapping[str, Any],
     return any(_YEAR_TOKEN_RE.fullmatch(token) for token in uncovered or ())
 
 
-def _undotted_words(text: str) -> list[str]:
-    """The words of `text` with the dots inside an abbreviation dropped:
-    'M.D.' and 'Ph.D.' read 'MD' and 'PhD'."""
-    return _WORD_RE.findall(_ABBREVIATION_DOT_RE.sub('', text))
-
-
-def _degree_mentions(text: str) -> list[str]:
-    """Every `_DEGREE_ABBREVIATIONS` word of `text`, in order, less a
-    two-letter one right after a comma ("Baltimore, MD" names a state)."""
-    undotted = _ABBREVIATION_DOT_RE.sub('', text)
-    return [match.group(0) for match in _WORD_RE.finditer(undotted)
-            if match.group(0) in _DEGREE_ABBREVIATIONS
-            and not (len(match.group(0)) == _STATE_CODE_LENGTH
-                     and undotted[:match.start()].rstrip().endswith(','))]
-
-
-def _lists_a_degree_no_record_holds(entry: Mapping[str, Any],
-                                    children: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether the entry's text names more degrees than it has children and
-    one of them is a word no child's rendered field holds (#1187, IPXFBA
-    ZGNARO: a master's line stage 4 left out, beside the doctorate it kept).
-    Both tests are needed: a degree stage 4 spelled out ("Master of
-    Science" for "MSc") is unheld but not extra, and a degree named twice
-    (an "MD" in "MD Anderson") is extra but held."""
-    mentions = _degree_mentions(str(entry.get('text') or ''))
-    if len(mentions) <= len(children):
-        return False
-    rendered = _RENDERED_FIELDS.get(str(entry.get('taxonomy_code')), frozenset())
-    held = {word.lower() for child in children
-            for key, value in child['extracted_fields'].items() if key in rendered
-            for word in _undotted_words(_leaf_text(value))}
-    return any(mention.lower() not in held for mention in mentions)
-
-
-def _unlisted_record(entry: Mapping[str, Any], children: Sequence[Mapping[str, Any]] | None,
-                     records_key: str | None) -> str | None:
-    """What the text of an entry that fanned out without the coverage test
-    names that no child holds: `_UNLISTED_YEAR`, else `_UNLISTED_DEGREE`, else
-    None. Only a generic list: stage 4's own records list reads its years
-    from the reply, and B1 attendance ranges there are not lost records."""
-    if not children or entry.get('taxonomy_code') not in _NO_TEXT_COVERAGE_CODES \
-            or FANNED_OUT_FROM not in children[0] \
-            or children[0][FANNED_OUT_FROM]['key'] == records_key:
-        return None
-    if _lists_a_year_no_record_holds(entry, children):
-        return _UNLISTED_YEAR
-    if _lists_a_degree_no_record_holds(entry, children):
-        return _UNLISTED_DEGREE
-    return None
+def _lists_an_unlisted_year(entry: Mapping[str, Any], children: Sequence[Mapping[str, Any]] | None,
+                            records_key: str | None) -> bool:
+    """Whether an entry fanned out of a generic list without the coverage test
+    while its text names a year no child holds. Only a generic list: stage
+    4's own records list reads its years from the reply, and B1 attendance
+    ranges there are not lost records."""
+    return bool(children) and entry.get('taxonomy_code') in _NO_TEXT_COVERAGE_CODES \
+        and FANNED_OUT_FROM in children[0] \
+        and children[0][FANNED_OUT_FROM]['key'] != records_key \
+        and _lists_a_year_no_record_holds(entry, children)
 
 
 def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> dict[str, list[str]]:
@@ -1016,17 +966,22 @@ class DeclinedList:
     stage4: bool = False
 
 
-def _checked_declined_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> list[DeclinedList]:
+def _checked_declined_lists(entry: Mapping[str, Any], schema: frozenset[str],
+                            records_key: str | None) -> list[DeclinedList]:
     """The declined record lists of an entry `_fan_out_entry` returned None
     for, when its code is checked after the render: every one, less the
-    date list H's date cell writes (`_h_renders_list`)."""
+    date list H's date cell writes (`_h_renders_list`) and, for a
+    `_STAGE4_LIST_CHECKED_AFTER_RENDER` code, stage 4's records list, which
+    `_declined_stage4_list` checks."""
     code = str(entry.get('taxonomy_code'))
-    if code not in _LIST_CHECKED_AFTER_RENDER:
+    if code not in _GENERIC_LIST_CHECKED_AFTER_RENDER:
         return []
     fields = entry.get('extracted_fields')
     out = []
     for name, stray in _declined_record_lists(entry, schema).items():
         if code == _H_CODE and _h_renders_list(fields, name):
+            continue
+        if code in _STAGE4_LIST_CHECKED_AFTER_RENDER and name == records_key:
             continue
         records = _list_at(fields, tuple(name.split(_PATH_SEPARATOR)))
         out.append(DeclinedList(code, name, tuple(stray), tuple(records)))
@@ -1060,28 +1015,68 @@ def _declined_stage4_list(entry: Mapping[str, Any], children: Sequence[Mapping[s
     return DeclinedList(code, records_key, (), tuple(records), stage4=True)
 
 
-def _record_in_document(record: Mapping[str, Any], line_words: Sequence[frozenset[str]]) -> bool:
+def _distinct_record_words(records: Sequence[Mapping[str, Any]]) -> list[frozenset[str]]:
+    """Each record's content words (`_tokens`: dates read as their year), less
+    one-letter initials and, in a list of two or more, the words every record
+    holds: what tells the record apart from its siblings and from other
+    entries naming the same people. web204 S3 1814's chapters all carry
+    "Allison, D. B.", whose words, with a coauthor's, vouched for every
+    chapter from the publication list while none was printed (#1187)."""
+    words = [frozenset(_tokens(_leaf_text(record))) for record in records]
+    shared = frozenset.intersection(*words) if len(words) > 1 else frozenset()
+    return [frozenset(word for word in own - shared if len(word) >= _MIN_DISTINCT_WORD_LENGTH)
+            for own in words]
+
+
+def _field_count(record: Mapping[str, Any]) -> int:
+    """How many fields of `record` hold a value."""
+    return sum(1 for value in record.values() if not _is_blank(value))
+
+
+def _row_windows(table_rows: Sequence[Sequence[frozenset[str]]], size: int) -> list[frozenset[str]]:
+    """The words of every run of `size` consecutive rows of each table: a
+    block that writes a record one field per row (a grant's, a mentee's;
+    web26 M2A) spans no more rows than the record has fields."""
+    return [frozenset().union(*rows[i:i + size]) for rows in table_rows for i in range(len(rows))]
+
+
+def _record_in_document(words: frozenset[str], line_words: Sequence[frozenset[str]]) -> bool:
     """Whether one rendered line holds at least `_MIN_RECORD_SHARE_IN_LINE` of
-    the record's content words (`_tokens`: dates read as their year). A
-    record with no content word has nothing to lose."""
-    words = set(_tokens(_leaf_text(record)))
+    a record's distinct words (`_distinct_record_words`). A record with no
+    such word has nothing to lose."""
     return not words or any(len(words & line) >= _MIN_RECORD_SHARE_IN_LINE * len(words)
                             for line in line_words)
 
 
-def unrendered_list_warnings(declined: Sequence[DeclinedList],
-                             document_lines: Sequence[str]) -> list[dict[str, Any]]:
+def _list_in_document(found: DeclinedList, line_words: Sequence[frozenset[str]],
+                      table_rows: Sequence[Sequence[frozenset[str]]]) -> bool:
+    """Whether every record of `found` is in the document: on one rendered
+    line, or in a run of table rows no longer than its field count."""
+    windows: dict[int, list[frozenset[str]]] = {}
+    for record, words in zip(found.records, _distinct_record_words(found.records), strict=True):
+        size = max(1, _field_count(record))
+        if size not in windows:
+            windows[size] = _row_windows(table_rows, size)
+        if not _record_in_document(words, [*line_words, *windows[size]]):
+            return False
+    return True
+
+
+def unrendered_list_warnings(declined: Sequence[DeclinedList], document_lines: Sequence[str],
+                             table_rows: Sequence[Sequence[str]] = ()) -> list[dict[str, Any]]:
     """The render warnings (`REJECTED_LIST_CHECK`) for the `declined` lists a
-    record of which no line of `document_lines`, the rendered document's
-    lines, holds: one per (code, list key), as `fan_out_multi_record_entries`
+    record of which the rendered document does not hold -- in no line of
+    `document_lines`, and in no run of rows of `table_rows` (each table's
+    rows' text) -- one per (code, list key), as `fan_out_multi_record_entries`
     raises for the codes it warns on directly (#1187)."""
     if not declined:
         return []
     line_words = [frozenset(_tokens(line)) for line in document_lines]
+    row_words = [[frozenset(_tokens(row)) for row in rows] for rows in table_rows]
     rejected: dict[tuple[str, str], list[list[str]]] = {}
     stage4: Counter[tuple[str, str]] = Counter()
     for found in declined:
-        if all(_record_in_document(record, line_words) for record in found.records):
+        if _list_in_document(found, line_words, row_words):
             continue
         if found.stage4:
             stage4[(found.code, found.key)] += 1
@@ -1376,7 +1371,7 @@ def fan_out_multi_record_entries(
     (#1187): for a code in `_LIST_LOST_WHEN_KEPT_WHOLE`, when `warnings` is
     given, one render-warning dict per (code, list path) is appended to it
     (`REJECTED_LIST_CHECK`), as it is for a B1 list whose text names a year
-    or degree no record holds (`_unlisted_record`). For a code in
+    no record holds (`_lists_an_unlisted_year`). For a code in
     `_LIST_CHECKED_AFTER_RENDER`, and a declined stage-4 records list of a
     `_STAGE4_LIST_CHECKED_AFTER_RENDER` code, when `declined` is given, a
     `DeclinedList` is appended to it instead, for the caller to check
@@ -1388,25 +1383,24 @@ def fan_out_multi_record_entries(
     """
     out: list[dict[str, Any]] = []
     rejected: dict[tuple[str, str], list[list[str]]] = {}
-    unlisted: Counter[tuple[str, str, str]] = Counter()
+    unlisted: Counter[tuple[str, str]] = Counter()
     for entry in entries:
         code = entry.get('taxonomy_code')
         schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
         children = _fan_out_entry(entry, schema, records_key)
-        what = _unlisted_record(entry, children, records_key)
-        if what is not None:
-            unlisted[(str(code), children[0][FANNED_OUT_FROM]['key'], what)] += 1
+        if _lists_an_unlisted_year(entry, children, records_key):
+            unlisted[(str(code), children[0][FANNED_OUT_FROM]['key'])] += 1
         if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
             for key, stray in _declined_record_lists(entry, schema).items():
                 rejected.setdefault((str(code), key), []).append(stray)
         if declined is not None:
             if children is None:
-                declined.extend(_checked_declined_lists(entry, schema))
+                declined.extend(_checked_declined_lists(entry, schema, records_key))
             stage4_list = _declined_stage4_list(entry, children, records_key)
             if stage4_list is not None:
                 declined.append(stage4_list)
         out.extend(children if children is not None else [entry])
     if warnings is not None:
         warnings.extend(_rejection_warnings(rejected))
-        warnings.extend(_unlisted_warnings(unlisted))
+        warnings.extend(_unlisted_year_warnings(unlisted))
     return out
