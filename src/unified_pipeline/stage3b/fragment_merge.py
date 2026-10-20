@@ -175,13 +175,19 @@ def _merge_sides(entries: list[dict[str, Any]], parent_idx: int) -> set[str]:
     return sides
 
 
-def merge_skip_reason(entries: list[dict[str, Any]], idx: int) -> str | None:
-    """Why fragment `idx` must not be merged; None when it should be."""
+def merge_skip_reason(
+    entries: list[dict[str, Any]], idx: int, waive: frozenset[str] = frozenset()
+) -> str | None:
+    """Why fragment `idx` must not be merged; None when it should be.
+
+    `waive` names `_own_skip_reason` verdicts the caller has its own evidence
+    against: T-validation's fold waives SKIP_ORGANIZATION for a line between
+    two consecutive numbered mentee rows, which is no sub-heading (#1702)."""
     parent_idx = resolve_parent(entries, idx)
     if parent_idx is None:
         return SKIP_NO_PARENT
     own = _own_skip_reason(entries, idx, parent_idx)
-    if own is not None:
+    if own is not None and own not in waive:
         return own
     if len(_merge_sides(entries, parent_idx)) > 1:
         return SKIP_BOTH_SIDES
@@ -216,11 +222,14 @@ def _merge_order(entries: list[dict[str, Any]]) -> list[int]:
     return forward + backward[::-1]
 
 
-def merge_into_parent(entries: list[dict[str, Any]], idx: int) -> str | None:
+def merge_into_parent(
+    entries: list[dict[str, Any]], idx: int, waive: frozenset[str] = frozenset()
+) -> str | None:
     """Fold fragment `idx`'s text into its parent and flag it, in place.
 
-    Returns why it must not be merged instead, leaving both entries untouched."""
-    reason = merge_skip_reason(entries, idx)
+    Returns why it must not be merged instead, leaving both entries untouched.
+    `waive` is passed to `merge_skip_reason`."""
+    reason = merge_skip_reason(entries, idx, waive)
     if reason is not None:
         return reason
     parent_idx = resolve_parent(entries, idx)
