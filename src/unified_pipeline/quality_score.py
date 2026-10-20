@@ -911,7 +911,7 @@ LINT_FIX_MINUTES = {
         "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "footer_in_record",
         "glyph_field", "grant_boundary", "grant_facts", "group_credit_dropped",
         "implausible_year", "institution_cleaned_name", "journal_name_joined",
-        "licensure_fallback_truncated",
+        "licensure_fallback_truncated", "mentee_field_incomplete",
         "owner_missing_from_citation",
         "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
         "session_title_missing", "shattered_prose", "span_count",
