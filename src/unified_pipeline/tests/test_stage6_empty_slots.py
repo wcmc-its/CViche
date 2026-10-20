@@ -145,6 +145,42 @@ def test_a_section_heading_ends_the_scope():
         ('p', NOT_APPLICABLE)]
 
 
+def test_a_table_slot_heading_ends_the_scope():
+    """N2's tables render under its own heading, not under N1's above it."""
+    doc = _template("Leadership and mentoring in programs (Describe activity)", "",
+                    "Institutional Training Grants and Mentored Trainee Grants")
+    snapshot = snapshot_template(doc.element.body)
+    _insert_after_heading(doc, "Institutional Training Grants and Mentored Trainee Grants",
+                          "Synthetic T32, 2019-2024")
+
+    fill_empty_slots(doc.element.body, snapshot)
+
+    assert _after(doc, "Leadership and mentoring in programs (Describe activity)", 1) == [
+        ('p', NOT_APPLICABLE)]
+
+
+def test_a_template_table_ends_the_scope():
+    doc = _template("Pending Funding")
+    _column_table(doc)
+    snapshot = snapshot_template(doc.element.body)
+    doc.add_paragraph("Content of whatever the table belongs to")
+
+    fill_empty_slots(doc.element.body, snapshot)
+
+    assert _after(doc, "Pending Funding", 1) == [('p', NOT_APPLICABLE)]
+
+
+def test_na_is_the_literal_wcm_asks_for_in_the_body_font():
+    doc = _template("Pending Funding")
+    snapshot = snapshot_template(doc.element.body)
+
+    fill_empty_slots(doc.element.body, snapshot)
+
+    run = doc.paragraphs[1].runs[0]
+    assert run.text == "N/A"
+    assert (run.font.name, run.font.size.pt) == ("Arial", 11)
+
+
 def test_a_rendered_line_reading_like_a_heading_is_not_a_slot():
     doc = _template("Chapters:", "", "Reviews and Editorials:")
     snapshot = snapshot_template(doc.element.body)
@@ -288,6 +324,7 @@ def test_real_template_keeps_every_placeholder_and_marks_the_empty_slots(tmp_pat
                  if kind == 'p' and text.strip().startswith(prefix))
         return body[i + 1]
 
+    assert first_after("Past (Completed) Funding") == ('p', NOT_APPLICABLE)
     assert first_after("Pending Funding") == ('p', NOT_APPLICABLE)
     assert first_after("Clinical Leadership") == ('p', NOT_APPLICABLE)
     assert first_after("Leadership and mentoring in programs") == ('p', NOT_APPLICABLE)
