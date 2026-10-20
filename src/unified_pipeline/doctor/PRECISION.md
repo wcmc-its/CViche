@@ -535,6 +535,12 @@ On the 166 runs, the four linted sections were given 10,215 entries. The lint fi
 
 A lost entry is matched by identity or by `element_idx_start`: an int, or for a table row the string stage 2 writes ("96.3"). Before the string form was read, 58 Service entries on 16 runs (Opresko, Bostwick and web207 table rows that `_route_q2_entries` copies) read as lost. They render; the copy carries the source's index.
 
+| MFI-1 | 2026-10-19 | `fix/1941-xaxvyb` on origin/dev `99c23548` (`lint_mentee_field_incomplete` over each run's stored delivered docx: table rows and body blocks) | 465 S3 runs with a stored `<uid>_wcm.docx` (`s3://wcm-cviche-storage/cviche/runs/`, synced 2026-10-19), 300 distinct CVs by stage-4 `cv_owner` | XAXVYB's corrected copy, comment 25 (every past mentee's Current Position N/A) | #1941 |
+
+MFI-1 adds `mentee_field_incomplete`. It reads each rendered mentee table (the six labels `stage6/sections/mentoring.py` writes) and the Current/Past Mentees heading above it, and reports a row the WCM template asks for that is blank or a placeholder ("N/A", "none", a dash): Site/Position, Mentoring Period and Type of Supervision in every table, Current Position under Past Mentees only. Project/Accomplishments is optional in the template, and a table whose name is blank or "N/A" is the submitter's "N/A" for an empty subsection, which WCM asks for, so it is skipped. One INFO finding per heading and row, naming the first table; it is a review-copy comment on that cell, never a run-page row.
+
+Over the 465 runs it fires on 203, 151 of the 300 distinct CVs, 1 to 7 findings per CV (721 in all: Type of Supervision 301, Current Position 181, Mentoring Period 125, Site/Position 114). XAXVYB fires once, on its 29 past mentees' Current Position. A first draft also read tables named "N/A"; the hand-check found 3 such placeholder tables (two runs) and the name rule now skips them. Hand-checked 40 findings after that, 10 per row, one run per CV, against the docx cell and the stage-4 entry: all 40 are a required cell left blank. In 37 the CV gives no value. In 3 the CV gives one that the stored render lost (a site, a period, a supervision type); two of those render on origin/dev, the stored docx being from older builds. The comment's ask, to fill the field, holds either way, so all 40 count as true.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -569,6 +575,7 @@ A lost entry is matched by identity or by `element_idx_start`: an int, or for a 
 | `identical_rendered_rows` | 11 | 11 | none | 21 / 21 hand-checked (100%) | 1 / 11 (9%) | 1 | IDR |
 | `record_boundary` | 5 | 5 | none | 23 / 23 hand-checked (100%) | 4 / 5 (80%) | 1 | X6-grant |
 | `renderer_row_missing` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | RRR-1 |
+| `mentee_field_incomplete` | 721 | 0 | none | 40 / 40 hand-checked (100%) | not measured (no label but XAXVYB's) | 1 | MFI-1 |
 | `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
 | `owner_attribution`: `mentee_under_non_mentee_heading` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (0%) | 0 | YUY-OA |
 | `owner_attribution`: `citation_without_owner` | 54 | 1 | none | 13 / 54 hand-checked (24%): WARN 1 / 1, INFO 12 / 53 | 4 / 37 on labelled runs (11%) | 4 | YUY-OA |

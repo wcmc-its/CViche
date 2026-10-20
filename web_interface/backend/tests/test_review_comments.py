@@ -19,6 +19,7 @@ from app.services import review_comments as rc  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
 from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
+from unified_pipeline.doctor.lints.completeness import lint_mentee_field_incomplete  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_grant_facts,
     lint_role_consistency,
@@ -28,6 +29,11 @@ from unified_pipeline.doctor.precision import LintPrecision  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     read_docx_blocks,
     read_docx_table_rows,
+)
+from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    MENTEE_CURRENT_POSITION_LABEL,
+    MENTEE_TABLE_LABELS,
+    PAST_MENTEES_HEADING,
 )
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     PI_NAME_LABEL,
@@ -639,6 +645,58 @@ def test_a_grant_facts_finding_is_a_comment_on_its_grant_title_though_info(tmp_p
     assert [f["severity"] for f in findings] == ["INFO"] and n == 1
     assert _comments(out) == [(_flag("grant_facts"), GRANT_TITLE)]
     assert _notes(out) == []
+
+
+def _with_past_mentees(tmp_path: Path, *current_positions: str) -> Path:
+    """The clean document with a Past Mentees heading and a rendered mentee
+    table per Current Position value; every other row filled."""
+    clean = _clean_docx(tmp_path)
+    doc = Document(str(clean))
+    doc.add_paragraph(PAST_MENTEES_HEADING)
+    for n, position in enumerate(current_positions):
+        values = [f"Mentee Example {n}", "Example University - Fellow", "2010-2012",
+                  "Squid lens optics", position, "Research"]
+        table = doc.add_table(rows=len(MENTEE_TABLE_LABELS), cols=2)
+        for row, label, value in zip(table.rows, MENTEE_TABLE_LABELS, values, strict=True):
+            row.cells[0].text, row.cells[1].text = label, value
+    doc.save(str(clean))
+    return clean
+
+
+def _commented_row_labels(path: Path) -> list[str]:
+    """The first cell's text of the table row each finding comment starts in."""
+    labels = []
+    for start in Document(str(path)).element.body.iter(qn("w:commentRangeStart")):
+        row = next((a for a in start.iterancestors() if a.tag == qn("w:tr")), None)
+        if row is not None:
+            labels.append("".join(t.text or "" for t in next(row.iter(qn("w:tc"))).iter(qn("w:t"))))
+    return labels
+
+
+def test_a_blank_mentee_field_is_one_comment_on_its_first_cell_though_info(tmp_path):
+    """#1941: three past mentees with no Current Position ("N/A", blank, "none")
+    are one comment, on the first one's cell, asking for the field; never a
+    review note."""
+    clean = _with_past_mentees(tmp_path, "Assistant Professor", "N/A", "", "none")
+    findings = lint_mentee_field_incomplete(read_docx_table_rows(str(clean)),
+                                            read_docx_blocks(str(clean)))
+    out, n = rc.write_review_docx(clean, _report(*findings))
+    assert [f["severity"] for f in findings] == ["INFO"] and n == 1
+    assert _comments(out) == [(_flag("mentee_field_incomplete"), "N/A")]
+    assert _commented_row_labels(out) == [MENTEE_CURRENT_POSITION_LABEL]
+    assert _notes(out) == []
+    assert json.loads(rc.comment_map_path(out).read_text())[0]["lint"] == "mentee_field_incomplete"
+
+
+def test_a_blank_mentee_field_finding_naming_no_such_row_is_not_flagged(tmp_path):
+    """A finding whose table or row the document lacks is no comment and no note."""
+    clean = _with_past_mentees(tmp_path, "")
+    for message in ("table 9, row 'Current Position:': blank or N/A in 1 of 1 Past Mentees tables",
+                    "table 0, row 'Goals:': blank or N/A in 1 of 1 Past Mentees tables",
+                    "Current Position blank"):
+        out, n = rc.write_review_docx(clean, _report(_finding(
+            "mentee_field_incomplete", message, severity="INFO")))
+        assert n == 0 and _comments(out) == [] and _notes(out) == []
 
 
 def _role_findings(clean: Path, stage4: dict) -> list[dict]:
