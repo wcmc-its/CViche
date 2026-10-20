@@ -566,7 +566,10 @@ def test_recovered_rows_dropped_when_their_values_already_rendered(tmp_path):
     assert full_text.count("Synthetic Tools for Data Curation") == 1
     assert full_text.count("$15,000.00") == 1
     assert full_text.count("A. Researcher") == 1
-    assert full_text.count("Your percent (%) effort") == 1
+    # Twice, both in tables: the M2B grant's own, and the Current Research
+    # Funding placeholder this CV leaves empty, which stays with N/A (#1942).
+    # The recovered row adds no third copy.
+    assert full_text.count("Your percent (%) effort") == 2
     # The Duration row's raw "00/2021-00/2022" never renders verbatim (the
     # grant table shows the reformatted "2021-2022"), so it stays -- one
     # duplicate line, not zero, and the Appendix exists because of it.

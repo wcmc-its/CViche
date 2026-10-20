@@ -1587,6 +1587,14 @@ _STAGE2_GRANTS = {"entries": [_entry(_GRANT_FSMB, start=1),
                               _entry(_GRANT_NBME, start=3)]}
 
 
+def test_dead_sections_reads_past_an_na_line_to_the_sections_content():
+    """#1942: stage 6's "N/A" in an empty slot is all caps but no section
+    header, so the grant table after it still belongs to GRANTS."""
+    blocks = [("p", "GRANTS"), ("p", "N/A"),
+              ("table", "Award Source: | National Synthetic Foundation")]
+    assert lint_dead_sections(_STAGE2_GRANTS, blocks) == []
+
+
 def test_dead_sections_fires_on_empty_matched_section():
     blocks = [("p", "D. GRANTS"), ("p", "T. APPENDIX"),
               ("p", "The following content from the original CV was not mapped:")]
