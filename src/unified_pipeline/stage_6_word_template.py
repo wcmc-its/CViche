@@ -77,7 +77,7 @@ from unified_pipeline.stage4.extraction import (
     calculate_unextracted_content,
 )
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
-from unified_pipeline.stage6 import supplementary
+from unified_pipeline.stage6 import render_check, supplementary
 from unified_pipeline.stage6.dedup import (  # noqa: F401
     _STOP_WORDS,
     DEDUP_FULL_CONTAINMENT_MIN_TOKENS,
@@ -4228,6 +4228,7 @@ Now analyze the text above:"""
                     tab_parts = {part for text_line in recovery_text(entry).split('\n')
                                  for part in tab_record_segments(text_line)}
                     deferred: list[str] = []
+                    siblings = render_check.record_siblings(records)
                     for line in records:
                         if code == 'T' and t_line_is_scaffolding(line, entry):
                             continue
@@ -4235,8 +4236,9 @@ Now analyze the text above:"""
                             rendered = _whole_record_rendered(
                                 line, haystack, t_line_token_sets, t_cut_token_sets)
                         else:
-                            rendered = _record_rendered(
-                                line, haystack, line_token_sets)
+                            rendered = render_check.sibling_record_rendered(
+                                line, siblings.get(line), haystack, line_token_sets,
+                                t_line_token_sets)
                         if rendered is None and line in tab_parts:
                             # Too few words for the overlap test (#1243).
                             rendered = short_tab_part_rendered(

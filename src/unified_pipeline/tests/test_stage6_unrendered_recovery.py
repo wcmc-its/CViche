@@ -41,7 +41,10 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
     LAST_STAGE4_RECORD,
 )
 from unified_pipeline.stage6.formatting import plain_entry_left_twips  # noqa: E402
-from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
+from unified_pipeline.stage6.normalization import (  # noqa: E402
+    _clean_inline_tabs,
+    _squash,
+)
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     DATE_LED_SOURCE_TEXT,
     split_date_led_records,
@@ -51,13 +54,16 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _entry_pieces,
     _norm,
     _record_rendered,
+    _record_tokens,
     _whole_record_rendered,
     record_chunks,
     record_pieces,
+    record_siblings,
     segment_held_by_fields,
     segments_cover_source,
     short_tab_part_rendered,
     short_tab_part_words,
+    sibling_record_rendered,
     tab_aware_record_lines,
 )
 from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
@@ -1882,6 +1888,330 @@ def test_segments_cover_source_pools_tokens_for_a_line_without_a_sibling():
     # Two tokens lost from the same line: 3 of 5, rejected.
     assert segments_cover_source([line.replace("geyser ", "").replace("basalt ", "")
                                   for line in lines[:1]] + lines[1:], source) is False
+
+
+def _two_by_two_grid():
+    """Two committees, each served in the same two terms: every token of each
+    row also sits in another row (#1230). Each row has 9 record tokens, as a
+    real row does; the two terms of one committee share 7 of them, under
+    `RECLASSIFY_MIN_TOKEN_COVERAGE`."""
+    return [f"Member | {name} Committee | Example State Medical College | {term}"
+            for name in ("Admissions", "Curriculum") for term in ("2010-2012", "2014-2016")]
+
+
+def test_segments_cover_source_rejects_a_dropped_row_of_a_two_by_two_grid():
+    """Dropping any one row of the grid leaves each of its tokens in the
+    rows the reply kept, so the all-tokens rule accepted it. Each sibling
+    row needs its own copy of the tokens it shares (#1230)."""
+    rows = _two_by_two_grid()
+    source = "\n".join(rows)
+    assert segments_cover_source(rows, source) is True
+    for dropped in rows:
+        assert segments_cover_source([row for row in rows if row != dropped], source) is False
+
+
+def test_segments_cover_source_counts_split_and_merged_grid_rows():
+    """Rows split at their separators, or two rows written whole into one
+    segment, keep every row's tokens and are accepted. A segment that writes
+    two terms as one row carries the shared words once and is rejected,
+    which keeps the entry whole (#1230)."""
+    rows = _two_by_two_grid()
+    source = "\n".join(rows)
+    split = [cell for row in rows for cell in row.split(" | ")]
+    assert segments_cover_source(split, source) is True
+    assert segments_cover_source(["; ".join(rows[:2])] + rows[2:], source) is True
+    merged = ("Member | Admissions Committee | Example State Medical College | "
+              "2010-2012 and 2014-2016")
+    assert segments_cover_source([merged] + rows[2:], source) is False
+
+
+def test_segments_cover_source_unrelated_lines_do_not_pay_for_a_dropped_grid_row():
+    """Unrelated lines that between them hold every word of a dropped grid row
+    do not count for it: only segments that are a piece of a sibling row, or
+    hold one whole, are counted (#1230)."""
+    rows = _two_by_two_grid()
+    unrelated = ["Member of the Faculty Senate, Riverbend Example University, 2014",
+                 "Admissions Prize Committee juror, 2016",
+                 "State Medical College seminar organiser"]
+    source = "\n".join(rows + unrelated)
+    assert segments_cover_source(rows + unrelated, source) is True
+    assert segments_cover_source([row for row in rows if row != rows[1]] + unrelated,
+                                 source) is False
+
+
+def test_segments_cover_source_a_partner_line_may_lose_a_word_no_sibling_row_holds():
+    """A line that holds a sibling row whole (its partner) is counted only for
+    the sibling row's words: trimming a word of its own keeps the pooled
+    share that any line without a sibling gets (#1230)."""
+    rows = _two_by_two_grid()
+    partner = rows[0] + " | organised the annual workshop retreat"
+    source = "\n".join(rows + [partner])
+    trimmed = partner.replace(" retreat", "")
+    assert segments_cover_source(rows + [trimmed], source) is True
+    assert segments_cover_source(rows[1:] + [partner], source) is False
+
+
+def test_record_siblings_skips_a_sibling_that_holds_the_whole_line():
+    """A line every token of which sits in a sibling is part of that sibling,
+    so the sibling's render carries it and it needs no token of its own
+    (#1230). The grid rows keep each other as siblings."""
+    rows = _two_by_two_grid()
+    short = rows[0].replace("Example State Medical College | ", "")
+    siblings = record_siblings([short] + rows)
+    assert _record_tokens(short) <= _record_tokens(rows[0])
+    assert _record_tokens(rows[0]) not in siblings[short]
+    assert siblings[short] == [_record_tokens(rows[2])]
+    assert set(rows) <= set(siblings)
+
+
+def test_non_t_grid_row_rendered_only_through_its_siblings_is_recovered():
+    """Three rows of the grid on the page vouched for the fourth: every one
+    of its words sits in a sibling's row. A sibling row is rendered only by
+    an output line that holds a token each sibling lacks (#1230)."""
+    rows = _two_by_two_grid()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for row in rows[:3]:
+        gen.doc.add_paragraph(row.replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert bullets == [rows[3].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_grid_rows_recovered_one_after_another_each_land_once():
+    """One grid row on the page: the other three are recovered in turn, and
+    each recovered row then counts as on the page for the rows after it. The
+    lines it may vouch through grow as rows are recovered (web207 crashed on
+    a list that did not grow with them, #1230)."""
+    rows = _two_by_two_grid()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0].replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert sorted(bullets) == sorted(row.replace(" | ", " \u2014 ") for row in rows[1:])
+
+
+def test_non_t_grid_rows_all_rendered_are_not_recovered():
+    """Every row on the page, reformatted: nothing is re-inserted (#1230)."""
+    rows = _two_by_two_grid()
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for row in rows:
+        gen.doc.add_paragraph(row.replace(" | ", ", ").replace("-", " - "))
+    gen._recover_unrendered_records({"P": [entry]})
+    assert not [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+
+
+def test_record_siblings_holds_the_same_row_in_another_term():
+    """The two terms of one committee share 7 of 9 tokens, under the sibling
+    share, yet differ only in their numbers: they are siblings (#1230). Rows
+    that differ only in a month name are not: a render may write the month as
+    a number."""
+    rows = _two_by_two_grid()
+    siblings = record_siblings(rows)
+    assert _record_tokens(rows[1]) in siblings[rows[0]]
+    assert _record_tokens(rows[0]) in siblings[rows[1]]
+    months = [f"Visiting Lecturer | Example State Medical College | {month} 2015"
+              for month in ("January", "March")]
+    assert record_siblings(months) == {}
+
+
+def test_non_t_one_committee_in_two_terms_recovers_the_missing_term():
+    """One committee in two terms, one term on the page: its row vouched for
+    the other term, which shares every word. A row whose own numbers are on
+    no rendered line with its words is recovered (#1230)."""
+    rows = _two_by_two_grid()[:2]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0].replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert bullets == [rows[1].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_date_led_grid_row_rendered_only_through_its_siblings_is_recovered():
+    """The grid written date first, three rows on the page: the fourth is
+    recovered (#1230)."""
+    rows = [f"{term} Member, {name} Committee, Example State Medical College"
+            for name in ("Admissions", "Curriculum") for term in ("2010-2012", "2014-2016")]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for row in rows[:3]:
+        gen.doc.add_paragraph(row.replace("-", " - "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if "Member" in t]
+    assert bullets == [rows[3]]
+
+
+def test_non_t_rows_differing_only_in_a_month_name_rendered_as_numbers_are_kept():
+    """Two rows told apart only by a month name, both on the page with the
+    month as a number: neither is re-inserted (#1230)."""
+    rows = [f"Visiting Lecturer | Example State Medical College | Boston | {month} 2015"
+            for month in ("January", "March")]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for number in ("01", "03"):
+        gen.doc.add_paragraph(
+            f"{number}/2015 Visiting Lecturer, Example State Medical College, Boston")
+    gen._recover_unrendered_records({"P": [entry]})
+    assert not [t for t in _bulleted_texts(gen.doc.paragraphs) if "Lecturer" in t]
+
+
+def test_non_t_sibling_rows_sharing_a_month_name_are_still_told_apart():
+    """Two committees in the same month: the month is no row's own token, so
+    the rendered row, which spells it, cannot vouch for the other (#1230)."""
+    rows = [f"Member | {name} Committee | Example State Medical College | January 2015"
+            for name in ("Admissions", "Curriculum")]
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0].replace(" | ", ", "))
+    gen._recover_unrendered_records({"P": [entry]})
+    bullets = [t for t in _bulleted_texts(gen.doc.paragraphs) if t.startswith("Member")]
+    assert bullets == [rows[1].replace(" | ", " \u2014 ")]
+
+
+def _recovered_terms(rows, out):
+    """The bullets the recovery pass re-inserts for P `rows` with `out` on the
+    page, one paragraph per item."""
+    entry = {"element_idx_start": 88, "taxonomy_code": "P",
+             "text": "\n".join(rows), "extracted_fields": {}}
+    gen = _generator()
+    for text in out:
+        gen.doc.add_paragraph(text)
+    gen._recover_unrendered_records({"P": [entry]})
+    return [t for t in _bulleted_texts(gen.doc.paragraphs) if "Committee" in t]
+
+
+def _one_committee_two_terms(place="Weill Cornell Medicine"):
+    return [f"Member | Admissions Committee | {place} | {term}"
+            for term in ("2010-2012", "2014-2016")]
+
+
+def test_non_t_two_terms_rendered_as_table_rows_without_the_place_are_kept():
+    """Both terms on the page in the committee table's form, the place left
+    out: each line holds half the row's words, so no line held the share of
+    the whole row, and both rows were re-inserted. The line holding the
+    row's committee cell and its own years vouches for it (#1230)."""
+    rows = _one_committee_two_terms()
+    assert not _recovered_terms(rows, [f"Admissions Committee | Member | {term}"
+                                       for term in ("2010-2012", "2014-2016")])
+    assert _recovered_terms(rows, ["Admissions Committee | Member | 2010-2012"]) == [
+        rows[1].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_two_terms_under_a_place_heading_are_kept():
+    """Both terms on the page under the place written once as a heading:
+    neither row is re-inserted (#1230)."""
+    rows = _one_committee_two_terms("Weill Cornell Medical College")
+    assert not _recovered_terms(rows, ["Weill Cornell Medical College",
+                                       "Member, Admissions Committee, 2010-2012",
+                                       "Member, Admissions Committee, 2014-2016"])
+
+
+def test_non_t_two_terms_with_the_years_dropped_are_kept():
+    """Both terms on the page without their years: no line is either term's
+    row, so nothing tells them apart and the verdict stands (#1230)."""
+    rows = _one_committee_two_terms()
+    assert not _recovered_terms(rows, ["Member, Admissions Committee, Weill Cornell Medicine"] * 2)
+
+
+@pytest.mark.parametrize("years, recovered", [
+    (("2010-12", "2014-16"), True),
+    (("'10-'12", "'14-'16"), False),
+])
+def test_non_t_two_terms_with_shortened_years_are_kept(years, recovered):
+    """Both terms on the page with each range's end written in two digits: a
+    year counts by its last two digits standing alone, so neither row is
+    re-inserted. With one term on the page, the other is recovered only when
+    the line spells a year of its sibling whole, as "2010-12" does; "'10-'12"
+    is no line positively the sibling's, and keeps the verdict (#1230)."""
+    rows = _one_committee_two_terms()
+    line = "Member, Admissions Committee, Weill Cornell Medicine, {}"
+    assert not _recovered_terms(rows, [line.format(y) for y in years])
+    assert _recovered_terms(rows, [line.format(years[0])]) == (
+        [rows[1].replace(" | ", " \u2014 ")] if recovered else [])
+
+
+@pytest.mark.parametrize("open_term", [
+    "2014-Present", "2014-current", "2014-ongoing", "2014-now", "2014 to date"])
+def test_non_t_a_term_and_an_open_term_are_told_apart(open_term):
+    """One committee 2010-2012 and again in an open term ("2014-Present"):
+    the open-term word counts like a year, so with either row on the page the
+    other is recovered, and with both on the page neither is (#1230)."""
+    rows = [f"Member | Admissions Committee | Weill Cornell Medical College | {term}"
+            for term in ("2010-2012", open_term)]
+    line = "Member, Admissions Committee, Weill Cornell Medical College, {}"
+    terms = ("2010-2012", open_term)
+    assert not _recovered_terms(rows, [line.format(term) for term in terms])
+    assert _recovered_terms(rows, [line.format(terms[0])]) == [rows[1].replace(" | ", " \u2014 ")]
+    assert _recovered_terms(rows, [line.format(terms[1])]) == [rows[0].replace(" | ", " \u2014 ")]
+
+
+@pytest.mark.parametrize("line", [
+    "Member, Admissions Committee, Example State Medical College, {}",
+    "Committee on Admissions, Member, Example State Med. College, {}",
+])
+def test_non_t_consecutive_terms_with_shortened_years_are_kept(line):
+    """Terms 2010-2012 and 2012-2014 on the page as "2010-12" and "2012-14",
+    with a verbatim cell or reworded: the second term's own year is on its
+    line only as "14", and the first term's line spells its sibling's 2010
+    whole, so without the two-digit form it was re-inserted (#1230)."""
+    rows = [f"Member | Admissions Committee | Example State Medical College | {term}"
+            for term in ("2010-2012", "2012-2014")]
+    assert not _recovered_terms(rows, [line.format(y) for y in ("2010-12", "2012-14")])
+
+
+def test_non_t_a_year_inside_another_number_does_not_tell_terms_apart():
+    """A missing term's year as two digits inside a longer number ("10014")
+    or its sibling's year inside one ("20101") is not that year (#1230)."""
+    rows = _one_committee_two_terms()
+    place = "Member, Admissions Committee, Weill Cornell Medicine, New York, NY 10014"
+    assert _recovered_terms(rows, [f"{place}, 2010-2012"]) == [rows[1].replace(" | ", " \u2014 ")]
+    room = "Member, Admissions Committee, Weill Cornell Medicine, room 20101"
+    assert not _recovered_terms(rows, [room, room])
+
+
+def test_non_t_a_line_sharing_one_cell_word_does_not_vouch_for_a_term():
+    """An unrelated line holding the missing term's years and one word of its
+    row ("Member") does not vouch for it: a chunk too short for the overlap
+    test is skipped, as `_record_rendered` skips it (#1230)."""
+    rows = _one_committee_two_terms()
+    assert _recovered_terms(rows, ["Member, Admissions Committee, Weill Cornell Medicine, 2010-2012",
+                                   "Member, Faculty Council, 2014-2016"]) == [
+        rows[1].replace(" | ", " \u2014 ")]
+
+
+def test_non_t_row_whose_years_hold_its_siblings_is_kept_with_a_short_range():
+    """'2010' and '2010-2012' rows, both on the page, the range written
+    '2010-12': the range's row is not re-inserted (#1230)."""
+    rows = [f"Member | Admissions Committee | Weill Cornell Medicine | {term}"
+            for term in ("2010", "2010-2012")]
+    assert not _recovered_terms(rows, [f"Member, Admissions Committee, Weill Cornell Medicine, {y}"
+                                       for y in ("2010", "2010-12")])
+
+
+def test_sibling_record_rendered_without_siblings_is_record_rendered():
+    """A line with no sibling rows keeps `_record_rendered`'s verdict, and a
+    sibling row on the page verbatim is rendered (#1230)."""
+    rows = _two_by_two_grid()
+    out = [rows[0].replace("2010-2012", "2014-2016")]
+    letters = [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in out]
+    records = [_record_tokens(line) for line in out]
+    haystack = "\x00".join(_squash(line) for line in out)
+    siblings = record_siblings(rows)
+    assert sibling_record_rendered(rows[0], None, haystack, letters, records) is True
+    assert sibling_record_rendered(rows[0], siblings[rows[0]], haystack, letters,
+                                   records) is False
+    assert sibling_record_rendered(rows[1], siblings[rows[1]], haystack, letters,
+                                   records) is True
 
 
 def test_t_sibling_rows_differing_only_in_one_name_are_all_recovered():
