@@ -486,10 +486,62 @@ def test_a_numeric_date_is_kept_when_the_dates_cell_shows_another_year():
 
 def test_untitled_talk_keeps_a_line_with_words_beyond_the_label():
     """Only label words ('Invited talk') stop the line from counting as a
-    possible title; 'Virtual' and the series name are not shown elsewhere."""
+    possible title; the series name is not shown elsewhere."""
     cells = _untitled_row("08/19/2020 Zqcaltech, Kestrel, ZZ.\tSummer Zqpostdoc Series. Virtual. Invited talk.",
                           date="2020-08-19", location="Zqcaltech, Kestrel, ZZ")
     assert cells[0] == "Summer Zqpostdoc Series. Virtual. Invited talk."
+
+
+def test_untitled_talk_counts_virtual_as_a_label_word():
+    """PZTNWT 158 (#1346): with the series in event_name, 'Virtual. Invited
+    talk.' is all that is left, so the stripped line no longer fills the cell."""
+    cells = _untitled_row("08/19/2020 Zqcaltech, Kestrel, ZZ.\tSummer Zqpostdoc Series. Virtual. Invited talk.",
+                          date="2020-08-19", event_name="Summer Zqpostdoc Series",
+                          location="Zqcaltech, Kestrel, ZZ")
+    assert cells == ["Summer Zqpostdoc Series, Virtual Invited talk", "Zqcaltech, Kestrel, ZZ", "2020"]
+
+
+def test_untitled_talk_with_no_role_or_event_keeps_a_line_left_with_only_virtual():
+    """1BFKKK 106 (#1346): with no role or event, a bare 'Virtual' would read
+    as the talk's title and quiet the missing-title lint, so the line stays."""
+    cells = _untitled_row("Zqemory University, 2022 (Virtual)", date="2022",
+                          location="Zqemory University")
+    assert cells == ["2022 (Virtual)", "Zqemory University", "2022"]
+
+
+def test_untitled_talk_with_a_role_counts_virtual_as_a_label_word():
+    """A role alone is enough beside 'Virtual': the row is titled by the
+    role and the label, not the stripped line (#1346)."""
+    cells = _untitled_row("2019 Zqkestrel University. Visiting Professor. Virtual.",
+                          date="2019", role="Visiting Professor", location="Zqkestrel University")
+    assert cells[0] == "Visiting Professor, Virtual"
+
+
+def test_untitled_talk_takes_out_an_event_before_the_venue_it_contains():
+    """PZTNWT 132 (#1346): the venue 'Zqcold Harbor' went first and broke the
+    event 'Zqcold Harbor Meeting on Zqproteins', so the line stayed."""
+    cells = _untitled_row("04/27/2024 Zqcold Harbor Meeting on Zqproteins\tZqcold Harbor. Invited talk.",
+                          date="2024-04-27", event_name="Zqcold Harbor Meeting on Zqproteins",
+                          location="Zqcold Harbor")
+    assert cells == ["Zqcold Harbor Meeting on Zqproteins, Invited talk", "Zqcold Harbor", "2024"]
+
+
+def test_untitled_talk_matches_an_event_whose_punctuation_the_source_spaces_differently():
+    """PZTNWT 151 (#1346): stage 4 wrote 'SFB960/RCB Colloquium' for the
+    source's 'SFB960 /RCB colloquium', so the event did not match and the
+    stripped line filled the Title cell."""
+    cells = _untitled_row("08/12/2021 Zqregen University, Varnoria. SFB960 /RCB colloquium.\tVirtual. Invited talk.",
+                          date="2021-08-12", event_name="SFB960/RCB Colloquium, Invited Talk",
+                          location="Zqregen University, Varnoria (Virtual)")
+    assert cells == ["SFB960/RCB Colloquium, Invited Talk",
+                     "Zqregen University, Varnoria (Virtual)", "2021"]
+
+
+def test_untitled_talk_still_needs_whitespace_between_two_words_of_its_event():
+    """The spacing tolerance is for punctuation only: event 'Zq Hall' does not
+    match the run-together 'ZqHall', so the line stays (#1346)."""
+    cells = _untitled_row("2019 ZqHall. Invited talk.", date="2019", event_name="Zq Hall")
+    assert cells[0] == "ZqHall. Invited talk."
 
 
 def test_a_titled_talk_renders_its_title_whatever_its_source_line_holds():

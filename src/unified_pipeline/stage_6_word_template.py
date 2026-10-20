@@ -93,9 +93,11 @@ from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
+    DeclinedList,
     fan_out_multi_record_entries,
     record_scope,
     record_text,
+    unrendered_list_warnings,
 )
 
 # Every name below is re-exported from this module by being imported here: it is
@@ -1635,6 +1637,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
 
+        # Record lists fan-out kept whole that `_validate_output` checks
+        # against the rendered document (#1187). Set by
+        # `_group_entries_by_code`, declared here for typing/reuse.
+        self._declined_lists: list[DeclinedList] = []
+
         # Grant entries `_create_grant_table` declined as too sparse (#839),
         # and mentee entries named only by an award title (#1702) --
         # appended to `unmapped_entries` at `generate()`'s Appendix fill so
@@ -1989,9 +1996,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         precollegiate_moved: list[object] = []
         bare_mentees_resolved: list[tuple[object, str]] = []
         leadership_moved: list[tuple[object, tuple[int, int]]] = []
+        self._declined_lists = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
-            records_key=STAGE4_RECORDS_KEY)
+            records_key=STAGE4_RECORDS_KEY, declined=self._declined_lists)
         mentee_siblings = _mentee_sibling_codes(entries)
         coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
@@ -3949,7 +3957,8 @@ Now analyze the text above:"""
         `_subpoint_lines` already holds the appointment-title duties the
         positions writer made sub-points (`_add_title_duties`); they join the
         haystack, so the same duties are not planned again from the entry's
-        text."""
+        text. The row-receipt ledger says which rows each entry wrote: a
+        degree's prose goes only under its own (`supplementary._own_degree_rows`)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(
@@ -3959,7 +3968,8 @@ Now analyze the text above:"""
         candidates = list(supplementary.anchor_candidates(self.doc, appendix))
         planned = supplementary.plan_subpoints(entries_by_code, haystack, candidates,
                                                self._subpoint_section_spans(),
-                                               self._subpoint_excluded_tables)
+                                               self._subpoint_excluded_tables,
+                                               self._row_receipts.elements_for)
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:
@@ -4978,7 +4988,22 @@ Now analyze the text above:"""
                     "evidence": [],
                 })
 
+        # Check 4: a record list fan-out kept whole, a record of which is not
+        # in the document (#1187, stage6/fan_out.py `DeclinedList`).
+        if self._declined_lists:
+            issues.extend(unrendered_list_warnings(
+                self._declined_lists, self._rendered_output_lines(include_tracked_insertions=True),
+                self._declined_list_table_rows()))
+
         return issues
+
+    def _declined_list_table_rows(self) -> list[list[str]]:
+        """Each table's rows' text, nested tables included, for Check 4: a
+        grant or mentee block writes one record one field per row, so no one
+        line holds it (#1187: web26's M2A sub-awards)."""
+        return [[' '.join(t.text or '' for t in row.iter(qn('w:t')))
+                 for row in table._tbl.iterchildren(qn('w:tr'))]
+                for table in self.doc.tables]
 
 
 def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = True,
