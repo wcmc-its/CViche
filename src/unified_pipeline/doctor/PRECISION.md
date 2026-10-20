@@ -539,6 +539,14 @@ On the 166 runs, the four linted sections were given 10,215 entries. The lint fi
 
 A lost entry is matched by identity or by `element_idx_start`: an int, or for a table row the string stage 2 writes ("96.3"). Before the string form was read, 58 Service entries on 16 runs (Opresko, Bostwick and web207 table rows that `_route_q2_entries` copies) read as lost. They render; the copy carries the source's index.
 
+| CUT-1 | 2026-10-19 | `feat/1588-split-record` on origin/dev `99c23548`: `run_doctor` per run, against a worktree of `99c23548`, both arms over the same stored delivered artifacts; and `lint_record_cut_in_two` alone over held-out prod stage-4 JSON | 197 labelled stored runs (as SLC-A3); and 219 prod runs from S3 with stage-4 output, none labelled and none read while the rule was designed (the design read 299 uids) | the local ground-truth labels: 1,683 indexed findings; 61 tied to #1226, E5 or s7ab-9, 28 of which no lint matched at `f4411540` | #1588, #1226 |
+
+CUT-1 adds `record_cut_in_two` (WARN, reads stage 4): one record stage 2 cut into two neighbouring entries of a list. Either the two entries hold complementary parts of the fields the list's other records carry (together all but at most one, sharing at most one), or the second is a description sentence split off the record before it and renders as a record of its own. It skips what `grant_boundary` and `record_boundary` already name. The rule came from reading the 27 of those 28 that origin/dev `a4e56c9b` still missed (`source_line_coverage` now matches the 28th): 8 were already named at another index, and of the 19 left, this shape covers 6 (IZABPD-04, JFGZFT-02, VYRDHN-05, WWSEWY-03a, XYXIQJ-04, XYXIQJ-05). Date pairing across neighbours, a boundary inside one paragraph, and a cut one line early are not judged.
+
+- **Held out, judged blind:** 23 hits on 15 of the 219 prod runs. Each was read by two readers against the source document, mixed with 11 unflagged adjacent pairs from the same lists and not told which was which. They agreed on 32 of 34 items, and a third reader settled the other 2. Verdicts: 17 one record split, 4 two separate records, 2 another defect. In both of the latter, the flagged entry is a real stage-2 fragment, but its other half sits with the other neighbour, so the message names the wrong partner. Precision is 17 / 23 = 0.74 (Wilson 0.54 to 0.87), or 19 / 23 counting a real fragment with the wrong partner. None of the 11 controls was read as a split. The bar was set before the build: WARN at 0.70 or more with a lower bound of at least 0.50.
+- **Labelled runs:** 17 hits on 13 of the 197 runs, all WARN. 13 of the 17 land on a labelled defect. The six labels above are now caught, so labels matched by any lint go from 937 to 943 of 1,683, with none lost. Every other lint's findings are identical on 197 of 197 runs.
+- **The false positives (4):** separate records whose fields happen to complement each other. Examples: a dated service item beside one that names a committee and a role; a numbered item holding only a title and a protocol number before a full one; a top-level bullet whose sub-bullets stage 2 grouped correctly; a dated talk beside a separate activity paragraph.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -572,6 +580,7 @@ A lost entry is matched by identity or by `element_idx_start`: an int, or for a 
 | `institution_cleaned_name`: `address_in_cell` | 2 | 2 | none | 2 / 2 hand-checked (100%), held out | not matched (SXPHOG-17 by reading) | 0 by index | INST-1 |
 | `identical_rendered_rows` | 11 | 11 | none | 21 / 21 hand-checked (100%) | 1 / 11 (9%) | 1 | IDR |
 | `record_boundary` | 5 | 5 | none | 23 / 23 hand-checked (100%) | 4 / 5 (80%) | 1 | X6-grant |
+| `record_cut_in_two` | 17 | 17 | none | 17 / 23 blind, held out (74%) | 13 / 17 on labelled runs (76%) | 11 | CUT-1 |
 | `renderer_row_missing` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | RRR-1 |
 | `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
 | `owner_attribution`: `mentee_under_non_mentee_heading` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (0%) | 0 | YUY-OA |
@@ -760,6 +769,7 @@ Any lint not listed here has no verdicts and is a comment.
 | `group_header_context`: `parent_dates_lost` | 21 / 21 (100%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
 | `identical_rendered_rows` | 21 / 21 (100%) | 15 / 15 (100%) | 36 / 36 (100%) | delete one copy | suggestion |
 | `record_boundary` | 23 / 23 (100%) | none | same | — | comment |
+| `record_cut_in_two` | none | 17 / 23 (74%), blind (CUT-1) | 17 / 23 (74%) | — | comment |
 | `orphaned_fragments` | 39 / 41 (95%) | none | same | — | comment |
 | `owner_attribution`: `mentee_under_non_mentee_heading` | 3 / 3 (100%) | none | same | — | comment |
 | `owner_attribution`: `citation_without_owner` | 13 / 54 (24%) | none | same | — | review note |
