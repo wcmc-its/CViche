@@ -94,3 +94,24 @@ def test_m2a_to_m2b_transition_still_works():
     assert "nationalsciencefoundation" in haystacks["M2A"].text.lower()
     assert "closedoutin2021" not in haystacks["M2A"].text.lower()
     assert "closedoutin2021" in haystacks["M2B"].text.lower()
+
+
+def test_an_unfilled_placeholder_table_stays_out_of_the_haystack():
+    # #1942: stage 6 keeps Current Research Funding's placeholder, N/A in its
+    # first answer, when that heading has no grants. Its labels are every
+    # grant's labels and must not vouch for a grant under M2A; a filled grant
+    # table, and the N/A line of an empty paragraph slot, are unaffected.
+    placeholder = ("Award Source: (funding agency – federal, foundation, industry; type of grant)*\n"
+                   "N/A\nProject title:\nAnnual direct costs:\nName of Principal Investigator:\n"
+                   "Your role*:\nYour percent (%) effort:")
+    blocks = [
+        ("p", "Current Research Funding"),
+        ("table", placeholder),
+        ("p", "Past (Completed) Funding"),
+        ("table", "Award Source:\n" + _GRANT_LINE),
+    ]
+    haystacks = _funding_haystacks(blocks)
+
+    assert "principal" not in haystacks["M2A"].tokens
+    assert "projecttitle" not in haystacks["M2A"].text.lower()
+    assert "pendingr01grant" in haystacks["M2B"].text.lower()
