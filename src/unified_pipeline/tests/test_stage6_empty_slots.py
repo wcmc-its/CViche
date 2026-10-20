@@ -273,6 +273,18 @@ def test_a_table_cleared_to_its_header_gets_its_blank_row_back_with_na():
     assert counts.tables == 1
 
 
+def test_the_restored_row_is_the_template_s_blank_one_not_what_was_written_into_it():
+    doc = Document()
+    table = _column_table(doc)
+    snapshot = snapshot_template(doc.element.body)
+    table.rows[1].cells[0].text = "Written then discarded"
+    table._tbl.remove(table.rows[1]._tr)
+
+    fill_empty_slots(doc.element.body, snapshot)
+
+    assert [c.text for c in table.rows[1].cells] == [NOT_APPLICABLE, '', '']
+
+
 def test_a_grant_block_gets_na_in_its_first_answer():
     doc = Document()
     table = doc.add_table(rows=3, cols=2)
