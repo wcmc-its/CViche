@@ -10,6 +10,8 @@ corrector does NOT fire.
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add src/ to path so unified_pipeline.core is importable.
 # tests/ -> backend/ -> web_interface/ -> project_root/ -> src/
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
@@ -20,6 +22,8 @@ from unified_pipeline.core.validators.prose_mentee_corrector import (  # noqa: E
 )
 
 MENTOR_SECTION = ["ADVISING & MENTORING"]
+# The run's year, pinned so a lone-year case does not move with the clock.
+RUN_YEAR = 2026
 
 
 def _entry(text, code="K2", hierarchy=None):
@@ -27,7 +31,7 @@ def _entry(text, code="K2", hierarchy=None):
 
 
 def _apply_one(entry):
-    entries, stats = apply_prose_mentee_corrections([entry])
+    entries, stats = apply_prose_mentee_corrections([entry], RUN_YEAR)
     return entries[0], stats
 
 
@@ -117,6 +121,68 @@ def test_non_teaching_code_is_untouched():
     assert e["taxonomy_code"] == "D1"
 
 
+# --- a lone past year is past (#1342, XELRLZ 250/258/260) ------------------
+
+def test_lone_past_year_becomes_n3b():
+    e, _ = _apply_one(_entry(
+        "2016 Mentor Unofficial dissertation advisor for Ana Doe; attended advisory meetings."))
+    assert e["taxonomy_code"] == "N3B"
+
+
+def test_every_stated_year_past_becomes_n3b():
+    e, _ = _apply_one(_entry(
+        "2015 Mentor Co-mentored Lee Roe during his project (poster at SfN March 25, 2016)"))
+    assert e["taxonomy_code"] == "N3B"
+
+
+@pytest.mark.parametrize("text", [
+    "2026 Mentor for Ana Doe, dissertation advising",          # the run's year
+    "Mentor for Ana Doe since 2016",                           # since
+    "Mentor for Ana Doe from 2016",                            # from
+    "Mentor for Ana Doe 2016 onwards",                         # onwards
+    "Mentor for Ana Doe 2016 until now",                       # until now
+    "2016 - Mentor for Ana Doe",                               # year, dash, no end year
+    "Mentor for Ana Doe (2016-",                               # dangling dash
+    "Mentor for Ana Doe 2016, current",                        # open-period word
+    "Mentor for Ana Doe",                                      # no year at all
+    "Mentor for Ana Doe 2016 till date",
+    "Mentor for Ana Doe 2016 to now",
+    "Mentor for Ana Doe 2016 (continuing)",
+    "Mentor for Ana Doe 2016 to date",
+    "Mentor for Ana Doe 2016 ongoing",
+    "Mentor for Ana Doe 2016 to the present",
+    "Mentor for Ana Doe 2016 until present",
+    "Mentor for Ana Doe 2016 pres.",
+    "Mentor for Ana Doe 2016, currently",
+    "Mentor for Ana Doe 2016, still in the lab",
+    "Mentor for Ana Doe 2016, active",
+    "Mentor for Ana Doe 2016 to today",
+    "Mentor for Ana Doe 2016, thesis in progress",
+    "Mentor for Ana Doe 2016 onward",
+    "Mentor for Ana Doe 2016 until date",
+    "Mentor for Ana Doe 2016 til date",
+], ids=["run-year", "since", "from", "onwards", "until-now", "spaced-dash", "dangling-dash", "current", "no-year",
+        "till-date", "to-now", "continuing", "to-date", "ongoing", "to-the-present", "until-present", "pres",
+        "currently", "still", "active", "today", "in-progress", "onward", "until-date", "til-date"])
+def test_a_year_that_may_be_open_stays_n3a(text):
+    e, _ = _apply_one(_entry(text))
+    assert e["taxonomy_code"] == "N3A"
+
+
+def test_an_open_word_after_an_end_year_stays_past_as_before():
+    # The lone-year vocabulary reads only text with no end-dated range; an
+    # end-dated one is read as it was ("2014-2016 onwards" was N3B).
+    e, _ = _apply_one(_entry("Mentor for Ana Doe 2014-2016 onwards"))
+    assert e["taxonomy_code"] == "N3B"
+
+
+def test_the_run_year_is_an_input():
+    entry = _entry("2025 Mentor for Ana Doe, dissertation advising")
+    (current,), _ = apply_prose_mentee_corrections([dict(entry)], 2025)
+    (past,), _ = apply_prose_mentee_corrections([dict(entry)], 2026)
+    assert (current["taxonomy_code"], past["taxonomy_code"]) == ("N3A", "N3B")
+
+
 # --- stats / non-mutation ---------------------------------------------------
 
 def test_stats_shape_and_no_spurious_corrections():
@@ -125,7 +191,7 @@ def test_stats_shape_and_no_spurious_corrections():
         _entry("Freshman Mentor and Teaching Assistant"),       # no
         _entry("Tumor board, 2014 - present", code="K2"),       # no
     ]
-    out, stats = apply_prose_mentee_corrections(entries)
+    out, stats = apply_prose_mentee_corrections(entries, RUN_YEAR)
     assert stats["entries_checked"] == 3
     assert stats["corrections_made"] == 1
     assert len(stats["correction_details"]) == 1

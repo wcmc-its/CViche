@@ -1099,6 +1099,42 @@ def _date_tokens(record: Mapping[str, Any], code: str) -> set[str]:
                          if _is_date_key(key) and not _is_blank(value)))
 
 
+def _names_of_record(record: Mapping[str, Any], records: Sequence[Mapping[str, Any]]) -> list[str]:
+    """`record`'s non-date string values, normalized, that no sibling's value
+    holds: what names this record and no other. A value written inside a
+    sibling's ("President" in "Vice President", "Glade" in "Glade Society
+    Chair") would find that sibling's line (#1342)."""
+    siblings = [norm(value) for other in records if other is not record
+                for value in other.values() if isinstance(value, str)]
+    names = [norm(value) for key, value in record.items()
+             if isinstance(value, str) and value.strip() and not _is_date_key(key)]
+    return [name for name in names if not any(name in sibling for sibling in siblings)]
+
+
+def _begins_with_name(segment: str, name: str) -> bool:
+    """Whether `segment` opens with `name` as whole words, a hyphenated word
+    whole too: "President" does not open "President-elect 2010-2012"."""
+    return re.match(rf'{re.escape(name)}(?![\w-])', norm(segment)) is not None
+
+
+def _dated_on_own_line(record: Mapping[str, Any], records: Sequence[Mapping[str, Any]],
+                       segments: Sequence[str], code: str) -> bool:
+    """Whether one segment both opens with one of `record`'s own names and
+    holds every year its dates show: "Co-leader of ... program 2020-2021
+    Member of ..." for the co-leader's 2020-2021, though the segments are
+    out of step with the records above it (OIEPQD TVQZIP 116, #1342). A name
+    further into a line ("Member" in "Executive Committee Member 2010-2012")
+    does not make it that record's line. Never when a sibling carries the
+    same dates: a date copied from a sibling always equals the sibling's, so
+    such a record falls back to the nearest-line rule and loses it (#1342)."""
+    dates = _date_tokens(record, code)
+    if any(_date_tokens(other, code) == dates for other in records if other is not record):
+        return False
+    own = _names_of_record(record, records)
+    return any(dates <= set(_tokens(segment)) and any(_begins_with_name(segment, name) for name in own)
+               for segment in segments)
+
+
 def _unsourced_date_records(records: Sequence[Mapping[str, Any]], text: object,
                             code: str) -> set[int]:
     """The indexes of the records whose dates their own line does not give
@@ -1112,7 +1148,8 @@ def _unsourced_date_records(records: Sequence[Mapping[str, Any]], text: object,
     board term two lines up, copied onto an undated "Past-President" below
     two later terms) are not in the source for that record. A record above
     every dated line, and every record of an entry whose lines do not line
-    up, is left as stage 4 wrote it.
+    up, is left as stage 4 wrote it. So is a record whose dates sit on a
+    line that names it (`_dated_on_own_line`), wherever that line falls.
     """
     segments = _segments(text)
     if len(segments) != len(records):
@@ -1123,7 +1160,8 @@ def _unsourced_date_records(records: Sequence[Mapping[str, Any]], text: object,
         if _is_dated(segment):
             nearest_dated = segment
         elif nearest_dated is not None \
-                and not _date_tokens(record, code) <= set(_tokens(nearest_dated)):
+                and not _date_tokens(record, code) <= set(_tokens(nearest_dated)) \
+                and not _dated_on_own_line(record, records, segments, code):
             unsourced.add(i)
     return unsourced
 
