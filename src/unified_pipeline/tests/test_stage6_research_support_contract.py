@@ -2458,11 +2458,10 @@ def test_missing_section_header_renders_nothing_and_does_not_raise():
     assert gen.stats['tables_populated'] == 0
 
 
-def test_existing_template_table_is_removed_even_when_the_category_is_empty():
-    """The blank template table under a header goes even with no grants to add.
-
-    Leaving it behind ships an empty two-column stub in the finished CV.
-    """
+def test_existing_template_table_stays_when_the_category_is_empty():
+    """The blank template table under a header stays when there are no grants
+    to add (#1942): the WCM reviewer wants it kept, with N/A, which the
+    empty-slot pass writes after every section has rendered."""
     gen = _generator()
     gen.doc.add_paragraph().add_run(CURRENT).bold = True
     placeholder = gen.doc.add_table(rows=1, cols=2)
@@ -2472,7 +2471,7 @@ def test_existing_template_table_is_removed_even_when_the_category_is_empty():
 
     gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, as_of=TEST_AS_OF)
 
-    assert gen.doc.tables == []
+    assert [t._tbl for t in gen.doc.tables] == [placeholder._tbl]
 
 
 def test_existing_template_table_is_replaced_by_the_grant_tables():

@@ -256,6 +256,10 @@ def test_documented_false_positive_class_is_pinned(entry):
      DROP_NEAR_TEMPLATE_INSTRUCTION),
     ("N/A", DROP_UNANSWERED_PROMPT),
     ("Not Applicable |  |  |", DROP_UNANSWERED_PROMPT),
+    # the source's own grant table, answered N/A once, as one entry (#1942)
+    ("Award Source: (funding agency \u2013 federal, foundation, industry; type of grant)* | N/A\n"
+     "Project title: |\nName of Principal Investigator: |\nYour role*: |",
+     DROP_UNANSWERED_PROMPT),
     ("Signature:", DROP_TEMPLATE_LABEL),
     ("Site/Position |", DROP_TEMPLATE_LABEL),
 ])

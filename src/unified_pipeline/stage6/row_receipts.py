@@ -186,6 +186,12 @@ class RowReceiptLedger:
         source column-header row, a withheld record): not a loss."""
         self._set_aside.append(entry)
 
+    def elements_for(self, entry: Mapping[str, object]) -> list[_Element]:
+        """The rows and paragraphs recorded for `entry` itself, by identity and
+        in write order: not a fan-out sibling's, which shares its index. The
+        #1205 sub-point pass anchors a degree's prose only under one of them."""
+        return [element for _section, owner, element in self._written if owner is entry]
+
     def _live(self, appendix_section: str) -> tuple[_EntrySet, _EntrySet]:
         """(entries with a live row written by a body section, entries with
         any live element at all) -- live meaning still in the document body."""
