@@ -267,8 +267,9 @@ CROSSREF_BUDGET_SECONDS = 300.0
 # keeps its status and gains this key, Crossref's record of it, so a check
 # for unverified citations can tell it from one nobody can find (#1870). Its
 # `source` says how it was matched: the CV's own DOI, or a title search.
-# Nothing renders it. On the 2026-10-15 stage-5 farm: 164 of 192
-# `doi_not_in_pubmed` DOIs matched (40 of 40 sampled the right item), and 59
+# Stage 6 fills its issue and last page into 5d's citation when the
+# citation's volume and first page are its own (#1872). On the 2026-10-15
+# stage-5 farm: 164 of 192 `doi_not_in_pubmed` DOIs matched (40 of 40 sampled the right item), and 59
 # of the 803 entries with no record, identifier, volume or pages matched by
 # title (52 right, 4 wrong, 3 unsure: each wrong one names another venue).
 # The title path's other 324 of those 803 found a PubMed record instead.
