@@ -40,6 +40,7 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
 )
+from unified_pipeline.stage6.formatting import plain_entry_left_twips  # noqa: E402
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     DATE_LED_SOURCE_TEXT,
@@ -1054,6 +1055,28 @@ def test_reconsidered_k_segment_lands_under_its_own_template_subsection(code):
     assert _heading_above(gen, segment).startswith(_K_SUBSECTION_HEADINGS[code])
 
 
+def _plain_left(para):
+    """The left indent, in twips, of a paragraph with no list markup."""
+    assert _num_level(para) is None, "expected no bullet (#1943)"
+    return para.paragraph_format.left_indent.twips
+
+
+@pytest.mark.parametrize(("code", "bulleted"), [("K1", False), ("L1", False), ("D1", True)])
+def test_a_reconsidered_k_or_l_segment_carries_no_bullet(code, bulleted):
+    # #1943: K and L entries render without bullets; a segment recovered into
+    # those sections matches them. Other sections keep the list bullet.
+    gen = _generator()
+    segment = f"Synthetic {code} recovered segment, Example University, 2015"
+
+    assert gen._insert_reconsidered_segment(segment, code) is True
+
+    para = next(p for p in gen.doc.paragraphs if p.text == segment)
+    if bulleted:
+        assert _num_level(para) == "0"
+    else:
+        assert _plain_left(para) == plain_entry_left_twips(0)
+
+
 def test_every_section_header_map_code_anchors_in_the_blank_template():
     codes = _section_header_map_codes()
     assert {"K3", "K4", "K5"} <= set(codes), "map harvest is vacuous"
@@ -1087,6 +1110,48 @@ def test_table_cell_overflow_for_k3_k4_k5_stays_in_the_teaching_section(code):
     start = next(i for i, t in enumerate(texts) if t.strip() == "EDUCATIONAL CONTRIBUTIONS")
     end = next(i for i, t in enumerate(texts) if t.startswith("CLINICAL PRACTICE, INNOVATION"))
     assert start < texts.index(text) < end
+    # #1943: the section's entries carry no bullet, and neither does its overflow.
+    assert _plain_left(gen.doc.paragraphs[texts.index(text)]) == plain_entry_left_twips(0)
+
+
+@pytest.mark.parametrize(("code", "bulleted"), [("K1", False), ("L1", False), ("D1", True)])
+def test_body_paragraph_overflow_is_unbulleted_for_k_and_l(code, bulleted):
+    """The other overflow route: the entry's own line is a body paragraph,
+    replaced by the full text at the end of its section (#1943)."""
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+    short = gen._insert_bulleted_entry(idx + 1, "Synthetic short line", None, list_level=0)
+    text = f"Synthetic {code} overflow prose, Example University, 2015"
+    gen._overflow_entries = [(
+        {"taxonomy_code": code, "text": text,
+         "extraction_coverage": {"extraction_coverage_percent": 12}},
+        short, code)]
+
+    gen._route_overflow_entries()
+
+    assert gen.stats["overflow_bullets_added"] == 1
+    para = next(p for p in gen.doc.paragraphs if p.text == text)
+    if bulleted:
+        assert _num_level(para) == "0"
+    else:
+        assert _plain_left(para) == plain_entry_left_twips(0)
+
+
+@pytest.mark.parametrize("bulleted", [True, False])
+def test_overflow_levels_survive_with_or_without_bullets(bulleted):
+    """A title, a context segment and a label's content: levels 0, 1, 2, as
+    ilvl when bulleted and as indent steps when not (#1943)."""
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+    gen._insert_overflow_bullet(idx + 1, "Synthetic title\tScope:\tSynthetic scope prose",
+                                bulleted=bulleted)
+    paras = {p.text: p for p in gen.doc.paragraphs}
+    expected = {"Synthetic title": 0, "Scope:": 1, "Synthetic scope prose": 2}
+    for text, level in expected.items():
+        if bulleted:
+            assert _num_level(paras[text]) == str(level)
+        else:
+            assert _plain_left(paras[text]) == plain_entry_left_twips(level)
 
 
 def test_reconsider_prompt_names_k3_k4_k5_by_their_taxonomy_labels(monkeypatch):
@@ -1388,7 +1453,9 @@ def test_an_appendix_holding_only_the_withheld_notice_states_no_entry_count():
     opens the Appendix; it is not an entry, so the box restated a count of 0
     as "These 0 entries ..." above no entries. It now says what is there."""
     from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
-    from unified_pipeline.stage6.sections.appendix import APPENDIX_NOTE_WITHHELD_ONLY_TEXT
+    from unified_pipeline.stage6.sections.appendix import (
+        APPENDIX_NOTE_WITHHELD_ONLY_TEXT,
+    )
 
     gen = _withheld_generator()
     recovered = gen._recover_appendix_lines([], {}, None)

@@ -14,7 +14,7 @@ is. Reject the deletion to keep it; accept all changes to get the template.
 
 Where it goes, by what the entry's rendered line is:
 
-- a body paragraph (a teaching bullet): a paragraph after it, one list level
+- a body paragraph (a teaching entry): a paragraph after it, one list level
   deeper, whose run AND paragraph mark are deleted, so accepting leaves no
   empty bullet;
 - a table row (an appointment, a grant table, a service row): a row
@@ -84,6 +84,7 @@ from unified_pipeline.core.template_boilerplate import (
 
 from .dedup import _is_sibling_of
 from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
+from .formatting import plain_entry_left_twips, plain_entry_level
 from .normalization import _squash
 from .parsing import _refold_shattered
 from .pii_pass import PII_DROPPED_FIELDS_KEY
@@ -703,16 +704,30 @@ def _keep_mark(p: BaseOxmlElement) -> None:
             ppr.remove(old)
 
 
+def _deepen_plain_entry(ppr: BaseOxmlElement) -> None:
+    """One level deeper for an entry written without a bullet (#1943: K and
+    L), which shows its level by a left indent on the bullet-text grid
+    rather than `w:ilvl`. Any other indent is left as it is."""
+    ind = ppr.find(qn('w:ind'))
+    left = None if ind is None else ind.get(qn('w:left'))
+    level = plain_entry_level(int(left)) if left is not None and left.isdigit() else None
+    if level is not None:
+        ind.set(qn('w:left'), str(plain_entry_left_twips(level + 1)))
+
+
 def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
                             revision: Revision) -> None:
     """Deleted paragraphs after `anchor`, with its paragraph properties; a
-    list paragraph goes one level deeper, so it reads as a sub-bullet. The
-    last one keeps its mark when no paragraph follows it (`_keep_mark`)."""
+    list paragraph goes one level deeper, so it reads as a sub-bullet, and so
+    does an unbulleted entry (`_deepen_plain_entry`). The last one keeps its
+    mark when no paragraph follows it (`_keep_mark`)."""
     ppr = copy.deepcopy(anchor._p.pPr) if anchor._p.pPr is not None else None
     if ppr is not None:
         level = ppr.find(f"{qn('w:numPr')}/{qn('w:ilvl')}")
         if level is not None:
             level.set(qn('w:val'), str(int(level.get(qn('w:val'), '0')) + 1))
+        else:
+            _deepen_plain_entry(ppr)
     after = _after_subpoints(anchor._p)
     if after is not anchor._p and not _has_deleted_mark(after):
         # An earlier sub-point kept its mark; one now follows it, so delete it again.
