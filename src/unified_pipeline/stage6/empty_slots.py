@@ -15,7 +15,9 @@ by hand writes N/A once, in the table's first answer ("Award Source: | N/A",
 the shape of the XAXVYB source itself), and leaves the rest blank. That reads
 as "this whole record does not apply" where a column of N/A would read as six
 separate answers. For a column-header table (Title | Institution | Dates) the
-first value cell is the first cell of the blank row under the header.
+first value cell is the first cell of the blank row under the header; a
+section that cleared its table down to the header row and had nothing to add
+(Honors, Invitations to Speak) gets the template's blank row back for it.
 
 Emptiness is bookkeeping, not text search. `snapshot_template` records the
 text of every paragraph and table of the template as loaded, before any
@@ -30,6 +32,7 @@ No `stage_6_word_template` import (a back-edge, `stage6/__init__.py`).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 
 from docx.oxml import OxmlElement
@@ -111,6 +114,9 @@ class TemplateSnapshot:
     """
     paragraphs: Mapping[BaseOxmlElement, str]
     tables: Mapping[BaseOxmlElement, tuple[tuple[str, ...], ...]]
+    #: A copy of each table's first all-blank row, for a table a section
+    #: cleared down to its header and then had nothing to add.
+    blank_rows: Mapping[BaseOxmlElement, BaseOxmlElement]
 
 
 @dataclass(frozen=True)
@@ -135,7 +141,12 @@ def snapshot_template(body: BaseOxmlElement) -> TemplateSnapshot:
     """Record *body*'s paragraphs and tables as the template ships them."""
     paragraphs = {el: _text(el) for el in body.iterchildren(qn("w:p"))}
     tables = {el: _table_grid(el) for el in body.iterchildren(qn("w:tbl"))}
-    return TemplateSnapshot(paragraphs, tables)
+    blank_rows = {}
+    for tbl in tables:
+        blank = next((tr for tr in tbl.iterchildren(qn("w:tr")) if not _text(tr).strip()), None)
+        if blank is not None:
+            blank_rows[tbl] = deepcopy(blank)
+    return TemplateSnapshot(paragraphs, tables, blank_rows)
 
 
 def _heading_text(text: str) -> str:
@@ -241,9 +252,14 @@ def _write_not_applicable(paragraph: BaseOxmlElement) -> None:
     _set_font(run)
 
 
-def _fill_unfilled_table(tbl: BaseOxmlElement) -> bool:
-    """Write N/A into *tbl*'s first empty cell. False when it has none."""
+def _fill_unfilled_table(tbl: BaseOxmlElement, blank_row: BaseOxmlElement | None) -> bool:
+    """Write N/A into *tbl*'s first empty cell. A table a section cleared down
+    to its header (`_clear_table_data`) gets the template's blank row back
+    first. False when there is nowhere to write."""
     tc = _first_empty_cell(tbl)
+    if tc is None and blank_row is not None:
+        tbl.append(deepcopy(blank_row))
+        tc = _first_empty_cell(tbl)
     if tc is None:
         return False
     paragraph = tc.find(qn("w:p"))
@@ -270,7 +286,7 @@ def fill_empty_slots(body: BaseOxmlElement, snapshot: TemplateSnapshot) -> SlotF
         if element in snapshot.tables:
             template_grid = snapshot.tables[element]
             if (is_record_table(template_grid) and table_is_unfilled(element, template_grid)
-                    and _fill_unfilled_table(element)):
+                    and _fill_unfilled_table(element, snapshot.blank_rows.get(element))):
                 tables += 1
         elif _is_paragraph_slot(element, snapshot) and paragraph_slot_is_empty(element, snapshot):
             _insert_not_applicable_after(element)

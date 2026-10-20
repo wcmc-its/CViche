@@ -258,6 +258,21 @@ def test_a_table_with_an_added_row_counts_as_filled():
     assert NOT_APPLICABLE not in [c.text for row in table.rows for c in row.cells]
 
 
+def test_a_table_cleared_to_its_header_gets_its_blank_row_back_with_na():
+    """Honors and Invitations to Speak clear the template's blank row before
+    writing theirs; with nothing to write, the header was all that was left."""
+    doc = Document()
+    table = _column_table(doc)
+    snapshot = snapshot_template(doc.element.body)
+    table._tbl.remove(table.rows[1]._tr)
+
+    counts = fill_empty_slots(doc.element.body, snapshot)
+
+    assert [[c.text for c in row.cells] for row in table.rows] == [
+        ["Title", "Institution", "Dates"], [NOT_APPLICABLE, '', '']]
+    assert counts.tables == 1
+
+
 def test_a_grant_block_gets_na_in_its_first_answer():
     doc = Document()
     table = doc.add_table(rows=3, cols=2)
