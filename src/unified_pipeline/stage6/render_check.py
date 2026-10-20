@@ -566,8 +566,13 @@ def _siblings(tokens: set[str], all_line_tokens: list[set[str]]) -> list[set[str
 
 
 def _has_sibling(tokens: set[str], all_line_tokens: list[set[str]]) -> bool:
-    """Whether `tokens` has a sibling row among `all_line_tokens` (#1230)."""
-    return bool(_siblings(tokens, all_line_tokens))
+    """Whether `tokens`, one of `all_line_tokens`, has a sibling row among
+    them (#1230) or a twin: another distinct line with the same tokens.
+    `_record_tokens` keeps no word under five letters, so "Committee A" and
+    "Committee B", or "NYP" and "WCM", give two rows one token set, and a
+    reply that dropped either was accepted (#1956)."""
+    return (bool(_siblings(tokens, all_line_tokens))
+            or all_line_tokens.count(tokens) > 1)
 
 
 def _sibling_record_tokens(text: str | None) -> set[str]:
@@ -612,9 +617,50 @@ def record_siblings(records: list[str]) -> dict[str, list[set[str]]]:
     return {line: others for line, others in siblings.items() if others}
 
 
+def record_twins(records: list[str]) -> dict[str, list[str]]:
+    """Each record line of one entry mapped to the `_squash`ed text of its
+    twins: the other lines with the same `_sibling_record_tokens` (#1956).
+
+    `record_siblings` leaves twins out: no token tells them apart, since
+    `_record_tokens` keeps no word under five letters ("Committee A" and
+    "Committee B", "NYP" and "WCM"). Their text does, so
+    `sibling_record_rendered` compares it. Lines with the same squashed text
+    are the same record, not twins."""
+    lines = list(dict.fromkeys(records))
+    tokens = {line: _sibling_record_tokens(line) for line in lines}
+    twins = {line: list(dict.fromkeys(
+                 _squash(other) for other in lines
+                 if tokens[other] == tokens[line]
+                 and _squash(other) != _squash(line)))
+             for line in lines}
+    return {line: others for line, others in twins.items() if others}
+
+
+def _only_twins_vouch(line: str, twins: list[str], haystack: str) -> bool:
+    """Whether every `haystack` line that vouches for `line` holds one of its
+    `twins` (`record_twins`) verbatim: the line's words are on the page only
+    as a twin's row (#1956).
+
+    A haystack line vouches as in `_record_rendered`: it holds one of the
+    line's `record_pieces`, or `RENDER_TOKEN_OVERLAP` of one chunk's letter
+    tokens, looked up in its squashed text. A vouching line that holds no
+    twin may be the line itself, reformatted, so the verdict stands; so it
+    does when no haystack line vouches (a recovered tab part did)."""
+    pieces = record_pieces(line)
+    chunks = [chunk for chunk in (set(_RENDER_TOKEN_RE.findall(_norm(text)))
+                                  for text in record_chunks(line))
+              if len(chunk) >= RENDER_TOKEN_MIN_COUNT]
+    vouching = [out for out in haystack.split("\x00")
+                if any(piece in out for piece in pieces)
+                or any(sum(token in out for token in chunk) / len(chunk)
+                       >= RENDER_TOKEN_OVERLAP for chunk in chunks)]
+    return bool(vouching) and all(any(twin in out for twin in twins) for out in vouching)
+
+
 def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack: str,
                             line_token_sets: list[set],
-                            record_token_sets: list[set]) -> bool | None:
+                            record_token_sets: list[set],
+                            twins: list[str] | None = None) -> bool | None:
     """`_record_rendered` for a record line of an entry that holds its sibling
     rows (`record_siblings`), counted one output line per row (#1230).
 
@@ -638,11 +684,19 @@ def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack
     `_record_rendered`; `record_token_sets` are `_record_tokens` of the
     output lines that may vouch here (the recovery pass passes its uncut
     lines plus the lines it has recovered so far). A line with no siblings
-    gets `_record_rendered` unchanged, and this never turns a False or None
-    into True.
+    and no twins gets `_record_rendered` unchanged, and this never turns a
+    False or None into True.
+
+    `twins` (`record_twins`) are rows no token tells apart from the line: a
+    True turns False when every output line that vouches for the line is a
+    twin's row verbatim (`_only_twins_vouch`, #1956).
     """
     rendered = _record_rendered(line, haystack, line_token_sets)
-    if not rendered or not siblings or _squash(line) in haystack:
+    if not rendered or not (siblings or twins) or _squash(line) in haystack:
+        return rendered
+    if twins and _only_twins_vouch(line, twins, haystack):
+        return False
+    if not siblings:
         return rendered
     tokens = _sibling_record_tokens(line)
     own = [tokens - sibling for sibling in siblings]
