@@ -561,6 +561,14 @@ MFI-1 adds `mentee_field_incomplete`. It reads each rendered mentee table (the s
 
 Over the 465 runs it fires on 203, 151 of the 300 distinct CVs, 1 to 7 findings per CV (721 in all: Type of Supervision 301, Current Position 181, Mentoring Period 125, Site/Position 114). XAXVYB fires once, on its 29 past mentees' Current Position. A first draft also read tables named "N/A"; the hand-check found 3 such placeholder tables (two runs) and the name rule now skips them. Hand-checked 40 findings after that, 10 per row, one run per CV, against the docx cell and the stage-4 entry: all 40 are a required cell left blank. In 37 the CV gives no value. In 3 the CV gives one that the stored render lost (a site, a period, a supervision type); two of those render on origin/dev, the stored docx being from older builds. The comment's ask, to fill the field, holds either way, so all 40 count as true.
 
+| PHE-1 | 2026-10-19 | `feat/1949-pinned-heading-empty-lint` on origin/dev `a4e56c9b` (`lint_pinned_heading_empty` alone, per stored stage-3b artifact, with the stage-3a mapping beside it or, failing that, one for the same uid) | 418 distinct uids (485 distinct classified artifacts) found under the main checkout, `~/worktrees/*` and local scratch: every one that could be paired with a stage-3a mapping. 409 more had no 3a anywhere | none: hand-checked | #1949 |
+
+PHE-1 adds `pinned_heading_empty`, #1949's detector for XAXVYB's empty N1 slot (#1938): a heading stage 3a mapped to code X at the header-pin floor (0.95), whose records stage 3b coded outside X's family, while no entry in the CV is X or a child of X. Only the entry's own heading counts (its deepest, up to the three levels stage 3b reads), and a T note is not a record.
+
+As the issue first worded it (no entry under the heading coded X), the lint fired 552 times on 199 of the 418 runs. Most were within a family: a grant under a "Current" heading coded M2B (46), a publication-type call (S4 for S3), K1 for K2, or a heading holding only T notes. The family rule and the T rule bring it to 205 on 84 runs; requiring X to be absent from the whole CV brings it to 59 on 32.
+
+Hand-checked, all 59: 14 true, 7 partial, 38 false. True: both XAXVYB headings (Leadership and mentoring in programs, O for N1, the positive control; Clinical Leadership, O for L3), NSUJZG's six (pipe-split grant rows coded S8, clinical responsibilities coded P, mentoring coded K2 and K3, research associate posts coded B1), BIITRL's administrative teaching leadership coded O, CHXRBM's hospital appointments coded G, GLBCOC's academic leadership roles coded O, JNATFN's industry post coded Q2, web177's clinic service coded K2 and web240's research award coded H. Most of the false ones are correctly coded rows stage 2 placed under the wrong heading: one CV's talks under nine mentorship and service sub-headings (2024), another's under five service headings (2032), mentee lists under a journal-reviewer heading. Those are real defects, but of stage 2's heading context, not of the code. Hence INFO.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -614,6 +622,7 @@ Over the 465 runs it fires on 203, 151 of the 300 distinct CVs, 1 to 7 findings 
 | `multi_record_coverage` | 165 | 115 | none | 50 / 57 hand-checked (88%): RCB-D's 12 / 13 and X6-multirec's 38 / 44 | 90 / 165 (55%) | 51 | RCB-D, X6-multirec |
 | `offschema_fields` | 47 | 14 | 16 / 2 / 5 | 16 / 23 (70%) | 34 / 47 (72%) | 28 | M1 |
 | `output_hygiene` | 55 | 0 | 30 / 3 / 0 | 30 / 33 (91%) | names text | 0 | M1 |
+| `pinned_heading_empty` | 59 | 0 | none | 14 / 59 hand-checked (24%), 7 partial | not matched (no labels) | 0 | PHE-1 |
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
 | `pubmed_title_truncated` | 22 | 22 | 22 / 0 / 0 | 22 / 22 (100%) | 8 / 22 (36%) | 2 | M2-enrich |
 | `role_consistency`: `contradicted` | 15 | 15 | none | 15 / 15 hand-checked (100%) | 2 / 15 (13%) | 1 | RC-ROLE |
