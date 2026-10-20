@@ -254,6 +254,23 @@ _APPEND_ROWS = [
      'Ricardo Munoz, Carol Schmitt, Victor Morell, Eduardo da Cruz', '',
      'Smith J. Ch. In: Munoz R, Schmitt C, eds. Critical Care. Springer; 2010. '
      'Ricardo Munoz, Carol Schmitt, Victor Morell, Eduardo da Cruz, eds.'),
+    ('an editor named only as the chapter author, outside the editors '
+     'clause, is not printed: the value goes at the end',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010.',
+     'Jonathan Quincy Doe', '',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010. '
+     'Jonathan Quincy Doe, eds.'),
+    ('one editor in the clause and one only as the author: the whole value '
+     'goes at the end',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010.',
+     'Alan Bernard Smith, John Quincy Doe', '',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010. '
+     'Alan Bernard Smith, John Quincy Doe, eds.'),
+    ('an editor surname that appears only in the title is not printed',
+     'Roe R. Heart failure. In: Smith A, ed. Book. Acme; 2010.',
+     'Alan Bernard Smith, Mary Elizabeth Heart', '',
+     'Roe R. Heart failure. In: Smith A, ed. Book. Acme; 2010. '
+     'Alan Bernard Smith, Mary Elizabeth Heart, eds.'),
     ('a clause naming fewer than half the people: the rest go at the end, '
      'not into a second clause',
      'Ash A. A chapter. In: Rey J, ed. Book.',

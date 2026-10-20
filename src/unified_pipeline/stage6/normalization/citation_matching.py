@@ -141,25 +141,27 @@ def _editors_referenced(editors: str, citation: str) -> bool:
     """True when the citation already names these editors.
 
     By the token test, or by person: 5d wrote an editors clause and every
-    person in stage 4's value has a word in the citation. Half is not
+    person in stage 4's value has a word inside that clause. Half is not
     enough: with two of four people printed, the other two would be named
     nowhere, where base appends the whole value.
     Stage 4 often spells out names 5d abbreviated ("Rasim Somer Diler" for
     "Diler RS": one token in three), so the token test alone read them as
     absent and printed them a second time after the year: 6 of the 16
     citations the safety net changed across the stored corpus (#481). The
-    person-wise test requires the editors clause, so it never lets a chapter
-    author who shares an editor's surname stand in for the editors. The
+    person-wise test looks only inside the editors clause, so a chapter
+    author or a title word that shares an editor's surname never stands in
+    for the editors. The
     token test before it has no such requirement and still can: "Doe J. A
     chapter. In: Book." reads editors "Doe J, Roe R" as present.
     """
     if _value_referenced(editors, citation):
         return True
-    if not _EDITORS_CLAUSE_RE.search(citation):
+    clause = _EDITORS_CLAUSE_RE.search(citation)
+    if not clause:
         return False
     people = [p for p in _EDITOR_SEPARATOR_RE.split(editors) if _significant_tokens(p)]
     return bool(people) and all(
-        any(_word_in(t, citation) for t in _significant_tokens(p)) for p in people)
+        any(_word_in(t, clause.group()) for t in _significant_tokens(p)) for p in people)
 
 
 def _with_editors(citation: str, editors: str) -> str:
