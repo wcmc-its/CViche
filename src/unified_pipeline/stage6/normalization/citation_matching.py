@@ -17,7 +17,8 @@ its own text omitted -- so the dependency runs `publication` ->
 `citation_matching` and never back.
 
     _value_referenced                is this value already present in this text?
-    _append_missing_stage5d_values   top a stage-5d citation up with what it omits
+    _append_missing_stage5d_values   top a stage-5d citation up with what it omits,
+                                     each value in its Vancouver position
     _insert_missing_stage5d_year     put back a group-filled year 5d never saw (#1810)
     _restore_stage5d_owner           give back the CV owner 5d's "et al." cut (#1259)
 
@@ -87,17 +88,122 @@ def _value_referenced(value: str, citation_text: str) -> bool:
     `publication.resolve_publication`, which is the only thing that reads raw
     stage-4 JSON (round-4 review of #737, points 7 and 13).
     """
-    if not value:
+    tokens = _significant_tokens(value)
+    if not tokens:
         return False
-    haystack = citation_text.casefold()
-    tokens = [
+    matched = sum(1 for t in tokens if _word_in(t, citation_text))
+    return matched / len(tokens) >= _CITATION_MATCH_MIN_RATIO
+
+
+def _significant_tokens(value: str) -> list[str]:
+    """`value`'s casefolded words that clear the length floor and the stop
+    list: the ones that can identify it."""
+    return [
         t for t in (raw.casefold() for raw in _CITATION_TOKEN_RE.findall(value))
         if len(t) >= _CITATION_TOKEN_MIN_LEN and t not in _CITATION_STOPWORDS
     ]
-    if not tokens:
+
+
+def _word_in(token: str, text: str) -> bool:
+    """True when casefolded `token` is a whole word of `text`."""
+    return bool(re.search(rf"\b{re.escape(token)}\b", text.casefold()))
+
+
+#: The editors clause stage 5d writes for a chapter, "In: Diler RS, ed." or
+#: "In: Cabanyes J, Monge MA, eds.": "In:", names with no sentence break,
+#: then ", ed(s)." (or ", editor(s)"). ", 2nd ed." is not this clause: the
+#: comma must sit directly before "ed".
+_EDITORS_CLAUSE_RE = re.compile(r"\bIn:\s(?:(?!\.\s).)+?,\s*(?:eds?\.|editors?\b)")
+#: What separates two people in a stage-4 editors value.
+_EDITOR_SEPARATOR_RE = re.compile(r"\s*(?:[;,&]|\band\b)\s*")
+#: Where a publisher's own name ends and its place begins: "Humana Press,
+#: Totowa, New Jersey", "Saunders (New York)".
+_PUBLISHER_PLACE_RE = re.compile(r"\s*[,(]")
+#: A book trailer with no publisher: the year (and pages) alone after a
+#: sentence break, closing the citation -- "Welcome to parenting. 2010." The
+#: publisher goes in front of it, as Vancouver and `_book_trailer_parts`
+#: place it ("Publisher; Year:Pages."). A year that already follows "; "
+#: has something in the publisher slot, and a journal trailer
+#: ("2002 Jun;31(2):353-368") is not this shape; both leave the publisher
+#: appended at the end, as before.
+_BARE_BOOK_YEAR_RE = re.compile(r"(?<=\. )(?:19|20)\d\d(?::\S+)?\.?$")
+#: The book-title clause an editors name list goes in front of.
+_IN_CLAUSE = "In: "
+
+
+def _editors_referenced(editors: str, citation: str) -> bool:
+    """True when the citation already names these editors.
+
+    By the token test, or by person: 5d wrote an editors clause and at
+    least half the people in stage 4's value have a word in the citation.
+    Stage 4 often spells out names 5d abbreviated ("Rasim Somer Diler" for
+    "Diler RS": one token in three), so the token test alone read them as
+    absent and printed them a second time after the year: 6 of the 16
+    citations the safety net changed across the stored corpus (#481). The
+    editors clause is required so that a chapter author who shares an
+    editor's surname does not stand in for the missing editors.
+    """
+    if _value_referenced(editors, citation):
+        return True
+    if not _EDITORS_CLAUSE_RE.search(citation):
         return False
-    matched = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", haystack))
-    return matched / len(tokens) >= _CITATION_MATCH_MIN_RATIO
+    people = [p for p in _EDITOR_SEPARATOR_RE.split(editors) if _significant_tokens(p)]
+    named = sum(1 for p in people if any(_word_in(t, citation) for t in _significant_tokens(p)))
+    return bool(people) and named / len(people) >= _CITATION_MATCH_MIN_RATIO
+
+
+def _with_editors(citation: str, editors: str) -> str:
+    """`citation` with an "Editors, eds." clause: after its "In: ", where
+    Vancouver puts the editors of a chapter's book, else at the end. A
+    citation that already has an editors clause has no free slot there:
+    "In: Rey J, ed." with stage 4's longer list in front of it would read as
+    two editors clauses, so the list goes at the end, as before."""
+    clause = f"{editors}, eds."
+    at = citation.find(_IN_CLAUSE)
+    if at < 0 or _EDITORS_CLAUSE_RE.search(citation):
+        return f"{citation} {clause}"
+    at += len(_IN_CLAUSE)
+    return f"{citation[:at]}{clause} {citation[at:]}"
+
+
+def _with_publisher(citation: str, publisher: str) -> str:
+    """`citation` with its publisher: in front of a bare closing year
+    ("Publisher; Year."), else at the end."""
+    trailer = _BARE_BOOK_YEAR_RE.search(citation)
+    if not trailer:
+        return f"{citation} {publisher.rstrip('.')}."
+    return f"{citation[:trailer.start()]}{publisher.rstrip('.')}; {trailer.group()}"
+
+
+def _with_publisher_place(citation: str, name: str, place: str) -> str | None:
+    """`citation` with `place` put in front of the publisher `name` it already
+    prints ("Totowa, New Jersey: Humana Press; 1992."), or None when it has
+    no free slot for one: no "Name;" to stand before, or a place already
+    there, or no place to put."""
+    slot = re.search(rf"(?<!: ){re.escape(name)};", citation, re.IGNORECASE)
+    if not (slot and place):
+        return None
+    return f"{citation[:slot.start()]}{place}: {citation[slot.start():]}"
+
+
+def _with_missing_publisher(citation: str, publisher: str) -> str:
+    """`citation` with whatever of stage 4's publisher it does not print.
+
+    Stage 4 writes a publisher with its place ("Humana Press, Totowa, New
+    Jersey"). When 5d printed the name and dropped the place, the place
+    goes in front of the name, where Vancouver puts it; printing the whole
+    value again after the year named the publisher twice (#481). Any other
+    shape keeps the whole value, positioned by `_with_publisher`.
+
+    Past the first test, a citation printing the name followed by ";" lacks
+    the place: the whole value's token ratio lies between its name's and its
+    place's, so a printed name with a printed place cannot get here.
+    """
+    if _value_referenced(publisher, citation):
+        return citation
+    name, *rest = _PUBLISHER_PLACE_RE.split(publisher, maxsplit=1)
+    placed = _with_publisher_place(citation, name, "".join(rest).strip(" ,()"))
+    return placed if placed is not None else _with_publisher(citation, publisher)
 
 
 def _append_missing_stage5d_values(
@@ -105,26 +211,29 @@ def _append_missing_stage5d_values(
 ) -> str:
     """Deterministic safety net for the stage-5d LLM path (#481).
 
-    Stage 5d's copy-back loop -- the `for field in [...]` list of names it
-    writes back onto `entry['extracted_fields']` in
-    `stage_5d_citation_formatter.py` -- omits `editors` and `publisher` even
-    when its own prompt extracted them, so a book/chapter citation the LLM
-    formatted without one of those values has no later stage that can add it.
-    Append whichever of the two the entry actually carries and the LLM's own
-    text does not already reference.
+    Stage 5d's LLM sometimes formats a book or chapter without the editors
+    or publisher stage 4 extracted from the same line, and no later stage
+    can add them -- except this one. Each value the entry carries and the
+    LLM's own text does not already name goes where a Vancouver citation
+    puts it: the editors after "In: ", the publisher before a bare closing
+    year, its place before its name. Only a citation with no such place
+    gets the value at its end.
 
     `editors` and `publisher` arrive as text or as `''`; a non-string
     stage-4 value became `''` in the resolver upstream, so there is no
     type check here and no way for a list's repr to reach a citation.
     """
-    additions = []
-    if editors and not _value_referenced(editors, formatted_citation):
-        additions.append(f"{editors}, eds.")
-    if publisher and not _value_referenced(publisher, formatted_citation):
-        additions.append(f"{publisher}.")
-    if not additions:
-        return formatted_citation
-    return f"{formatted_citation} " + " ".join(additions)
+    # Both are judged against 5d's own text, so an added editors clause can
+    # never read as the publisher. The publisher is placed first because
+    # its slot is the closing year, which editors appended at the end would
+    # no longer be.
+    editors_missing = bool(editors) and not _editors_referenced(editors, formatted_citation)
+    citation = formatted_citation
+    if publisher:
+        citation = _with_missing_publisher(citation, publisher)
+    if editors_missing:
+        citation = _with_editors(citation, editors)
+    return citation
 
 
 #: A four-digit year anywhere in a citation. One is enough to leave the

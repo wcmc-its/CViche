@@ -189,7 +189,9 @@ def test_append_missing_stage5d_values_appends_both_when_both_absent():
     """Moved with its subject. The call now takes the two values as text
     rather than a stage-4 field dict -- the type guard it used to carry moved
     to `resolve_publication`, which is the only reader of raw stage-4 JSON --
-    but the assertion is the one it always made."""
+    The values now go where Vancouver puts them (#481): the publisher in
+    front of the bare year, and the editors -- with no "In: " to follow --
+    at the end."""
     result = _append_missing_stage5d_values(
         'Smith J. A Chapter. 2021.',
         'Totally Different Names',
@@ -197,14 +199,14 @@ def test_append_missing_stage5d_values_appends_both_when_both_absent():
     )
 
     assert result == (
-        'Smith J. A Chapter. 2021. Totally Different Names, eds. '
-        'Totally Different Press.'
+        'Smith J. A Chapter. Totally Different Press; 2021. '
+        'Totally Different Names, eds.'
     )
 
 
 #: (case, citation, editors, publisher, expected). One row per branch of the
-#: safety net, so the ordering rule ("editors clause first"), each half firing
-#: alone, and every reason not to fire are all stated in one place.
+#: safety net, so where each value goes, each half firing alone, and every
+#: reason not to fire are all stated in one place.
 _APPEND_ROWS = [
     ('neither value carried',
      'Doe J. A chapter. In: Book. 2020.', '', '',
@@ -212,22 +214,21 @@ _APPEND_ROWS = [
     ('editors alone, absent from the text',
      'Yount K. Family and modernity. In: Book. 2008.',
      'M. Moaddel and M. Gelfand', '',
-     'Yount K. Family and modernity. In: Book. 2008. '
-     'M. Moaddel and M. Gelfand, eds.'),
+     'Yount K. Family and modernity. In: M. Moaddel and M. Gelfand, eds. Book. 2008.'),
     ('publisher alone, absent from the text',
      'Welcome to parenting. 2010.', '', 'GNYHA',
-     'Welcome to parenting. 2010. GNYHA.'),
-    ('both absent -- editors clause comes first',
+     'Welcome to parenting. GNYHA; 2010.'),
+    ('both absent -- each in its Vancouver place',
      'Doe J. A chapter. In: Book. 2020.', 'Adams Q, Baker R', 'Zenith House',
-     'Doe J. A chapter. In: Book. 2020. Adams Q, Baker R, eds. Zenith House.'),
+     'Doe J. A chapter. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.'),
     ('editors already referenced, publisher not',
      'Doe J. In: Adams Q, Baker R, eds. Book. 2020.',
      'Adams Q, Baker R', 'Zenith House',
-     'Doe J. In: Adams Q, Baker R, eds. Book. 2020. Zenith House.'),
+     'Doe J. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.'),
     ('publisher already referenced, editors not',
      'Doe J. A chapter. In: Book. Zenith House; 2020.',
      'Adams Q, Baker R', 'Zenith House',
-     'Doe J. A chapter. In: Book. Zenith House; 2020. Adams Q, Baker R, eds.'),
+     'Doe J. A chapter. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.'),
     ('both already referenced -- citation untouched',
      'Doe J. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.',
      'Adams Q, Baker R', 'Zenith House',
@@ -235,6 +236,57 @@ _APPEND_ROWS = [
     ('reworded publisher still counts as present',
      'Smith J. A Chapter. In: Springer; 2021.', '', 'Springer-Verlag, NY',
      'Smith J. A Chapter. In: Springer; 2021.'),
+    # The stored-corpus shapes behind #481's position fix. Names invented.
+    ('editors spelled out in full, 5d abbreviated them in its clause: present',
+     'Ash A. A chapter. In: Diler RS, ed. Book. Nova; 2007:167-177.',
+     'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Diler RS, ed. Book. Nova; 2007:167-177.'),
+    ('half the people named in the clause is enough: a credential is not a person 5d drops',
+     'Ash A. A chapter. In: Waldstein S, eds. Book. Springer; 2023.',
+     'Shari Waldstein, PhD', '',
+     'Ash A. A chapter. In: Waldstein S, eds. Book. Springer; 2023.'),
+    ('a clause naming fewer than half the people: the rest go at the end, '
+     'not into a second clause',
+     'Ash A. A chapter. In: Rey J, ed. Book.',
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O', '',
+     'Ash A. A chapter. In: Rey J, ed. Book. '
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O, eds.'),
+    ('with no editors clause, authors who share the editors surnames do not '
+     'stand in for them',
+     'Fedor S, Rich A. A chapter. In: Book. Humana; 1992.',
+     'Samuel Thomas Fedor, Alice Mary Rich', '',
+     'Fedor S, Rich A. A chapter. In: Samuel Thomas Fedor, Alice Mary Rich, eds. '
+     'Book. Humana; 1992.'),
+    ('a publisher too short to match and no place: at the end, as before',
+     'Ash A. A book. AP; 2001.', '', 'AP',
+     'Ash A. A book. AP; 2001. AP.'),
+    ('publisher absent, the year already has a publisher before it: at the end',
+     'Ash A. A book. Nova; 2007.', '', 'Zenith House',
+     'Ash A. A book. Nova; 2007. Zenith House.'),
+    ('no "In: " to follow: editors at the end',
+     'Ash A. A book. Nova; 2007.', 'Birch B', '',
+     'Ash A. A book. Nova; 2007. Birch B, eds.'),
+    ('publisher named, its place dropped: the place goes in front of the name',
+     'Ash A. A chapter. In: Book. Humana Press; 1992:97-104.',
+     '', 'Humana Press, Totowa, New Jersey',
+     'Ash A. A chapter. In: Book. Totowa, New Jersey: Humana Press; 1992:97-104.'),
+    ('publisher named with a place of its own already: left as 5d wrote it',
+     'Ash A. A chapter. In: Book. New York: Saunders; 2003.',
+     '', 'Saunders (New York)',
+     'Ash A. A chapter. In: Book. New York: Saunders; 2003.'),
+    ('publisher named, a different place already in its slot: the whole value '
+     'at the end, as before',
+     'Ash A. A chapter. In: Book. Philadelphia: W.B. Saunders; 2000:549-560.',
+     '', 'W.B. Saunders, Phil. USA',
+     'Ash A. A chapter. In: Book. Philadelphia: W.B. Saunders; 2000:549-560. '
+     'W.B. Saunders, Phil. USA.'),
+    ('publisher absent, the year already follows "; ": at the end',
+     'Ash A. A chapter. In: Book. Elsevier; 2018. In press.', '', 'Esliever',
+     'Ash A. A chapter. In: Book. Elsevier; 2018. In press. Esliever.'),
+    ('publisher absent, a journal trailer: at the end, not inside it',
+     'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368.',
+     '', 'Zenith House',
+     'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368. Zenith House.'),
 ]
 
 
