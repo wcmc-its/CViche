@@ -865,8 +865,9 @@ class PipelineOrchestrator:
             except Exception as e:
                 logger.warning(
                     "Failed to mirror output %s to storage for run %s: %s",
-                    path_str, self.run_id, e,
+                    path_str, self.run_id, redacted_error_label(e),
                 )
+                logger.debug("Failed to mirror output %s for run %s: %s", path_str, self.run_id, e)
 
     def _persist_cv_owner_name(self, step: Step) -> None:
         """Store stage 4's inferred CV owner on ``runs.cv_owner_name``.
@@ -1564,8 +1565,9 @@ class PipelineOrchestrator:
             except Exception as exc:
                 logger.warning(
                     "Failed to upload prompt log %s for run %s step %d: %s",
-                    path.name, self.run_id, step_number, exc,
+                    path.name, self.run_id, step_number, redacted_error_label(exc),
                 )
+                logger.debug("Failed to upload prompt log %s for run %s: %s", path.name, self.run_id, exc)
 
         if uploaded:
             logger.info(

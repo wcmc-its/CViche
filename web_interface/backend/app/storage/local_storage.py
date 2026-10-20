@@ -65,7 +65,8 @@ def _atomic_write(path: Path, data: bytes) -> None:
         except OSError as cleanup_err:
             # Log rather than raise, so a failed cleanup never replaces the
             # original error as the one that propagates.
-            logger.warning("failed to clean up temp file %s: %s", tmp_name, cleanup_err)
+            logger.warning("failed to clean up temp file %s: %s", tmp_name, type(cleanup_err).__name__)
+            logger.debug("failed to clean up temp file %s: %s", tmp_name, cleanup_err)
         raise
 
 

@@ -290,7 +290,8 @@ def rerun_doctor(db: Session, run_id: str, admin: User) -> DoctorRerunResult:
     try:
         payload = _store_doctor_report(db, run_id)
     except Exception as e:
-        logger.exception("Doctor re-run for run %s failed", run_id)
+        logger.error("Doctor re-run for run %s failed: %s", run_id, type(e).__name__)
+        logger.debug("Doctor re-run for run %s failed", run_id, exc_info=True)  # the traceback ends in str(e) (§4.7)
         raise internal_error("The doctor re-run failed; it is safe to retry.") from e
     logger.info("Doctor re-run for run %s by %s: worst severity %s",
                 run_id, admin.email, payload.get("worst_severity"))

@@ -114,7 +114,7 @@ def saml_login(request: Request, db: Session = Depends(get_db)) -> RedirectRespo
         # server-side and returns a sanitized 500 to the client. Swallowing
         # it into "auth_failed" would mask a real bug as a routine login
         # failure (mrj4001 review, PR #656 item 6 / #672).
-        logger.error("SAML login initiation failed: %s", e, exc_info=True)
+        logger.error("SAML login initiation failed: %s", type(e).__name__, exc_info=True)
         return RedirectResponse(_AUTH_FAILED_REDIRECT, status_code=302)
 
 
@@ -186,7 +186,7 @@ def saml_metadata(db: Session = Depends(get_db)):
         # (sanitized 500, full traceback logged server-side) instead of
         # being folded into the same "not available" response an ops/config
         # problem gets (mrj4001 review, PR #656 item 6 / #672).
-        logger.error("SAML metadata generation failed: %s", e, exc_info=True)
+        logger.error("SAML metadata generation failed: %s", type(e).__name__, exc_info=True)
         return Response(content="SAML metadata not available", status_code=500)
 
 

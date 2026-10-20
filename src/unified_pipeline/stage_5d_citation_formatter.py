@@ -202,7 +202,9 @@ def _reply_object(llm_output: str) -> dict | None:
     except json.JSONDecodeError as e:
         # parse_llm_output can run on a pool thread (#881 step 6), so this
         # log call is the only trace a malformed batch leaves in the run log.
-        logger.warning("Could not parse LLM JSON output: %s (response preview: %s...)", e, llm_output[:500])
+        logger.warning("Could not parse LLM JSON output: %s (response length %d)",
+                       redacted_error_label(e), len(llm_output))
+        logger.debug("Could not parse LLM JSON output: %s (response preview: %s...)", e, llm_output[:500])
         return None
 
 

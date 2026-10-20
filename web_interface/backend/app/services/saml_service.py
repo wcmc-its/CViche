@@ -164,7 +164,8 @@ def _parse_saml_assertion(saml_response: str, db: Session) -> dict | SamlLoginFa
         # subclass); IncorrectlySigned is response.py's distinct
         # signature-failure type. Together these are pysaml2's full
         # signature/cert-validation exception surface.
-        logger.warning("[SECURITY] SAML signature validation failed: %s", str(e))
+        logger.warning("[SECURITY] SAML signature validation failed: %s", type(e).__name__)
+        logger.debug("SAML signature validation failure detail: %s", e)
         return SamlLoginFailure.BAD_SIGNATURE
     except (RuntimeError, OSError, SAMLError, SourceNotFound) as e:
         # Same taxonomy as saml_login (get_saml_client() is the shared call
@@ -181,7 +182,7 @@ def _parse_saml_assertion(saml_response: str, db: Session) -> dict | SamlLoginFa
         # PR #656 item 6 / #672). This SAMLError/RuntimeError/OSError/
         # SourceNotFound tuple stays narrow; the catch-all below it is a
         # separate, deliberate boundary (see its own comment).
-        logger.error("SAML ACS processing failed: %s", e, exc_info=True)
+        logger.error("SAML ACS processing failed: %s", type(e).__name__, exc_info=True)
         return SamlLoginFailure.RESPONSE_REJECTED
     except Exception:
         # pysaml2's audience-restriction check (saml2/response.py's
@@ -215,7 +216,8 @@ def _parse_saml_assertion(saml_response: str, db: Session) -> dict | SamlLoginFa
         attrs["email"] = normalize_email(attrs["email"])
     except ValueError as e:
         # Missing required attribute (e.g., mail)
-        logger.warning("SAML ACS: missing attributes -- %s", str(e))
+        logger.warning("SAML ACS: missing attributes -- %s", type(e).__name__)
+        logger.debug("SAML ACS missing-attributes detail: %s", e)
         return SamlLoginFailure.MISSING_ATTRIBUTES
 
     return attrs

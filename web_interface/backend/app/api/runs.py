@@ -174,7 +174,8 @@ def _dispatch_queue(
         try:
             run_queue.enqueue(run.id, queue)
         except redis.exceptions.RedisError as e:
-            logger.exception("Re-enqueue failed for already-queued run %s", run.id)
+            logger.error("Re-enqueue failed for already-queued run %s: %s", run.id, type(e).__name__)
+            logger.debug("Re-enqueue failed for already-queued run %s", run.id, exc_info=True)  # the traceback ends in str(e) (§4.7)
             raise HTTPException(
                 status_code=503,
                 detail={"error": "queue_unavailable",
@@ -188,7 +189,8 @@ def _dispatch_queue(
     try:
         run_queue.enqueue(run.id, queue)
     except redis.exceptions.RedisError as e:
-        logger.exception("Enqueue failed for run %s; reverting the flip", run.id)
+        logger.error("Enqueue failed for run %s; reverting the flip: %s", run.id, type(e).__name__)
+        logger.debug("Enqueue failed for run %s", run.id, exc_info=True)  # the traceback ends in str(e) (§4.7)
         if not revert_queued(db, run.id, prior):
             db.refresh(run)
             return JSONResponse(
@@ -598,8 +600,9 @@ async def restart_run(
         )
     except Exception as e:
         logger.error(
-            "Durable archive of restarted input failed; aborting restart: %s", e,
+            "Durable archive of restarted input failed; aborting restart: %s", type(e).__name__,
         )
+        logger.debug("Durable archive of restarted input failed: %s", e)
         raise HTTPException(
             status_code=502,
             detail={

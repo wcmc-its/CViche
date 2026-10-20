@@ -417,8 +417,9 @@ def _bind(cfg: LDAPConfig) -> Iterator[Connection]:
         logger.error(
             "ED rejected our bind as %s -- check ED_LDAP_BIND_DN / "
             "ED_LDAP_BIND_PASSWORD and the service account's rights: %s",
-            cfg.bind_dn, exc
+            cfg.bind_dn, type(exc).__name__
         )
+        logger.debug("ED bind rejection detail: %s", exc)
         raise EdConfigurationError(str(exc)) from exc
     except (LDAPException, OSError, ConnectionError) as exc:
         logger.warning("ED directory unreachable at %s: %s", cfg.ldap_url, type(exc).__name__)

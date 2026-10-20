@@ -33,6 +33,8 @@ import logging
 import re
 from pathlib import Path
 
+from unified_pipeline.log_redaction import redacted_error_label
+
 logger = logging.getLogger(__name__)
 
 # Resolve the JSON relative to THIS file so it works regardless of cwd.
@@ -129,7 +131,8 @@ def _load_phrases(path: Path = _JSON_PATH) -> tuple[frozenset[str], frozenset[st
         # (precision bias: never drop real content if the data is missing).
         # Logged, not silent: every template line then reaches the output.
         logger.warning("Template boilerplate phrases unavailable (%s): %s; "
-                       "no template instruction will be detected", path, exc)
+                       "no template instruction will be detected", path, redacted_error_label(exc))
+        logger.debug("Template boilerplate phrases unavailable (%s): %s", path, exc)
         return frozenset(), frozenset()
 
     instruction_set = frozenset(n for n in (_normalize(p) for p in instructions) if n)

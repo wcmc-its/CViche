@@ -17,6 +17,7 @@ Self-contained: no DB, no FastAPI app, no backend conftest. Requires only
 ``python-docx`` and the bundled WCM template (auto-located by the generator).
 """
 
+import logging
 import sys
 import zipfile
 from pathlib import Path
@@ -151,3 +152,27 @@ def test_saved_docx_reopens_cleanly_with_flags_off(tmp_path):
     assert "New citation" in text
     assert "Inserted text" in text
     assert "Old citation" not in text
+
+
+def test_a_comments_xml_failure_logs_the_class_and_writes_no_traceback_to_stderr(capsys, caplog):
+    """#639: the comments.xml except-branch used traceback.print_exc() under
+    verbose, writing the raw traceback (str(e) included) to stderr. The
+    WARNING names the class; the text and traceback go to DEBUG only."""
+    sentinel = "Jane Q. Example quoted from a CV entry"
+    gen = WCMTemplateGenerator(verbose=True, emit_track_changes=True, emit_comments=True)
+    gen.doc = Document()
+    gen._add_word_comment(gen.doc.add_paragraph(), "a comment", author="Classification")
+
+    def _boom():
+        raise RuntimeError(sentinel)
+
+    gen._create_comments_xml = _boom
+    with caplog.at_level(logging.DEBUG, logger="unified_pipeline.stage_6_word_template"):
+        gen._finalize_comments()
+
+    assert "Traceback" not in capsys.readouterr().err
+    records = [r for r in caplog.records if "comments.xml" in r.getMessage()]
+    assert [r.getMessage() for r in records if r.levelno == logging.WARNING] == [
+        "  Warning: Could not create comments.xml: RuntimeError"]
+    assert any(r.levelno == logging.DEBUG and r.exc_info and sentinel in r.getMessage()
+               for r in records)

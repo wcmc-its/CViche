@@ -431,10 +431,11 @@ def compensated_run_creation(
         yield
         commit_inserts_retrying_conflict(db)
     except Exception as exc:
-        logger.exception(
-            "Run row creation or commit failed after a durable archive; compensating (run=%s)",
-            run_id,
+        logger.error(
+            "Run row creation or commit failed after a durable archive; compensating (run=%s): %s",
+            run_id, type(exc).__name__,
         )
+        logger.debug("Run row creation failed (run=%s)", run_id, exc_info=True)  # the traceback ends in str(e) (§4.7)
         _rollback_logged(db, run_id)
         removed = _compensate_failed_run(run_id, email, file_path)
         raise internal_error(

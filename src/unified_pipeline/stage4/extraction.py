@@ -30,6 +30,7 @@ from unified_pipeline.core.batch_pool import (
 )
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.llm_provenance import (
     FALLBACK_SERVED_KEY,
     STAGE4_ENTRY_FALLBACK_KEY,
@@ -752,8 +753,9 @@ def attempt_llm_recovery(
     except ValidationError as exc:
         logger.warning(
             "Stage 4 recovery response for taxonomy %s failed shape validation: %s",
-            taxonomy_code, exc,
+            taxonomy_code, redacted_error_label(exc),
         )
+        logger.debug("Stage 4 recovery response validation detail (%s): %s", taxonomy_code, exc)
         return {
             "entries": [{**entry, "llm_recovery_error": LLM_RESPONSE_INVALID} for entry in entries],
             "cost": llm_result["cost"] if llm_result else 0.0,
@@ -1062,8 +1064,9 @@ def _validate_raw_extractions(raw_extractions: list[Any], code: str) -> dict[int
         except ValidationError as exc:
             logger.warning(
                 "Stage 4 batch extraction for %s dropped one malformed LLM entry: %s",
-                code, exc,
+                code, redacted_error_label(exc),
             )
+            logger.debug("Stage 4 malformed LLM entry detail (%s): %s", code, exc)
             continue
         extraction_map[validated_item.entry_index].append(
             validated_item.model_dump(exclude={"entry_index"}))
