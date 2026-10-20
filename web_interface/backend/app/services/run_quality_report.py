@@ -563,6 +563,12 @@ LINT_COPY = {
         "A labelled line that belongs to one entry, such as a trainee's current position, "
         "starts the next entry instead, so one entry lacks it and the next shows it.",
         "Move each flagged line back to the entry above it, as the source CV orders them."),
+    "record_cut_in_two": LintCopy(
+        "One entry shown as two",
+        "One entry of the source CV was cut in two, so the document shows two partial "
+        "entries: one holds some of its details, such as the dates or the title, and the "
+        "entry beside it holds the rest, or a sentence about it.",
+        "Merge each flagged entry with the entry beside it, as the source CV writes them."),
     "citation_field_dropped": LintCopy(
         "Citation leaves out its title, link or \"...\"",
         "A citation in the document leaves out something the source CV gives to identify the "
@@ -696,7 +702,11 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: and measured on four held-out CVs only (PRECISION.md, GF-1), so it is a
 #: comment on the grant's table, never a run-page row, until a run-page
 #: wording is approved.
-REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts"})
+#: mentee_field_incomplete (#1941) is a mentee field the submitter left blank or
+#: "N/A": a request to complete it, not a CViche problem, so it is a comment on
+#: the blank cell, never a run-page row.
+REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts",
+                                    "mentee_field_incomplete"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 

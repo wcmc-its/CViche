@@ -28,6 +28,7 @@ without the list number, year and venue the other two cells already show.
 import logging
 import re
 from collections.abc import Mapping
+from itertools import pairwise
 
 from ..fan_out import fallback_text
 from ..formatting import (
@@ -75,11 +76,20 @@ _VALUE_PIECE_SPLIT_RE = re.compile(r'\s*[,;()]\s*')
 # talk.", 17 rows of PZTNWT) is titled by role and event, with the words kept
 # after them, instead of by the whole source line.
 _TALK_LABEL_WORDS = frozenset({'invited', 'talk', 'lecture', 'presentation'})
+# Words naming how the talk was given ("<venue>. <series>. Virtual. Invited
+# talk.", PZTNWT 158). They count as label words only beside a role or event:
+# alone, "Emory University, 2022 (Virtual)" would be titled a bare "Virtual",
+# which reads as the talk's title and quiets the doctor's missing-title lint
+# (1BFKKK 106, #1346).
+_DELIVERY_WORDS = frozenset({'virtual'})
 _TITLE_EDGES = ' \t,;:|-–—'
 # A stop can only open a title once a venue that led the line is gone
 # ("<venue>. <series>. Invited talk."); at the end it may close one.
 _TITLE_START_EDGES = _TITLE_EDGES + '.'
 _SEPARATOR_RUN_RE = re.compile(r'\s*([,;:|\-–—])(?:\s*[,;:|.\-–—])+\s*')
+# A phrase's words and its punctuation marks, one token each.
+_PHRASE_TOKEN_RE = re.compile(r'\w+|[^\w\s]')
+_WORD_CHAR_RE = re.compile(r'\w')
 
 
 def _normalize_space(text: str) -> str:
@@ -88,11 +98,26 @@ def _normalize_space(text: str) -> str:
     return re.sub(r'\s+', ' ', text.replace('\u2019', "'").replace('\u2018', "'")).strip()
 
 
+def _phrase_pattern(phrase: str) -> str:
+    """A regex for `phrase` that lets the source space a punctuation mark
+    differently: stage 4 wrote "SFB960/RCB Colloquium" for the source's
+    "SFB960 /RCB colloquium" (PZTNWT 151, #1346). Two words still need
+    whitespace between them."""
+    tokens = _PHRASE_TOKEN_RE.findall(phrase)
+    pattern = re.escape(tokens[0])
+    for before, token in pairwise(tokens):
+        between_words = _WORD_CHAR_RE.match(before) and _WORD_CHAR_RE.match(token)
+        gap = r'\s+' if between_words else r'\s*'
+        pattern += gap + re.escape(token)
+    return pattern
+
+
 def _remove_phrase(text: str, phrase: str) -> str:
-    """`text` without each whole-word, case-insensitive occurrence of `phrase`."""
-    if not phrase:
+    """`text` without each whole-word, case-insensitive occurrence of `phrase`,
+    however the source spaces its punctuation (`_phrase_pattern`)."""
+    if not phrase.strip():
         return text
-    return re.sub(rf'(?<!\w){re.escape(phrase)}(?!\w)', ' ', text, flags=re.IGNORECASE)
+    return re.sub(rf'(?<!\w){_phrase_pattern(phrase)}(?!\w)', ' ', text, flags=re.IGNORECASE)
 
 
 def _remove_venue(text: str, venue: str) -> str:
@@ -126,12 +151,14 @@ def _strip_leading_date(line: str, shown_years: set[str]) -> str:
 
 def _shown_phrases(venue: str, role: str, event_name: str) -> list[str]:
     """The phrases of the source line the row already shows, in the order
-    they are taken out: the whole venue, the whole role and event name
-    (longest first), then each comma, semicolon or bracket piece of the
-    three (longest first), so a whole value goes before its parts."""
+    they are taken out: the whole venue, role and event name (longest
+    first), then each comma, semicolon or bracket piece of the three
+    (longest first), so a whole value goes before its parts and a value
+    goes before one it contains: the venue "Cold Spring Harbor" must not
+    break the event "Cold Spring Harbor Meeting on ..." (PZTNWT 132, #1346)."""
     wholes = [_normalize_space(v or '') for v in (venue, role, event_name)]
     pieces = {piece for whole in wholes for piece in _VALUE_PIECE_SPLIT_RE.split(whole)}
-    ordered = [wholes[0], *sorted(wholes[1:], key=len, reverse=True),
+    ordered = [*sorted(wholes, key=len, reverse=True),
                *sorted(pieces, key=len, reverse=True)]
     return [phrase for phrase in ordered if phrase]
 
@@ -161,8 +188,11 @@ def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
     for phrase in _shown_phrases(venue, role, event_name):
         residue = _remove_phrase(residue, phrase)
     words = _WORD_RE.findall(_DATE_WORD_RE.sub(' ', residue))
-    if not any(w.casefold() not in _CONNECTIVES | _TALK_LABEL_WORDS for w in words):
-        label = ' '.join(w for w in words if w.casefold() in _TALK_LABEL_WORDS)
+    label_words = _TALK_LABEL_WORDS
+    if (role or '').strip() or (event_name or '').strip():
+        label_words = _TALK_LABEL_WORDS | _DELIVERY_WORDS
+    if not any(w.casefold() not in _CONNECTIVES | label_words for w in words):
+        label = ' '.join(w for w in words if w.casefold() in label_words)
         # The stage-4 values as given, so the venue's own duplicate check
         # in `_fill_presentations` recognises them in the title.
         return ', '.join(part.strip() for part in (role or '', event_name or '', label)

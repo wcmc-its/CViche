@@ -153,9 +153,9 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 80, (
+    assert len(known) == 82, (
         f"KNOWN_LINTS changed size ({len(known)}, was 27 -- this change added "
-        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded; #1259 then added owner_missing_from_citation and etal_added; #1243 then added multi_record_coverage; #819 then added year_not_in_source; EBYSBC E9/E21 then added date_cell_shape; EBYSBC E8/E10/E29 then added junk_or_header_row; EBYSBC E20/E25 then added teaching_postcheck and contact_slot_lost; EBYSBC E19 then added pubmed_title_truncated and enrichment_pubtype_mismatch; EBYSBC E11/E30 and E17 then added section_consistency and segmentation_collapse; EBYSBC E5/E7 then added grant_boundary and grant_bucket; #1174 then added research_summary_call_failed; RCBKFG #1245 then added span_count; #1403 then added role_consistency; #1445 then added fanout_cell_residue; EOAHMI QTATUP-04/BRUSUZ-01 then added identical_rendered_rows; EOAHMI DUTAVD-03/WYMVGU-02 then added split_child_unsourced; X6 E5 then added record_boundary; X6 KJJVVO-10/UXBHHF-20 then added citation_field_dropped; X6 E8/E11 then added group_header_context; #1256 then added orphaned_fragments; #1243 then added stage4_unplaced_items; #1554 then added summary_unsupported_claim; #1573 then added owner_attribution; #1570 then added citation_grounding; #1583 then added shattered_prose; #1588 then added source_line_coverage; #1205 then added appointment_title_overlong; #1588 then added grant_facts; #1576 then added licensure_fallback_truncated; #1584 then added footer_in_record and glyph_field; the NECRGC autopsy then added stage2_unaccounted (#1693), record_date_shift (#1226) and header_consumed_record (#1254); the #1226 forensics then added stage2_text_break; #1433 then added stage2_span_overlap; #1575 then added cross_entry_value; #1346 then added session_title_missing; #1414 then added journal_name_joined; #1661 then added group_credit_dropped; #1257 then added institution_cleaned_name; #534 then added renderer_row_missing). That is fine if a lint was genuinely added or "
+        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded; #1259 then added owner_missing_from_citation and etal_added; #1243 then added multi_record_coverage; #819 then added year_not_in_source; EBYSBC E9/E21 then added date_cell_shape; EBYSBC E8/E10/E29 then added junk_or_header_row; EBYSBC E20/E25 then added teaching_postcheck and contact_slot_lost; EBYSBC E19 then added pubmed_title_truncated and enrichment_pubtype_mismatch; EBYSBC E11/E30 and E17 then added section_consistency and segmentation_collapse; EBYSBC E5/E7 then added grant_boundary and grant_bucket; #1174 then added research_summary_call_failed; RCBKFG #1245 then added span_count; #1403 then added role_consistency; #1445 then added fanout_cell_residue; EOAHMI QTATUP-04/BRUSUZ-01 then added identical_rendered_rows; EOAHMI DUTAVD-03/WYMVGU-02 then added split_child_unsourced; X6 E5 then added record_boundary; X6 KJJVVO-10/UXBHHF-20 then added citation_field_dropped; X6 E8/E11 then added group_header_context; #1256 then added orphaned_fragments; #1243 then added stage4_unplaced_items; #1554 then added summary_unsupported_claim; #1573 then added owner_attribution; #1570 then added citation_grounding; #1583 then added shattered_prose; #1588 then added source_line_coverage; #1205 then added appointment_title_overlong; #1588 then added grant_facts; #1576 then added licensure_fallback_truncated; #1584 then added footer_in_record and glyph_field; the NECRGC autopsy then added stage2_unaccounted (#1693), record_date_shift (#1226) and header_consumed_record (#1254); the #1226 forensics then added stage2_text_break; #1433 then added stage2_span_overlap; #1575 then added cross_entry_value; #1346 then added session_title_missing; #1414 then added journal_name_joined; #1661 then added group_credit_dropped; #1257 then added institution_cleaned_name; #534 then added renderer_row_missing; #1588 then added record_cut_in_two; #1941 then added mentee_field_incomplete). That is fine if a lint was genuinely added or "
         f"removed -- update this count and say so in the commit message."
     )
 
@@ -281,7 +281,7 @@ def test_known_lints_literal_expected_order():
         "grant_boundary", "grant_bucket", "research_summary_call_failed",
         "span_count", "role_consistency", "fanout_cell_residue",
         "identical_rendered_rows", "split_child_unsourced", "record_boundary",
-        "citation_field_dropped",
+        "record_cut_in_two", "citation_field_dropped",
         "group_header_context", "orphaned_fragments", "stage4_unplaced_items",
         "summary_unsupported_claim", "owner_attribution", "citation_grounding",
         "shattered_prose", "source_line_coverage", "appointment_title_overlong",
@@ -289,7 +289,7 @@ def test_known_lints_literal_expected_order():
         "stage2_unaccounted", "record_date_shift", "header_consumed_record",
         "stage2_text_break", "stage2_span_overlap", "cross_entry_value", "session_title_missing",
         "journal_name_joined", "group_credit_dropped", "institution_cleaned_name",
-        "renderer_row_missing",
+        "renderer_row_missing", "mentee_field_incomplete",
         "owner_contact_missing", "pipeline_errors_present", "no_output",
     )
 

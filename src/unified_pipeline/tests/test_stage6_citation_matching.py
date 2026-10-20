@@ -32,6 +32,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.normalization.citation_matching import (  # noqa: E402
     _append_missing_stage5d_values,
+    _complete_stage5d_trailer,
     _insert_missing_stage5d_year,
     _owner_words,
     _prints_junk_author,
@@ -430,3 +431,50 @@ _PLACE = 'Larchmere, ZZ'
 def test_insert_missing_stage5d_year(citation: str, year: str, location: str,
                                      expected: str) -> None:
     assert _insert_missing_stage5d_year(citation, year, location) == expected
+
+
+# ---------------------------------------------------------------------------
+# `_complete_stage5d_trailer`: Crossref's issue and last page (#1872)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('citation, volume, issue, pages, expected', [
+    # The CV gave the volume and first page; Crossref adds issue and last page.
+    ('Brindle Q. A title. Larch Clin N Am. 1985;23:689.', '23', '4', '689-717',
+     'Brindle Q. A title. Larch Clin N Am. 1985;23(4):689-717.'),
+    # A range the CV gives is kept as written; only the issue is added.
+    ('Brindle Q. A title. Larch Clin. 1989;7:227-38.', '7', '2', '227-238',
+     'Brindle Q. A title. Larch Clin. 1989;7(2):227-38.'),
+    # An issue the CV gives is kept; the last page still comes in.
+    ('Brindle Q. A title. Larch Clin. 2015 Jan;10(1):4. doi:10.1/x.', '10', '1', '4-7',
+     'Brindle Q. A title. Larch Clin. 2015 Jan;10(1):4-7. doi:10.1/x.'),
+    # The CV's issue wins over Crossref's spelling of it.
+    ('Brindle Q. A title. Larch Clin. 2015;10(Suppl 1):4.', '10', 'S1', '4-7',
+     'Brindle Q. A title. Larch Clin. 2015;10(Suppl 1):4-7.'),
+    # The citation's own spacing before the volume survives.
+    ('Brindle Q. A title. Larch Clin. 1985; 23:689.', '23', '4', '689-717',
+     'Brindle Q. A title. Larch Clin. 1985; 23(4):689-717.'),
+    # Another volume or another first page: a different article, untouched.
+    ('Brindle Q. A title. Larch Clin. 1985;24:689.', '23', '4', '689-717',
+     'Brindle Q. A title. Larch Clin. 1985;24:689.'),
+    ('Brindle Q. A title. Larch Clin. 1985;23:6890.', '23', '4', '689-717',
+     'Brindle Q. A title. Larch Clin. 1985;23:6890.'),
+    ('Brindle Q. A title. Larch Clin. 1985;123:689.', '23', '4', '689-717',
+     'Brindle Q. A title. Larch Clin. 1985;123:689.'),
+    # No trailer in the citation: nothing is invented into it.
+    ('Brindle Q. A title. Larch Clin. 1985.', '23', '4', '689-717',
+     'Brindle Q. A title. Larch Clin. 1985.'),
+    # Crossref with no volume or no pages has nothing to anchor on.
+    ('Brindle Q. A title. Larch Clin. 1985;23:689.', '', '4', '689-717',
+     'Brindle Q. A title. Larch Clin. 1985;23:689.'),
+    ('Brindle Q. A title. Larch Clin. 1985;23:689.', '23', '4', '',
+     'Brindle Q. A title. Larch Clin. 1985;23:689.'),
+    # A one-page article: Crossref's "342-342" adds no last page.
+    ('Brindle Q. A title. Larch Clin. 2012 Feb;146(2):342. doi:10.1/x.', '146', '2', '342-342',
+     'Brindle Q. A title. Larch Clin. 2012 Feb;146(2):342. doi:10.1/x.'),
+    # No issue on Crossref's side: the last page alone.
+    ('Brindle Q. A title. Larch Clin. 1985;23:689.', '23', '', '689-717',
+     'Brindle Q. A title. Larch Clin. 1985;23:689-717.'),
+])
+def test_complete_stage5d_trailer(citation: str, volume: str, issue: str, pages: str,
+                                  expected: str) -> None:
+    assert _complete_stage5d_trailer(citation, volume, issue, pages) == expected

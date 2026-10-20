@@ -89,13 +89,16 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     deduplicate_entries,
     recovered_row_already_rendered,
 )
+from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE, TemplateSnapshot, fill_empty_slots, snapshot_template
 from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
+    DeclinedList,
     fan_out_multi_record_entries,
     record_scope,
     record_text,
+    unrendered_list_warnings,
 )
 
 # Every name below is re-exported from this module by being imported here: it is
@@ -1635,6 +1638,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
 
+        # Record lists fan-out kept whole that `_validate_output` checks
+        # against the rendered document (#1187). Set by
+        # `_group_entries_by_code`, declared here for typing/reuse.
+        self._declined_lists: list[DeclinedList] = []
+
         # Grant entries `_create_grant_table` declined as too sparse (#839),
         # and mentee entries named only by an award title (#1702) --
         # appended to `unmapped_entries` at `generate()`'s Appendix fill so
@@ -1989,9 +1997,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         precollegiate_moved: list[object] = []
         bare_mentees_resolved: list[tuple[object, str]] = []
         leadership_moved: list[tuple[object, tuple[int, int]]] = []
+        self._declined_lists = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
-            records_key=STAGE4_RECORDS_KEY)
+            records_key=STAGE4_RECORDS_KEY, declined=self._declined_lists)
         mentee_siblings = _mentee_sibling_codes(entries)
         coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
@@ -2246,8 +2255,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
             self._dedup_grouped_entries(entries_by_code)
 
-        # Load template
+        # Load template, and record it as shipped: which slots end up empty is read against this (#1942).
         self.doc = Document(self.template_path)
+        template_snapshot = snapshot_template(self.doc.element.body)
 
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
@@ -2347,21 +2357,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # inserts count as rendered) -- both bullet leftover content into the
         # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
         recovered_appendix_lines = self._recover_appendix_lines(written_appendix_entries, pre_dedup_entries_by_code, cv_owner)
-
-        # Finalize comments (add to comments.xml)
-        self._finalize_comments()
-
-        # Apply vertical middle alignment to ALL table cells
-        self._apply_vertical_alignment_to_all_tables()
-
-        # Apply table styling (header background color, borders)
-        self._apply_table_styling_to_all_tables()
-
-        # Drop the WCM template's gray instruction box last, after all
-        # content-search-based filling is done, so table removal can't shift
-        # anything the fill logic relied on.
-        if self.strip_template_instructions:
-            self._remove_instruction_box()
+        self._finish_document(template_snapshot)
 
         # Determine output path
         if output_path is None:
@@ -2393,6 +2389,30 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             self._log_generation_summary(output_path)
 
         return output_path
+
+    def _finish_document(self, template_snapshot: TemplateSnapshot) -> None:
+        """The passes over the whole document once every line is placed: N/A in
+        each template slot nothing filled, then comments, table formatting and
+        the instruction box."""
+        # Last content written, so a slot something above fills never says N/A (#1942).
+        filled = fill_empty_slots(self.doc.element.body, template_snapshot)
+        logger.info("Empty template slots marked %s: %d paragraph, %d table",
+                    NOT_APPLICABLE, filled.paragraphs, filled.tables)
+
+        # Finalize comments (add to comments.xml)
+        self._finalize_comments()
+
+        # Apply vertical middle alignment to ALL table cells
+        self._apply_vertical_alignment_to_all_tables()
+
+        # Apply table styling (header background color, borders)
+        self._apply_table_styling_to_all_tables()
+
+        # Drop the WCM template's gray instruction box last, after all
+        # content-search-based filling is done, so table removal can't shift
+        # anything the fill logic relied on.
+        if self.strip_template_instructions:
+            self._remove_instruction_box()
 
     def _log_generation_summary(self, output_path: str) -> None:
         """The verbose end-of-render stats block, lifted out of `generate`
@@ -4981,7 +5001,22 @@ Now analyze the text above:"""
                     "evidence": [],
                 })
 
+        # Check 4: a record list fan-out kept whole, a record of which is not
+        # in the document (#1187, stage6/fan_out.py `DeclinedList`).
+        if self._declined_lists:
+            issues.extend(unrendered_list_warnings(
+                self._declined_lists, self._rendered_output_lines(include_tracked_insertions=True),
+                self._declined_list_table_rows()))
+
         return issues
+
+    def _declined_list_table_rows(self) -> list[list[str]]:
+        """Each table's rows' text, nested tables included, for Check 4: a
+        grant or mentee block writes one record one field per row, so no one
+        line holds it (#1187: web26's M2A sub-awards)."""
+        return [[' '.join(t.text or '' for t in row.iter(qn('w:t')))
+                 for row in table._tbl.iterchildren(qn('w:tr'))]
+                for table in self.doc.tables]
 
 
 def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = True,

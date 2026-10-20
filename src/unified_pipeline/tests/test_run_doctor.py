@@ -1587,6 +1587,14 @@ _STAGE2_GRANTS = {"entries": [_entry(_GRANT_FSMB, start=1),
                               _entry(_GRANT_NBME, start=3)]}
 
 
+def test_dead_sections_reads_past_an_na_line_to_the_sections_content():
+    """#1942: stage 6's "N/A" in an empty slot is all caps but no section
+    header, so the grant table after it still belongs to GRANTS."""
+    blocks = [("p", "GRANTS"), ("p", "N/A"),
+              ("table", "Award Source: | National Synthetic Foundation")]
+    assert lint_dead_sections(_STAGE2_GRANTS, blocks) == []
+
+
 def test_dead_sections_fires_on_empty_matched_section():
     blocks = [("p", "D. GRANTS"), ("p", "T. APPENDIX"),
               ("p", "The following content from the original CV was not mapped:")]
@@ -5361,6 +5369,209 @@ def test_duplicate_passages_see_through_renumbering_and_separator_drift():
     assert findings[0]["evidence"][0].startswith("blocks 0-2 repeat at 4-6")
 
 
+def _field_record(title, audience, institution, dates):
+    return [("p", f"Title: {title}"), ("p", f"Audience: {audience}"),
+            ("p", f"Institution: {institution}"), ("p", f"Dates: {dates}")]
+
+
+def test_duplicate_passages_quiet_on_field_lines_shared_by_distinct_records():
+    """#1940 (XAXVYB): teaching records rendered one labelled line per field
+    share their Institution/Audience/Dates lines whenever the same people were
+    taught at the same place in the same years. Those lines repeating together,
+    inside records whose Title differs, are shared fields -- not a record twice."""
+    hospital = "Riverside Medical Center"
+    blocks = ([("p", "Clinical teaching")]
+              + _field_record("Clinical Teaching", "Medical students", hospital, "2005–2025")
+              + _field_record("Teaching Rounds", "Residents, fellows", hospital, "2005–2025")
+              + [("p", "Continuing education")]
+              + _field_record("Didactic Lectures", "Residents and fellows", hospital, "2010–2025")
+              + _field_record("Airway lecture", "Residents and fellows", hospital, "2010–2025")
+              + _field_record("PBL Tutor", "Phase 1a module", "Lakeview College", "2014")
+              + _field_record("PBL Tutor", "Phase 1b module", "Lakeview College", "2014"))
+    assert lint_duplicate_passages(blocks) == []
+
+    # a shared run at the START of both records is still partial when the
+    # field after it differs: same Title and Dates, a different Audience
+    tutor = [("p", "Title: PBL Tutor"), ("p", "Dates: 2014")]
+    blocks += (tutor + [("p", "Audience: Module 6")]
+               + tutor + [("p", "Audience: Module 7")])
+    assert lint_duplicate_passages(blocks) == []
+
+
+def test_duplicate_passages_still_flags_a_whole_field_record_twice():
+    """The other side of #1940: the SAME per-field record, every labelled line
+    of it, rendered twice is still one record reaching the docx twice -- and a
+    labelled run that covers only part of one copy's record is not."""
+    hospital = "Riverside Medical Center"
+    record = _field_record("Didactic Lectures", "Residents and fellows", hospital, "2010–2025")
+    other = _field_record("Grand Rounds", "Faculty", "Weill Cornell", "2019")
+    findings = lint_duplicate_passages(record + other + record)
+    assert len(findings) == 1 and "1 passage(s)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("blocks 0-3 repeat at 8-11")
+    # ...wherever the copy sits: here closed by a heading, not the document end
+    assert lint_duplicate_passages(record + other + record + [("p", "Mentoring")])
+
+    # the second copy shares only the fields after its own, different Title
+    partial = [("p", "Title: Another lecture")] + record[1:]
+    assert lint_duplicate_passages(record + other + partial) == []
+    # ...but an unlabelled title line beside a labelled one is no evidence that
+    # the records differ (no field is filled in twice), so that stays as on dev
+    untitled = [("p", "Lectures")] + record[1:] + [("p", "Mentoring")]
+    assert lint_duplicate_passages(untitled + other + partial)
+
+
+def _course_record(course, dates):
+    return [("p", f"Course: {course}"), ("p", "Role: Director"), ("p", f"Dates: {dates}")]
+
+
+def test_duplicate_passages_flags_a_whole_record_beside_a_new_label():
+    """#1940 review, round 3: a whole record repeated next to a labelled line of
+    a label it does not carry -- a one-off "Location:" or "Role:" line, or a
+    record of another form -- is still reported. Only the same field filled in
+    differently just outside both copies marks them as distinct records."""
+    record = _field_record("Anatomy", "Medical students", "Riverside Medical Center", "2015-2019")
+    other = _field_record("Pharmacology", "Medical students", "Riverside Medical Center", "2001")
+    head, tail = [("p", "Educational Contributions")], [("p", "Other Section")]
+    # labelled on both sides, but under different labels ("Dates:" vs "Location:")
+    location = head + other + record + tail + [("p", "Location: Springfield")] + record
+    assert lint_duplicate_passages(location)[0]["evidence"][0].startswith(
+        "blocks 5-8 repeat at 11-14: Title: Anatomy")
+    note = head + record + other + tail + record + [("p", "Note: co-taught")]
+    assert lint_duplicate_passages(note)[0]["evidence"][0].startswith(
+        "blocks 1-4 repeat at 10-13: Title: Anatomy")
+    role = head + [("p", "Role: Course Director")] + record + other + tail + record
+    assert lint_duplicate_passages(role)[0]["evidence"][0].startswith(
+        "blocks 2-5 repeat at 11-14: Title: Anatomy")
+    talk = [("p", "Title: Talk A"), ("p", "Audience: Residents"), ("p", "Institution: Lakeview College")]
+    forms = (head + _course_record("Anatomy", "2015") + _course_record("Physiology", "2016")
+             + tail + talk + _course_record("Anatomy", "2015"))
+    assert lint_duplicate_passages(forms)[0]["evidence"][0].startswith(
+        "blocks 1-3 repeat at 11-13: Course: Anatomy")
+
+
+def test_duplicate_passages_reports_a_whole_record_inside_a_shared_field_stretch():
+    """#1940 review: records sharing Audience/Institution/Dates run straight into
+    a record that IS duplicated, so the maximal repeated stretch opens on shared
+    fields mid-record. The stretch is trimmed to the whole records, not dropped."""
+    def record(title):
+        return _field_record(title, "Medical students", "Weill Cornell Medicine", "2015-2019")
+    blocks = ([("p", "Educational Contributions")] + record("Pharmacology") + record("Anatomy")
+              + [("p", "Other Section")] + record("Neuroscience") + record("Anatomy"))
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1 and "1 passage(s)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("blocks 5-8 repeat at 14-17: Title: Anatomy")
+
+
+def test_duplicate_passages_flags_a_record_right_after_a_record_of_another_form():
+    """#1966: a duplicated record directly after a record of ANOTHER field form,
+    no heading between, is still reported. The record start comes from the
+    run the lines sit in -- "Dates:" ends the run, so a record starts just
+    after a "Dates:", and a "Journal:" line that follows itself is a one-line
+    record -- so the differing "Dates:"/"Course:"/"Title:" just outside both
+    copies belongs to the neighbouring record and the copies are trimmed to
+    nothing less."""
+    head, tail = [("p", "Educational Contributions")], [("p", "Other Section")]
+
+    def talk(title, dates):
+        return _field_record(title, "Medical students", "Riverside Medical Center", dates)
+    lead = (head + talk("Pharmacology", "2001") + _course_record("Anatomy", "2015")
+            + tail + talk("Neuroscience", "2002") + _course_record("Anatomy", "2015"))
+    assert lint_duplicate_passages(lead)[0]["evidence"][0].startswith(
+        "blocks 5-7 repeat at 13-15: Course: Anatomy")
+    # ...and the closing label is each run's own, not the document's last one
+    assert lint_duplicate_passages(lead + [("p", "Committees"), ("p", "Role: Member")])[0][
+        "evidence"][0].startswith("blocks 5-7 repeat at 13-15: Course: Anatomy")
+    trail = (head + talk("Anatomy", "2015-2019") + _course_record("Biochemistry", "2001")
+             + tail + talk("Anatomy", "2015-2019") + _course_record("Microbiology", "2002"))
+    assert lint_duplicate_passages(trail)[0]["evidence"][0].startswith(
+        "blocks 1-4 repeat at 9-12: Title: Anatomy")
+    short = (head + [("p", "Title: Seminar P"), ("p", "Dates: 2001")] + _course_record("Anatomy", "2015")
+             + tail + [("p", "Title: Seminar Q"), ("p", "Dates: 2002")] + _course_record("Anatomy", "2015"))
+    assert lint_duplicate_passages(short)[0]["evidence"][0].startswith(
+        "blocks 3-5 repeat at 9-11: Course: Anatomy")
+    journals = [("p", "Journal: Annals of Medicine 2019. A."), ("p", "Journal: Clinical Reports 2020. B.")]
+    cites = head + talk("Pharmacology", "2015-2019") + journals + tail + talk("Neuroscience", "2015-2019") + journals
+    assert lint_duplicate_passages(cites)[0]["evidence"][0].startswith(
+        "blocks 5-6 repeat at 12-13: Journal: Annals of Medicine")
+    # "Role:" ending both runs makes "Course:/Role:" then "Dates:/Role:" a
+    # possible reading, but so is a second "Role:" after a whole record, and
+    # labels cannot tell those apart -- the record is still reported, as on dev
+    roles = (head + _course_record("Anatomy", "2015") + [("p", "Role: Lecturer")]
+             + tail + _course_record("Anatomy", "2015") + [("p", "Role: Tutor")])
+    assert lint_duplicate_passages(roles)[0]["evidence"][0].startswith(
+        "blocks 1-3 repeat at 6-8: Course: Anatomy")
+
+    # a lone "Institution:" line in another section does not start a record
+    # inside the XAXVYB shape, so its shared fields stay a shared stretch
+    shared = (head + talk("Pharmacology", "2015-2019") + talk("Physiology", "2015-2019")
+              + talk("Neuroscience", "2015-2019") + tail + [("p", "Institution: Lakeview College")])
+    assert lint_duplicate_passages(shared) == []
+    # a record started just after a closing "Dates:" holds the "Course:" and
+    # "Role:" before the next "Dates:", so the "Title:" after it is the next
+    # record's -- the stretch from a shared "Dates:" into two distinct records
+    # is not a duplicate
+    lecture = [("p", "Title: Lecture"), ("p", "Audience: Fellows")]
+    crossing = (head + [("p", "Title: Seminar"), ("p", "Audience: Residents"), ("p", "Dates: 2015")]
+                + _course_record("Anatomy", "2015") + lecture + [("p", "Dates: 2015")]
+                + lecture + [("p", "Dates: ongoing")] + tail + [("p", "Audience: Fellows"), ("p", "Dates: ongoing")])
+    assert lint_duplicate_passages(crossing) == []
+
+
+def test_duplicate_passages_quiet_when_another_section_ends_records_on_a_shared_label():
+    """#1966 review: where a record ends is read from its own run of labelled
+    lines, never from another section. An Education section whose entries
+    open on "Institution:", or a Committees section whose entries end on
+    "Role:", does not start a teaching record at its shared "Institution:" or
+    "Audience:" line, so the XAXVYB shape beside it stays quiet. Three forms in
+    one run, all ending on the same "Dates:", stay quiet too: their shared
+    "Role:"/"Sponsor:" and "Dates:" lines are fields, not a duplicate."""
+    def talk(title):
+        return _field_record(title, "Medical students", "Riverside Medical Center", "2015-2019")
+
+    def lecture(title):
+        return [("p", f"Title: {title}"), ("p", "Role: Lecturer"),
+                ("p", "Audience: Medical students"), ("p", "Dates: 2015-2019")]
+    teaching = [("p", "Teaching")] + talk("Anatomy") + talk("Physiology") + talk("Pharmacology")
+    lectures = [("p", "Teaching")] + lecture("Anatomy") + lecture("Physiology") + lecture("Pharmacology")
+    education = [("p", t) for t in (
+        "Education", "Doctor of Medicine", "Institution: Lakeview College", "Dates: 2001-2005",
+        "Bachelor of Arts", "Institution: Hillcrest University", "Dates: 1997-2001")]
+    assert lint_duplicate_passages(education + teaching) == []
+    committees = [("p", t) for t in (
+        "Committees", "Admissions committee", "Role: Member", "Curriculum committee", "Role: Chair")]
+    assert lint_duplicate_passages(committees + lectures) == []
+    opened = teaching + [("p", t) for t in (
+        "Other Section", "Institution: Lakeview College", "Dates: 2001",
+        "Third Section", "Institution: Hillcrest University", "Dates: 2002")]
+    assert lint_duplicate_passages(opened) == []
+    closed = lectures + [("p", t) for t in (
+        "Other Section", "Course: Anatomy", "Role: Director",
+        "Third Section", "Course: Biochemistry", "Role: Tutor")]
+    assert lint_duplicate_passages(closed) == []
+
+    def grant(number):
+        return [("p", f"Grant: {number}"), ("p", "Sponsor: NIH"), ("p", "Dates: 2015-2019")]
+    forms = ([("p", "Teaching")] + talk("Anatomy") + _course_record("Histology", "2015-2019") + grant("R01")
+             + talk("Physiology") + _course_record("Neurology", "2015-2019") + grant("K23"))
+    assert lint_duplicate_passages(forms) == []
+
+
+def test_duplicate_passages_flags_a_repeated_pair_of_colon_titles():
+    """#1940 review: talk or citation titles that open "Topic: subtitle" match
+    the field-line shape, but the lines just outside the two copies carry
+    different "labels", so nothing is trimmed and a duplicated pair of them is
+    still one passage twice."""
+    blocks = [("p", t) for t in (
+        "Invited Talks", "Lung disease: an update, 2021",
+        "Cancer: a review of outcomes, 2019", "Heart failure: revisited, 2020",
+        "Sepsis: early signs, 2022", "Selected Talks", "Brain imaging: new methods, 2018",
+        "Cancer: a review of outcomes, 2019", "Heart failure: revisited, 2020",
+        "Kidney transplant: long-term results, 2017")]
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1
+    assert findings[0]["evidence"][0].startswith("blocks 2-3 repeat at 7-8: Cancer:")
+
+
 def test_duplicate_passages_threshold_is_pinned_at_two_blocks():
     """The corpus's only true positive is a 2-block duplicate (web119: the same
     abstract at two adjacent numbers), so raising the threshold to 3 silently
@@ -5983,14 +6194,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (80), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (82), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 78
+    assert len(payload["findings"]) == 80
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6680,6 +6891,15 @@ def test_source_line_coverage_prevalence_is_the_measured_corpus_fraction():
     measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["source_line_coverage"] == round(156 / 167, 3)
+
+
+def test_record_cut_in_two_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-19 (CUT-1 in doctor/PRECISION.md): runs where
+    `record_cut_in_two` fires, over the 197 stored labelled runs (13) and 219
+    held-out prod runs with stage-4 output (15); a new measurement updates
+    both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["record_cut_in_two"] == round(28 / 416, 3)
 
 
 def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):

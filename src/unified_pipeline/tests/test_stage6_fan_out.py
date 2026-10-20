@@ -15,6 +15,7 @@ and web228's K4 `sessions`.
 import copy
 import itertools
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -474,13 +475,23 @@ def _rendered_body(tmp_path, code, fields):
         '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
 
 
+# Fields the map keeps although a probe entry of the code does not render
+# them. A Past (Completed) Funding table leaves out the effort row (#1944),
+# but an M2B record re-bucketed into Current or Pending still renders it, and
+# the supplementary pass reads the map to tell a grant's own record line from
+# its prose: dropping `percent_effort` here offered six record and goals lines
+# on three corpus CVs as new sub-points.
+_KEPT_THOUGH_UNRENDERED = {'M2B': {'percent_effort'}}
+
+
 @pytest.mark.parametrize('code', sorted(fan_out._RENDERED_FIELDS))
 def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
     """`_RENDERED_FIELDS[code]` is exactly the set of fields the code's section
     writes: a field the map claims but the renderer skips would let the
     coverage test pass on content the output drops (web240's `institution`),
     and one it omits would needlessly keep entries whole."""
-    assert _rendered_markers(tmp_path, code) == (set(fan_out._RENDERED_FIELDS[code]), False)
+    expected = set(fan_out._RENDERED_FIELDS[code]) - _KEPT_THOUGH_UNRENDERED.get(code, set())
+    assert _rendered_markers(tmp_path, code) == (expected, False)
 
 
 def _offschema_date_fields(code):
@@ -1265,6 +1276,275 @@ class TestDeclinedListWarnsForEveryFieldRenderedCode:
         warnings = []
         assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
         assert warnings == []
+
+
+def _declined(*entries, records_key=None):
+    """`(warnings, declined)` of one fan-out pass over `entries`."""
+    warnings, declined = [], []
+    fan_out_multi_record_entries(list(entries), FIELD_SCHEMAS, warnings,
+                                 records_key=records_key, declined=declined)
+    return warnings, declined
+
+
+_FANOUT_LIST_SHAPE = re.compile(r"holds (?:several )?records that were not split")
+
+
+class TestDeclinedListCheckedAfterRender:
+    """#1187: a declined list of these codes is in the document when the
+    parent holds no name of its own (its row then prints the entry's text),
+    so it warns only once the render shows a record missing."""
+
+    @pytest.mark.parametrize('code,list_item', [
+        ('B2', {'program_name': 'Glade Program'}), ('C', {'training_type': 'Fellowship'}),
+        ('F2', {'certifying_board': 'Glade Board'}), ('L3', {'leadership_role': 'Director'}),
+        ('M2A', {'title': 'Glade Study'}), ('M2B', {'title': 'Glade Study'}),
+        ('M2C', {'title': 'Glade Study'}), ('M2D', {'title': 'Glade Device'}),
+        ('N2', {'grant_title': 'Glade Training Grant'}), ('N3', {'mentee_name': 'Quillon Ashgrove'}),
+        ('N3A', {'mentee_name': 'Quillon Ashgrove'}), ('N3B', {'mentee_name': 'Quillon Ashgrove'}),
+        ('Q4', {'journal_name': 'Glade Review'}), ('Q4A', {'journal_name': 'Glade Review'}),
+        ('Q4B', {'journal_name': 'Glade Review'}), ('Q4C', {'journal_name': 'Glade Review'}),
+        ('Q4D', {'journal_name': 'Glade Review'}), ('H', {'award_name': 'Glade Prize'})])
+    def test_a_declined_list_is_handed_back_not_warned(self, code, list_item):
+        entry = {'taxonomy_code': code, 'text': 'Zzunheld prose no field carries',
+                 'extracted_fields': {'records': [dict(list_item), dict(list_item)]}}
+        warnings, declined = _declined(entry)
+        assert warnings == []
+        assert [(d.code, d.key, d.records, d.stage4) for d in declined] == [
+            (code, 'records', (list_item, list_item), False)]
+
+    def test_a_directly_warned_code_is_not_handed_back(self):
+        entry = {'taxonomy_code': 'P', 'text': 'Zzunheld prose no field carries',
+                 'extracted_fields': {'records': [{'committee_name': 'Glade Board'}] * 2}}
+        warnings, declined = _declined(entry)
+        assert [w['code'] for w in warnings] == ['P'] and declined == []
+
+    def test_stray_item_keys_are_named_and_values_never(self):
+        entry = {'taxonomy_code': 'N3B', 'text': 'Quillon Ashgrove; Tamsin Oakhurst',
+                 'extracted_fields': {'mentee_name': 'Pellam Fairweather', 'mentees': [
+                     {'mentee_name': 'Quillon Ashgrove', 'site_position': 'Glade Lab'},
+                     {'mentee_name': 'Tamsin Oakhurst', 'site_position': 'Glade Lab'}]}}
+        (found,) = _declined(entry)[1]
+        (warning,) = fan_out.unrendered_list_warnings([found], ['Pellam Fairweather'])
+        assert (warning['check'], warning['code'], warning['severity']) == (
+            fan_out.REJECTED_LIST_CHECK, 'N3B', 'WARN')
+        assert warning['evidence'] == ['N3B.mentees: 1 entry', 'site_position']
+        assert _FANOUT_LIST_SHAPE.search(warning['message'])
+        assert 'Quillon' not in str(warning) and 'Glade' not in str(warning)
+
+    def test_records_the_document_holds_do_not_warn(self):
+        found = fan_out.DeclinedList('Q4D', 'journals', ('start_date',), (
+            {'journal_name': 'Quillmere Journal', 'start_date': '2009'},
+            {'journal_name': 'Ashgrove Review', 'start_date': '2010'}))
+        document = ['Reviewer: Quillmere Journal (2009-2012); Ashgrove Review (2010-2014)']
+        assert fan_out.unrendered_list_warnings([found], document) == []
+
+    def test_a_record_whose_words_are_spread_over_lines_is_not_in_the_document(self):
+        # A journal's name words also in citations (VYNARH 138): no one line
+        # prints the journal, so it is missing.
+        found = fan_out.DeclinedList('Q4D', 'journals', (), ({'journal_name': 'Quillmere Ashgrove Glade Review'},))
+        lines = ['Doe J. Quillmere study. 2001', 'Roe R. Ashgrove trial. 2002',
+                 'Poe P. Glade cohort. 2003', 'Fern Review. 2004']
+        assert len(fan_out.unrendered_list_warnings([found], lines)) == 1
+
+    def test_one_record_missing_warns_once_per_code_and_key(self):
+        found = fan_out.DeclinedList('Q4D', 'journals', (), (
+            {'journal_name': 'Quillmere Journal'}, {'journal_name': 'Ashgrove Review'}))
+        warnings = fan_out.unrendered_list_warnings([found, found], ['Quillmere Journal'])
+        assert [w['evidence'] for w in warnings] == [['Q4D.journals: 2 entries']]
+
+    @pytest.mark.parametrize('document,missing', [
+        ('Quillmere', False),            # 1 of 2 words: half is enough
+        ('Glade', True),                 # 0 of 2
+    ])
+    def test_a_record_counts_as_rendered_from_half_its_words(self, document, missing):
+        found = fan_out.DeclinedList('Q4D', 'journals', (), ({'journal_name': 'Quillmere Journal'},))
+        assert bool(fan_out.unrendered_list_warnings([found], [document])) is missing
+
+    def test_a_record_with_no_word_has_nothing_to_lose(self):
+        found = fan_out.DeclinedList('Q4D', 'journals', (), ({'journal_name': '—'},))
+        assert fan_out.unrendered_list_warnings([found], []) == []
+
+    def test_dates_are_compared_by_year(self):
+        found = fan_out.DeclinedList('N3B', 'mentees', (), (
+            {'mentee_name': 'Quillon', 'start_date': '2013-09', 'end_date': 'current'},))
+        assert fan_out.unrendered_list_warnings([found], ['Quillon 2013-Present']) == []
+
+    def test_a_k1_or_s_list_beside_a_named_parent_is_handed_back(self):
+        # web204 S3 1802 / 1814: a book's chapters, kept whole beside its own
+        # title, which is all the row prints.
+        chapters = [{'authors': 'Gorman, B. S.', 'chapter': 'Glade Tides'},
+                    {'authors': 'Pellam, R.', 'chapter': 'Fern Lattice'}]
+        entry = {'taxonomy_code': 'S3', 'text': 'Glade Handbook. Chapters: Glade Tides; Fern Lattice',
+                 'extracted_fields': {'title': 'Glade Handbook', 'chapters_authored': chapters}}
+        warnings, declined = _declined(entry)
+        assert warnings == []
+        assert [(d.code, d.key, d.stray, d.stage4) for d in declined] == [
+            ('S3', 'chapters_authored', ('chapter',), False)]
+
+    def test_a_k1_list_is_handed_back_beside_its_declined_stage4_list(self):
+        # Stage 4's records list is handed back once, as itself.
+        records = [{'course_title': 'Glade Anatomy', 'role': 'Lecturer'}, {'institution': None}]
+        courses = [{'course': 'Fern Physiology'}, {'course': 'Moss Histology'}]
+        entry = _stage4_entry(records, code='K1', text='Glade Anatomy; Fern Physiology; Moss Histology',
+                              extracted_fields={**records[-1], _RECORDS: records, 'courses': courses})
+        _, declined = _declined(entry, records_key=_RECORDS)
+        assert sorted((d.key, d.stage4) for d in declined) == [('courses', False), (_RECORDS, True)]
+
+    def test_words_every_record_shares_do_not_vouch_for_one(self):
+        # web204 S3 1814: every chapter names the owner, so a publication line
+        # naming the owner and one title word does not print the chapter.
+        found = fan_out.DeclinedList('S3', 'chapters_authored', ('chapter',), (
+            {'authors': 'Allison Quillmere', 'chapter': 'Glade Tides'},
+            {'authors': 'Allison Quillmere', 'chapter': 'Fern Lattice Theory'}))
+        lines = ['Allison Quillmere. Glade Tides.', 'Allison Quillmere. Fern cohort. 2001']
+        (warning,) = fan_out.unrendered_list_warnings([found], lines)
+        assert warning['evidence'][0] == 'S3.chapters_authored: 1 entry'
+
+    def test_initials_do_not_vouch_for_a_record(self):
+        found = fan_out.DeclinedList('S3', 'chapters_authored', ('chapter',), (
+            {'authors': 'Gorman, B. S.', 'chapter': 'Glade Tides'},
+            {'authors': 'Pellam, R.', 'chapter': 'Fern Lattice'}))
+        lines = ['Pellam R. Fern Lattice.', 'Gorman B S. Moss cohort.']
+        assert len(fan_out.unrendered_list_warnings([found], lines)) == 1
+
+    @pytest.mark.parametrize('rows,missing', [
+        (['Title: Glade', 'PI: Quillon', 'Amount: Ashgrove'], False),
+        (['Title: Glade', 'Fern', 'Moss', 'PI: Quillon', 'Ashby', 'Pine', 'Amount: Ashgrove'], True),
+    ])
+    def test_a_record_written_one_field_per_row_spans_its_field_count(self, rows, missing):
+        # web26 M2A: a grant block writes one field per row; a whole table's
+        # text would vouch for words strewn over unrelated rows.
+        found = fan_out.DeclinedList('M2A', 'sub_awards', (), (
+            {'sub_title': 'Glade', 'pi_name': 'Quillon', 'funding': 'Ashgrove', 'notes': None},))
+        assert bool(fan_out.unrendered_list_warnings([found], [], [rows])) is missing
+
+    def test_no_declined_argument_hands_nothing_back(self):
+        entry = {'taxonomy_code': 'N3B', 'text': 'Zzunheld prose no field carries',
+                 'extracted_fields': {'records': [{'mentee_name': 'Quillon'}] * 2}}
+        warnings = []
+        assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
+        assert warnings == []
+
+
+def _h_spans():
+    return [{'start_date': '2001', 'end_date': '2002'}, {'start_date': '2005', 'end_date': '2006'}]
+
+
+class TestHonorsDateListIsNotADeclinedList:
+    """#1187: H's date cell writes a dates-only list, but only the first of
+    `H_DATE_LIST_KEYS` that holds one, and only beside no date of its own."""
+
+    def _h(self, **fields):
+        return {'taxonomy_code': 'H', 'text': 'Zzunheld prose no field carries',
+                'extracted_fields': {'award_name': 'Glade Prize', **fields}}
+
+    @pytest.mark.parametrize('key', ['dates', 'additional_dates'])
+    def test_the_list_the_date_cell_writes_is_not_handed_back(self, key):
+        assert _declined(self._h(**{key: _h_spans()})) == ([], [])
+
+    @pytest.mark.parametrize('own', ['date', 'year', 'start_date', 'end_date'])
+    def test_a_date_list_beside_the_records_own_date_is(self, own):
+        _, declined = _declined(self._h(dates=_h_spans(), **{own: '1999'}))
+        assert [d.key for d in declined] == ['dates']
+
+    def test_only_the_first_date_list_is_written(self):
+        _, declined = _declined(self._h(dates=_h_spans(),
+                                        additional_dates=_h_spans()))
+        assert [d.key for d in declined] == ['additional_dates']
+
+    def test_a_date_list_under_another_key_is(self):
+        _, declined = _declined(self._h(periods=_h_spans()))
+        assert [d.key for d in declined] == ['periods']
+
+    def test_a_list_carrying_more_than_dates_is(self):
+        spans = [dict(span, award_name='Glade Medal') for span in _h_spans()]
+        _, declined = _declined(self._h(dates=spans))
+        assert [d.key for d in declined] == ['dates']
+
+    def test_the_section_reads_the_same_keys(self):
+        from unified_pipeline.stage6.sections import honors
+        assert honors._DATE_LIST_KEYS is fan_out.H_DATE_LIST_KEYS
+
+
+class TestDeclinedStage4RecordsList:
+    """#1187: a K1 or S* entry whose stage-4 records `_stage4_children`
+    declined renders the last record only, unless stage 5 rendered all."""
+
+    def _k1(self, **fields):
+        # The last record renders nothing K1 writes, so the split is declined.
+        records = [{'course_title': 'Glade Anatomy', 'role': 'Lecturer'}, {'institution': None}]
+        return _stage4_entry(records, code='K1', text='Glade Anatomy, Lecturer; Fern Physiology',
+                             extracted_fields={**records[-1], _RECORDS: records, **fields})
+
+    def test_a_declined_k1_list_is_handed_back(self):
+        warnings, (found,) = _declined(self._k1(), records_key=_RECORDS)
+        assert warnings == []
+        assert (found.code, found.key, found.stage4, len(found.records)) == ('K1', _RECORDS, True, 2)
+
+    def test_its_warning_has_the_list_shape(self):
+        _, declined = _declined(self._k1(), records_key=_RECORDS)
+        (warning,) = fan_out.unrendered_list_warnings(declined, ['Fern Physiology'])
+        assert warning['evidence'] == [f'K1.{_RECORDS}: 1 entry']
+        assert _FANOUT_LIST_SHAPE.search(warning['message'])
+
+    def test_a_k1_list_5c_rendered_whole_is_not(self):
+        assert _declined(self._k1(formatted_text='Glade Anatomy\nFern Physiology'),
+                         records_key=_RECORDS) == ([], [])
+
+    def _s8(self, citation):
+        records = [{'title': 'Glade Poster', 'conference_name': 'Fern Meeting'},
+                   {'title': 'Moss Talk', 'conference_name': 'Ashby Meeting'}]
+        return _stage4_entry(records, code='S8', text='Glade Poster, Fern Meeting; Moss Talk, Ashby Meeting',
+                             extracted_fields={**records[-1], _RECORDS: records,
+                                               'formatted_citation': citation})
+
+    def test_a_citation_writing_every_title_renders_the_list_whole(self):
+        assert _declined(self._s8('Glade Poster. Fern Meeting. Moss Talk. Ashby Meeting.'),
+                         records_key=_RECORDS) == ([], [])
+
+    def test_a_citation_writing_no_title_does_not(self):
+        _, declined = _declined(self._s8('Fern Meeting; Ashby Meeting.'), records_key=_RECORDS)
+        assert [(d.code, d.stage4) for d in declined] == [('S8', True)]
+
+    def test_a_split_list_is_not_handed_back(self):
+        records = [{'course_title': 'Glade Anatomy'}, {'course_title': 'Fern Physiology'}]
+        entry = _stage4_entry(records, code='K1', text='Glade Anatomy\tFern Physiology')
+        assert _declined(entry, records_key=_RECORDS) == ([], [])
+
+    def test_a_code_outside_the_set_is_not_handed_back(self):
+        records = [{'committee_name': 'Glade Board'}, {'role': None}]
+        entry = _stage4_entry(records, code='O', text='Glade Board; Fern Council')
+        assert _declined(entry, records_key=_RECORDS)[1] == []
+
+
+class TestGeneratorChecksDeclinedListsAfterRender:
+    def _render(self, tmp_path, entry):
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+        source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+        source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [entry]}))
+        generator = WCMTemplateGenerator(verbose=False)
+        generator.generate(str(source), str(target), research_summary_path=None)
+        sidecar = json.loads(next(tmp_path.glob('*render_warnings.json')).read_text())
+        return [w for w in sidecar['warnings'] if w.get('check') == fan_out.REJECTED_LIST_CHECK]
+
+    def test_a_list_lost_beside_a_named_parent_warns(self, tmp_path):
+        entry = {'taxonomy_code': 'N3B', 'element_idx_start': 5,
+                 'text': 'Pellam Fairweather, PhD 2010-2012; Quillon Ashgrove 2013; Tamsin Oakhurst 2014',
+                 'extracted_fields': {
+                     'mentee_name': 'Pellam Fairweather', 'mentee_level': 'PhD',
+                     'start_date': '2010', 'end_date': '2012',
+                     'mentees': [{'mentee_name': 'Quillon Ashgrove', 'start_date': '2013', 'site_position': 'Lab'},
+                                 {'mentee_name': 'Tamsin Oakhurst', 'start_date': '2014', 'site_position': 'Lab'}]}}
+        assert [(w['code'], w['evidence'][0]) for w in self._render(tmp_path, entry)] == [
+            ('N3B', 'N3B.mentees: 1 entry')]
+
+    def test_a_list_the_text_renders_does_not(self, tmp_path):
+        entry = {'taxonomy_code': 'Q4D', 'element_idx_start': 5,
+                 'text': 'Reviewer: Quillmere Journal (2009-2012); Ashgrove Review (2010-2014)',
+                 'extracted_fields': {'journals': [
+                     {'journal_name': 'Quillmere Journal', 'start_date': '2009', 'end_date': '2012'},
+                     {'journal_name': 'Ashgrove Review', 'start_date': '2010', 'end_date': '2014'}]}}
+        assert self._render(tmp_path, entry) == []
 
 
 class TestParentKeepsItsOwnPart:
