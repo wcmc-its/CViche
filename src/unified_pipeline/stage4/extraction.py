@@ -16,7 +16,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, NamedTuple, NotRequired, TypedDict
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
@@ -327,6 +327,12 @@ def _distinct_parts(item: dict[str, Any], others: list[dict[str, Any]]) -> list[
             for part in _parts(value).difference(*(_parts(other.get(key)) for other in others))]
 
 
+def _written(text: str, value: str) -> Iterator[re.Match[str]]:
+    """Where `value` is written in `text` as whole words, a hyphenated word
+    whole too: "Chair" is not written in "Vice-Chair"."""
+    return re.finditer(rf'(?<![\w-]){re.escape(value)}(?![\w-])', text)
+
+
 def _clause_around(text: str, span: tuple[int, int]) -> tuple[int, int]:
     """The bounds of the clause holding `span`: from the line break or
     semicolon before it to the one after it."""
@@ -344,7 +350,7 @@ def _nearness(text: str, values: list[str], clause: tuple[int, int],
     first (TVQZIP 116)."""
     ranks = []
     for value in values:
-        for match in re.finditer(re.escape(value), text[clause[0]:clause[1]]):
+        for match in _written(text[clause[0]:clause[1]], value):
             at, to = clause[0] + match.start(), clause[0] + match.end()
             if to <= span[0]:
                 ranks.append((span[0] - to, _BEFORE))

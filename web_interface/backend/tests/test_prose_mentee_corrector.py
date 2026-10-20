@@ -145,10 +145,35 @@ def test_every_stated_year_past_becomes_n3b():
     "Mentor for Ana Doe (2016-",                               # dangling dash
     "Mentor for Ana Doe 2016, current",                        # open-period word
     "Mentor for Ana Doe",                                      # no year at all
-], ids=["run-year", "since", "from", "onwards", "until-now", "spaced-dash", "dangling-dash", "current", "no-year"])
+    "Mentor for Ana Doe 2016 till date",
+    "Mentor for Ana Doe 2016 to now",
+    "Mentor for Ana Doe 2016 (continuing)",
+    "Mentor for Ana Doe 2016 to date",
+    "Mentor for Ana Doe 2016 ongoing",
+    "Mentor for Ana Doe 2016 to the present",
+    "Mentor for Ana Doe 2016 until present",
+    "Mentor for Ana Doe 2016 pres.",
+    "Mentor for Ana Doe 2016, currently",
+    "Mentor for Ana Doe 2016, still in the lab",
+    "Mentor for Ana Doe 2016, active",
+    "Mentor for Ana Doe 2016 to today",
+    "Mentor for Ana Doe 2016, thesis in progress",
+    "Mentor for Ana Doe 2016 onward",
+    "Mentor for Ana Doe 2016 until date",
+    "Mentor for Ana Doe 2016 til date",
+], ids=["run-year", "since", "from", "onwards", "until-now", "spaced-dash", "dangling-dash", "current", "no-year",
+        "till-date", "to-now", "continuing", "to-date", "ongoing", "to-the-present", "until-present", "pres",
+        "currently", "still", "active", "today", "in-progress", "onward", "until-date", "til-date"])
 def test_a_year_that_may_be_open_stays_n3a(text):
     e, _ = _apply_one(_entry(text))
     assert e["taxonomy_code"] == "N3A"
+
+
+def test_an_open_word_after_an_end_year_stays_past_as_before():
+    # The lone-year vocabulary reads only text with no end-dated range; an
+    # end-dated one is read as it was ("2014-2016 onwards" was N3B).
+    e, _ = _apply_one(_entry("Mentor for Ana Doe 2014-2016 onwards"))
+    assert e["taxonomy_code"] == "N3B"
 
 
 def test_the_run_year_is_an_input():

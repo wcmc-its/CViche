@@ -1859,6 +1859,19 @@ def test_a_part_of_a_composite_value_names_its_record(monkeypatch):
     assert _last_dates(out) == (None, None)
 
 
+@pytest.mark.parametrize("written, last", [
+    ("Vice-Chair", {"committee_name": "Glade Board", "role": "Vice Chair"}),   # the model's spelling
+    ("Vice-Chair", {"committee_name": "Glade Board"}),
+    ("Chair-elect", {"committee_name": "Glade Board"}),
+], ids=["normalized-role", "no-role", "hyphen-after"])
+def test_a_name_inside_a_hyphenated_word_is_not_written_there(monkeypatch, written, last):
+    # "Chair", the first record's role, is not written in "Vice-Chair" or
+    # "Chair-elect": the range stays on the last record, as on dev (#1342).
+    out = _two_record_entry(monkeypatch, f"Fern Council, Chair; Glade Board, {written} 2001-2005", last,
+                            first_extra={"role": "Chair", "start_date": None, "end_date": None})
+    assert _last_dates(out) == ("2001", "2005")
+
+
 def test_records_that_cover_the_entry_skip_the_recovery_call(monkeypatch):
     # The last item alone covers a fifth of a long dated entry, which sends it
     # to recovery; the five items together cover all of it.

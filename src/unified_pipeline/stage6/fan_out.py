@@ -1100,22 +1100,34 @@ def _date_tokens(record: Mapping[str, Any], code: str) -> set[str]:
 
 
 def _names_of_record(record: Mapping[str, Any], records: Sequence[Mapping[str, Any]]) -> list[str]:
-    """`record`'s non-date string values that no other record holds under
-    the same key, normalized: what names this record and no sibling."""
-    return [norm(value) for key, value in record.items()
-            if isinstance(value, str) and value.strip() and not _is_date_key(key)
-            and not any(other is not record and other.get(key) == value for other in records)]
+    """`record`'s non-date string values, normalized, that no sibling's value
+    holds: what names this record and no other. A value written inside a
+    sibling's ("President" in "Vice President", "Glade" in "Glade Society
+    Chair") would find that sibling's line (#1342)."""
+    siblings = [norm(value) for other in records if other is not record
+                for value in other.values() if isinstance(value, str)]
+    names = [norm(value) for key, value in record.items()
+             if isinstance(value, str) and value.strip() and not _is_date_key(key)]
+    return [name for name in names if not any(name in sibling for sibling in siblings)]
+
+
+def _begins_with_name(segment: str, name: str) -> bool:
+    """Whether `segment` opens with `name` as whole words, a hyphenated word
+    whole too: "President" does not open "President-elect 2010-2012"."""
+    return re.match(rf'{re.escape(name)}(?![\w-])', norm(segment)) is not None
 
 
 def _dated_on_own_line(record: Mapping[str, Any], records: Sequence[Mapping[str, Any]],
                        segments: Sequence[str], code: str) -> bool:
-    """Whether one segment both names `record` by one of its own values and
+    """Whether one segment both opens with one of `record`'s own names and
     holds every year its dates show: "Co-leader of ... program 2020-2021
     Member of ..." for the co-leader's 2020-2021, though the segments are
-    out of step with the records above it (OIEPQD TVQZIP 116, #1342)."""
+    out of step with the records above it (OIEPQD TVQZIP 116, #1342). A name
+    further into a line ("Member" in "Executive Committee Member 2010-2012")
+    does not make it that record's line."""
     dates = _date_tokens(record, code)
     own = _names_of_record(record, records)
-    return any(dates <= set(_tokens(segment)) and any(value in norm(segment) for value in own)
+    return any(dates <= set(_tokens(segment)) and any(_begins_with_name(segment, name) for name in own)
                for segment in segments)
 
 
