@@ -748,6 +748,38 @@ def test_stage2_span_overlap_names_a_multi_element_overlap_before_a_one_element_
     assert evidence == ["entry 20-23 shares 3 element(s) with entry 21-25"]
 
 
+def test_stage2_span_overlap_leads_a_finding_with_its_multi_element_pairs():
+    # 20-21 shares one line with 10-20 before 35-37 shares three with 30-40, both
+    # A then B: the finding is led by 35, as when only two-line overlaps counted.
+    stage2 = {"entries": [_span(10, 20, hierarchy=("A",)), _span(30, 40, hierarchy=("A",)),
+                          _span(20, 21, hierarchy=("B",)), _span(35, 37, hierarchy=("B",))]}
+    [finding] = lint_stage2_span_overlap(stage2)
+    assert finding["message"].split(":")[0] == "entry 35"
+    assert [e.split(":")[0] for e in finding["evidence"]] == [
+        "entry 35-37 shares 3 element(s) with entry 30-40",
+        "entry 20-21 shares 1 element(s) with entry 10-20"]
+
+
+def test_stage2_span_overlap_needs_a_shared_line_for_one_shared_element():
+    # web30 1012.0-1012.1 holds only row 0's text, so row 1 is shared by span alone.
+    header = _span("1012.0", "1012.1", etype="table_row", text="Year (YYYY) | Person Months (##.##)")
+    row = _span("1012.1", "1012.1", hierarchy=("Refereed articles",), etype="table_row",
+                text="1.   2021 | 0.12 calendar")
+    assert lint_stage2_span_overlap({"entries": [header, row]}) == []
+    shared = {**row, "text": "Person Months (##.##) | 0.5"}
+    assert len(lint_stage2_span_overlap({"entries": [header, shared]})) == 1
+    # KYOPUV 27-29 / 29-30: a tab-separated part of one text inside the other's
+    # line, whichever of the two comes first.
+    left = _span(27, 29, text="Leon, Nicaragua\tJuly '92-June '96:")
+    right = _span(29, 30, hierarchy=("A",), text="July '92-June '96:  Clinical Fellow, Yale")
+    assert len(lint_stage2_span_overlap({"entries": [left, right]})) == 1
+    assert len(lint_stage2_span_overlap({"entries": [right, left]})) == 1
+    assert lint_stage2_span_overlap({"entries": [left, {**right, "text": "Clinical Fellow\t"}]}) == []
+    # A line of a multi-line text.
+    lines = [_span(1, 2, text="Award 1993\nWho's Who"), _span(2, 3, hierarchy=("A",), text="Who's Who in Nursing")]
+    assert len(lint_stage2_span_overlap({"entries": lines})) == 1
+
+
 def test_stage2_span_overlap_reads_table_row_spans_by_row_number():
     # web172 112.x: overlapping row ranges of one table.
     rows = {"entries": [_span("112.0", "112.2", etype="table_row"),

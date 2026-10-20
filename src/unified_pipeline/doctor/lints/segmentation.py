@@ -846,9 +846,9 @@ def lint_stage2_text_break(stage2: dict, stage1a: dict | None = None,
 #: 324 distinct local stage-2 artifacts measured for #1433 there are 6,886
 #: such pairs on 21 of them, one single-element entry that older stage-2 runs
 #: emitted twice (filter_extraction_noise drops that copy). Entries whose spans
-#: differ are reported on one shared element (ATUVAL 863-867 under HONORS,
-#: 867-869 under a committee heading): 306 such pairs on 28 artifacts, and 264
-#: of the 265 entries they add hold the shared line's text in both entries.
+#: differ are reported on one shared element when their texts share a line
+#: (ATUVAL 863-867 under HONORS, 867-869 under a committee heading): 306 such
+#: pairs on 28 artifacts, 305 of them sharing text.
 SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS = 2
 #: Overlapping pairs a `stage2_span_overlap` finding quotes, per section pair.
 SPAN_OVERLAP_EVIDENCE_PAIRS = 3
@@ -876,11 +876,31 @@ def _span_keys(entry: dict) -> frozenset[int | str]:
     return frozenset(_element_span(entry)) or _row_span(entry)
 
 
-def _is_reported_overlap(span: frozenset[int | str], earlier_span: frozenset[int | str], shared: int) -> bool:
-    """Two spans that share ``shared`` (at least one) source elements are
-    reported unless they are the same span and share fewer than
-    SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS: one element emitted twice."""
-    return span != earlier_span or shared >= SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS
+#: What a stage-2 entry's text is split on to find a line, cell or element it
+#: shares with another: a tab, a line break, and the " | " between table cells.
+SPAN_OVERLAP_TEXT_PARTS = re.compile(r"\t|\n| \| ")
+
+
+def _shares_text(text: str, other: str) -> bool:
+    """True when a line, cell or element of one text is inside the other one,
+    compared normalized. A span alone is not enough: web30 1012.0-1012.1 and
+    1012.1 share row 1 by span, but the first holds only row 0's text."""
+    texts = (norm(text), norm(other))
+    return any(part and part in texts[1 - side]
+               for side, raw in enumerate((text, other))
+               for part in map(norm, SPAN_OVERLAP_TEXT_PARTS.split(raw)))
+
+
+def _is_reported_overlap(entry: dict, earlier: dict, span: frozenset[int | str],
+                         earlier_span: frozenset[int | str], shared: int) -> bool:
+    """Two entries whose spans share ``shared`` (at least one) source elements
+    are reported when they share SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS or more.
+    Below that, they are reported only when the spans differ (the same span is
+    one element emitted twice) and the two texts share a line (`_shares_text`)."""
+    if shared >= SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS:
+        return True
+    return span != earlier_span and _shares_text(str(entry.get("text") or ""),
+                                                 str(earlier.get("text") or ""))
 
 
 def _overlapping_pairs(stage2: dict) -> list[tuple[dict, dict, int]]:
@@ -896,7 +916,8 @@ def _overlapping_pairs(stage2: dict) -> list[tuple[dict, dict, int]]:
     for later, entry in enumerate(entries):
         span = spans[later]
         shared = Counter(earlier for key in span for earlier in owners.get(key, ()))
-        reported = [i for i, count in shared.items() if _is_reported_overlap(span, spans[i], count)]
+        reported = [i for i, count in shared.items()
+                    if _is_reported_overlap(entry, entries[i], span, spans[i], count)]
         earlier = min(reported, key=lambda i: (shared[i] < SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS, i), default=None)
         if earlier is not None:
             pairs.append((entries[earlier], entry, shared[earlier]))
@@ -914,13 +935,17 @@ def lint_stage2_span_overlap(stage2: dict) -> list[dict]:
     (#1433), one element emitted twice excepted (`_is_reported_overlap`): the
     shared lines can render twice, once under the wrong section when the two
     sit in different ones. WARN, one per pair of sections, led by the first
-    such entry. Reads stage 2 only."""
+    such entry that shares SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS or more, else
+    the first. Reads stage 2 only."""
     by_sections: dict[tuple[str, str], list[tuple[dict, dict, int]]] = {}
     for earlier, later, shared in _overlapping_pairs(stage2):
         by_sections.setdefault((_section_title(earlier), _section_title(later)), []).append(
             (earlier, later, shared))
     findings = []
     for (earlier_title, later_title), pairs in by_sections.items():
+        # Multi-element pairs lead and fill the evidence first (stable sort), so a
+        # finding the two-element rule already gave keeps its lead entry and lines.
+        pairs.sort(key=lambda pair: pair[2] < SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS)
         where = (f"section '{later_title}'" if earlier_title == later_title
                  else f"sections '{earlier_title}' and '{later_title}'")
         findings.append(_finding(
