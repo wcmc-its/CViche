@@ -215,10 +215,10 @@ def test_mentoring_replaces_the_template_placeholder_tables():
     assert gen.stats['tables_populated'] == 2
 
 
-def test_mentoring_current_only_removes_the_past_placeholder_too():
-    """#845: mentees under ONLY "Current Mentees:" still get "Past
-    Mentees:"'s own placeholder removed -- removal no longer depends on
-    that heading having content of its own."""
+def test_mentoring_current_only_keeps_the_past_placeholder():
+    """#1942 (reversing #845): mentees under ONLY "Current Mentees:" leave
+    "Past Mentees:"'s own placeholder in place, empty, for the N/A pass --
+    a heading's placeholder goes only when that heading has content."""
     gen = _new_generator()
     gen.doc.add_paragraph("MENTORING")
     gen.doc.add_paragraph("Current Mentees:")
@@ -228,14 +228,15 @@ def test_mentoring_current_only_removes_the_past_placeholder_too():
 
     gen._fill_mentoring({'N3A': [_mentee('N3A', 'Alice A')]})
 
-    assert [t.rows[0].cells[1].text for t in gen.doc.tables] == ['Alice A']
+    assert [t.rows[0].cells[1].text for t in gen.doc.tables] == ['Alice A', '']
+    assert _body_after(gen.doc, "Past Mentees:", 1)[0][0] == 'tbl'
     assert gen.stats['tables_populated'] == 1
 
 
 def test_mentoring_no_entries_does_not_remove_a_non_placeholder_table():
     """Guard negative path, with no mentees at all: a table that is not a
-    pristine "Name" placeholder survives the now-unconditional removal
-    (#845) -- the guard, not the content check, is what protects it."""
+    pristine "Name" placeholder survives: with no mentees nothing is removed
+    at all (#1942), and the guard would refuse it anyway."""
     gen = _new_generator()
     gen.doc.add_paragraph("MENTORING")
     gen.doc.add_paragraph("Current Mentees:")
@@ -249,20 +250,19 @@ def test_mentoring_no_entries_does_not_remove_a_non_placeholder_table():
     assert gen.doc.tables[0].rows[0].cells[0].text == "Name of Committee"
 
 
-def test_mentoring_real_template_no_entries_removes_both_mentee_placeholders():
-    """#845, real template: with zero N1-N4 entries, N2's own placeholder
-    is removed by `_fill_training_grants` (pre-existing #529 behavior) and
-    both mentee placeholders are now ALSO removed on purpose -- three
-    tables gone, none rebuilt -- while N1's own template slot and its
-    neighbours are untouched."""
+def test_mentoring_real_template_no_entries_keeps_every_placeholder():
+    """#1942, real template: with zero N1-N4 entries, N2's placeholder and
+    both mentee placeholders all stay (#845 and #529's removals reversed),
+    for the N/A pass, while N1's own template slot and its neighbours are
+    untouched."""
     gen = _template_generator()
     template_tables = len(gen.doc.tables)
     n1_neighbours_before = _body_after(gen.doc, N1_HEADING, 2)
 
     gen._fill_mentoring({})
 
-    assert len(gen.doc.tables) == template_tables - 3
-    assert not any(t.rows[0].cells[0].text.strip() == 'Name' for t in gen.doc.tables)
+    assert len(gen.doc.tables) == template_tables
+    assert sum(t.rows[0].cells[0].text.strip() == 'Name' for t in gen.doc.tables) == 2
     assert _body_after(gen.doc, N1_HEADING, 2) == n1_neighbours_before
     assert gen.stats['tables_populated'] == 0
     assert gen.stats['entries_inserted'] == 0
@@ -397,12 +397,9 @@ def test_mentoring_real_template_body_order():
     assert past[:2] == [('tbl', 'Carol C'), ('p', '')]
     assert past[2][1].startswith('Duplicate table below')
     assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'One mentee now leads a lab.')]
-    # Two mentee placeholders out, three mentee tables in; the N2 placeholder
-    # also disappears as a side effect -- `_fill_mentoring` calls
-    # `_fill_training_grants([])` first, and its removal is now
-    # unconditional-but-guarded (#529 round 2, F3), so it fires even though
-    # this test has no N2 entries.
-    assert len(gen.doc.tables) == template_tables - 3 + 3
+    # Two mentee placeholders out, three mentee tables in. With no N2
+    # entries the N2 placeholder stays (#1942).
+    assert len(gen.doc.tables) == template_tables - 2 + 3
     assert gen.stats['tables_populated'] == 3
     assert gen.stats['entries_inserted'] == 5
 
@@ -922,8 +919,7 @@ def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
     instruction -> tables, the template's own order (#529 round 2, F1;
     was between the heading and the instruction before this fix). A
     third, sparse entry renders as one plain line and adds no table.
-    No N3A/N3B/N4 entries here, so both mentee placeholders are also
-    removed on purpose (#845)."""
+    No N3A/N3B/N4 entries here, so both mentee placeholders stay (#1942)."""
     gen = _template_generator()
     template_tables = len(gen.doc.tables)
     entries_by_code = {
@@ -954,9 +950,9 @@ def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
     assert [row.cells[1].text for row in table_a.rows] == [
         'National Test Institute (T32-100) (Mentor)', 'Test Training Program A', '2018-2021']
     # N2's own placeholder out, two grant tables in; the sparse entry built
-    # none; both mentee placeholders also out (no mentees at all, #845).
-    assert len(gen.doc.tables) == template_tables - 1 - 2 + 2
-    assert not any(t.rows[0].cells[0].text.strip() == 'Name' for t in gen.doc.tables)
+    # none; both mentee placeholders stay (no mentees at all, #1942).
+    assert len(gen.doc.tables) == template_tables - 1 + 2
+    assert sum(t.rows[0].cells[0].text.strip() == 'Name' for t in gen.doc.tables) == 2
     assert gen.stats['tables_populated'] == 2
     assert gen.stats['entries_inserted'] == 3
 
@@ -1003,12 +999,10 @@ def test_n2_foreign_table_after_heading_survives_the_shape_guard():
     assert len(tables_by_label['Something else:'].rows) == 5
 
 
-def test_n2_real_template_no_entries_removes_placeholder_region_otherwise_unchanged():
-    """F3's removal policy: unconditional-but-guarded. With NO N2 entries at
-    all, the placeholder table is still removed (#836's real-pipeline
-    cascade already does this on every render, N2 content or not -- see the
-    PR description), but every other element in the MENTORING -> Mentees
-    body region is untouched at the XML level (#529 round 2, F3)."""
+def test_n2_real_template_no_entries_leaves_the_region_unchanged():
+    """With NO N2 entries the placeholder table stays (#1942, reversing
+    #529 round 2 F3's removal with no entries), and every element of the
+    MENTORING -> Mentees body region is untouched at the XML level."""
     from lxml import etree
 
     def region_elements(doc):
@@ -1029,7 +1023,7 @@ def test_n2_real_template_no_entries_removes_placeholder_region_otherwise_unchan
     after = region_elements(gen.doc)
     after_non_tables = [etree.tostring(el) for el in after if el.tag != qn('w:tbl')]
     assert after_non_tables == before_non_tables
-    assert not any(el.tag == qn('w:tbl') for el in after)
+    assert [etree.tostring(el) for el in after] == [etree.tostring(el) for el in before]
 
 
 def test_n1_n2_only_entries_still_render_when_no_n3_n4_content():

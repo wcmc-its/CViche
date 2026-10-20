@@ -60,6 +60,7 @@ import copy
 import re
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
@@ -341,12 +342,64 @@ _EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
 # the same fields-only kind. A period-only `additional_dates` list on P or R
 # is rendered (`with_extra_date_spans`, `further_date_spans`), so such a
 # warning can be a false alarm, as it can for Q1.
-# H and O stay out: H's `dates` / `additional_dates` (`honors._record_date`)
-# and O's `additional_dates` (`leadership.py`, `with_extra_date_spans`) are the
-# lists their sections do write, so on the corpus every H and O warning was a
-# false alarm (HZGJFM H 261/262, VNUAHA O 142 render the spans).
+# O stays out: its `additional_dates` (`leadership.py`, `with_extra_date_spans`)
+# is the list its section does write, so on the corpus every O warning was a
+# false alarm (VNUAHA O 142 renders the spans).
 _LIST_LOST_WHEN_KEPT_WHOLE = frozenset({
     'B1', 'D1', 'D2', 'D3', 'F1', 'I', 'P', 'Q1', 'Q2', 'Q3', 'R'})
+
+# #1187: codes whose declined list warns only when its records are not in the
+# rendered document (`DeclinedList`, `unrendered_list_warnings`). Each section
+# writes its row from the fields `_RENDERED_FIELDS` names, so a list left
+# whole is not written as a list. But when the parent holds no name of its
+# own the row falls back to the entry's text, which carries every record:
+# on the 238-CV render set every such list (15 entries in 8 CVs: N3B
+# `mentees` 6, M2A `sub_awards` / `sub_projects` 2, Q4C / Q4D `journals` 4,
+# and 3 S8 records lists, below) is in the document, so an unconditional
+# warning here would have been a false alarm every time.
+_LIST_CHECKED_AFTER_RENDER = frozenset({
+    'B2', 'C', 'F2', 'H', 'L3', 'M2A', 'M2B', 'M2C', 'M2D', 'N2', 'N3', 'N3A',
+    'N3B', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D'})
+
+# #1187: H's date cell (`honors._record_date`) writes a list of dates under
+# one of these keys -- the first one that holds any -- and only when the
+# record has none of `_H_OWN_DATE_KEYS` itself, so such a list is not a
+# declined list at all (HZGJFM H 261-263). Any other H record list left whole
+# (`awards`, or a date list beside the record's own `date`) is checked
+# after the render. Read by `sections/honors.py`, so this is its one
+# definition.
+H_DATE_LIST_KEYS = ('dates', 'additional_dates')
+_H_CODE = 'H'
+_H_OWN_DATE_KEYS = ('date', 'year', 'start_date', 'end_date')
+
+# #1187: codes whose stage-4 records list (`records_key`) is checked after the
+# render when `_stage4_children` declines it: the entry then renders its
+# scalars, which are the last record only. Not checked when stage 5 rendered
+# the whole entry (`_stage4_list_rendered_whole`): K1's 5c `formatted_text`
+# writes one line per record (`teaching._record_blocks`; DTFNOR, VGHNZD,
+# WYMVGU, ZDCXIV), and a 5d citation that writes 2+ records' titles prints
+# them all (GHCIXA S8 170 / 178). The warnings above already name
+# `records_key` for the codes they cover.
+_STAGE4_LIST_CHECKED_AFTER_RENDER = frozenset({
+    'K1', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'})
+
+# #1187: those codes are checked the same way for any other record list they
+# keep whole, such as an S3 book's `chapters_authored` beside its own title
+# (web204 S3 1802, 1814: the row prints the book and none of the chapters).
+_GENERIC_LIST_CHECKED_AFTER_RENDER = _LIST_CHECKED_AFTER_RENDER | _STAGE4_LIST_CHECKED_AFTER_RENDER
+
+# A record of a declined list is in the rendered document when one line of it
+# holds at least this share of the record's content words (`_tokens`;
+# `_record_in_document`). One line, not the document pooled: VYNARH's 19
+# reviewed journals, each named in its citations too, matched word by word
+# across the publication list while not one journal row was printed. A
+# record a line prints only in part (a reformatted date, a name 5b cleaned)
+# still clears half.
+_MIN_RECORD_SHARE_IN_LINE = 0.5
+
+# A word shorter than this is an initial ("D. B."), which names no one, so
+# `_distinct_record_words` does not count it as evidence for a record.
+_MIN_DISTINCT_WORD_LENGTH = 2
 
 # #1187: a code whose section writes none of an entry's text and none of a
 # record list left whole, so `_fields_carry_text` has nothing to protect: the
@@ -790,6 +843,25 @@ def _rejected_record_lists(fields: Mapping[str, Any],
             if _is_dict_list(value, _MIN_LIST_ITEMS) and not _record_list(value, schema)}
 
 
+def _entries_noun(count: int) -> str:
+    return 'entry' if count == 1 else 'entries'
+
+
+def _list_warning(code: str, key: str, count: int, message: str,
+                  stray: Sequence[str] = ()) -> dict[str, Any]:
+    """One sidecar WARN about the `key` lists of `count` `code` entries;
+    `message` follows the count and names no value, only key names."""
+    noun = _entries_noun(count)
+    return {
+        'check': REJECTED_LIST_CHECK,
+        'code': code,
+        'section': None,
+        'message': f"{count} {code} {noun}: {message}",
+        'evidence': [f"{code}.{key}: {count} {noun}", *stray[:_EVIDENCE_KEYS_SHOWN]],
+        'severity': _WARN_SEVERITY,
+    }
+
+
 def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> list[dict[str, Any]]:
     """One sidecar WARN per (code, list key), counting the entries and, when
     item keys outside the schema kept the list from fanning out, naming them.
@@ -801,19 +873,22 @@ def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> 
         stray = sorted({k for extra in cases for k in extra})
         why = (f"item keys outside the {code} schema: {', '.join(stray[:_EVIDENCE_KEYS_SHOWN])}"
                if stray else "the entry's text holds content its fields do not carry")
-        out.append({
-            'check': REJECTED_LIST_CHECK,
-            'code': code,
-            'section': None,
-            'message': (f"{len(cases)} {code} entr{'y' if len(cases) == 1 else 'ies'}: "
-                        f"`{key}` holds records that were not split into "
-                        f"separate rows ({why}); a record may be missing from "
-                        "the output"),
-            'evidence': [f"{code}.{key}: {len(cases)} entr{'y' if len(cases) == 1 else 'ies'}",
-                         *stray[:_EVIDENCE_KEYS_SHOWN]],
-            'severity': _WARN_SEVERITY,
-        })
+        out.append(_list_warning(
+            code, key, len(cases),
+            f"`{key}` holds records that were not split into separate rows ({why}); "
+            "a record may be missing from the output", stray))
     return out
+
+
+def _stage4_decline_warnings(declined: Mapping[tuple[str, str], int]) -> list[dict[str, Any]]:
+    """One sidecar WARN per (code, records key) for the entries whose
+    declined stage-4 records list is not all in the document (#1187)."""
+    return [_list_warning(
+        code, key, count,
+        f"`{key}` holds records that were not split into separate rows (stage 4's "
+        "records were kept whole and only the last one renders); a record may be "
+        "missing from the output")
+        for (code, key), count in sorted(declined.items())]
 
 
 def _unlisted_year_warnings(unlisted: Mapping[tuple[str, str], int]) -> list[dict[str, Any]]:
@@ -821,20 +896,11 @@ def _unlisted_year_warnings(unlisted: Mapping[tuple[str, str], int]) -> list[dic
     without the text coverage test (`_NO_TEXT_COVERAGE_CODES`) while their text
     names a year no record holds: a dated record stage 4 left out of the list
     (#1187). Not raised for stage 4's own records list."""
-    out = []
-    for (code, key), count in sorted(unlisted.items()):
-        noun = 'entry' if count == 1 else 'entries'
-        out.append({
-            'check': REJECTED_LIST_CHECK,
-            'code': code,
-            'section': None,
-            'message': (f"{count} {code} {noun}: `{key}` was split into separate "
-                        "rows, but the entry's text names a year no record "
-                        "holds; a record may be missing from the output"),
-            'evidence': [f"{code}.{key}: {count} {noun}"],
-            'severity': _WARN_SEVERITY,
-        })
-    return out
+    return [_list_warning(
+        code, key, count,
+        f"`{key}` was split into separate rows, but the entry's text names a "
+        "year no record holds; a record may be missing from the output")
+        for (code, key), count in sorted(unlisted.items())]
 
 
 def _lists_a_year_no_record_holds(entry: Mapping[str, Any],
@@ -843,6 +909,18 @@ def _lists_a_year_no_record_holds(entry: Mapping[str, Any],
     children's fields hold (#1187)."""
     uncovered = _uncovered_tokens(entry, [child['extracted_fields'] for child in children])
     return any(_YEAR_TOKEN_RE.fullmatch(token) for token in uncovered or ())
+
+
+def _lists_an_unlisted_year(entry: Mapping[str, Any], children: Sequence[Mapping[str, Any]] | None,
+                            records_key: str | None) -> bool:
+    """Whether an entry fanned out of a generic list without the coverage test
+    while its text names a year no child holds. Only a generic list: stage
+    4's own records list reads its years from the reply, and B1 attendance
+    ranges there are not lost records."""
+    return bool(children) and entry.get('taxonomy_code') in _NO_TEXT_COVERAGE_CODES \
+        and FANNED_OUT_FROM in children[0] \
+        and children[0][FANNED_OUT_FROM]['key'] != records_key \
+        and _lists_a_year_no_record_holds(entry, children)
 
 
 def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> dict[str, list[str]]:
@@ -854,6 +932,158 @@ def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> 
         return {}
     return {**{_path_name(path): [] for path in _record_keys(fields, schema)},
             **_rejected_record_lists(fields, schema)}
+
+
+def _h_renders_list(fields: Mapping[str, Any], key: str) -> bool:
+    """Whether H's date cell writes the list at `key` (`H_DATE_LIST_KEYS`):
+    it is the first of those keys holding a value, every item of it is
+    dates only, and the record has no date of its own (#1187)."""
+    if any(not _is_blank(fields.get(own)) for own in _H_OWN_DATE_KEYS):
+        return False
+    first = next((name for name in H_DATE_LIST_KEYS if not _is_blank(fields.get(name))), None)
+    if key != first:
+        return False
+    items = fields[key]
+    return isinstance(items, list) and all(
+        isinstance(item, Mapping) and all(_is_date_key(name) for name in item)
+        for item in items)
+
+
+@dataclass(frozen=True)
+class DeclinedList:
+    """A record list fan-out kept whole for a `_GENERIC_LIST_CHECKED_AFTER_RENDER`
+    code, or the stage-4 records list of a `_STAGE4_LIST_CHECKED_AFTER_RENDER`
+    one (#1187). Whether its records reached the document is known only
+    after the render, so stage 6 hands the rendered text to
+    `unrendered_list_warnings`, which warns for the lists some record of
+    which is not there."""
+
+    code: str
+    key: str
+    # Item keys outside the code's schema (key names, never values).
+    stray: tuple[str, ...]
+    records: tuple[Mapping[str, Any], ...]
+    # True for stage 4's own records list (`records_key`).
+    stage4: bool = False
+
+
+def _checked_declined_lists(entry: Mapping[str, Any], schema: frozenset[str],
+                            records_key: str | None) -> list[DeclinedList]:
+    """The declined record lists of an entry `_fan_out_entry` returned None
+    for, when its code is checked after the render: every one, less the
+    date list H's date cell writes (`_h_renders_list`) and, for a
+    `_STAGE4_LIST_CHECKED_AFTER_RENDER` code, stage 4's records list, which
+    `_declined_stage4_list` checks."""
+    code = str(entry.get('taxonomy_code'))
+    if code not in _GENERIC_LIST_CHECKED_AFTER_RENDER:
+        return []
+    fields = entry.get('extracted_fields')
+    out = []
+    for name, stray in _declined_record_lists(entry, schema).items():
+        if code == _H_CODE and _h_renders_list(fields, name):
+            continue
+        if code in _STAGE4_LIST_CHECKED_AFTER_RENDER and name == records_key:
+            continue
+        records = _list_at(fields, tuple(name.split(_PATH_SEPARATOR)))
+        out.append(DeclinedList(code, name, tuple(stray), tuple(records)))
+    return out
+
+
+def _stage4_list_rendered_whole(fields: Mapping[str, Any],
+                                records: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether stage 5 rendered every record of a stage-4 records list in
+    the entry's own output: 5c's `formatted_text`, or a 5d citation that
+    writes two or more of the records' titles (#1187)."""
+    return bool(fields.get(_FORMATTED_TEXT_KEY)) or len(_cited_records(fields, records)) > 1
+
+
+def _declined_stage4_list(entry: Mapping[str, Any], children: Sequence[Mapping[str, Any]] | None,
+                          records_key: str | None) -> DeclinedList | None:
+    """The stage-4 records list of a `_STAGE4_LIST_CHECKED_AFTER_RENDER`
+    entry that `_stage4_children` declined (no child is its last record)
+    and stage 5 did not render whole, or None (#1187)."""
+    code = str(entry.get('taxonomy_code'))
+    if records_key is None or code not in _STAGE4_LIST_CHECKED_AFTER_RENDER:
+        return None
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping) or not _is_dict_list(fields.get(records_key)):
+        return None
+    if children is not None and any(LAST_STAGE4_RECORD in child for child in children):
+        return None
+    records = fields[records_key]
+    if _stage4_list_rendered_whole(fields, records):
+        return None
+    return DeclinedList(code, records_key, (), tuple(records), stage4=True)
+
+
+def _distinct_record_words(records: Sequence[Mapping[str, Any]]) -> list[frozenset[str]]:
+    """Each record's content words (`_tokens`: dates read as their year), less
+    one-letter initials and, in a list of two or more, the words every record
+    holds: what tells the record apart from its siblings and from other
+    entries naming the same people. web204 S3 1814's chapters all carry
+    "Allison, D. B.", whose words, with a coauthor's, vouched for every
+    chapter from the publication list while none was printed (#1187)."""
+    words = [frozenset(_tokens(_leaf_text(record))) for record in records]
+    shared = frozenset.intersection(*words) if len(words) > 1 else frozenset()
+    return [frozenset(word for word in own - shared if len(word) >= _MIN_DISTINCT_WORD_LENGTH)
+            for own in words]
+
+
+def _field_count(record: Mapping[str, Any]) -> int:
+    """How many fields of `record` hold a value."""
+    return sum(1 for value in record.values() if not _is_blank(value))
+
+
+def _row_windows(table_rows: Sequence[Sequence[frozenset[str]]], size: int) -> list[frozenset[str]]:
+    """The words of every run of `size` consecutive rows of each table: a
+    block that writes a record one field per row (a grant's, a mentee's;
+    web26 M2A) spans no more rows than the record has fields."""
+    return [frozenset().union(*rows[i:i + size]) for rows in table_rows for i in range(len(rows))]
+
+
+def _record_in_document(words: frozenset[str], line_words: Sequence[frozenset[str]]) -> bool:
+    """Whether one rendered line holds at least `_MIN_RECORD_SHARE_IN_LINE` of
+    a record's distinct words (`_distinct_record_words`). A record with no
+    such word has nothing to lose."""
+    return not words or any(len(words & line) >= _MIN_RECORD_SHARE_IN_LINE * len(words)
+                            for line in line_words)
+
+
+def _list_in_document(found: DeclinedList, line_words: Sequence[frozenset[str]],
+                      table_rows: Sequence[Sequence[frozenset[str]]]) -> bool:
+    """Whether every record of `found` is in the document: on one rendered
+    line, or in a run of table rows no longer than its field count."""
+    windows: dict[int, list[frozenset[str]]] = {}
+    for record, words in zip(found.records, _distinct_record_words(found.records), strict=True):
+        size = max(1, _field_count(record))
+        if size not in windows:
+            windows[size] = _row_windows(table_rows, size)
+        if not _record_in_document(words, [*line_words, *windows[size]]):
+            return False
+    return True
+
+
+def unrendered_list_warnings(declined: Sequence[DeclinedList], document_lines: Sequence[str],
+                             table_rows: Sequence[Sequence[str]] = ()) -> list[dict[str, Any]]:
+    """The render warnings (`REJECTED_LIST_CHECK`) for the `declined` lists a
+    record of which the rendered document does not hold -- in no line of
+    `document_lines`, and in no run of rows of `table_rows` (each table's
+    rows' text) -- one per (code, list key), as `fan_out_multi_record_entries`
+    raises for the codes it warns on directly (#1187)."""
+    if not declined:
+        return []
+    line_words = [frozenset(_tokens(line)) for line in document_lines]
+    row_words = [[frozenset(_tokens(row)) for row in rows] for rows in table_rows]
+    rejected: dict[tuple[str, str], list[list[str]]] = {}
+    stage4: Counter[tuple[str, str]] = Counter()
+    for found in declined:
+        if _list_in_document(found, line_words, row_words):
+            continue
+        if found.stage4:
+            stage4[(found.code, found.key)] += 1
+        else:
+            rejected.setdefault((found.code, found.key), []).append(list(found.stray))
+    return [*_rejection_warnings(rejected), *_stage4_decline_warnings(stage4)]
 
 
 def _renders_something(record: Mapping[str, Any], rendered: frozenset[str]) -> bool:
@@ -1002,13 +1232,20 @@ def _citation_record(fields: Mapping[str, Any],
     """The index of the one record whose title stage 5d's citation writes,
     or None: no citation, no record's title in it, or several (a citation
     of the whole list, which no single record may carry)."""
+    hits = _cited_records(fields, records)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _cited_records(fields: Mapping[str, Any],
+                   records: Sequence[Mapping[str, Any]]) -> list[int]:
+    """The indexes of the records whose title stage 5d's citation writes;
+    empty when there is no citation."""
     citation = _title_words(fields.get(_FORMATTED_CITATION_KEY))
     if not citation:
-        return None
+        return []
     titles = [_title_words(next((record[key] for key in _TITLE_KEYS if record.get(key)), ''))
               for record in records]
-    hits = [i for i, title in enumerate(titles) if title and f' {title} ' in f' {citation} ']
-    return hits[0] if len(hits) == 1 else None
+    return [i for i, title in enumerate(titles) if title and f' {title} ' in f' {citation} ']
 
 
 def _fan_out_stage4_records(entry: Mapping[str, Any], schema: frozenset[str],
@@ -1119,7 +1356,8 @@ def fan_out_multi_record_entries(
         entries: Sequence[Mapping[str, Any]],
         schema_fields: Mapping[str, Mapping[str, Any]],
         warnings: list[dict[str, Any]] | None = None,
-        records_key: str | None = None) -> list[dict[str, Any]]:
+        records_key: str | None = None,
+        declined: list[DeclinedList] | None = None) -> list[dict[str, Any]]:
     """`entries` with every multi-record entry replaced, in place and in order,
     by one child per record. Everything else is returned untouched.
 
@@ -1133,7 +1371,12 @@ def fan_out_multi_record_entries(
     refused it, or a later guard declined the entry -- is not dropped silently
     (#1187): for a code in `_LIST_LOST_WHEN_KEPT_WHOLE`, when `warnings` is
     given, one render-warning dict per (code, list path) is appended to it
-    (`REJECTED_LIST_CHECK`).
+    (`REJECTED_LIST_CHECK`), as it is for a B1 list whose text names a year
+    no record holds (`_lists_an_unlisted_year`). For a code in
+    `_GENERIC_LIST_CHECKED_AFTER_RENDER`, and a declined stage-4 records list of a
+    `_STAGE4_LIST_CHECKED_AFTER_RENDER` code, when `declined` is given, a
+    `DeclinedList` is appended to it instead, for the caller to check
+    against the rendered document (`unrendered_list_warnings`).
 
     `records_key` names the list stage 4 keeps when the LLM returned several
     records for one entry (`stage4.schemas.STAGE4_RECORDS_KEY`); None splits
@@ -1146,15 +1389,17 @@ def fan_out_multi_record_entries(
         code = entry.get('taxonomy_code')
         schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
         children = _fan_out_entry(entry, schema, records_key)
-        # Only a generic list: stage 4's own records list reads its years from
-        # the reply, and B1 attendance ranges there are not lost records.
-        if (children and code in _NO_TEXT_COVERAGE_CODES and FANNED_OUT_FROM in children[0]
-                and children[0][FANNED_OUT_FROM]['key'] != records_key
-                and _lists_a_year_no_record_holds(entry, children)):
+        if _lists_an_unlisted_year(entry, children, records_key):
             unlisted[(str(code), children[0][FANNED_OUT_FROM]['key'])] += 1
         if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
             for key, stray in _declined_record_lists(entry, schema).items():
                 rejected.setdefault((str(code), key), []).append(stray)
+        if declined is not None:
+            if children is None:
+                declined.extend(_checked_declined_lists(entry, schema, records_key))
+            stage4_list = _declined_stage4_list(entry, children, records_key)
+            if stage4_list is not None:
+                declined.append(stage4_list)
         out.extend(children if children is not None else [entry])
     if warnings is not None:
         warnings.extend(_rejection_warnings(rejected))

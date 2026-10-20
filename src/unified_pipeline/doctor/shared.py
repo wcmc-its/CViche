@@ -30,6 +30,7 @@ from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
 # re-export below (`lints/render.py`, `lints/extraction.py`, `run_doctor.py`
 # import them from here unchanged); `_RENDER_TOKEN_RE` is also used directly
 # by `_long_word_tokens` below.
+from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     _RENDER_TOKEN_RE,
     RENDER_PIECE_MIN_CHARS,
@@ -125,8 +126,11 @@ _SECTION_HEADER_RE = re.compile(r"^[A-Z]\.\s+\S")
 
 def _output_section_header(text: str) -> str | None:
     """Normalized section name when a paragraph is a WCM output section
-    header (either form above), else None."""
+    header (either form above), else None. Stage 6's "N/A" line in an empty
+    template slot (#1942) is all caps too, and is no header."""
     stripped = str(text or "").strip()
+    if stripped == NOT_APPLICABLE:
+        return None
     if _SECTION_HEADER_RE.match(stripped):
         return norm(re.sub(r"^[A-Z]\.\s+", "", stripped))
     if (3 <= len(stripped) <= 60 and stripped[0].isalpha()

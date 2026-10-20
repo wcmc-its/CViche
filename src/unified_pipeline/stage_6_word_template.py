@@ -89,13 +89,16 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     deduplicate_entries,
     recovered_row_already_rendered,
 )
+from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE, TemplateSnapshot, fill_empty_slots, snapshot_template
 from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
+    DeclinedList,
     fan_out_multi_record_entries,
     record_scope,
     record_text,
+    unrendered_list_warnings,
 )
 
 # Every name below is re-exported from this module by being imported here: it is
@@ -123,6 +126,7 @@ from unified_pipeline.stage6.formatting import (  # noqa: F401
     format_date_range,
     is_cviche_box,
     normalize_iso_dates_in_text,
+    plain_entry_left_twips,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: F401
     _ALL_PHONE_SLOT_KEYS,
@@ -655,6 +659,15 @@ OVERFLOW_OTHER_MIN_CHARS = 1000
 # 64 under Academic Appointments, Current Funding, Leadership and Clinical
 # Innovations, with its Appendix line cut mid-word).
 _NO_OVERFLOW_CODE = 'M1'
+# Sections whose entries carry no bullet (#1943, WCM reviewers): K Educational
+# Contributions and L Clinical Practice, Innovation and Leadership. Their own
+# writers pass bulleted=False; the recovery and overflow writers read this.
+UNBULLETED_CODE_PREFIXES = ('K', 'L')
+
+
+def _renders_unbulleted(taxonomy_code: str) -> bool:
+    """Whether an entry of `taxonomy_code` is written without a bullet."""
+    return taxonomy_code.startswith(UNBULLETED_CODE_PREFIXES)
 
 
 def _has_formatted_text(entry: Mapping[str, Any]) -> bool:
@@ -1625,6 +1638,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
 
+        # Record lists fan-out kept whole that `_validate_output` checks
+        # against the rendered document (#1187). Set by
+        # `_group_entries_by_code`, declared here for typing/reuse.
+        self._declined_lists: list[DeclinedList] = []
+
         # Grant entries `_create_grant_table` declined as too sparse (#839),
         # and mentee entries named only by an award title (#1702) --
         # appended to `unmapped_entries` at `generate()`'s Appendix fill so
@@ -1979,9 +1997,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         precollegiate_moved: list[object] = []
         bare_mentees_resolved: list[tuple[object, str]] = []
         leadership_moved: list[tuple[object, tuple[int, int]]] = []
+        self._declined_lists = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
-            records_key=STAGE4_RECORDS_KEY)
+            records_key=STAGE4_RECORDS_KEY, declined=self._declined_lists)
         mentee_siblings = _mentee_sibling_codes(entries)
         coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
@@ -2236,8 +2255,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
             self._dedup_grouped_entries(entries_by_code)
 
-        # Load template
+        # Load template, and record it as shipped: which slots end up empty is read against this (#1942).
         self.doc = Document(self.template_path)
+        template_snapshot = snapshot_template(self.doc.element.body)
 
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
@@ -2337,21 +2357,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # inserts count as rendered) -- both bullet leftover content into the
         # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
         recovered_appendix_lines = self._recover_appendix_lines(written_appendix_entries, pre_dedup_entries_by_code, cv_owner)
-
-        # Finalize comments (add to comments.xml)
-        self._finalize_comments()
-
-        # Apply vertical middle alignment to ALL table cells
-        self._apply_vertical_alignment_to_all_tables()
-
-        # Apply table styling (header background color, borders)
-        self._apply_table_styling_to_all_tables()
-
-        # Drop the WCM template's gray instruction box last, after all
-        # content-search-based filling is done, so table removal can't shift
-        # anything the fill logic relied on.
-        if self.strip_template_instructions:
-            self._remove_instruction_box()
+        self._finish_document(template_snapshot)
 
         # Determine output path
         if output_path is None:
@@ -2383,6 +2389,30 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             self._log_generation_summary(output_path)
 
         return output_path
+
+    def _finish_document(self, template_snapshot: TemplateSnapshot) -> None:
+        """The passes over the whole document once every line is placed: N/A in
+        each template slot nothing filled, then comments, table formatting and
+        the instruction box."""
+        # Last content written, so a slot something above fills never says N/A (#1942).
+        filled = fill_empty_slots(self.doc.element.body, template_snapshot)
+        logger.info("Empty template slots marked %s: %d paragraph, %d table",
+                    NOT_APPLICABLE, filled.paragraphs, filled.tables)
+
+        # Finalize comments (add to comments.xml)
+        self._finalize_comments()
+
+        # Apply vertical middle alignment to ALL table cells
+        self._apply_vertical_alignment_to_all_tables()
+
+        # Apply table styling (header background color, borders)
+        self._apply_table_styling_to_all_tables()
+
+        # Drop the WCM template's gray instruction box last, after all
+        # content-search-based filling is done, so table removal can't shift
+        # anything the fill logic relied on.
+        if self.strip_template_instructions:
+            self._remove_instruction_box()
 
     def _log_generation_summary(self, output_path: str) -> None:
         """The verbose end-of-render stats block, lifted out of `generate`
@@ -2717,7 +2747,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: dict | None = None,
                                 add_blank_before: bool = False,
                                 list_level: int | None = None,
-                                entry_sibling_paras: list[Paragraph] | None = None) -> Paragraph | None:
+                                entry_sibling_paras: list[Paragraph] | None = None,
+                                bulleted: bool = True) -> Paragraph | None:
         """Insert a SINGLE bulleted entry paragraph as a real Word list item.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -2739,6 +2770,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 to weigh everything the entry rendered rather than this single
                 paragraph (#476 review). A caller that renders an entry as one
                 paragraph leaves it None and the check is unchanged.
+            bulleted: False writes the entry without a bullet, at the indent
+                the bullet's text would have had (`_apply_plain_list_indent`).
+                The teaching and clinical-practice writers pass False (#1943).
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -2758,7 +2792,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         body = _clean_inline_tabs(_strip_taxonomy_code(text))
         run = entry_para.add_run(body)
         _set_font(run)
-        self._apply_list_bullet(entry_para, level=list_level if list_level is not None else 0)
+        level = list_level if list_level is not None else 0
+        if bulleted:
+            self._apply_list_bullet(entry_para, level=level)
+        else:
+            self._apply_plain_list_indent(entry_para, level=level)
 
         if entry:
             self._add_entry_comments(entry_para, entry,
@@ -2779,11 +2817,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         This produces the closed circle -> open circle -> closed square hierarchy
         with proper margin indentation handled entirely by Word.
         """
-        # Set the List Paragraph style
-        try:
-            para.style = self.doc.styles['List Paragraph']
-        except KeyError:
-            pass  # Style not found — numbering alone will still work
+        self._set_list_paragraph_style(para)
 
         # Add numPr to paragraph properties
         pPr = para._p.get_or_add_pPr()
@@ -2801,6 +2835,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         numPr.append(ilvl)
         numPr.append(numId)
         pPr.append(numPr)
+
+    def _apply_plain_list_indent(self, para: Paragraph, level: int = 0) -> None:
+        """Format `para` as an unbulleted list item (#1943): the List Paragraph
+        style a bullet gets, so spacing matches, but no `w:numPr`, and a left
+        indent equal to where `_apply_list_bullet`'s level puts its text."""
+        self._set_list_paragraph_style(para)
+        para.paragraph_format.left_indent = Twips(plain_entry_left_twips(level))
+
+    def _is_entry_paragraph(self, para: Paragraph) -> bool:
+        """A bullet in either form `_is_bullet_paragraph` reads, or an entry
+        `_insert_bulleted_entry` wrote without one (#1943), which carries
+        neither a glyph nor `w:numPr` and so is invisible to that test."""
+        return _is_bullet_paragraph(para) or para._p in self._bullet_paras
+
+    def _set_list_paragraph_style(self, para: Paragraph) -> None:
+        """Give `para` the template's List Paragraph style, when it has one."""
+        try:
+            para.style = self.doc.styles['List Paragraph']
+        except KeyError:
+            pass  # Style not found — numbering or the explicit indent still applies
 
     @staticmethod
     def _get_wcm_section_header(taxonomy_code: str) -> str:
@@ -3379,7 +3433,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     if header_idx is not None:
                         section_end_idx = self._find_section_end_paragraph_idx(header_idx)
                         if section_end_idx is not None:
-                            overflow_para = self._insert_overflow_bullet(section_end_idx, original_text)
+                            overflow_para = self._insert_overflow_bullet(
+                                section_end_idx, original_text,
+                                bulleted=not _renders_unbulleted(taxonomy_code))
                             if overflow_para:
                                 self._add_word_comment(
                                     overflow_para,
@@ -3401,7 +3457,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if section_end_idx is not None:
                 # Insert overflow bullet just before the next section header
-                overflow_para = self._insert_overflow_bullet(section_end_idx, original_text)
+                overflow_para = self._insert_overflow_bullet(
+                    section_end_idx, original_text, bulleted=not _renders_unbulleted(taxonomy_code))
                 if overflow_para:
                     # Add explanatory comment (blue text + comment = reviewer signal)
                     self._add_word_comment(
@@ -3424,7 +3481,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Last section or lookup failed — fall back to appendix, keep original in place
                 self._route_overflow_to_appendix(entry, coverage_pct)
 
-    def _insert_overflow_bullet(self, insert_idx: int, text: str) -> Paragraph | None:
+    def _insert_overflow_bullet(self, insert_idx: int, text: str,
+                                bulleted: bool = True) -> Paragraph | None:
         """Insert overflow content as tracked-change bullet(s) preserving original structure.
 
         Each tab-separated segment from the original CV becomes its own paragraph,
@@ -3434,6 +3492,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
           - Label segments ending with ':': ilvl=1 (section labels)
           - Content after a label: ilvl=2 (detail content)
           - Everything else: ilvl=1 (dates, institution context)
+
+        `bulleted=False` writes the same levels without bullets, on the indent
+        grid of the section's own unbulleted entries (#1943).
 
         Returns the first created paragraph, or None if insertion failed.
         """
@@ -3482,18 +3543,23 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             first_para = None
             for idx, (seg_text, level) in enumerate(reversed(list(zip(clean_segments, levels)))):
                 para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-                self._apply_list_bullet(para, level=level)
+                if bulleted:
+                    self._apply_list_bullet(para, level=level)
 
-                # Override indentation so ilvl=0 bullet sits at the left margin.
-                pPr = para._p.get_or_add_pPr()
-                existing_ind = pPr.find(qn('w:ind'))
-                if existing_ind is not None:
-                    pPr.remove(existing_ind)
-                ind = OxmlElement('w:ind')
-                left = INDENT_PER_LEVEL * (level + 1)
-                ind.set(qn('w:left'), str(left))
-                ind.set(qn('w:hanging'), str(HANGING))
-                pPr.append(ind)
+                    # Override indentation so ilvl=0 bullet sits at the left margin.
+                    pPr = para._p.get_or_add_pPr()
+                    existing_ind = pPr.find(qn('w:ind'))
+                    if existing_ind is not None:
+                        pPr.remove(existing_ind)
+                    ind = OxmlElement('w:ind')
+                    left = INDENT_PER_LEVEL * (level + 1)
+                    ind.set(qn('w:left'), str(left))
+                    ind.set(qn('w:hanging'), str(HANGING))
+                    pPr.append(ind)
+                else:
+                    self._apply_plain_list_indent(para, level=level)
+                    # No bullet to recognise it by: register it (#1943).
+                    self._bullet_paras.add(para._p)
 
                 run = para.add_run(seg_text)
                 _set_font(run)
@@ -3788,7 +3854,12 @@ Now analyze the text above:"""
 
             run = new_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
-            self._apply_list_bullet(new_para, level=0)
+            if _renders_unbulleted(taxonomy_code):
+                self._apply_plain_list_indent(new_para, level=0)
+                # No bullet to recognise it by: register it (#1943).
+                self._bullet_paras.add(new_para._p)
+            else:
+                self._apply_list_bullet(new_para, level=0)
 
             # Add explanatory comment
             self._add_word_comment(
@@ -3898,7 +3969,8 @@ Now analyze the text above:"""
         `_subpoint_lines` already holds the appointment-title duties the
         positions writer made sub-points (`_add_title_duties`); they join the
         haystack, so the same duties are not planned again from the entry's
-        text."""
+        text. The row-receipt ledger says which rows each entry wrote: a
+        degree's prose goes only under its own (`supplementary._own_degree_rows`)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(
@@ -3908,7 +3980,8 @@ Now analyze the text above:"""
         candidates = list(supplementary.anchor_candidates(self.doc, appendix))
         planned = supplementary.plan_subpoints(entries_by_code, haystack, candidates,
                                                self._subpoint_section_spans(),
-                                               self._subpoint_excluded_tables)
+                                               self._subpoint_excluded_tables,
+                                               self._row_receipts.elements_for)
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:
@@ -4873,7 +4946,7 @@ Now analyze the text above:"""
                 if not para_text:
                     continue
                 # Check if this looks like a combined entry (semicolon-separated list)
-                if _is_bullet_paragraph(para) and para_text.count(';') > 3:
+                if self._is_entry_paragraph(para) and para_text.count(';') > 3:
                     issues.append({
                         "check": "semicolon_fused_bullets",
                         "code": code,
@@ -4917,7 +4990,7 @@ Now analyze the text above:"""
                 para_text = para.text.strip()
                 if 'CLINICAL PRACTICE' in para_text.upper():
                     break
-                if _is_bullet_paragraph(para) and len(para_text) > 5:
+                if self._is_entry_paragraph(para) and len(para_text) > 5:
                     has_visible_bullets = True
                     break
             if not has_visible_bullets:
@@ -4929,7 +5002,22 @@ Now analyze the text above:"""
                     "evidence": [],
                 })
 
+        # Check 4: a record list fan-out kept whole, a record of which is not
+        # in the document (#1187, stage6/fan_out.py `DeclinedList`).
+        if self._declined_lists:
+            issues.extend(unrendered_list_warnings(
+                self._declined_lists, self._rendered_output_lines(include_tracked_insertions=True),
+                self._declined_list_table_rows()))
+
         return issues
+
+    def _declined_list_table_rows(self) -> list[list[str]]:
+        """Each table's rows' text, nested tables included, for Check 4: a
+        grant or mentee block writes one record one field per row, so no one
+        line holds it (#1187: web26's M2A sub-awards)."""
+        return [[' '.join(t.text or '' for t in row.iter(qn('w:t')))
+                 for row in table._tbl.iterchildren(qn('w:tr'))]
+                for table in self.doc.tables]
 
 
 def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = True,

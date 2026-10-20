@@ -101,7 +101,7 @@ except ImportError as exc:
 
 from unified_pipeline.core.render_check import entry_lines
 
-from ..fan_out import fallback_text as record_fallback_text, is_split_record
+from ..fan_out import H_DATE_LIST_KEYS, fallback_text as record_fallback_text, is_split_record
 from ..formatting import (
     _set_font,
     format_date_for_section,
@@ -505,7 +505,9 @@ def _field_text(fields: Mapping, *names: str) -> str:
 # Keys outside the H schema (whose only date field is `date`) that stage 4
 # writes an award's several dates under: a list of years or of
 # `{start_date, end_date}` spans, or one string of them (#1245, EBYSBC E15).
-_DATE_LIST_KEYS = ('dates', 'additional_dates')
+# Defined in fan_out, which does not check a declined list this cell
+# writes against the document (#1187).
+_DATE_LIST_KEYS = H_DATE_LIST_KEYS
 
 # What separates the dates in a string-valued `dates` ("2019; 2020; 2021").
 _DATE_LIST_SPLIT_RE = re.compile(r'[;,]')

@@ -346,6 +346,17 @@ Lints, ranked by the severity of the failure class they catch:
                           mentee's 'Current position:' opening the next
                           mentee's entry (IEUPKK 438/444/466/467). WARN.
                           Reads stage 4 only
+14az. record_cut_in_two   one record of a list stage 2 cut into two
+                          neighbouring entries with no label to read
+                          (#1226), each rendered as a partial record: two
+                          neighbours of one code family that between them
+                          fill the fields the list's other records carry
+                          and share at most one (IZABPD 832, WWSEWY 193), or
+                          a sentence after a whole record filed as a record
+                          of its own (XYXIQJ 193, 246). WARN, one per
+                          fragment entry; entries grant_boundary or
+                          record_boundary report are left to them. Reads
+                          stage 4 only
 14ac. citation_field_dropped a publication whose rendered bibliography
                           line leaves out a stage-4 field that identifies it:
                           its title, on no bibliography line at all (an
@@ -669,6 +680,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_record_boundary,
     lint_role_consistency,
     lint_span_count,
+    lint_record_cut_in_two,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -917,6 +929,7 @@ KNOWN_LINTS = (
     "identical_rendered_rows",
     "split_child_unsourced",
     "record_boundary",
+    "record_cut_in_two",
     "citation_field_dropped",
     "group_header_context",
     "orphaned_fragments",
@@ -1152,6 +1165,10 @@ LINT_PREVALENCE = {
     # the _autopsy_artifacts batches), measured 2026-10-07. Reads stage 4
     # only. Same mixed-corpus caveat as above.
     "record_boundary": 0.033,
+    # record_cut_in_two (#1226, CUT-1 in doctor/PRECISION.md): 28 of 416 runs,
+    # the 197 labelled stored runs (13) and 219 held-out prod runs with
+    # stage-4 output (15), measured 2026-10-19. Reads stage 4 only.
+    "record_cut_in_two": 0.067,
     # citation_field_dropped (X6 KJJVVO-10, UXBHHF-20, VPMMFM-08; X6-cite in
     # doctor/PRECISION.md): 18 of the 111 runs under analysis/ with a stage-4
     # artifact and a stage-6 docx, each over its stored docx, measured
@@ -1842,6 +1859,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("split_child_unsourced", lint_split_child_unsourced, ("stage_4",),
              optional=("table_rows",)),
     LintSpec("record_boundary", lint_record_boundary, ("stage_4",)),
+    LintSpec("record_cut_in_two", lint_record_cut_in_two, ("stage_4",)),
     LintSpec("citation_field_dropped", lint_citation_field_dropped, ("stage_4", "blocks")),
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),

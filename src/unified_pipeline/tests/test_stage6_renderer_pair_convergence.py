@@ -382,6 +382,12 @@ def _has_numbering(para):
     return pPr is not None and pPr.find(qn("w:numPr")) is not None
 
 
+def _is_entry(gen, para):
+    """A paragraph the entry writer inserted: since #1943 a clinical entry has
+    no numbering, so numbering no longer tells an entry from the spacer."""
+    return para._p in gen._bullet_paras
+
+
 def _soft_breaks(para):
     return len(para._p.findall(f".//{qn('w:br')}"))
 
@@ -411,7 +417,7 @@ class TestL2FallbackMatchesL1AndL3:
 
         # add_blank_before inserts one spacer, then three list paragraphs
         paras = _list_paragraphs_after(gen, "Clinical Innovations", 4)
-        bullets = [p for p in paras if _has_numbering(p)]
+        bullets = [p for p in paras if _is_entry(gen, p)]
         assert [p.text for p in bullets] == [
             "Developed a new triage protocol",
             "Piloted it at NYP Weill Cornell",
@@ -428,7 +434,7 @@ class TestL2FallbackMatchesL1AndL3:
         # Rejected, not populated: the forced funding table keeps its one row
         assert len(gen._funding_table.rows) == 1
         paras = _list_paragraphs_after(gen, "Clinical Innovations", 2)
-        bullets = [p for p in paras if _has_numbering(p)]
+        bullets = [p for p in paras if _is_entry(gen, p)]
         assert [p.text for p in bullets] == ["Piloted a new triage protocol"]
 
     def test_l2_fallback_renders_exactly_like_l1(self):
