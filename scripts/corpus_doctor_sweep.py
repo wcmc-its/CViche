@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 SUFFIX_DIR = {
     "_segmented.json": "stage_1a_segmentation",
     "_entries.json": "stage_2_entry_extraction",
+    "_header_taxonomy.json": "stage_3a_header_mappings",
     "_classified.json": "stage_3b_classified_entries",
     "_fields.json": "stage_4_field_extraction",
     "_enriched.json": "stage_5_enrichment",

@@ -68,6 +68,22 @@ _OPEN_PERIOD = re.compile(r"\b(present|current|ongoing|to\s+date)\b", re.I)
 # "– May 2023". Used only when there is no open-period marker.
 _END_DATED = re.compile(r"[-–—]\s*(?:[A-Z][a-z]{2,8}\.?\s+)?(?:19|20)\d{2}\b")
 
+# Every four-digit year the text states.
+_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+# Anything that may leave a year open: "since 2015", "from 2015", an open
+# word ("2015 onwards", "2015 till date", "2015 (continuing)", "2015 to
+# now", "currently"), or a dash after a year that no year follows ("2015 -",
+# "2015 - Mentor for ..."). Looser than an open range on purpose: a false
+# match keeps the entry N3A, as it was coded before the lone-past-year rule
+# below, and only a clean miss moves it. Read only when no range is
+# end-dated, so the end-dated rule above stays as it was.
+_MAY_BE_OPEN = re.compile(
+    r"\b(?:since|from|onwards?|now|today|currently|continu\w*|pres|active|still|in\s+progress"
+    r"|(?:till?|until)\s+date)\b"
+    r"|(?:19|20)\d{2}\s*[-–—](?!\s*(?:[A-Z][a-z]{2,8}\.?\s+)?\d)",
+    re.I,
+)
+
 # Only override these known-wrong source codes (the K teaching family). Never
 # touch an already-plausible N3A/N3B, nor non-teaching codes.
 _MENTEE_FROM = {"K1", "K2", "K3", "K4", "K5"}
@@ -85,7 +101,32 @@ def _named_mentee(text: str) -> bool:
     return False
 
 
-def _correct(entry: dict):
+def _states_only_past_years(text: str, current_year: int) -> bool:
+    """True when the text states a year, every year it states is before
+    `current_year`, and nothing in it may leave a year open.
+
+    A mentee written with a lone past year ("2016 Mentor ... for <name>")
+    was coded N3A, because only an end-dated range read as past,
+    and rendered under Current Mentees as "<year>-present" (EBYSBC autopsy,
+    XELRLZ 250/258/260, #1342). A year that is not before `current_year`
+    stays current: it can be this year's mentee, the same line stage 6
+    draws in `_n3a_entry_has_ended`.
+    """
+    years = [int(year) for year in _YEAR.findall(text)]
+    if not years or max(years) >= current_year:
+        return False
+    return not (_OPEN_PERIOD.search(text) or _MAY_BE_OPEN.search(text))
+
+
+def _is_past_mentorship(text: str, current_year: int) -> bool:
+    """N3B rather than N3A: an end-dated range with no open-period marker,
+    or only past years and nothing that may leave one open."""
+    if _END_DATED.search(text):
+        return not _OPEN_PERIOD.search(text)
+    return _states_only_past_years(text, current_year)
+
+
+def _correct(entry: dict, current_year: int):
     """Return (new_code, reason) or (None, None) if no correction applies."""
     code = entry.get("taxonomy_code", "") or ""
     if code not in _MENTEE_FROM:
@@ -100,16 +141,22 @@ def _correct(entry: dict):
     if not _named_mentee(text):
         return None, None
 
-    is_past = bool(_END_DATED.search(text)) and not _OPEN_PERIOD.search(text)
+    is_past = _is_past_mentorship(text, current_year)
     return ("N3B" if is_past else "N3A"), "prose named-mentee under advising/mentoring section"
 
 
-def apply_prose_mentee_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
-    """Apply prose named-mentee corrections in place. Returns (entries, stats)."""
+def apply_prose_mentee_corrections(entries: list[dict], current_year: int,
+                                   ) -> tuple[list[dict], dict]:
+    """Apply prose named-mentee corrections in place. Returns (entries, stats).
+
+    `current_year` is the run's year: a mentee whose text states only
+    earlier years is past (`_states_only_past_years`). The caller reads the
+    clock, so a test or replay can pin it (CODING_STANDARDS 7.4).
+    """
     corrections_made = 0
     details = []
     for entry in entries:
-        new_code, reason = _correct(entry)
+        new_code, reason = _correct(entry, current_year)
         if new_code and new_code != entry.get("taxonomy_code"):
             original = entry.get("taxonomy_code")
             entry["taxonomy_code"] = new_code

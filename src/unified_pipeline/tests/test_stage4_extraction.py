@@ -1750,6 +1750,128 @@ def test_only_the_last_record_is_offered_the_entry_text(monkeypatch):
     assert sorted(out["reformatted_fields"]) == ["end_date", "start_date"]
 
 
+def _two_record_entry(monkeypatch, text: str, last: dict, first_extra: dict | None = None) -> dict:
+    """`text` as one P entry whose reply is a dated first record and `last`."""
+    entry = {"text": text, "taxonomy_code": "P", "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, "committee_name": "Fern Council",
+                                    "start_date": "2001", "end_date": "2005", **(first_extra or {})},
+                                   {"entry_index": 0, **last}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    return out
+
+
+def test_a_last_record_named_after_the_range_is_not_given_it(monkeypatch):
+    # RINASX 455 (#1342): the range dates an earlier clause, and the last
+    # record, named after it, is undated in the source.
+    out = _two_record_entry(monkeypatch, "Fern Council 2001-2005; Glade Board",
+                            {"committee_name": "Glade Board"})
+    last = out["extracted_fields"][STAGE4_RECORDS_KEY][-1]
+    assert (last.get("start_date"), last.get("end_date")) == (None, None)
+    assert (out["extracted_fields"].get("start_date"), out["extracted_fields"].get("end_date")) == (None, None)
+    assert "reformatted_fields" not in out
+
+
+def _last_dates(out: dict) -> tuple:
+    last = out["extracted_fields"][STAGE4_RECORDS_KEY][-1]
+    return last.get("start_date"), last.get("end_date")
+
+
+@pytest.mark.parametrize("text, last", [
+    # Named just before the range, a value after it (B).
+    ("Fern Council; Glade Board 2001-2005, Boston", {"committee_name": "Glade Board", "city": "Boston"}),
+    # Named just after it, the date-first layout (D).
+    ("Fern Council; 2001-2005 Glade Board", {"committee_name": "Glade Board"}),
+    # Another record nearer in characters, but across a clause break.
+    ("Fern Council; 2001-2005 chair of the Glade Board", {"committee_name": "Glade Board"}),
+    # Not found in the text: a name the model normalized (C).
+    ("Fern Council, Glade Bd. 2001-2005", {"committee_name": "Glade Board"}),
+])
+def test_without_another_record_nearer_the_range_the_last_keeps_it(monkeypatch, text, last):
+    assert _last_dates(_two_record_entry(monkeypatch, text, last)) == ("2001", "2005")
+
+
+def test_the_last_records_own_start_year_does_not_name_it(monkeypatch):
+    # The reply kept the start year and dropped the end (#556). A date is not
+    # a name: "2001" would find the record on the range itself, and Fern
+    # Council, nearer the range than nothing, would withhold "2005".
+    out = _two_record_entry(monkeypatch, "Fern Council, Glade Bd. 2001-2005",
+                            {"committee_name": "Glade Board", "start_date": "2001"},
+                            first_extra={"start_date": None, "end_date": None})
+    assert _last_dates(out) == ("2001", "2005")
+
+
+def test_the_last_record_named_in_the_ranges_clause_keeps_its_end(monkeypatch):
+    # The verifier's #556 shape: "Fern Council, Member; Glade Board, Chair 2001-2005".
+    out = _two_record_entry(monkeypatch, "Fern Council, Member; Glade Board, Chair 2001-2005",
+                            {"committee_name": "Glade Board", "role": "Chair", "start_date": "2001"},
+                            first_extra={"role": "Member", "start_date": None, "end_date": None})
+    assert _last_dates(out) == ("2001", "2005")
+
+
+def test_a_value_the_last_record_shares_does_not_place_it(monkeypatch):
+    # "Ashby" is every record's institution: written next to the range, it
+    # names the entry, not the last record (WYMVGU 865 shape).
+    out = _two_record_entry(monkeypatch, "Fern Council, Ashby 2001-2005; Glade Board",
+                            {"committee_name": "Glade Board", "institution": "Ashby"},
+                            first_extra={"institution": "Ashby"})
+    assert _last_dates(out) == (None, None)
+
+
+def test_a_record_named_between_the_last_and_the_range_keeps_it(monkeypatch):
+    # The range follows Fern Council, the record named after Glade Board.
+    out = _two_record_entry(monkeypatch, "Glade Board; Fern Council 2001-2005",
+                            {"committee_name": "Glade Board"})
+    assert _last_dates(out) == (None, None)
+
+
+def test_a_record_nearer_in_the_same_clause_keeps_the_range(monkeypatch):
+    # JJYBKP 500: "...Advisory Committee, 1990-1992, and member of Friends of Convocations".
+    out = _two_record_entry(monkeypatch, "Fern Council, 2001-2005, and member of Glade Board",
+                            {"committee_name": "Glade Board"})
+    assert _last_dates(out) == (None, None)
+
+
+def test_a_name_before_the_range_outranks_one_as_near_after_it(monkeypatch):
+    # TVQZIP 116: "Co-leader of ... program 2020-2021 Member of ...".
+    out = _two_record_entry(monkeypatch, "Fern Council 2001-2005 Glade Board",
+                            {"committee_name": "Glade Board"})
+    assert _last_dates(out) == (None, None)
+
+
+def test_a_tie_is_no_evidence_against_the_last_record(monkeypatch):
+    # "Board" and "Glade Board" end at the same character: neither is nearer.
+    out = _two_record_entry(monkeypatch, "Glade Board 2001-2005",
+                            {"committee_name": "Glade Board"},
+                            first_extra={"committee_name": "Board"})
+    assert _last_dates(out) == ("2001", "2005")
+
+
+def test_a_part_of_a_composite_value_names_its_record(monkeypatch):
+    # EQADVR 455: the model's role "Ad hoc reviewer, Biopsychology Study
+    # Section SBIR" is written "Biopsychology Study Section SBIR ad hoc, 1990, 1993-1995".
+    out = _two_record_entry(monkeypatch, "Fern Council, Ashby 2001-2005; Glade Board",
+                            {"committee_name": "Glade Board"},
+                            first_extra={"committee_name": "Ashby, Fern Council"})
+    assert _last_dates(out) == (None, None)
+
+
+@pytest.mark.parametrize("written, last", [
+    ("Vice-Chair", {"committee_name": "Glade Board", "role": "Vice Chair"}),   # the model's spelling
+    ("Vice-Chair", {"committee_name": "Glade Board"}),
+    ("Chair-elect", {"committee_name": "Glade Board"}),
+], ids=["normalized-role", "no-role", "hyphen-after"])
+def test_a_name_inside_a_hyphenated_word_is_not_written_there(monkeypatch, written, last):
+    # "Chair", the first record's role, is not written in "Vice-Chair" or
+    # "Chair-elect": the range stays on the last record, as on dev (#1342).
+    out = _two_record_entry(monkeypatch, f"Fern Council, Chair; Glade Board, {written} 2001-2005", last,
+                            first_extra={"role": "Chair", "start_date": None, "end_date": None})
+    assert _last_dates(out) == ("2001", "2005")
+
+
 def test_records_that_cover_the_entry_skip_the_recovery_call(monkeypatch):
     # The last item alone covers a fifth of a long dated entry, which sends it
     # to recovery; the five items together cover all of it.

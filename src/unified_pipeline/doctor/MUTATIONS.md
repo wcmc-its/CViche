@@ -43,4 +43,4 @@ severity, that the clean run does not. Cells are `COVERAGE.md`'s matrix cells.
 
 ## Not exercised
 
-The synthetic run has no stage 1a, 1b, 4.5, 5 or 5d artifact, so these lints skip on every mutation and cannot catch one here: `citation_grounding`, `enrichment_failures`, `enrichment_pubtype_mismatch`, `institution_cleaned_name`, `missed_headers`, `pubmed_title_truncated`, `research_summary_call_failed`, `segmentation`, `segmentation_collapse`, `summary_unsupported_claim`, `teaching_postcheck`.
+The synthetic run has no stage 1a, 1b, 3a, 4.5, 5 or 5d artifact, so these lints skip on every mutation and cannot catch one here: `citation_grounding`, `enrichment_failures`, `enrichment_pubtype_mismatch`, `institution_cleaned_name`, `missed_headers`, `pinned_heading_empty`, `pubmed_title_truncated`, `research_summary_call_failed`, `segmentation`, `segmentation_collapse`, `summary_unsupported_claim`, `teaching_postcheck`.

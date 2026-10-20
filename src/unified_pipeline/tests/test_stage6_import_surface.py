@@ -219,7 +219,8 @@ HOME_ONLY_IMPORTS = {
                                       "_narrower_committee", "_other_series_member",
                                       "_series_marks", "_singular", "_uncovered_letters"),
     "unified_pipeline.stage6.render_check": ("record_chunks", "record_pieces",
-                                             "short_tab_part_words"),
+                                             "record_siblings", "short_tab_part_words",
+                                             "sibling_record_rendered"),
 }
 
 _RELOCATED_CASES = [

@@ -368,7 +368,7 @@ def _findings(report: dict[str, Any], *, skipped: bool) -> list[dict[str, Any]]:
 def doctor_findings(root: Path) -> frozenset[Finding]:
     """The doctor's findings on the run under `root`, minus the INFO each lint
     records when an artifact it reads is absent: the synthetic run has no
-    stage 1a, 1b, 4.5, 5 or 5d."""
+    stage 1a, 1b, 3a, 4.5, 5 or 5d."""
     return frozenset(Finding(f["lint"], f["severity"], f["message"])
                      for f in _findings(run_doctor(root, UID), skipped=False))
 
@@ -452,7 +452,7 @@ def render_table(measurement: Measurement) -> str:
         by = ", ".join(sorted({f"`{f.lint}` ({f.severity})" for f in outcome.caught_by})) or "missed"
         lines.append(f"| `{m.name}` | {m.defect} / {m.level} | {m.stage} | {m.note} | {by} |")
     lines += ["", "## Not exercised", "",
-              "The synthetic run has no stage 1a, 1b, 4.5, 5 or 5d artifact, so these lints skip on every "
+              "The synthetic run has no stage 1a, 1b, 3a, 4.5, 5 or 5d artifact, so these lints skip on every "
               "mutation and cannot catch one here: "
               + ", ".join(f"`{lint}`" for lint in measurement.skipped) + "."]
     return "\n".join(lines) + "\n"

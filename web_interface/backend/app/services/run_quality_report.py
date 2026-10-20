@@ -633,6 +633,11 @@ LINT_COPY = {
         "A bullet symbol from the source CV, such as \"o\" or \"•\", is shown on its own in a "
         "table cell, where a value such as an organization should be.",
         "Replace the symbol with the value from the source CV, or clear the cell."),
+    "pinned_heading_empty": LintCopy(
+        "Section left empty",
+        "A source heading clearly names one section, but every entry under it was filed in a "
+        "different section, so that section is empty in the document.",
+        "Check the quoted entries and move any that belong under their source heading's section."),
 }
 
 # #1388: a rerun of the same CV helps only when the failure was a passing one,

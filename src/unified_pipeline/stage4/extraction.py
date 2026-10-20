@@ -14,8 +14,9 @@ function in play (the #496 split-state lesson).
 
 import json
 import logging
+import re
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, NamedTuple, NotRequired, TypedDict
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
@@ -35,6 +36,7 @@ from unified_pipeline.llm_provenance import (
 )
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
+    CLOSED_DATE_RANGE_PATTERN,
     JOURNAL_LIST_TAXONOMY_CODES,
     POSITION_TAXONOMY_CODES,
     ReformattedFields,
@@ -259,6 +261,17 @@ _MIN_RECORDS_PER_ENTRY = 2
 # against: none, so the regex pass fills nothing from the entry's text into it.
 _NO_ENTRY_TEXT = ""
 
+# Stage 4's date fields, which date a record rather than name it.
+_DATE_KEY_SUFFIX = "_date"
+_BARE_DATE_KEYS = frozenset({"date", "year"})
+
+# What ends a clause of an entry's text: a line break (stage 2 joins lines
+# with tabs) or a semicolon.
+_CLAUSE_BREAK = re.compile(r"[\t\n;]")
+# Which side of the range a name is written on, ordered so that the name
+# before it wins a tie (`_nearness`).
+_BEFORE, _AFTER = 0, 1
+
 # Fields that qualify a record without making one. A numbered record holding
 # only these (`panel_name_2` and nothing else) joins its parent's value: alone
 # it renders a Q3 row with no role, agency or dates, and as the entry's last
@@ -276,8 +289,9 @@ class _EntryExtraction(NamedTuple):
     records_returned: int
 
 
-def _clean_item(entry_text: str, item_fields: dict[str, Any],
-                taxonomy_code: str) -> tuple[dict[str, Any], ReformattedFields]:
+def _clean_item(entry_text: str, item_fields: dict[str, Any], taxonomy_code: str,
+                *, restore_closed_range: bool = True,
+                ) -> tuple[dict[str, Any], ReformattedFields]:
     """One reply item's fields, coerced, date-normalized and regex-completed.
 
     Declared `dict[str, Any]`, not `ExtractedFields`: the input is unvalidated
@@ -287,8 +301,91 @@ def _clean_item(entry_text: str, item_fields: dict[str, Any],
     """
     fields = coerce_field_value_types(item_fields)
     fields = normalize_dates(fields)
-    cleaned, reformatted = apply_regex_post_processing(entry_text, fields, taxonomy_code)
+    cleaned, reformatted = apply_regex_post_processing(
+        entry_text, fields, taxonomy_code, restore_closed_range=restore_closed_range)
     return dict(cleaned), reformatted
+
+
+def _is_date_key(key: str) -> bool:
+    return key in _BARE_DATE_KEYS or key.endswith(_DATE_KEY_SUFFIX)
+
+
+def _parts(value: object) -> set[str]:
+    """A string value's comma-separated parts: a model's composite "Ad hoc
+    reviewer, Biopsychology Study Section SBIR" is written apart in the text."""
+    if not isinstance(value, str):
+        return set()
+    return {part.strip() for part in value.split(",") if part.strip()}
+
+
+def _distinct_parts(item: dict[str, Any], others: list[dict[str, Any]]) -> list[str]:
+    """The parts of `item`'s non-date values that no item of `others` holds
+    under the same key: what names `item` rather than the entry around it
+    (EQADVR 455's composite role). A date is not a name: the last record's
+    start year is the range's own first year."""
+    return [part for key, value in item.items() if not _is_date_key(key)
+            for part in _parts(value).difference(*(_parts(other.get(key)) for other in others))]
+
+
+def _written(text: str, value: str) -> Iterator[re.Match[str]]:
+    """Where `value` is written in `text` as whole words, a hyphenated word
+    whole too: "Chair" is not written in "Vice-Chair"."""
+    return re.finditer(rf'(?<![\w-]){re.escape(value)}(?![\w-])', text)
+
+
+def _clause_around(text: str, span: tuple[int, int]) -> tuple[int, int]:
+    """The bounds of the clause holding `span`: from the line break or
+    semicolon before it to the one after it."""
+    breaks = [match.start() for match in _CLAUSE_BREAK.finditer(text)]
+    start = max((at + 1 for at in breaks if at < span[0]), default=0)
+    end = min((at for at in breaks if at >= span[1]), default=len(text))
+    return start, end
+
+
+def _nearness(text: str, values: list[str], clause: tuple[int, int],
+              span: tuple[int, int]) -> tuple[int, int] | None:
+    """How near to `span` any of `values` is written inside `clause`, as
+    (characters between, `_BEFORE` or `_AFTER`), or None when none is. A value written just before the range outranks one written
+    just after it at the same distance: "<name> 2020-2021 <name>" dates the
+    first (TVQZIP 116)."""
+    ranks = []
+    for value in values:
+        for match in _written(text[clause[0]:clause[1]], value):
+            at, to = clause[0] + match.start(), clause[0] + match.end()
+            if to <= span[0]:
+                ranks.append((span[0] - to, _BEFORE))
+            elif at >= span[1]:
+                ranks.append((at - span[1], _AFTER))
+    return min(ranks, default=None)
+
+
+def _range_dates_last_record(entry_text: str, items: list[dict[str, Any]]) -> bool:
+    """Whether the entry's one closed date range may fill the last item's dates.
+
+    One item: yes, as always. Several: yes, unless the text names the last
+    record somewhere and names another record nearer the range, inside the
+    range's clause, than the last record (`_nearness`; a tie is no evidence).
+    "...SBIR ad hoc, 1990, 1993-1995, 1997. ... g) Craig Foundation" gave the
+    undated Craig Foundation the study section's span (RINASX 455, #1342;
+    7 distinct entries in 6 distinct CVs, none of them dated by it). Without
+    that evidence the range stays, as before: on a last record named before
+    it ("Glade Board 2001-2005, Boston"), named after it ("Fern Council;
+    2001-2005 Glade Board"), or not found in the text at all (a name the
+    model normalized).
+    Text with no single range is a yes: the repair finds nothing to restore.
+    """
+    ranges = list(CLOSED_DATE_RANGE_PATTERN.finditer(entry_text))
+    if len(items) < _MIN_RECORDS_PER_ENTRY or len(ranges) != 1:
+        return True
+    last_values = _distinct_parts(items[-1], items[:-1])
+    if not any(value in entry_text for value in last_values):
+        return True
+    span = ranges[0].span()
+    clause = _clause_around(entry_text, span)
+    others = [part for item in items[:-1] for part in _distinct_parts(item, items[-1:])]
+    other = _nearness(entry_text, others, clause, span)
+    last = _nearness(entry_text, last_values, clause, span)
+    return other is None or (last is not None and last <= other)
 
 
 def _union_of_records(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -384,14 +481,17 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
     percent effort, the one closed date range). With several records that
     value belongs to one of them at most, so only the last record, the one
     the entry kept before, is offered the text; an earlier one gets the
-    text-free cleanups alone.
+    text-free cleanups alone. The entry's one closed date range reaches the
+    last record only when the text dates that record with it
+    (`_range_dates_last_record`).
 
     A second record the model filed under an off-schema key follows the
     record it came from (`_offschema_records`). `records_returned` stays the
     count of items the model returned.
     """
     cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
-    cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code))
+    cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code,
+                               restore_closed_range=_range_dates_last_record(entry_text, items)))
     last_reformatted = cleaned[-1][1]
     if taxonomy_code in POSITION_TAXONOMY_CODES:
         outer = split_parenthetical_title_span(entry_text, cleaned[-1][0], last_reformatted)
