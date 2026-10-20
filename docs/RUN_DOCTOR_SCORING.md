@@ -34,7 +34,7 @@ The doctor and the score exist for the person reviewing a converted CV. They sho
 | 1 | **Catch what matters.** Every serious defect is flagged, on the entry where it occurs. | Share of verified HIGH defects that a finding names, by entry | 4 of 53 fully caught, 6 partly; 121 of 444 defects at any severity (27%) | Half of HIGH (approved 2026-10-08, Paul) | 19 of 53 HIGH caught; 13 of them out of sample, the other 6 from lints written from these runs |
 | 2 | **Don't waste the reviewer's time.** What the reviewer is shown is right. | Precision of findings shown to users (WARN and above, and Word comments in the review copy) | 279 of 397 WARN (70%); about 67 of 401 review-copy comments come from two lints that are mostly false positives (#1585) | 90% of what is shown (approved 2026-10-08, Paul) | 278 of 396 WARN true (70%) on the dev-259 doctor; about 282 of 338 (83%) on the current doctor, not re-judged and partly in-sample |
 | 3 | **A quiet doctor means something.** No finding never reads as "checked and fine" when the doctor couldn't check. | Every run has a doctor outcome, and every run lists what the doctor can't see | IXJMKS scored GREEN 97 with no doctor report (#1593). Runs with nothing to flag get no review copy, and no "not checked" list exists (#1589) | Every run | |
-| 4 | **GREEN means ship.** The score predicts the cleanup a run needs. | Share of GREEN runs carrying a verified HIGH; fit of the score to the review form's correction-time answers | 22 of 31 GREEN runs carry a verified HIGH, including all 6 runs at 100 (#822) | Under 1 in 10 GREEN runs with a HIGH (approved 2026-10-08, Paul) | 16 of 24 GREEN runs carry a HIGH with the #1595 score (YUYVIG, whose verdicts now feed the weights); bounded by goal 1, see "Measured (#1595)". On the R1 labels (2026-10-16): 49 of 75 over the 207 labelled runs, 4 of 5 on the interim held-out set |
+| 4 | **GREEN means ship.** The score predicts the cleanup a run needs. | Share of GREEN runs carrying a verified HIGH; fit of the score to the review form's correction-time answers | 22 of 31 GREEN runs carry a verified HIGH, including all 6 runs at 100 (#822) | Under 1 in 10 GREEN runs with a HIGH (approved 2026-10-08, Paul) | 16 of 24 GREEN runs carry a HIGH with the #1595 score (YUYVIG, whose verdicts now feed the weights); bounded by goal 1, see "Measured (#1595)". On the R1 labels after the 2026-10-20 recheck, with the doctor as of #1963: 36 of 71 over the 207 labelled runs |
 | 5 | **Point to the fix.** A finding sits where the problem is and shows what's wrong. | Findings anchored to the document text, quoting the source text at stake; certain fixes applied or suggested as tracked changes | Comments are anchored (#1543) but don't quote the source; no fix is applied or suggested (#1591) | Every shown finding quotes its source | |
 | 6 | **Measured, not asserted.** Every lint's precision and recall are known. | `PRECISION.md` has a held-out row for every lint that fires; labels grow from each batch autopsy and from reviewer verdicts | In-sample only (62 runs) until #1586; no reviewer verdicts (#1587) | Every lint, held-out | |
 | 7 | **Feed the pipeline.** Findings rank pipeline fixes by the cleanup they cause. | Each finding names the stage that caused it; a corpus Pareto by cause | Stage named in autopsies only, not in findings | Every finding names its stage | |
@@ -360,7 +360,11 @@ sample, not a full pass). The stored labels carry the mechanical R1 grade, with
 each batch's own grade kept beside it as `severity_original`. The re-grade
 changed 1,214 of the 2,419 grades (HIGH 255 → 432). On 2026-10-16 a trace of the
 lost-record labels found 52 whose record does render; each was regraded from
-what is actually wrong (HIGH 432 → 380).
+what is actually wrong (HIGH 432 → 380). On 2026-10-20 a blind recheck re-derived
+the action and record count of 99 R1 promotions: 82 from a batch's LOW, and 17
+from MED on GREEN runs. Two readers each saw neither grade. They agreed that 65
+were graded too high, because R1's inferred action was wrong (an empty note box,
+for example, had been read as protected data shown): HIGH 380 → 315.
 
 The `misleads` rule is not applied to the stored labels. The flag was set on
 an 80-finding sample only, so applying it would grade a finding by whether it
@@ -414,7 +418,8 @@ in the repo.
 
 On the R1 grades, the same 207 runs give a batch-stratified rank r of -0.51 and
 a pooled -0.29, with 53 of 75 GREEN runs carrying a HIGH; after the 2026-10-16
-regrade, -0.54, -0.33 and 49 of 75. A consistent scale
+regrade, -0.54, -0.33 and 49 of 75. After the 2026-10-20 recheck, re-scored
+with the doctor as of #1963, they are -0.54, -0.40 and 36 of 71. A consistent scale
 makes the GREEN problem larger, not smaller. The 33 PDF runs in the table were
 first re-doctored without their source docx; rebuilt from the archived PDF with
 the image's own converter, their score and band are unchanged.
