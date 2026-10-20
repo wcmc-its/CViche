@@ -14,7 +14,8 @@ model's call, which is what the "content overrides hierarchy" rule exists for.
 Batch EBYSBC (class E11) added three narrow extensions: an author-less S8 loses
 to an R pin; a Q2 grant review loses to a Q3 sub-heading even when its parent
 disagrees (`leaf_header_code`); and `content_pin_code`, a handful of shapes
-whose code does not depend on the heading at all. `is_note_not_record` names
+whose code does not depend on the heading at all. An O or K3 answer under a
+sub-heading 3a maps to N1 is N1 (#1938), the same leaf-only way. `is_note_not_record` names
 the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code`
 (#1251) recodes a mentee's own awards, listed under the owner's mentoring, to N4.
 `mentor_grant_pin_code` (#1710) recodes a grant listed under a heading that names
@@ -90,6 +91,18 @@ _CONTRIBUTED_WORK = re.compile(
 # and must not name a committee, board, advisory group or session, which stay the model's Q2.
 _GRANT_REVIEW_PIN = "Q3"
 _GRANT_REVIEW_OVERRIDABLE = frozenset({"Q2"})
+
+# --- #1938: a role under a mentoring-programs sub-heading is N1 ---
+#
+# XAXVYB's "Leadership and mentoring in programs" sub-heading (3a: N1 at 1.0,
+# under a MENTORING parent mapped N3 0.5 / N1 0.3) held a fellowship director,
+# an assistant DIO and a division director of education. The prompt's rule 17
+# sends a training-program director to O, so all three came back O at 0.70-0.80,
+# rendered in Institutional Leadership and left the N1 slot empty. Like Q3, only
+# the most specific level has to say N1. A mentee row is N3A/N3B, not O or K3,
+# so the code set alone keeps it out of this pin.
+_MENTORING_PROGRAM_PIN = "N1"
+_MENTORING_PROGRAM_OVERRIDABLE = frozenset({"O", "K3"})
 _GRANT_HEADING = re.compile(r"\bgrants?\b|\bfunding\b", re.I)
 _GRANT_REVIEW_TEXT = re.compile(r"\breview(?:er|ers|ed|s|ing)?\b|\bgrants?\b|\bstudy\s+sections?\b", re.I)
 _NOT_A_GRANT_REVIEW = re.compile(
@@ -433,7 +446,8 @@ def leaf_header_code(context: TaxonomyContext) -> str | None:
 
     Unlike `pinned_header_code` the parent levels need not agree: a grant-reviewer
     sub-heading under a general service heading mapped Q2/Q4 still says Q3.
-    Used only for the grant-review pin, whose override set is one code wide.
+    Used only for the grant-review (Q3) and mentoring-programs (N1) pins,
+    whose override sets are one and two codes wide.
     """
     for level in (context.subsection, context.section, context.meta_section):
         if level and level.get("taxonomy_options"):
@@ -532,6 +546,8 @@ def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | Non
         return _S1_PIN
     if leaf == _GRANT_REVIEW_PIN and code in _GRANT_REVIEW_OVERRIDABLE and _is_grant_review(entry):
         return _GRANT_REVIEW_PIN
+    if leaf == _MENTORING_PROGRAM_PIN and code in _MENTORING_PROGRAM_OVERRIDABLE:
+        return _MENTORING_PROGRAM_PIN
     return None
 
 
