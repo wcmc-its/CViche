@@ -718,10 +718,34 @@ def test_stage2_span_overlap_reports_two_shared_lines_across_sections():
         "entry 868-869 shares 2 element(s) with entry 867-869: 1993\tWho's Who"]
 
 
-def test_stage2_span_overlap_quiet_on_one_shared_line():
-    # 863-867 and 867-869 share only line 867: under SPAN_OVERLAP_MIN_ELEMENTS.
-    assert lint_stage2_span_overlap({"entries": [_span(863, 867), _span(867, 869)]}) == []
-    assert lint_stage2_span_overlap({"entries": [_span(5, 5), _span(5, 5)]}) == []
+def test_stage2_span_overlap_reports_one_shared_line_when_the_spans_differ():
+    # ATUVAL 863-867 under HONORS and 867-869 under a committee heading share line 867.
+    stage2 = {"entries": [_span(863, 867), _span(867, 869, hierarchy=("COMMITTEES",))]}
+    findings = lint_stage2_span_overlap(stage2)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 867"]
+    assert findings[0]["evidence"][0].startswith("entry 867-869 shares 1 element(s) with entry 863-867")
+    # A one-line entry inside a longer one (web26 764 / 764-765), and a row range of one table.
+    assert len(lint_stage2_span_overlap({"entries": [_span(764, 764), _span(764, 765)]})) == 1
+    rows = {"entries": [_span("40.2", "40.4", etype="table_row"), _span("40.4", "40.5", etype="table_row")]}
+    assert len(lint_stage2_span_overlap(rows)) == 1
+
+
+def test_stage2_span_overlap_quiet_on_one_element_emitted_twice():
+    # Two one-element entries on one element: older stage-2 runs' duplicate copy.
+    assert lint_stage2_span_overlap({"entries": [_span(5, 5), _span(5, 5, hierarchy=("A",))]}) == []
+    assert lint_stage2_span_overlap({"entries": [_span("9.3", "9.3", etype="table_row"),
+                                                 _span("9.3", "9.3", etype="table_row")]}) == []
+    # The same two-element span twice is still reported.
+    assert len(lint_stage2_span_overlap({"entries": [_span(5, 6), _span(5, 6)]})) == 1
+
+
+def test_stage2_span_overlap_names_a_multi_element_overlap_before_a_one_element_one():
+    # 20-23 shares one line with 10-20 and three with 21-25: the pair named stays
+    # the multi-element one, as before one-element overlaps were reported.
+    stage2 = {"entries": [_span(10, 20, hierarchy=("A",)), _span(21, 25, hierarchy=("B",)),
+                          _span(20, 23, hierarchy=("C",))]}
+    evidence = [e.split(":")[0] for f in lint_stage2_span_overlap(stage2) for e in f["evidence"]]
+    assert evidence == ["entry 20-23 shares 3 element(s) with entry 21-25"]
 
 
 def test_stage2_span_overlap_reads_table_row_spans_by_row_number():

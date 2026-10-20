@@ -841,22 +841,24 @@ def lint_stage2_text_break(stage2: dict, stage1a: dict | None = None,
 # section since #1798; this reads what is left: spans across two sections,
 # and table-row spans (web172 112.1-112.13 and 112.3-112.33).
 
-#: The fewest source elements two record entries must share to be reported.
-#: One shared element is not judged: on the 278 local stage-2 runs measured
-#: for #1433, 6,886 pairs share exactly one element, nearly all one
-#: single-element entry emitted twice, which older stage-2 runs wrote on 42
-#: runs. Two or more: 344 entries on 19 runs, 12 of 12 sampled pairs a
-#: record held twice.
-SPAN_OVERLAP_MIN_ELEMENTS = 2
+#: The fewest source elements two entries with the SAME span must share to be
+#: reported, so two one-element entries on one element are not judged: on the
+#: 324 distinct local stage-2 artifacts measured for #1433 there are 6,886
+#: such pairs on 21 of them, one single-element entry that older stage-2 runs
+#: emitted twice (filter_extraction_noise drops that copy). Entries whose spans
+#: differ are reported on one shared element (ATUVAL 863-867 under HONORS,
+#: 867-869 under a committee heading): 306 such pairs on 28 artifacts, and 264
+#: of the 265 entries they add hold the shared line's text in both entries.
+SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS = 2
 #: Overlapping pairs a `stage2_span_overlap` finding quotes, per section pair.
 SPAN_OVERLAP_EVIDENCE_PAIRS = 3
 
 
 def _row_span(entry: dict) -> frozenset[str]:
     """The table-row keys ("112.3") a table-row entry covers, from its start
-    row to its end row; empty when the two are not rows of one table. Such a
-    span is one row at most (`row_range_entry` shrinks it to its start), and
-    one row is under SPAN_OVERLAP_MIN_ELEMENTS."""
+    row to its end row; empty, so the entry is not compared, when the two are
+    not rows of one table: the rows between them cannot be listed from stage
+    2's own record."""
     start, end = entry.get("element_idx_start"), entry.get("element_idx_end")
     if not (isinstance(start, str) and isinstance(end, str)):
         return frozenset()
@@ -874,19 +876,28 @@ def _span_keys(entry: dict) -> frozenset[int | str]:
     return frozenset(_element_span(entry)) or _row_span(entry)
 
 
+def _is_reported_overlap(span: frozenset[int | str], earlier_span: frozenset[int | str], shared: int) -> bool:
+    """Two spans that share ``shared`` (at least one) source elements are
+    reported unless they are the same span and share fewer than
+    SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS: one element emitted twice."""
+    return span != earlier_span or shared >= SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS
+
+
 def _overlapping_pairs(stage2: dict) -> list[tuple[dict, dict, int]]:
     """(earlier entry, later entry, elements shared) for each record entry
-    that shares SPAN_OVERLAP_MIN_ELEMENTS or more source elements with an
-    entry before it; the first such entry is named."""
+    whose span overlaps an entry before it (`_is_reported_overlap`). The
+    first entry it shares SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS or more elements
+    with is named, else the first it shares one with."""
     entries = [entry for entry in stage2.get("entries") or []
                if isinstance(entry, dict) and entry.get("element_type") in STAGE2_RECORD_TYPES]
+    spans = [_span_keys(entry) for entry in entries]
     owners: dict[int | str, list[int]] = {}
     pairs = []
     for later, entry in enumerate(entries):
-        span = _span_keys(entry)
+        span = spans[later]
         shared = Counter(earlier for key in span for earlier in owners.get(key, ()))
-        earlier = min((i for i, count in shared.items() if count >= SPAN_OVERLAP_MIN_ELEMENTS),
-                      default=None)
+        reported = [i for i, count in shared.items() if _is_reported_overlap(span, spans[i], count)]
+        earlier = min(reported, key=lambda i: (shared[i] < SPAN_OVERLAP_MIN_IDENTICAL_ELEMENTS, i), default=None)
         if earlier is not None:
             pairs.append((entries[earlier], entry, shared[earlier]))
         for key in span:
@@ -899,10 +910,11 @@ def _section_title(entry: dict) -> str:
 
 
 def lint_stage2_span_overlap(stage2: dict) -> list[dict]:
-    """Record entries that share two or more source elements with an entry
-    before them (#1433): the shared lines can render twice, once under the
-    wrong section when the two sit in different ones. WARN, one per pair of
-    sections, led by the first such entry. Reads stage 2 only."""
+    """Record entries that share source elements with an entry before them
+    (#1433), one element emitted twice excepted (`_is_reported_overlap`): the
+    shared lines can render twice, once under the wrong section when the two
+    sit in different ones. WARN, one per pair of sections, led by the first
+    such entry. Reads stage 2 only."""
     by_sections: dict[tuple[str, str], list[tuple[dict, dict, int]]] = {}
     for earlier, later, shared in _overlapping_pairs(stage2):
         by_sections.setdefault((_section_title(earlier), _section_title(later)), []).append(
