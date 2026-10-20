@@ -376,7 +376,23 @@ def test_compute_score_fills_defaults_for_keys_the_result_lacks(client, db, monk
     resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
 
     assert resp.json() == {"run_id": "SF_COMPLETE", "totalScore": 50, "band": "", "dimensionScores": [],
-                           "flags": [], "data_complete": None, "missing_evidence": []}
+                           "flags": [], "data_complete": None, "missing_evidence": [],
+                           "deliverable": None, "blockers": []}
+
+
+def test_compute_score_returns_deliverable_and_blockers(client, db, monkeypatch):
+    """#823: the rescore response carries score_run's deliverable flag and
+    each blocker beside the score."""
+    from app.services import admin_run_service
+
+    _seed_mixed_status_runs(db)
+    blocker = {"gate": "owner_contact_missing", "cap": 25, "detail": "cv_owner name empty; hard-fail cap=25"}
+    result = {**_INCOMPLETE_SCORE, "totalScore": 25, "deliverable": False, "blockers": [blocker]}
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid, **_kw: result)
+
+    body = _admin_post(client, "/api/admin/run/SF_COMPLETE/score").json()
+
+    assert (body["deliverable"], body["blockers"]) == (False, [blocker])
 
 
 # quality_score.score_run's dimensionScores entry, as it builds one (#409).

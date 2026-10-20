@@ -25,6 +25,9 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline import quality_score as qs  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
+    BAND_GREEN,
+    BAND_YELLOW,
+    BLOCKER_GATE_BY_SCORER,
     CAP_ONLY_GATES,
     DIMENSIONS,
     FATAL_ERROR_PATTERN,
@@ -885,6 +888,78 @@ def test_score_run_keeps_a_run_with_a_failed_stage4_group_out_of_green(tmp_path)
     assert failed["flags"][0].startswith(
         "HARD-FAIL cap=84: Stage-4 extraction group failed (caps below GREEN) (failed_batches=1;")
     assert clean["hard_fail_caps_applied"] == []
+
+
+# --------------------------------------------------------------------- D23
+# Deliverability beside the score (#823): a blocker gate sets deliverable=False
+# and names itself in blockers[]; a cap that only keeps a run out of GREEN
+# does not.
+# --------------------------------------------------------------------- D23
+
+
+def test_a_clean_run_is_deliverable_with_no_blockers(tmp_path):
+    result = score_run(_complete_run_dir(tmp_path))
+    assert (result["deliverable"], result["blockers"]) == (True, [])
+
+
+def test_a_missing_owner_name_is_a_blocker_carrying_the_gate_cap_and_detail(tmp_path):
+    """web172's shape: a complete run whose cv_owner has no name."""
+    _complete_run_dir(tmp_path)
+    _write_json(tmp_path, "X_fields.json", {
+        "cv_owner": {"full_name": ""},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"extracted_fields": {"email": "j@x.org"}, "extraction_success": True}],
+    })
+    result = score_run(tmp_path)
+    assert result["deliverable"] is False
+    assert result["blockers"] == [{"gate": "owner_contact_missing", "cap": 25,
+                                   "detail": "cv_owner name empty; hard-fail cap=25"}]
+    assert result["totalScore"] == 25  # additive: the cap still applies
+
+
+def test_an_empty_directory_lists_every_blocker_in_gate_order(tmp_path):
+    """The not-checked cap (84) fires too, and is not a blocker."""
+    result = score_run(tmp_path)
+    assert result["deliverable"] is False
+    assert [(b["gate"], b["cap"]) for b in result["blockers"]] == [
+        ("owner_contact_missing", 25), ("no_output", 20)]
+
+
+def test_the_two_out_of_green_caps_are_not_blockers(tmp_path):
+    rescued = {**_clean_entry("P"), "extraction_error": LLM_RESPONSE_INVALID,
+               "llm_recovery_applied": True, "extracted_fields": {"email": "j@x.org"}}
+    _complete_run_dir(tmp_path)
+    artifact = _stage4_artifact([rescued], failed_batches=1)
+    artifact["cv_owner_location"] = {"inference_success": True, "primary_location": "NY"}
+    _write_json(tmp_path, "X_fields.json", artifact)
+    (tmp_path / "X_doctor.json").unlink()
+    result = score_run(tmp_path)
+    assert result["hard_fail_caps_applied"] == [84, 84]
+    assert (result["deliverable"], result["blockers"]) == (True, [])
+
+
+def test_blocker_gates_are_exactly_the_caps_that_force_red():
+    """Every blocker gate is a registered gate; RED (a cap under BAND_YELLOW)
+    and "not deliverable" pick out the same runs today."""
+    registered = [f for _, _, f in DIMENSIONS] + [g for _, g in CAP_ONLY_GATES]
+    assert set(BLOCKER_GATE_BY_SCORER) <= set(registered)
+    caps = {qs.score_no_output: qs.NO_OUTPUT_CAP, qs.score_cv_owner: 25,
+            qs.score_protected_data: qs.PROTECTED_DATA_CAP, qs.score_pipeline_errors: 40,
+            qs.score_stage3b_fallback_ratio: qs.STAGE3B_FALLBACK_HARD_FAIL_CAP}
+    assert set(caps) == set(BLOCKER_GATE_BY_SCORER)
+    assert all(cap < BAND_YELLOW for cap in caps.values())
+    assert qs.NOT_CHECKED_CAP == qs.STAGE4_GROUP_FAILURE_CAP == BAND_GREEN - 1
+
+
+def test_quality_gate_blocks_an_undeliverable_run_even_above_red(tmp_path, monkeypatch):
+    """The verdict reads deliverable, not only the score: a blocker whose
+    cap sat above BAND_YELLOW would still block."""
+    _complete_run_dir(tmp_path)
+    monkeypatch.setattr(qs, "PROTECTED_DATA_CAP", 70)
+    monkeypatch.setattr(qs, "lint_protected_data_in_output", lambda *_a: [{"lint": "x"}])
+    result = quality_gate(tmp_path, mode="block")
+    assert (result["totalScore"], result["deliverable"]) == (70, False)
+    assert (result["verdict"], result["gate_passed"]) == ("BLOCK", False)
 
 
 def test_the_scorer_reads_the_markers_stage_4_actually_writes(monkeypatch):

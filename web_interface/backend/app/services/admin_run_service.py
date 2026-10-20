@@ -342,4 +342,6 @@ def _score_result(run_id: str, result: dict) -> QualityScoreResult:
         flags=result.get("flags", []),
         data_complete=result.get("data_complete"),
         missing_evidence=result.get("missing_evidence", []),
+        deliverable=result.get("deliverable"),
+        blockers=result.get("blockers", []),
     )
