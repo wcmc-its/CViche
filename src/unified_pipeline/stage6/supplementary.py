@@ -192,8 +192,10 @@ LEADERSHIP_CODES = frozenset({'O'})
 #: their rows' words. An entry holding several records gets none, as which of
 #: them a line is about cannot be shown: one the writer prints as several
 #: rows (a list of records under a committee name, #208/#248; a block of
-#: dated lines it re-parses, #660), and one whose parts hold several dated
-#: records though one row prints (`_own_committee_line`). The last of stage
+#: dated lines it re-parses, #660), and one that one row prints though it
+#: holds several (`_own_committee_line`): its parts hold several dated
+#: records, a part names another committee, or stage 4 listed several, one
+#: naming no committee and so printing no row (#256). The last of stage
 #: 4's records offers only its own segment of the line. An entry rerouted to
 #: another code before rendering is grouped under that code and follows its
 #: rule (N1 is excluded, and C, F2 and I are not offered: their heading
@@ -288,6 +290,26 @@ ADMINISTRATIVE_ACTIVITY_FIELDS = ('committee_name', 'committee', 'activity')
 #: The off-schema ones among them: `_value_tokens` adds them for P.
 _ADMINISTRATIVE_ROW_FIELDS = tuple(name for name in ADMINISTRATIVE_ACTIVITY_FIELDS
                                    if name not in _RENDERED_FIELDS['P'])
+#: The kinds of body a record of committee service names, capitalised as a
+#: name is ("Admissions Appeals Committee", "Faculty Council"). A part of a
+#: committee's line naming another one is another record
+#: (`_names_another_committee`), dated or not.
+_COMMITTEE_BODIES = ('Committee', 'Subcommittee', 'Council', 'Board', 'Panel', 'Commission',
+                     'Senate', 'Task Force', 'Taskforce', 'Working Group', 'Workgroup')
+_NAME_WORD = r"[A-Z][\w'’&.-]*"
+#: A committee's name as a line writes it: the capitalised words before one
+#: of `_COMMITTEE_BODIES`, and those an "on", "of" or "for" adds after it
+#: ("Committee on Admissions"). A word that only begins with one ("Senator",
+#: "Panelist") names none.
+_COMMITTEE_NAME_RE = re.compile(
+    rf"(?:{_NAME_WORD}\s+)*(?:{'|'.join(_COMMITTEE_BODIES)})\b"
+    rf"(?:\s+(?:on|of|for)\s+(?:the\s+)?{_NAME_WORD}(?:\s+{_NAME_WORD})*)?")
+#: A committee name more than this share of whose distinctive words are in
+#: the entry's own committee name is that committee: one the CV typed with a
+#: typo, or wrapped onto the next part ("<words> Steering\tCommittee,
+#: <institution>"), still shares most of its words, and another committee
+#: little more than the word for its kind ("Committee").
+_OWN_COMMITTEE_MIN_SHARE = 0.5
 
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
@@ -614,17 +636,74 @@ def _own_record_line(entry: Mapping) -> str:
     return '' if own is None or _holds_dated_records(own) else own
 
 
+def _committee_records(entry: Mapping) -> list[object]:
+    """The records the entry's committee fields hold, as the writer reads
+    them: the list stage 4 packed under the first of
+    `ADMINISTRATIVE_ACTIVITY_FIELDS` that holds one (#208/#248), else the
+    fields themselves, one record."""
+    fields = entry.get('extracted_fields')
+    fields = fields if isinstance(fields, Mapping) else {}
+    listed = next((value for name in ADMINISTRATIVE_ACTIVITY_FIELDS
+                   if isinstance(value := fields.get(name), list)), None)
+    return listed or [fields]
+
+
+def _committee_name_tokens(record: object) -> set[str]:
+    """The distinctive tokens of the record's committee name, its
+    `ADMINISTRATIVE_ACTIVITY_FIELDS` text; none for a record that is not a
+    mapping (a bare name in a list)."""
+    if not isinstance(record, Mapping):
+        return set()
+    return _tokens(' '.join(str(record.get(name) or '') for name in ADMINISTRATIVE_ACTIVITY_FIELDS))
+
+
+def _names_another_committee(part: str, own_name: set[str]) -> bool:
+    """Whether a part of a committee's line names another committee
+    (`_COMMITTEE_NAME_RE`) than the entry's own (`own_name`,
+    `_committee_name_tokens`): one no more than `_OWN_COMMITTEE_MIN_SHARE` of
+    whose words are the entry's. A part holding every word of the entry's
+    own name is its record, and a sub-committee it names one of its details.
+    With no name to hold, whose a named committee is cannot be shown."""
+    if own_name and own_name <= _tokens(part):
+        return False
+    for match in _COMMITTEE_NAME_RE.finditer(part):
+        named = _tokens(match.group())
+        if len(named & own_name) <= _OWN_COMMITTEE_MIN_SHARE * len(named):
+            return True
+    return False
+
+
 def _own_committee_line(entry: Mapping) -> str:
     """The text a committee's prose is read from (`_own_record_line`), and
-    nothing when its parts hold several dated records by the writer's own
-    #660 test (`_looks_like_multiple_records`), read per tab, line and pipe
-    part rather than per line. Stage 2 joins a list's paragraphs with tabs,
-    so committees each followed by their years reach stage 6 as one line,
-    which the writer prints as one row, of the record stage 4 extracted; the
-    others would be offered as its prose (EBYSBC YOXXOH 74: six committees,
-    two of them offered under the sixth's row)."""
+    nothing when it holds another record than the one the writer prints
+    for it, as that record's text would be offered as the committee's prose,
+    under its row:
+
+    - its parts hold several dated records by the writer's own #660 test
+      (`_looks_like_multiple_records`), read per tab, line and pipe part
+      rather than per line. Stage 2 joins a list's paragraphs with tabs, so
+      committees each followed by their years reach stage 6 as one line,
+      which the writer prints as one row, of the record stage 4 extracted
+      (EBYSBC YOXXOH 74: six committees, two of them offered under the
+      sixth's row);
+    - a part names another committee (`_names_another_committee`), dated or
+      not: an undated sibling, or one dated sibling next to a committee
+      whose own years are in its fields only, which that test reads as one
+      record;
+    - stage 4 packed several records in a list (`_committee_records`,
+      #208/#248). The writer prints a row for each one naming a committee,
+      and `_own_committee_row` then sees several, but none for one naming
+      none (#256): the entry has one row though it holds two.
+
+    A sibling record in the same part as the committee's own ("<other>,
+    2001-2004; <own>, 2008-2012") is not seen."""
     own = _own_record_line(entry)
-    return '' if _looks_like_multiple_records(_split_fragments(own)) else own
+    records = _committee_records(entry)
+    parts = _split_fragments(own)
+    if len(records) > 1 or _looks_like_multiple_records(parts):
+        return ''
+    own_name = _committee_name_tokens(records[0])
+    return '' if any(_names_another_committee(part, own_name) for part in parts) else own
 
 
 def _own_committee_row(entry: Mapping, candidates: list[AnchorCandidate],
@@ -710,7 +789,7 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     and its line must be a row its writer recorded for it (`rows_written`,
     `_own_rows`), which it takes with no word test when it is the only one
     (`_pick_anchor`). A committee's is read the same way, and none is
-    offered when its parts hold several dated records
+    offered when its line holds another record than the one its row prints
     (`_own_committee_line`) or its writer recorded it several rows
     (`_own_committee_row`).
 

@@ -52,6 +52,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypedDict
 
+from docx.table import Table
+
 from unified_pipeline.core.render_check import entry_lines
 
 from ..fan_out import fallback_text, has_built_text
@@ -224,7 +226,7 @@ def _name_with_institution(activity: str, institution: str) -> str:
 class AdministrativeActivitiesSection:
     """Section P writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_administrative_activities(self, entries: list[_AdminActivityEntry]):
+    def _fill_administrative_activities(self, entries: list[_AdminActivityEntry]) -> None:
         """Fill P. INSTITUTIONAL ADMINISTRATIVE ACTIVITIES section.
 
         WCM template has table with: Activity/Committee | Role | Dates
@@ -422,7 +424,7 @@ class AdministrativeActivitiesSection:
 
         return rows
 
-    def _add_committee_row(self, table, activity: str, role: str, dates: str):
+    def _add_committee_row(self, table: Table, activity: str, role: str, dates: str) -> None:
         """Add a single committee row with proper column handling, recorded
         against the entry `_fill_administrative_activities` is on
         (`begin_entry`): the row-receipt ledger, by which the #1205 sub-point

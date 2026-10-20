@@ -3910,6 +3910,43 @@ def test_a_committee_the_section_writes_no_row_for_gets_no_sub_point():
     assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
 
 
+_KESTREL_LINE = "Member, Example Admissions Appeals Committee, Kestrel Medical Society"
+
+
+def _committee_after_an_undated_committee():
+    """Another committee, undated, then the extracted one with its years: one
+    dated part, so the writer's #660 test reads one record."""
+    entry = _committee()
+    entry["text"] = f"{_KESTREL_LINE}\t{entry['text']}"
+    return entry
+
+
+def _committee_list_with_a_nameless_record():
+    """Stage 4 packed a record naming no committee and the committee in a
+    list (#208/#248): the writer prints no row for the nameless one (#256)."""
+    entry = _committee(prose=None)
+    entry["text"] = (f"Member, 2001-2004, {_ADMISSIONS_PROSE}\t"
+                     f"{_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}, Member")
+    entry["extracted_fields"] = {"committee_name": [
+        {"role": "Member", "start_date": "2001", "end_date": "2004"},
+        {"committee_name": _COMMITTEE_NAME, "institution": _COMMITTEE_INSTITUTION,
+         "role": "Member"}]}
+    return entry
+
+
+@pytest.mark.parametrize("entry", [_committee_after_an_undated_committee,
+                                   _committee_list_with_a_nameless_record])
+def test_a_committee_row_holding_another_record_gets_no_sub_point(entry):
+    """The writer prints one row, the entry's own, though the line holds
+    another record: that record's text would be offered as the committee's
+    prose, under its row."""
+    entry = entry()
+    gen = _render_committees([entry], supplementary_subpoints=True)
+
+    assert len(gen._row_receipts.elements_for(entry)) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
 def _render_grouped_committees(entries, **kwargs):
     gen = _generator(**kwargs)
     grouped = gen._group_entries_by_code(entries)
