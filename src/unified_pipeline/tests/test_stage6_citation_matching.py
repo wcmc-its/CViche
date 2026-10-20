@@ -242,10 +242,18 @@ _APPEND_ROWS = [
      'Ash A. A chapter. In: Diler RS, ed. Book. Nova; 2007:167-177.',
      'Rasim Somer Diler', '',
      'Ash A. A chapter. In: Diler RS, ed. Book. Nova; 2007:167-177.'),
-    ('half the people named in the clause is enough: a credential is not a person 5d drops',
+    # Every person must be named. A credential split off as its own
+    # "person" ("PhD") is not in the clause, so the value is appended at the
+    # end, exactly as base does: a duplicate, never a loss.
+    ('a credential stage 4 kept reads as an unnamed person: the whole value at the end, as base',
      'Ash A. A chapter. In: Waldstein S, eds. Book. Springer; 2023.',
      'Shari Waldstein, PhD', '',
-     'Ash A. A chapter. In: Waldstein S, eds. Book. Springer; 2023.'),
+     'Ash A. A chapter. In: Waldstein S, eds. Book. Springer; 2023. Shari Waldstein, PhD, eds.'),
+    ('two of four people named in the clause: the whole value at the end, as base',
+     'Smith J. Ch. In: Munoz R, Schmitt C, eds. Critical Care. Springer; 2010.',
+     'Ricardo Munoz, Carol Schmitt, Victor Morell, Eduardo da Cruz', '',
+     'Smith J. Ch. In: Munoz R, Schmitt C, eds. Critical Care. Springer; 2010. '
+     'Ricardo Munoz, Carol Schmitt, Victor Morell, Eduardo da Cruz, eds.'),
     ('a clause naming fewer than half the people: the rest go at the end, '
      'not into a second clause',
      'Ash A. A chapter. In: Rey J, ed. Book.',
@@ -370,6 +378,23 @@ _APPEND_ROWS = [
     ('"(ED)" as an abbreviation is not an editors clause: editors go after "In: "',
      'Ash A. A chapter. In: Emergency department (ED) care. Nova; 2007.', 'Birch B', '',
      'Ash A. A chapter. In: Birch B, eds. Emergency department (ED) care. Nova; 2007.'),
+    # The editors slot is an "In: " at a sentence break, the last one. An
+    # "In: " inside a title is not it.
+    ('"In: " inside the title and at a sentence break: editors after the second',
+     'Smith J. Living In: a memoir of care. In: Book. 2010.', 'Roe R', '',
+     'Smith J. Living In: a memoir of care. In: Roe R, eds. Book. 2010.'),
+    ('"In: " only inside the title: the editors at the end, as base',
+     'Smith J. Living In: a memoir of care. 2010.', 'Roe R', '',
+     'Smith J. Living In: a memoir of care. 2010. Roe R, eds.'),
+    ('"In: " opening the citation: editors after it',
+     'In: Book. 2010.', 'Roe R', '',
+     'In: Roe R, eds. Book. 2010.'),
+    ('two "In: " at sentence breaks: editors after the last',
+     'Smith J. A note. In: Proceedings. In: Book. 2010.', 'Roe R', '',
+     'Smith J. A note. In: Proceedings. In: Roe R, eds. Book. 2010.'),
+    ('an editors clause, editors with no significant word: the whole value at the end, as base',
+     'Ash A. A chapter. In: Rey J, ed. Book. 2010.', 'J, K', '',
+     'Ash A. A chapter. In: Rey J, ed. Book. 2010. J, K, eds.'),
 ]
 
 

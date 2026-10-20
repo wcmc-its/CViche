@@ -131,15 +131,19 @@ _EDITOR_SEPARATOR_RE = re.compile(r"\s*(?:[;,&]|\band\b)\s*")
 #: end and a sentence break, so a year or a "Name;" in the title or inside
 #: a printed publisher name ("John Wiley; 2004.") is never the slot.
 _BARE_BOOK_YEAR_RE = re.compile(r"(?<=\. )(?:19|20)\d\d(?::\S+)?\.?$")
-#: The book-title clause an editors name list goes in front of.
-_IN_CLAUSE = "In: "
+#: The book-title clause an editors name list goes in front of: an "In: "
+#: that opens the citation or follows a sentence break. One inside a title
+#: ("Living In: a memoir") is not the slot.
+_IN_CLAUSE_RE = re.compile(r"(?:^|(?<=\. ))In: ")
 
 
 def _editors_referenced(editors: str, citation: str) -> bool:
     """True when the citation already names these editors.
 
-    By the token test, or by person: 5d wrote an editors clause and at
-    least half the people in stage 4's value have a word in the citation.
+    By the token test, or by person: 5d wrote an editors clause and every
+    person in stage 4's value has a word in the citation. Half is not
+    enough: with two of four people printed, the other two would be named
+    nowhere, where base appends the whole value.
     Stage 4 often spells out names 5d abbreviated ("Rasim Somer Diler" for
     "Diler RS": one token in three), so the token test alone read them as
     absent and printed them a second time after the year: 6 of the 16
@@ -154,21 +158,22 @@ def _editors_referenced(editors: str, citation: str) -> bool:
     if not _EDITORS_CLAUSE_RE.search(citation):
         return False
     people = [p for p in _EDITOR_SEPARATOR_RE.split(editors) if _significant_tokens(p)]
-    named = sum(1 for p in people if any(_word_in(t, citation) for t in _significant_tokens(p)))
-    return bool(people) and named / len(people) >= _CITATION_MATCH_MIN_RATIO
+    return bool(people) and all(
+        any(_word_in(t, citation) for t in _significant_tokens(p)) for p in people)
 
 
 def _with_editors(citation: str, editors: str) -> str:
-    """`citation` with an "Editors, eds." clause: after its "In: ", where
-    Vancouver puts the editors of a chapter's book, else at the end. A
+    """`citation` with an "Editors, eds." clause: after its last "In: " at
+    a sentence break, where Vancouver puts the editors of a chapter's book,
+    else at the end. A
     citation that already has an editors clause has no free slot there:
     "In: Rey J, ed." with stage 4's longer list in front of it would read as
     two editors clauses, so the list goes at the end, as before."""
     clause = f"{editors}, eds."
-    at = citation.find(_IN_CLAUSE)
-    if at < 0 or _EDITORS_CLAUSE_RE.search(citation):
+    slots = list(_IN_CLAUSE_RE.finditer(citation))
+    if not slots or _EDITORS_CLAUSE_RE.search(citation):
         return f"{citation} {clause}"
-    at += len(_IN_CLAUSE)
+    at = slots[-1].end()
     return f"{citation[:at]}{clause} {citation[at:]}"
 
 
