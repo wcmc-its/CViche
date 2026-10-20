@@ -30,7 +30,8 @@ a heading or as a review note. It is a possibility to check, not a problem.
 The other, source_line_coverage (#1588), quotes source text the document may
 have lost, so it has no place on the page: each quoted line is a review note.
 grant_facts (#1588) takes citation_grounding's path: a comment on the grant's
-title in its table, whatever its severity.
+title in its table, whatever its severity. mentee_field_incomplete (#1941),
+a mentee field left blank or "N/A", is a comment on that blank cell.
 
 A finding whose fix is certain is not a comment but the fix itself, as a
 Word tracked change: accepting it gives the corrected text, rejecting it the
@@ -47,6 +48,7 @@ import copy
 import json
 import re
 import zipfile
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -56,6 +58,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.oxml.xmlchemy import BaseOxmlElement
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from lxml.etree import XMLSyntaxError
@@ -72,6 +75,10 @@ from app.services.run_quality_report import (
 )
 from unified_pipeline.core.text_norm import squash  # noqa: E402
 from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
+from unified_pipeline.doctor.lints.completeness import (  # noqa: E402
+    MENTEE_FIELD_LINT,
+    MENTEE_FIELD_LOCATOR_RE,
+)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     DEDUP_TEXT_CHARS,
     ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
@@ -206,6 +213,9 @@ REVIEW_FLAGS = {
                             "journal's name: give each journal its own row."),
     "group_credit_dropped": ("Your CV credits a group or study team in these authors (such as "
                              "\"... Study Group\") that is missing here: add it back from your CV."),
+    "mentee_field_incomplete": ("Please complete this field: WCM asks for every mentee field. "
+                                "Fill it in here and in any other mentee table that leaves it "
+                                "blank or N/A."),
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "
                     "your CV gives is missing, or one shown here is not in this grant's entry. "
                     "Check it against the CV."),
@@ -504,12 +514,29 @@ def _diversion_code(lint: str, inst: DoctorFindingInstance) -> str | None:
     return _CODE_BY_LABEL.get(inst.section or "", "")
 
 
+def _mentee_field_flags(finding: dict, tables: Sequence[Table]) -> list[Flag]:
+    """A mentee_field_incomplete finding's comment, on the value cell of the
+    row its message names, in the table it names (`MENTEE_FIELD_LOCATOR_RE`).
+    Empty when the document has no such row: the finding quotes no text to
+    look for instead."""
+    m = MENTEE_FIELD_LOCATOR_RE.match(str(finding.get("message") or ""))
+    if m is None or int(m["table"]) >= len(tables):
+        return []
+    for row in tables[int(m["table"])].rows:
+        cells = row.cells
+        if len(cells) > 1 and cells[0].text.strip() == m["label"]:
+            return [Flag(cells[1].paragraphs[0], None, REVIEW_FLAGS[MENTEE_FIELD_LINT])]
+    return []
+
+
 def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
-           rows: dict[ShapeKey, LintPrecision]) -> tuple[list[Flag], list[Note]]:
+           rows: dict[ShapeKey, LintPrecision],
+           tables: Sequence[Table] = ()) -> tuple[list[Flag], list[Note]]:
     """Where one finding goes: a comment on its quoted text; else on its
     section's heading; else a review note saying what and where it was. A
     near-duplicate is always a note, since what it removed is not on the page,
-    and so is a finding the precision gate keeps off the text."""
+    and so is a finding the precision gate keeps off the text. A blank mentee
+    field is a comment on its cell of ``tables`` (the document's), or nothing."""
     lint, inst = finding["lint"], _instance(finding)
     if lint == "dedup_drops":
         return [], _dedup_notes(inst)
@@ -520,6 +547,8 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
         return [], []
     if not shown_in_place(lint, str(finding.get("message") or ""), rows):
         return [], _less_certain(lint, inst)
+    if lint == MENTEE_FIELD_LINT:
+        return _mentee_field_flags(finding, tables), []
     if diverted_from is not None:  # no heading to sit on: a note, never nothing
         flags = _diversion(diverted_from, inst, surfaces[0])
         return (flags, []) if flags else ([], [_diversion_note(lint, inst)])
@@ -702,7 +731,7 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     notes: list[Note] = []
     per_lint: dict[str, int] = {}
     for f in findings:
-        found, noted = _flags(f, surfaces, rows)
+        found, noted = _flags(f, surfaces, rows, doc.tables)
         for flag in found:
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
             if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:

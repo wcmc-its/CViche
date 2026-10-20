@@ -3970,7 +3970,8 @@ Now analyze the text above:"""
         positions writer made sub-points (`_add_title_duties`); they join the
         haystack, so the same duties are not planned again from the entry's
         text. The row-receipt ledger says which rows each entry wrote: a
-        degree's prose goes only under its own (`supplementary._own_degree_rows`)."""
+        degree's or a leadership role's prose goes only under its own
+        (`supplementary._own_rows`)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(

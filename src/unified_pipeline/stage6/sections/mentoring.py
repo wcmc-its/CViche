@@ -86,6 +86,24 @@ N2_HEADING = "Institutional Training Grants and Mentored Trainee Grants"
 N2_INSTRUCTION = ("Duplicate table below as needed. Examples include serving "
                    "as PI or Mentor on T32, K01, K08, K23 or other mentored grants.")
 
+# A mentee table's label column, in template order (`_mentee_table_rows`).
+# The doctor's mentee_field_incomplete (#1941) reads a rendered table by these
+# labels, and asks for the two named here only where the template does: the
+# Project/Accomplishments row is optional ("**Optional: List publications
+# ..."), and Current Position is a Past Mentees row (a current mentee's table
+# asks for "Goals/expected Outcomes" there instead).
+MENTEE_NAME_LABEL = 'Name:'
+MENTEE_PROJECT_LABEL = 'Project/Accomplishments:'
+MENTEE_CURRENT_POSITION_LABEL = 'Current Position:'
+MENTEE_TABLE_LABELS = (
+    MENTEE_NAME_LABEL,
+    'Site/Position:',
+    'Mentoring Period:',
+    MENTEE_PROJECT_LABEL,
+    MENTEE_CURRENT_POSITION_LABEL,
+    'Type of Supervision:',
+)
+
 # Spacing paragraph between mentee tables: 6pt before and after, in
 # twentieths of a point (w:spacing units).
 MENTEE_TABLE_SPACING_TWIPS = '120'
@@ -828,14 +846,14 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
 def _mentee_table_rows(record: MenteeRecord) -> tuple[tuple[str, str], ...]:
     """The six (label, value) rows of a mentee table, in template order.
     Blank values are kept so every table has the same shape."""
-    return (
-        ('Name:', record.name),
-        ('Site/Position:', record.site_position),
-        ('Mentoring Period:', record.mentoring_period),
-        ('Project/Accomplishments:', record.project),
-        ('Current Position:', record.current_position),
-        ('Type of Supervision:', record.supervision_type),
-    )
+    return tuple(zip(MENTEE_TABLE_LABELS, (
+        record.name,
+        record.site_position,
+        record.mentoring_period,
+        record.project,
+        record.current_position,
+        record.supervision_type,
+    ), strict=True))
 
 
 def _first_table_after(anchor: BaseOxmlElement) -> BaseOxmlElement | None:
