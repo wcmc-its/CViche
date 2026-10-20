@@ -27,6 +27,8 @@ way; see #841.)
 Bullet levels (#984): a multi-part entry ("title<TAB>hours<TAB>dates", or the
 same on separate lines) renders its first part as a level-0 bullet and every
 later part as a level-1 sub-bullet under it; a single-part entry is level 0.
+Since #1943 none of them carries a bullet glyph: a level is an indent step
+(`_apply_plain_list_indent`), as WCM reviewers asked.
 
 `_insert_multiline_as_bullets` is the bullet fallback used by all three
 subsections (L2 joined L1 and L3 in #572; it used the single-bullet inserter,
@@ -730,6 +732,7 @@ class ClinicalPracticeSection:
                 entry if is_last else None,  # Attach entry/comments to first bullet
                 add_blank_before=add_blank_before and is_last,
                 list_level=_TITLE_BULLET_LEVEL if is_last else _DETAIL_BULLET_LEVEL,
+                bulleted=False,  # #1943: reviewers read unbulleted entries more easily
                 # Because insertion runs backwards, every later bullet of this
                 # entry already exists by the time the first one -- the one the
                 # entry rides -- is written. Hand them over with it: the

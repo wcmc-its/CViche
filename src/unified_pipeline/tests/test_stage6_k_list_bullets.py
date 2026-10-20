@@ -33,6 +33,7 @@ import inspect
 import sys
 from pathlib import Path
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -40,6 +41,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.formatting import plain_entry_level  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -78,6 +80,19 @@ def _num_level(para):
     if numPr is None:
         return None
     return numPr.find(qn("w:ilvl")).get(qn("w:val"))
+
+
+def _plain_level(para):
+    """The level of an entry written WITHOUT a bullet (#1943), read from its
+    left indent, or None when the paragraph is a bullet or has no indent."""
+    pPr = para._p.pPr
+    if pPr is None or pPr.find(qn("w:numPr")) is not None:
+        return None
+    left = para.paragraph_format.left_indent
+    if left is None:
+        return None
+    level = plain_entry_level(left.twips)
+    return None if level is None else str(level)
 
 
 def _bullet_calls_by_function():
@@ -122,7 +137,25 @@ def test_without_list_level_still_emits_a_word_list_paragraph_at_level_0():
     assert para.text == "A non-K bullet"
 
 
-def test_teaching_entries_render_as_list_paragraphs_end_to_end():
+def test_unbulleted_entry_has_no_numbering_and_keeps_the_bullet_text_indent():
+    # #1943: the same helper, bulleted=False. No w:numPr and no glyph, the
+    # List Paragraph style a bullet gets, and the text where that level's
+    # bullet text sat: level 0 at the template's 1080 twips, level 1 a step in.
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+    child = gen._insert_bulleted_entry(idx + 1, "A sub-item", None, list_level=1, bulleted=False)
+    title = gen._insert_bulleted_entry(idx + 1, "A title", None, list_level=0, bulleted=False)
+    for para in (title, child):
+        assert _num_level(para) is None
+        assert para.style.name == "List Paragraph"
+        assert para.paragraph_format.first_line_indent is None
+    assert title.paragraph_format.left_indent.twips == 1080
+    assert child.paragraph_format.left_indent.twips == 1800
+    assert title.text == "A title"
+
+
+def test_teaching_entries_render_without_bullets_end_to_end():
+    # #1943 (WCM reviewer feedback): section K entries carry no bullet.
     gen = _generator()
     gen._fill_teaching({"K1": [{
         "taxonomy_code": "K1",
@@ -131,7 +164,8 @@ def test_teaching_entries_render_as_list_paragraphs_end_to_end():
     }]})
     rendered = [p for p in gen.doc.paragraphs if "PA Student Lectures" in p.text]
     assert len(rendered) == 1
-    assert _num_level(rendered[0]) == "0"
+    assert _num_level(rendered[0]) is None
+    assert _plain_level(rendered[0]) == "0"
     assert "•" not in rendered[0].text
 
 
@@ -265,6 +299,8 @@ def test_validator_sees_k_content_rendered_as_list_paragraphs():
     # _validate_output detected K content by a literal "•" prefix. Dropping the
     # glyph made that predicate blind, so check 3 fired on every CV with a fully
     # populated section K. Observed on C0ZGFW before _is_bullet_paragraph.
+    # Since #1943 the K entry has no w:numPr either, so the validator has to
+    # know it by the paragraphs the writer inserted (`_is_entry_paragraph`).
     gen = _generator()
     gen._fill_teaching({"K1": [{
         "taxonomy_code": "K1",
@@ -288,6 +324,34 @@ def test_validator_still_catches_semicolon_fused_list_paragraphs():
 
     fused = [i for i in gen._validate_output() if i["check"] == "semicolon_fused_bullets"]
     assert [i["code"] for i in fused] == ["K1"]
+
+
+def test_validator_still_catches_semicolon_fused_unbulleted_entries():
+    # #1943: the K writer's own shape now -- no glyph, no w:numPr.
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("Didactic teaching")
+    gen._insert_bulleted_entry(idx + 1, "Lecture A; Lecture B; Lecture C; Lecture D; Lecture E",
+                               None, list_level=0, bulleted=False)
+
+    fused = [i for i in gen._validate_output() if i["check"] == "semicolon_fused_bullets"]
+    assert [i["code"] for i in fused] == ["K1"]
+
+
+@pytest.mark.parametrize("writer", ["overflow", "reconsidered"])
+def test_validator_sees_unbulleted_overflow_and_reconsidered_paragraphs(writer):
+    # #1943: the overflow and reconsidered-segment writers also unbullet K, so
+    # the validator has to know their paragraphs too. Unregistered, check 3
+    # misreported the section as empty and check 1 missed the fused entry.
+    gen = _generator()
+    fused_text = "Lecture A; Lecture B; Lecture C; Lecture D; Lecture E"
+    if writer == "overflow":
+        idx = gen._find_paragraph_with_text("Didactic teaching")
+        assert gen._insert_overflow_bullet(idx + 1, fused_text, bulleted=False) is not None
+    else:
+        assert gen._insert_reconsidered_segment(fused_text, "K1")
+
+    issues = gen._validate_output({"K1": [{}]})
+    assert [(i["check"], i["code"]) for i in issues] == [("semicolon_fused_bullets", "K1")]
 
 
 # --- #423: sub-bullet levels re-read from the source table cell ---------------
@@ -351,7 +415,7 @@ def _levels_of(gen, lines):
     for line in lines:
         hits = [p for p in gen.doc.paragraphs if line in p.text]
         assert len(hits) == 1, f"expected one paragraph for {line!r}, got {len(hits)}"
-        out.append(_num_level(hits[0]))
+        out.append(_plain_level(hits[0]))
     return out
 
 
@@ -449,7 +513,7 @@ def test_levels_are_dropped_when_the_rendered_lines_are_not_the_raw_lines(tmp_pa
                 if p.text.strip() in {_TITLE, _CHILDREN[0]}
                 or p.text.strip() in {x.strip() for x in long_child.split(";")}]
     assert len(rendered) == 4
-    assert {_num_level(p) for p in rendered} == {"0"}
+    assert {_plain_level(p) for p in rendered} == {"0"}
 
 
 def test_a_tail_is_licensed_on_the_first_line_only(tmp_path):
