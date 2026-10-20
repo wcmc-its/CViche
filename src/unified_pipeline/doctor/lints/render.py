@@ -1387,17 +1387,38 @@ def _field_record_bounds(labels: list[str | None]) -> tuple[list[bool], list[boo
     """Where each per-field record starts and ends, over a block sequence's
     field labels (None for a block that is not a labelled line). A record is a
     run of labelled lines; it starts after a non-labelled block, or where a
-    label already seen in the current record comes round again (the next
-    record's "Title:")."""
+    label already seen in the current record comes round again. In that last
+    case the record can also start just after the line between the two
+    occurrences (labels do not repeat inside a record, so there is at most one)
+    that carries the label the run ends on -- a
+    "Course:/Role:/Dates:" record after a "Title:/.../Dates:" one starts at
+    "Course:", not at its own "Dates:" (#1966). Labels alone cannot tell which
+    of the two is meant ("Course:/Role:/Dates:" then a second "Role:" has the
+    same shape), so both are marked as starts -- unless the label is the one
+    the record opened with, which is just the next record of its form. The
+    closing label is the run's
+    own, never one learned from another section: a "Role:" that ends the
+    committee runs says nothing about where a teaching record ends (#1966
+    review). A label that follows itself ("Journal:" after "Journal:") is a
+    one-line record, so its first line starts one too."""
     starts = [False] * len(labels)
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
+    closer: str | None = None
     for t, label in enumerate(labels):
         if label is None:
             continue
-        if t == 0 or labels[t - 1] is None or label in seen:
-            starts[t] = True
-            seen = set()
-        seen.add(label)
+        if t == 0 or labels[t - 1] is None:
+            starts[t], seen = True, {}
+            end = next((k for k in range(t, len(labels)) if labels[k] is None), len(labels))
+            closer = labels[end - 1]
+        elif label in seen:
+            first = seen[label]
+            start = t if first == min(seen.values()) else next(
+                (k + 1 for k in range(first, t) if labels[k] == closer), t)
+            starts[start] = starts[t] = True
+            starts[first] |= first == t - 1
+            seen = {labels[k]: k for k in range(start, t)}
+        seen[label] = t
     ends = [label is not None and (t + 1 == len(labels) or labels[t + 1] is None
                                    or starts[t + 1])
             for t, label in enumerate(labels)]
