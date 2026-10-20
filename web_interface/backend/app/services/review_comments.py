@@ -166,6 +166,7 @@ REVIEW_FLAGS = {
     "identical_rendered_rows": "Same as another row: delete one.",
     "split_child_unsourced": "Place or dates come from another entry.",
     "record_boundary": "This line belongs to the entry before.",
+    "record_cut_in_two": "This and the entry beside it are one entry: merge them.",
     "citation_field_dropped": 'Title, link or "..." missing from this citation.',
     "group_header_context": "Lost the heading it sat under.",
     "orphaned_fragments": "Text from the original CV may be missing from this entry.",

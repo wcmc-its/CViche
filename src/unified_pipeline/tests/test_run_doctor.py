@@ -5983,14 +5983,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (80), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (81), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 78
+    assert len(payload["findings"]) == 79
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6680,6 +6680,15 @@ def test_source_line_coverage_prevalence_is_the_measured_corpus_fraction():
     measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["source_line_coverage"] == round(156 / 167, 3)
+
+
+def test_record_cut_in_two_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-19 (CUT-1 in doctor/PRECISION.md): runs where
+    `record_cut_in_two` fires, over the 197 stored labelled runs (13) and 219
+    held-out prod runs with stage-4 output (15); a new measurement updates
+    both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["record_cut_in_two"] == round(28 / 416, 3)
 
 
 def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
