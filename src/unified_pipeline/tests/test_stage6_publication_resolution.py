@@ -451,6 +451,24 @@ def test_anything_but_a_stage5d_citation_resolves_to_no_citation(fields):
     assert resolve_publication({'extracted_fields': fields}).formatted_citation == ''
 
 
+@pytest.mark.parametrize('crossref, expected', [
+    ({'volume': '23', 'issue': '4', 'pages': '689-717'}, 'Brindle Q. A title. Larch Clin. 1985;23(4):689-717.'),
+    # Stage 5 writes null for a value Crossref lacks; a non-dict match is ignored.
+    ({'volume': '23', 'issue': None, 'pages': None}, 'Brindle Q. A title. Larch Clin. 1985;23:689.'),
+    ('not a record', 'Brindle Q. A title. Larch Clin. 1985;23:689.'),
+])
+def test_a_stage5d_citation_takes_crossrefs_issue_and_last_page(crossref, expected):
+    """#1872: the resolver hands the entry's `crossref_match` to the trailer
+    completion; the cases of the completion itself are in
+    test_stage6_citation_matching.py."""
+    resolved = resolve_publication({'crossref_match': crossref, 'extracted_fields': {
+        'formatted_citation': 'Brindle Q. A title. Larch Clin. 1985;23:689.',
+        'formatting_source': 'stage_5d_llm',
+    }})
+
+    assert resolved.formatted_citation == expected
+
+
 def test_a_non_string_editors_value_cannot_reach_the_stage5d_safety_net():
     """The guard `_append_missing_stage5d_values` used to carry itself. It is
     now upstream of the call, so the matcher never sees a list and the
