@@ -114,22 +114,57 @@ def _word_in(token: str, text: str) -> bool:
 #: "In: Cabanyes J, Monge MA, eds." or "In: Diler RS (Ed.)": "In:", names
 #: with no sentence break, then "ed", "eds" or "editor(s)" after a comma or
 #: an opening parenthesis, in any case. ", 2nd ed." is not this clause: the
-#: comma or parenthesis must sit directly before "ed".
+#: comma or parenthesis must sit directly before "ed". Nor is an all-caps
+#: abbreviation in parentheses, "Emergency department (ED) care".
 _EDITORS_CLAUSE_RE = re.compile(
-    r"\bIn:\s(?:(?!\.\s).)+?(?:,\s*|\s*\()(?:eds?\b|editors?\b)", re.IGNORECASE)
+    r"\b(?i:in):\s(?:(?!\.\s).)+?"
+    r"(?:,\s*|\s*\((?!EDS?\)|EDITORS?\)))(?i:eds?\b|editors?\b)")
 #: What separates two people in a stage-4 editors value.
 _EDITOR_SEPARATOR_RE = re.compile(r"\s*(?:[;,&]|\band\b)\s*")
-#: One place name: up to three capitalised words, "Totowa", "New York", "St. Louis".
-_PLACE_NAME = r"[A-Z][\w.'-]*(?: [A-Z][\w.'-]*){0,2}"
-#: A stage-4 publisher that carries its place after its own name, in a shape
-#: only a place has: "Humana Press, Totowa, New Jersey" (a "City, Region"
-#: pair after the comma) or "Saunders (New York)" (in parentheses). The name
-#: must be non-empty. "Lippincott, Williams Wilkins" does not match: the part
-#: after its comma is more of the name, not a "City, Region" pair, and
-#: relabelling it as a place would misstate the publisher (#481).
-_PUBLISHER_WITH_PLACE_RE = re.compile(
-    rf"(?P<name>[^,(]*[^,(\s])\s*"
-    rf"(?:\((?P<paren>{_PLACE_NAME}(?:, {_PLACE_NAME})?)\)|,\s*(?P<comma>{_PLACE_NAME}, {_PLACE_NAME}))")
+#: One city name: up to three capitalised words, "Totowa", "St. Louis".
+_CITY_NAME_RE = re.compile(r"[A-Z][\w.'-]*(?: [A-Z][\w.'-]*){0,2}")
+#: The regions a stage-4 publisher's place can end in: US states and the
+#: countries the corpus's publishers print. Only a value whose last comma
+#: part is one of these is read as name plus place (#481). A capitalisation
+#: test cannot tell a place from a name: "Mosby, Inc, St. Louis" and
+#: "Springer, Verlag, Heidelberg" read as a name and a "place" "Inc, St.
+#: Louis" or "Verlag, Heidelberg".
+_PLACE_REGIONS = frozenset({
+    'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado',
+    'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
+    'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine',
+    'maryland', 'massachusetts', 'michigan', 'minnesota', 'mississippi',
+    'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire', 'new jersey',
+    'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio',
+    'oklahoma', 'oregon', 'pennsylvania', 'rhode island', 'south carolina',
+    'south dakota', 'tennessee', 'texas', 'utah', 'vermont', 'virginia',
+    'washington', 'west virginia', 'wisconsin', 'wyoming',
+    'united states', 'united kingdom', 'england', 'scotland', 'canada',
+    'germany', 'france', 'italy', 'spain', 'switzerland', 'austria',
+    'netherlands', 'the netherlands', 'belgium', 'sweden', 'denmark', 'norway',
+    'ireland', 'japan', 'china', 'india', 'australia', 'israel',
+})
+#: The same, as capitals with their dots dropped ("NJ", "N.Y.", "USA"). Upper
+#: case only: "Co" is a company, not Colorado.
+_PLACE_REGION_CODES = frozenset({
+    'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI',
+    'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN',
+    'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH',
+    'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA',
+    'WV', 'WI', 'WY', 'US', 'USA', 'UK',
+})
+#: Words that make a comma part a company, not a city: "Academic Press,
+#: Elsevier Science, New York" and "Serono Symposia Series, Raven Press, New
+#: York" end in a region, and the part before it is a second publisher.
+_CORPORATE_WORDS = frozenset({
+    'inc', 'ltd', 'limited', 'llc', 'co', 'corp', 'corporation', 'company',
+    'gmbh', 'sa', 'sl', 'verlag', 'press', 'publishers', 'publishing',
+    'publications', 'books', 'group', 'sons', 'series', 'media', 'science',
+    'sciences', 'health', 'elsevier', 'springer', 'wiley', 'lippincott',
+    'williams', 'wilkins', 'saunders', 'mosby', 'karger', 'thieme', 'humana',
+    'raven', 'blackwell', 'decker', 'butterworth', 'churchill', 'livingstone',
+    'mcgraw', 'hill', 'academic', 'taylor', 'francis', 'routledge', 'sage',
+})
 #: A book trailer with no publisher: the year (and pages) alone after a
 #: sentence break, closing the citation -- "Welcome to parenting. 2010." The
 #: publisher goes in front of it, as Vancouver and `_book_trailer_parts`
@@ -188,17 +223,53 @@ def _with_publisher(citation: str, publisher: str) -> str:
     return f"{citation[:trailer.start()]}{publisher.rstrip('.')}; {trailer.group()}"
 
 
+def _is_region(part: str) -> bool:
+    """True when `part` is a US state or a country, by name or code."""
+    return (part.rstrip('.').casefold() in _PLACE_REGIONS
+            or part.replace('.', '') in _PLACE_REGION_CODES)
+
+
+def _is_city(part: str) -> bool:
+    """True when `part` can be a city: capitalised words, none of them a
+    company's."""
+    words = re.findall(r"[^\W_]+", part.casefold())
+    return bool(_CITY_NAME_RE.fullmatch(part)) and not _CORPORATE_WORDS.intersection(words)
+
+
+def _split_publisher_place(publisher: str) -> tuple[str, str] | None:
+    """`publisher` as (name, place), or None when it does not end in a place.
+
+    The place is the last comma part when that is a region ("Springer,
+    Germany"), with the part before it when that can be a city ("Humana
+    Press, Totowa, New Jersey"). A city part with a company's word in it is
+    a second publisher, so the value is refused whole. The name must keep
+    at least one part.
+    """
+    parts = [p.strip() for p in publisher.split(',')]
+    if not _is_region(parts[-1]):
+        return None
+    place_len = 1
+    if len(parts) >= 3:
+        if not _is_city(parts[-2]):
+            return None
+        place_len = 2
+    name = ', '.join(parts[:-place_len])
+    if not name:
+        return None
+    return name, ', '.join(parts[-place_len:])
+
+
 def _with_publisher_place(citation: str, publisher: str) -> str | None:
     """`citation` with the place of stage 4's `publisher` put in front of the
     publisher name it already prints ("Totowa, New Jersey: Humana Press;
-    1992."), or None when there is nothing safe to move: `publisher` is not
-    a name followed by a place (`_PUBLISHER_WITH_PLACE_RE`), or the citation
-    has no "Name;" to stand before, or a place already there."""
-    parts = _PUBLISHER_WITH_PLACE_RE.fullmatch(publisher)
-    if not parts:
+    1992."), or None when there is nothing safe to move: `publisher` does
+    not end in a place (`_split_publisher_place`), or the citation has no
+    "Name;" to stand before, or a place already there."""
+    split = _split_publisher_place(publisher)
+    if split is None:
         return None
-    place = parts["paren"] or parts["comma"]
-    slot = re.search(rf"(?<!: ){re.escape(parts['name'])};", citation, re.IGNORECASE)
+    name, place = split
+    slot = re.search(rf"(?<!: ){re.escape(name)};", citation, re.IGNORECASE)
     if not slot:
         return None
     return f"{citation[:slot.start()]}{place}: {citation[slot.start():]}"
@@ -211,8 +282,8 @@ def _with_missing_publisher(citation: str, publisher: str) -> str:
     Jersey"). When 5d printed the name and dropped the place, the place
     goes in front of the name, where Vancouver puts it; printing the whole
     value again after the year named the publisher twice (#481). Only a
-    value whose tail has a place's shape counts as name plus place
-    (`_PUBLISHER_WITH_PLACE_RE`); any other value keeps the whole of it,
+    value that ends in a region counts as name plus place
+    (`_split_publisher_place`); any other value keeps the whole of it,
     positioned by `_with_publisher`.
 
     Past the first test, a citation printing the name followed by ";" lacks

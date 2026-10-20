@@ -130,18 +130,20 @@ def _book_trailer_parts(pub: ResolvedPublication) -> list[str]:
 
 
 def _series_parts(pub: ResolvedPublication) -> list[str]:
-    """`(Series; vol Volume).` -- the series a chapter appeared in, as zero or
-    one part (#481).
+    """`(Series; vol Volume, no. Issue).` -- the series a chapter appeared
+    in, as zero or one part (#481).
 
     Where NLM's Citing Medicine puts it, after the book's own trailer. The
-    volume is the series volume PubMed gave, which the book trailer has no
-    slot for.
+    volume and issue are the ones PubMed gave the series, which the book
+    trailer has no slot for; the journal form printed both.
     """
     if not pub.series:
         return []
-    if pub.volume:
-        return [f"({pub.series}; vol {pub.volume})."]
-    return [f"({pub.series})."]
+    numbering = [label for label in (pub.volume and f"vol {pub.volume}",
+                                     pub.issue and f"no. {pub.issue}") if label]
+    if not numbering:
+        return [f"({pub.series})."]
+    return [f"({pub.series}; {', '.join(numbering)})."]
 
 
 def _is_meeting(pub: ResolvedPublication) -> bool:

@@ -1366,6 +1366,19 @@ def test_a_series_with_no_volume_is_cited_by_name_alone():
     assert citation.endswith('Example Press; 2012:289-321. (Methods Example Sci). PMID:123.')
 
 
+def test_a_series_issue_is_cited_with_its_volume():
+    """The journal form printed "511(3)"; the series keeps the issue."""
+    citation, _, _ = _format_citation(_series_chapter(pubmed_issue='3'), 4)
+
+    assert citation.endswith('Example Press; 2012:289-321. (Methods Example Sci; vol 511, no. 3). PMID:123.')
+
+
+def test_a_series_issue_with_no_volume_is_cited_alone():
+    citation, _, _ = _format_citation(_series_chapter(pubmed_volume='', pubmed_issue='3'), 4)
+
+    assert citation.endswith('Example Press; 2012:289-321. (Methods Example Sci; no. 3). PMID:123.')
+
+
 def test_pubmed_matched_to_another_chapter_keeps_the_journal_citation():
     """2054_Opresko_Cv 396: one CV line held two chapters. PubMed matched
     the first and stage 4 read the second's book, so the book shape would
