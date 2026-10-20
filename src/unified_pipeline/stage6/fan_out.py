@@ -951,11 +951,12 @@ def _h_renders_list(fields: Mapping[str, Any], key: str) -> bool:
 
 @dataclass(frozen=True)
 class DeclinedList:
-    """A record list fan-out kept whole for a `_LIST_CHECKED_AFTER_RENDER` or
-    `_STAGE4_LIST_CHECKED_AFTER_RENDER` code (#1187). Whether its records
-    reached the document is known only after the render, so stage 6 hands
-    the rendered text to `unrendered_list_warnings`, which warns for the
-    lists some record of which is not there."""
+    """A record list fan-out kept whole for a `_GENERIC_LIST_CHECKED_AFTER_RENDER`
+    code, or the stage-4 records list of a `_STAGE4_LIST_CHECKED_AFTER_RENDER`
+    one (#1187). Whether its records reached the document is known only
+    after the render, so stage 6 hands the rendered text to
+    `unrendered_list_warnings`, which warns for the lists some record of
+    which is not there."""
 
     code: str
     key: str
@@ -1372,7 +1373,7 @@ def fan_out_multi_record_entries(
     given, one render-warning dict per (code, list path) is appended to it
     (`REJECTED_LIST_CHECK`), as it is for a B1 list whose text names a year
     no record holds (`_lists_an_unlisted_year`). For a code in
-    `_LIST_CHECKED_AFTER_RENDER`, and a declined stage-4 records list of a
+    `_GENERIC_LIST_CHECKED_AFTER_RENDER`, and a declined stage-4 records list of a
     `_STAGE4_LIST_CHECKED_AFTER_RENDER` code, when `declined` is given, a
     `DeclinedList` is appended to it instead, for the caller to check
     against the rendered document (`unrendered_list_warnings`).
