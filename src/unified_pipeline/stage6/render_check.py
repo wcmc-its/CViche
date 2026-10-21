@@ -31,7 +31,7 @@ from collections import Counter
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
 from unified_pipeline.core.template_boilerplate import is_template_label_line
-from unified_pipeline.core.text_norm import tab_record_segments
+from unified_pipeline.core.text_norm import edge_date_range, tab_record_segments
 
 from .normalization import _squash
 
@@ -389,10 +389,13 @@ def short_tab_part_rendered(part: str, extracted_fields: dict,
     when one output line holds all its words and its years: `output_token_sets`
     are `_record_tokens` of each line, and the years keep siblings apart
     ("Secretary, 2009-2011" is not "Secretary, 2013-2015"). None when the part
-    cannot be checked, as in `_record_rendered`.
+    cannot be checked, as in `_record_rendered`, and None for a part dated by
+    one year only ("Elected fellow 2015."): the row of the record it
+    belongs to ("Fellow, Quokka Society" beside a "2015-Present" cell)
+    holds that year without its words, so the check cannot tell the two apart.
     """
     words = short_tab_part_words(part)
-    if words is None:
+    if words is None or edge_date_range(part) is None:
         return None
     if words <= _scalar_field_words(extracted_fields):
         return True
