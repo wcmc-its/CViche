@@ -122,6 +122,28 @@ _ROLE_LINE_RE = re.compile(r'(?:^|[\t\n])\s*Role:\s*([^\t\n]+)')
 #: Teaching", and blank for mentees with no level.
 _SUPERVISION_ROW_RE = re.compile(r'Type of Supervision[^|\t\n]*\| *([^|\t\n]+)', re.I)
 
+#: The same label with its value on the same line and no pipe (#1973):
+#: "Type of Supervision Clinical" (YTPMZK, A5IZ6Q, YDSVDB) or the template
+#: label, a tab, then the value (9TUVGW). A value starting with "(" or
+#: repeating the label is a garbled label, not a value (EH4XXA), and a label
+#: with nothing after it ("Type of Supervision:", B2RRRA) matches nothing.
+_SUPERVISION_INLINE_RE = re.compile(
+    r'Type of Supervision(?:[ \t]*\([^()\t\n]*\))?(?:[ \t]*:[ \t]*|[ \t]+)'
+    r'(?!\(|Type of Supervision)([^\s|][^|\t\n]*)', re.I)
+
+#: The template label split by its value (IZABPD, #1973): the docx cell read
+#: "Type of Supervision (Research, <value>\tclinical, teaching, leadership)".
+_SUPERVISION_SPLIT_LABEL_RE = re.compile(
+    r'Type of Supervision \(Research, ([^\t\n]+?)\tclinical, teaching, leadership\)', re.I)
+
+#: A captured value that is not one: the next template label ("Current
+#: Position:"), N/A, or punctuation with no letters ("-"). Found by the #1973
+#: verifier's probes; none is in the corpus, so this is preventive.
+_NOT_A_SUPERVISION_VALUE_RE = re.compile(r':\s*$|^\s*n/?a\s*$|^[^A-Za-z]*$', re.I)
+
+#: Tried in this order: the pipe row first, as before #1973.
+_SUPERVISION_SOURCE_RES = (_SUPERVISION_ROW_RE, _SUPERVISION_SPLIT_LABEL_RE, _SUPERVISION_INLINE_RE)
+
 #: The revised template's "Goals/expected Outcomes | <value>" row (YDSVDB,
 #: #829). No schema field holds it and the WCM table has no goals row, so it
 #: joins Project/Accomplishments; before, all 5 of YDSVDB's goals were lost.
@@ -749,6 +771,15 @@ def _with_site_extras(site_position: str, fields: Mapping[str, Any]) -> str:
     return _SITE_PART_SEPARATOR.join(parts)
 
 
+def _source_supervision_type(text: str) -> str:
+    """The Type of Supervision value the entry's own source text states, or ''."""
+    for pattern in _SUPERVISION_SOURCE_RES:
+        match = pattern.search(text)
+        if match and not _NOT_A_SUPERVISION_VALUE_RE.search(match.group(1)):
+            return match.group(1).strip()
+    return ''
+
+
 def _infer_supervision_type(level_text: str) -> str:
     """Supervision type from the mentee's level/position when stage 4 gave
     none. Checked in this order on purpose: a "clinical fellow" is Research
@@ -822,8 +853,7 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
 
     supervision_type = _text(fields.get('supervision_type'))
     if not supervision_type:
-        row_match = _SUPERVISION_ROW_RE.search(_text(entry.get('text')))
-        supervision_type = row_match.group(1).strip() if row_match else ''
+        supervision_type = _source_supervision_type(_text(entry.get('text')))
     role_match = _ROLE_LINE_RE.search(_text(entry.get('text')))
     role = role_match.group(1).strip() if role_match else ''
     if not supervision_type:

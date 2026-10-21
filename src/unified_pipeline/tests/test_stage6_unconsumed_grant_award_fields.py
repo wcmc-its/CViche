@@ -252,6 +252,49 @@ def test_an_empty_template_supervision_row_falls_back_to_inference():
     assert _normalize_mentee(entry, ongoing=True).supervision_type == "Clinical"
 
 
+def test_an_inline_supervision_value_beats_the_level_inference():
+    # #1973, YTPMZK: the label and its value share one cell, no pipe.
+    entry = {"text": "Name Jane Roe\tCurrent Position\tType of Supervision Clinical",
+             "extracted_fields": {"mentee_level": "PhD"}}
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Clinical"
+    entry["text"] = "Name Jane Roe\nType of Supervision: Teaching\tNext cell"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Teaching"
+
+
+def test_a_tab_after_the_template_label_is_an_inline_value():
+    # #1973, 9TUVGW: the template label, a tab, then the value.
+    entry = {"text": "Type of Supervision (Research, clinical, teaching, leadership)\tResearch and career advice",
+             "extracted_fields": {"mentee_level": "Resident"}}
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research and career advice"
+
+
+def test_a_template_label_split_by_its_value_yields_the_value():
+    # #1973, IZABPD: the cell read "(Research, <value>\tclinical, teaching, leadership)".
+    entry = {"text": "Current Position Dentist\tType of Supervision (Research, Clinical\tclinical, teaching, leadership)",
+             "extracted_fields": {"mentee_level": "PhD"}}
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Clinical"
+
+
+@pytest.mark.parametrize("text", [
+    "Project/Accomplishments:\tCurrent Position:\tType of Supervision:",  # B2RRRA: label, no value
+    "Type of Supervision Type of Supervision ((rresearch, clinical, teaching, leadership)esearch",  # EH4XXA
+    "Type of Supervision (Research, clinical, teaching, leadership)\t",
+    "Type of Supervision (research, clinical, teaching, leadership) |",
+    "Type of Supervision\tCurrent Position:",  # next label, not a value
+    "Type of Supervision: N/A",
+    "Type of Supervision -",
+])
+def test_a_supervision_label_without_a_value_falls_back_to_inference(text):
+    entry = {"text": text, "extracted_fields": {"mentee_level": "Resident"}}
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Clinical"
+
+
+def test_the_pipe_row_still_wins_over_an_inline_value():
+    entry = {"text": "Type of Supervision Clinical\nType of Supervision (Research) | Research",
+             "extracted_fields": {}}
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research"
+
+
 def test_the_template_goals_row_joins_the_project():
     # #829, YDSVDB: no field holds the revised template's goals row; all 5 were lost.
     entry = {"text": "Name | Jane Roe\nProject/Accomplishments** | Archive move\n"
