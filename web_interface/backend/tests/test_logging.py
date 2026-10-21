@@ -166,6 +166,51 @@ class TestConfigureLogging:
         configure_logging()
 
 
+_CV_TEXT = "SECRET_CV_TEXT"
+_PROVIDER_TEXT = "SECRET2"
+
+
+def _raise_chained() -> None:
+    try:
+        raise KeyError(_PROVIDER_TEXT)
+    except KeyError as exc:
+        raise ValueError(_CV_TEXT) from exc
+
+
+class TestTracebackRedaction:
+    """#639: through the real configured handler, a traceback above DEBUG keeps
+    its frames and exception classes but not str(e); DEBUG keeps it whole.
+
+    Mutant that kills this: drop "()": RedactingFormatter from the text
+    formatter, or call self.formatException in JSONFormatter again.
+    """
+
+    def _emit(self, capsys, fmt: str, level: int) -> str:
+        configure_logging(level="DEBUG", fmt=fmt)
+        capsys.readouterr()
+        try:
+            try:
+                _raise_chained()
+            except ValueError:
+                logging.getLogger("app.probe_639").log(level, "run failed", exc_info=True)
+            out = capsys.readouterr().out
+        finally:
+            configure_logging(level="INFO", fmt="text")
+        return json.loads(out)["exc_info"] if fmt == "json" else out
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_error_traceback_has_frames_and_classes_but_no_message(self, capsys, fmt):
+        text = self._emit(capsys, fmt, logging.ERROR)
+        assert "in _raise_chained" in text and "direct cause" in text
+        assert "\nKeyError\n" in text and text.rstrip().endswith("\nValueError")
+        assert _CV_TEXT not in text and _PROVIDER_TEXT not in text
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_debug_traceback_keeps_the_message(self, capsys, fmt):
+        text = self._emit(capsys, fmt, logging.DEBUG)
+        assert f"ValueError: {_CV_TEXT}" in text and f"KeyError: '{_PROVIDER_TEXT}'" in text
+
+
 class TestRequestIDMiddleware:
     def test_response_carries_x_request_id_header(self, client):
         response = client.get("/health")

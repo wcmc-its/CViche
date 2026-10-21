@@ -444,6 +444,35 @@ def test_short_tab_part_rendered_needs_its_years_on_the_line():
     assert short_tab_part_rendered("Secretary, 2005-2007", {}, sets) is True
     assert short_tab_part_rendered("Secretary, 2009-2011", {"role": "Secretary"}, []) is True
     assert short_tab_part_rendered("COMMITTEES 1993-1994", {}, []) is None
+    # #1243: a part dated by one year cannot be told from the row whose range
+    # cell holds that year ("Fellow, Quokka Society" beside "2015-Present").
+    assert short_tab_part_rendered("Elected fellow 2015.", {}, []) is None
+    assert short_tab_part_rendered("Elected fellow 2015-2016.", {}, []) is False
+
+
+def test_tab_parts_dated_by_one_year_the_render_dropped_are_recovered():
+    # #1243 (BFSUMA 98's shape): a society line whose posts mostly carry one
+    # year. The posts no line names are recovered; the one the render wrote
+    # into another line is not, and neither is a short one-year part.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "I",
+        "text": ("Quokka College of Pharmacy, 1979-present\tFounding Member, 1979\t"
+                 "Elected fellow 2015.\tResearch Affairs Committee, 1985\t"
+                 "Chairperson, Awards Committee, 1987-1988"),
+        "extracted_fields": {"organization": "Quokka College of Pharmacy",
+                             "membership_type": "Founding Member, 1979"},
+    }
+    gen.doc.add_paragraph("Founding Member, 1979; Fellow, 1985, Quokka College of Pharmacy 1979-present")
+    gen.doc.add_paragraph("Fellow, Quokka College of Pharmacy")
+
+    gen._recover_unrendered_records({"I": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Research Affairs Committee, 1985" in t for t in bullets)
+    assert any("Chairperson, Awards Committee, 1987-1988" in t for t in bullets)
+    assert not any("Founding Member" in t or "Elected fellow" in t for t in bullets)
+    assert gen.stats["unrendered_records_recovered"] == 2
 
 
 # ------------------------------------------------ D1 positions path (KFGXBW)
@@ -5960,9 +5989,10 @@ def test_a_record_fan_out_made_keeps_its_tabs(marker):
 
 # The web181 Q1 shape: a long lead-in, then dated offices, most of them
 # single years. #1243's tab-part rules read it as one record (fewer than half
-# its parts give a date range); its date-led lines would read as two.
+# its parts give a date range, and the lead-in's colon makes the single years
+# details); its date-led lines would read as two.
 _FORUM_PARTS = [
-    "Example Rehabilitation Forum. A not-for-profit consortium of academic departments",
+    "Example Rehabilitation Forum. A not-for-profit consortium of academic departments:",
     "2005-present Founding President.",
     "2009 Conference Director: First World Conference, Example City.",
     "2011 Conference Director: World Congress, Example City",

@@ -10,6 +10,7 @@ from app.errors import not_found, validation_error
 from app.models import Feedback, Run, RunState, Step, User, UserRole, UserStatus
 from app.schemas import AdminStats, AdminStepAvg, AdminUser, AdminUserUpdate
 from app.services import admin_policy
+from app.services.run_service import find_rowless_archives_or_none
 from app.services.runs_admin_query import submission_split
 from app.timeutil import utc_now
 
@@ -79,7 +80,16 @@ def get_admin_stats(db: Session) -> AdminStats:
         p95_duration_seconds=p95_duration_seconds,
         step_avg_seconds=step_avg_seconds,
         submissions=submission_split(db),
+        rowless_archives=_rowless_archive_count(db),
     )
+
+
+def _rowless_archive_count(db: Session) -> int | None:
+    """How many input archives in storage have no run row (#802), or None
+    when storage could not be checked. Shown on the Overview tab; the ids and
+    the reap live on POST /api/admin/runs/reap-orphans."""
+    rowless = find_rowless_archives_or_none(db, caller="admin stats")
+    return None if rowless is None else len(rowless)
 
 
 def get_users_with_stats(db: Session) -> list[AdminUser]:

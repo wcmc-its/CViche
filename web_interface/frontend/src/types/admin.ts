@@ -7,6 +7,8 @@ export interface Stats {
   p95_duration_seconds?: number | null
   step_avg_seconds?: StepAvg[]
   submissions?: SubmissionSplit
+  /** Input archives in storage with no run row (#802); null when storage could not be listed. */
+  rowless_archives?: number | null
 }
 
 export interface DepartmentSubmissions {

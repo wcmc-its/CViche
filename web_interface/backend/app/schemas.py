@@ -535,6 +535,10 @@ class AdminStats(BaseModel):
     # Per-stage average duration over completed runs, in pipeline order.
     step_avg_seconds: list[AdminStepAvg] = []
     submissions: SubmissionSplit = SubmissionSplit()
+    # Input archives in storage with no run row (#802): what
+    # run_service.find_rowless_archives finds. None when storage could not be
+    # listed, so an unchecked store never reads as a clean one.
+    rowless_archives: int | None = None
 
 
 class AdminUser(BaseModel):

@@ -86,6 +86,7 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from unified_pipeline.core.prompt_logger import set_current_run_id
 from unified_pipeline.llm_client import LlmUsage, format_models_used
+from unified_pipeline.log_redaction import RedactingFormatter
 from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_on
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
     get_cv_hierarchy_chunked,
@@ -163,9 +164,12 @@ def configure_cli_logging() -> None:
             "narration_only": {"()": _NarrationOnly},
             "not_narration": {"()": _NotNarration},
         },
+        # RedactingFormatter: a traceback above DEBUG keeps its frames and
+        # exception classes but not str(e) (#639, unified_pipeline.log_redaction).
         "formatters": {
-            "plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"},
-            "message_only": {"format": "%(message)s"},
+            "plain": {"()": RedactingFormatter,
+                      "fmt": "%(asctime)s %(levelname)s %(name)s %(message)s"},
+            "message_only": {"()": RedactingFormatter, "fmt": "%(message)s"},
         },
         "handlers": {
             "default": {
