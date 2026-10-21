@@ -166,6 +166,9 @@ class ResolvedPublication:
     #: '' when the line names no such month; the meeting trailer then prints
     #: `year` as it always did.
     meeting_date: str = ''
+    #: The entry's own line, which the S8 fallback checks its abstract number
+    #: and meeting month against so it prints no word twice (#1570).
+    source_text: str = ''
     volume: str = ''
     issue: str = ''
     pages: str = ''
@@ -218,10 +221,13 @@ def _scalar_text(value: object) -> str:
     return str(value)
 
 
-#: A CV's own list number at the head of an entry's line: "10. ", "(3) ".
-#: The same shape stage 5d strips before its call (`_LEADING_LIST_NUMBER_RE`
-#: in `stage_5d_citation_formatter.py`).
-_LEADING_LIST_NUMBER_RE = re.compile(r'^\s*(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
+#: The number that opens an entry's line, which is the CV's own list number
+#: in every shape the corpus writes one: "10. ", "*56. ", "61.* ",
+#: "112.Analgesia", "2 Rook J", "[56] ", "(56) ", "56) ", "608: ". Wider than
+#: stage 5d's `_LEADING_LIST_NUMBER_RE`, which strips only "N." "N)" "(N)"
+#: followed by a space: stage 4 stores the other shapes as the abstract
+#: number too (YUYVIG LTTYWI 387, TQXZNI 130; NECRGC WYNUCX; #1570).
+_OPENING_NUMBER_RE = re.compile(r'\s*\*?\s*[\[(]?\s*(?P<number>\d+)')
 
 #: A month name or abbreviation. The `\.?\s+` after it in the pattern below
 #: makes the alternation's order immaterial: "Sep" in "Sept." backtracks.
@@ -237,16 +243,18 @@ _WRITTEN_MONTH_DATE_RE = re.compile(
 def _abstract_number(value: object, source_text: str) -> str:
     """An S8 `abstract_number` that the entry's own line writes, else ''.
 
-    The value has to stand in the line as its own token, and not as the
-    line's leading list number: stage 4 stores the CV's "56." as the
-    abstract number (YUYVIG ECXGAT 369, 489), and printed, that would be a
-    number the CV never gave the abstract (#1570).
+    The value has to stand in the line as its own token, and must not be the
+    number the line opens with: that is the CV's list number, which stage 4
+    stores as the abstract number ("56." in YUYVIG ECXGAT 369, 489), and
+    printed, it would be a number the CV never gave the abstract (#1570).
     """
-    number = _scalar_text(value).strip()
+    number = _scalar_text(value).strip().rstrip('.')
     if not number:
         return ''
-    line = _LEADING_LIST_NUMBER_RE.sub('', source_text, count=1)
-    return number if re.search(rf'(?<!\w){re.escape(number)}(?!\w)', line) else ''
+    opening = _OPENING_NUMBER_RE.match(source_text)
+    if opening and number.isdigit() and int(number) == int(opening['number']):
+        return ''
+    return number if re.search(rf'(?<!\w){re.escape(number)}(?!\w)', source_text) else ''
 
 
 def _meeting_date(value: object, source_text: str) -> str:
@@ -454,6 +462,7 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         location=_text(fields.get('location')),
         abstract_number=_abstract_number(fields.get('abstract_number'), source_text),
         meeting_date=_meeting_date(fields.get('year'), source_text),
+        source_text=source_text,
         volume=(_scalar_text(enrichment.get('pubmed_volume'))
                 or _scalar_text(fields.get('volume'))),
         issue=(_scalar_text(enrichment.get('pubmed_issue'))

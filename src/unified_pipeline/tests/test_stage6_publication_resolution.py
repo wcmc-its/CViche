@@ -637,9 +637,27 @@ def test_an_int_year_equal_to_the_group_year_is_added():
     ('K-20', 'A Talk. Larks Meeting, Larchmere, May 22, 2000, K-20', 'K-20'),
     ('3(6):476-477', '202. Rook J. A Talk. Proc Larks 3(6):476-477, 2006.', '3(6):476-477'),
     (175, 'Rook J. A Talk. Larks Day, abstract 175, 2025.', '175'),
-    # The CV's own list number is not the abstract's (ECXGAT 369, 489).
+    # The CV's own list number is not the abstract's (ECXGAT 369, 489), in
+    # every shape the corpus opens a line with one (#1570 round 2: QZWBKQ,
+    # WYNUCX, LTTYWI 387, TQXZNI 130, RGUNJV, web053 473).
     ('56', '56. Rook J. A Talk on Larks', ''),
     ('175', '175. Rook J. A Talk. Larks Day, 2016-2024.', ''),
+    ('56', '*56. A Talk on Larks', ''),
+    ('61', '61.* Rook J. A Talk on Larks', ''),
+    ('112', '112.Analgesia for Larks. Larks Day', ''),
+    ('100', '100.Rook J. A Talk on Larks', ''),
+    ('2', '2 Rook J, A Talk on Larks', ''),
+    ('56', '[56] A Talk on Larks', ''),
+    ('56', '(56) A Talk on Larks', ''),
+    ('56', '56) A Talk on Larks', ''),
+    ('1056', '1056. A Talk on Larks', ''),
+    ('608', '608: A Talk on Larks', ''),
+    ('56.', '56. A Talk on Larks', ''),
+    # Another number opening the line does not hide the abstract's.
+    ('K-20', '3. A Talk on Larks, K-20', 'K-20'),
+    ('12', '3. A Talk on Larks, abstract 12', '12'),
+    # A longer opening number is not this one, and "56" in "1056" is no token.
+    ('56', '1056. A Talk on Larks', ''),
     # Not written in the line at all, or only inside a longer number.
     ('W59', 'Rook J. A Talk on Larks', ''),
     ('20', 'Rook J. A Talk. Larks Day, 2020.', ''),

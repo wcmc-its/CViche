@@ -19,6 +19,7 @@ shape a record takes, and what punctuation joins it (round-4 review of PR #737,
 points 1/2/3 and 8-15).
 """
 import re
+from collections import Counter
 from collections.abc import Mapping
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -162,7 +163,7 @@ def _is_meeting(pub: ResolvedPublication) -> bool:
     return bool(pub.conference_name or pub.location)
 
 
-def _meeting_trailer_parts(pub: ResolvedPublication) -> list[str]:
+def _meeting_trailer_parts(pub: ResolvedPublication, shown: str) -> list[str]:
     """`Meeting; Year; Place.` -- the S8 trailer (#1570), in the order and
     with the separators stage 5d's own S8 format uses, so a meeting line reads
     the same whichever path rendered it.
@@ -177,14 +178,46 @@ def _meeting_trailer_parts(pub: ResolvedPublication) -> list[str]:
     writes follows the trailer as its own part, where stage 5d puts it
     ("...; Los Angeles. K-20."). Both are resolved against the line by
     `resolve_publication`, so neither can add a word the CV lacks (#1570).
+    Neither is printed where it would write a word more often than the
+    entry's line does, counting what the rest of the citation (`shown`)
+    already prints: a title "Abstract LB-043: ..." keeps its number once, a
+    number "2007 10 (Pt 2): 636-43" is left off a line whose meeting and
+    place already print the line's every "2007" (RXYBVF 425), and a month the
+    place already writes stays the stored date.
     """
-    date = pub.meeting_date or pub.year
+    shown_year = " ".join(part for part in (shown, pub.conference_name, pub.location)
+                          if part)
+    date = pub.year
+    if pub.meeting_date and not _repeats_a_word(pub.meeting_date, shown_year,
+                                                pub.source_text):
+        date = pub.meeting_date
     trailer = "; ".join(part for part in (pub.conference_name, date, pub.location)
                         if part)
     parts = [trailer.rstrip('.') + "."]
-    if pub.abstract_number:
+    if pub.abstract_number and not _repeats_a_word(
+            pub.abstract_number, f"{shown} {trailer}", pub.source_text):
         parts.append(pub.abstract_number.rstrip('.') + ".")
     return parts
+
+
+#: A word of a rendered line, for `_repeats_a_word`. One- and two-letter
+#: words are left out: they are initials and labels ("J", "Pt") that an
+#: author list prints many times over, not the text a field duplicates.
+_COUNTED_WORD_RE = re.compile(r'[^\W_]*\d[^\W_]*|[^\W\d_]{3,}')
+
+
+def _word_counts(text: str) -> Counter[str]:
+    return Counter(_COUNTED_WORD_RE.findall(text))
+
+
+def _repeats_a_word(added: str, shown: str, source_text: str) -> bool:
+    """True when printing `added` beside `shown` writes some word more often
+    than the entry's own line does: the added text would duplicate what the
+    line already prints (#1570)."""
+    shown_counts = _word_counts(shown)
+    source_counts = _word_counts(source_text)
+    return any(shown_counts[word] + count > source_counts[word]
+               for word, count in _word_counts(added).items())
 
 
 def _identifier_parts(pub: ResolvedPublication) -> list[str]:
@@ -257,7 +290,8 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     elif pub.publisher and not pub.journal:
         parts.extend(_book_trailer_parts(pub))
     elif _is_meeting(pub):
-        parts.extend(_meeting_trailer_parts(pub))
+        shown = " ".join(parts + _identifier_parts(pub))
+        parts.extend(_meeting_trailer_parts(pub, shown))
     else:
         parts.extend(_journal_trailer_parts(pub))
     parts.extend(_identifier_parts(pub))
