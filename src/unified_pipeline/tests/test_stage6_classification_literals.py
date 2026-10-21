@@ -1123,6 +1123,63 @@ def test_resolve_postdoc_training_does_not_mutate_the_input_entries():
     assert entry["taxonomy_code"] == "C"
 
 
+def test_an_entry_carrying_its_routing_code_is_handed_on_itself():
+    """Only an entry whose own code disagrees with its routing code is
+    stamped on a copy. One that agrees is the record's `source_entry`
+    itself, so its row is recorded against the entry stage 6 grouped
+    (#1205)."""
+    agrees = {"taxonomy_code": "C3", "text": "Fellowship", "extracted_fields": {}}
+    disagrees = {"taxonomy_code": "C", "text": "Fellowship", "extracted_fields": {}}
+    (record,) = _resolve_postdoc_training({"C3": [agrees]})
+    assert record.source_entry is agrees
+    (record,) = _resolve_postdoc_training({"C3": [disagrees]})
+    assert record.source_entry is not disagrees
+    assert record.source_entry["taxonomy_code"] == "C3"
+
+
+def test_every_training_row_is_recorded_against_its_own_entry():
+    """The row-receipt ledger (#534) holds each row under the entry it was
+    written for, by identity, which is how the #1205 sub-point pass finds a
+    position's own row. A stamped copy's row is the copy's, not the
+    entry's."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("C. POSTDOCTORAL TRAINING")
+    table = gen.doc.add_table(rows=1, cols=3)
+
+    def training(code, start, end):
+        return {"taxonomy_code": code, "text": "Training",
+                "extracted_fields": {"training_type": "Residency", "institution": "Fictional Hospital",
+                                     "start_date": start, "end_date": end}}
+
+    earlier, later = training("C", "2015-07", "2018-06"), training("C", "2018-07", "2021-06")
+    stamped = training("C", "2012-07", "2015-06")
+    gen._fill_postdoc_training({"C": [earlier, later], "C3": [stamped]})
+
+    later_row, earlier_row, stamped_row = (row._tr for row in table.rows[1:])
+    assert [p.getparent().getparent() for p in gen._row_receipts.elements_for(later)] == [later_row]
+    assert [p.getparent().getparent() for p in gen._row_receipts.elements_for(earlier)] == [earlier_row]
+    assert gen._row_receipts.elements_for(stamped) == []
+    assert stamped_row is not None
+
+
+def test_the_writer_fills_the_table_after_the_postdoctoral_heading():
+    """The writer looks its table up by `POSTDOC_TRAINING_HEADING`, the
+    heading the #1205 sub-point pass reads its span from. Its "TRAINING"
+    fallback would take an earlier heading that names training too."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("INSTITUTIONAL TRAINING GRANTS")
+    grants = gen.doc.add_table(rows=1, cols=3)
+    gen.doc.add_paragraph("C. POSTDOCTORAL TRAINING")
+    training = gen.doc.add_table(rows=1, cols=3)
+    gen._fill_postdoc_training({"C": [{"taxonomy_code": "C", "text": "Residency",
+                                       "extracted_fields": {"training_type": "Residency"}}]})
+
+    assert len(grants.rows) == 1
+    assert [c.text for c in training.rows[1].cells][0] == "Residency"
+
+
 def test_resolve_postdoc_training_is_empty_when_no_code_matches():
     assert _resolve_postdoc_training({}) == ()
     assert _resolve_postdoc_training({"C9": [{"text": "x"}], "C": []}) == ()

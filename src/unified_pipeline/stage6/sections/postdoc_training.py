@@ -61,12 +61,23 @@ from ..resolution import (
     _recover_institution_from_nearby_entries,
 )
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import (
+    POSTDOC_DATE_FIELDS,
+    POSTDOC_FIELD_OF_STUDY_FIELDS,
+    POSTDOC_TYPE_FIELDS,
+    training_cell_value,
+)
 
 logger = logging.getLogger(__name__)
 
 # The generic postdoctoral code, used both as a member of the table below and
 # as the fallback when an entry carries no routing code of its own.
 GENERIC_TRAINING_CODE = 'C'
+
+# The template heading the section's table follows. The writer looks it up,
+# and so does the #1205 sub-point pass for the section's span
+# (`_SUBPOINT_SECTION_HEADERS`), so the two cannot name different headings.
+POSTDOC_TRAINING_HEADING = 'POSTDOCTORAL'
 
 # Every taxonomy code the Postdoctoral Training table renders: C generic,
 # C1 postdoctoral research, C2 residency, C3 fellowship. C3 was omitted
@@ -104,9 +115,10 @@ class PostdocTrainingRecord:
 
     `location` is already '' when the institution string names that city, so
     the renderer needs no de-duplication rule of its own; `dates` is already
-    through the code's own date rule. `source_entry` is the stamped stage-4
-    dict, carried through only because `_add_table_row_with_mixed_content`
-    reads it to attach upstream pipeline comments to the row.
+    through the code's own date rule. `source_entry` is the stage-4 dict as
+    `_gather_postdoc_entries` hands it on, carried through because
+    `_add_table_row_with_mixed_content` reads it to attach upstream pipeline
+    comments to the row and records the row against it.
     """
 
     taxonomy_code: str = GENERIC_TRAINING_CODE
@@ -159,16 +171,18 @@ def _normalize_training_entry(
     # A fused multi-record entry extracts these as a list, one item per
     # record (corpus CV FIHL8A), not a string -- join before any string
     # method sees it.
+    # Each cell's aliases, in order, and the alias it prints are
+    # `supplementary`'s, so the #1205 sub-point pass counts what this row
+    # prints and no other alias (`_value_tokens`).
     training_type = _join_if_list(
-        fields.get('training_type') or fields.get('title')
+        training_cell_value(fields, POSTDOC_TYPE_FIELDS)
         or DEFAULT_TRAINING_TYPES.get(taxonomy_code, FALLBACK_TRAINING_TYPE))
     # Replace tabs with comma-space for cleaner display
     if '\t' in training_type:
         training_type = ', '.join(part.strip()
                                   for part in training_type.split('\t')
                                   if part.strip())
-    field_of_study = _join_if_list(fields.get('field_of_study')
-                                   or fields.get('specialty'))
+    field_of_study = _join_if_list(training_cell_value(fields, POSTDOC_FIELD_OF_STUDY_FIELDS))
     if field_of_study and field_of_study.casefold() not in training_type.casefold():
         training_type = (f"{training_type}, {field_of_study}"
                          if training_type else field_of_study)
@@ -192,6 +206,7 @@ def _normalize_training_entry(
     location, location_is_enriched = _get_institution_location(entry)
     if _location_already_in_institution(location, institution):
         location = ''
+    start_date, end_date = (fields.get(name, '') for name in POSTDOC_DATE_FIELDS)
 
     return PostdocTrainingRecord(
         taxonomy_code=taxonomy_code,
@@ -200,8 +215,7 @@ def _normalize_training_entry(
         location=location,
         location_is_enriched=location_is_enriched,
         # Dates - format according to C/C1/C2/C3 requirements (mm/yy - mm/yy)
-        dates=format_date_range(fields.get('start_date', ''),
-                                fields.get('end_date', ''), taxonomy_code,
+        dates=format_date_range(start_date, end_date, taxonomy_code,
                                 entry.get('text', '')),
         source_entry=entry,
     )
@@ -229,13 +243,21 @@ def _resolve_postdoc_training(
 def _gather_postdoc_entries(
     entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """The section's entries, each stamped with the code it was routed under.
+    """The section's entries, each carrying the code it was routed under.
 
-    entries_by_code's key is the authoritative routing code -- stamp it onto a
-    shallow copy of each entry rather than trusting (or mutating) whatever the
-    entry's own 'taxonomy_code' field says, so a C3 entry can't silently fall
-    back to the generic C date rule if that field is missing or disagrees with
-    how it was routed (#573 review).
+    entries_by_code's key is the authoritative routing code -- an entry whose
+    own 'taxonomy_code' field is missing or disagrees with it is stamped with
+    it on a shallow copy, rather than trusted or mutated, so a C3 entry can't
+    silently fall back to the generic C date rule (#573 review).
+
+    An entry whose field already says it is handed on itself, not a copy. Its
+    row is then recorded against the entry stage 6 grouped (the row-receipt
+    ledger's `wrote`, by identity), which the #1205 sub-point pass reads to
+    put a training position's prose under its own row only, and which the
+    content-overflow pass reads to skip an entry whose prose is a sub-point.
+    A stamped copy's row anchors no sub-point. Reroutes stamp the entry
+    itself (`_correct_mismatch_if_needed`), so a copy is the exception: none
+    of the 263 C entries the 102 farm renders draw is one.
 
     Reads no field but 'taxonomy_code', so it cannot raise on a malformed
     stage-4 entry. `_fill_postdoc_training` relies on that: it needs the
@@ -245,7 +267,7 @@ def _gather_postdoc_entries(
     review).
     """
     return [
-        {**entry, 'taxonomy_code': code}
+        entry if entry.get('taxonomy_code') == code else {**entry, 'taxonomy_code': code}
         for code in POSTDOC_TRAINING_CODES
         for entry in entries_by_code.get(code, [])
     ]
@@ -299,7 +321,7 @@ class PostdocTrainingSection:
         logger.info("Filling Postdoctoral Training (%d entries)...", len(training_entries))
 
         # Try to find the POSTDOCTORAL section
-        training_idx = self._find_header_paragraph("POSTDOCTORAL")
+        training_idx = self._find_header_paragraph(POSTDOC_TRAINING_HEADING)
         if training_idx is None:
             training_idx = self._find_header_paragraph("TRAINING")
         if training_idx is None:
@@ -321,6 +343,7 @@ class PostdocTrainingSection:
         for entry in sort_entries_reverse_chronological(training_entries):
             record = _normalize_training_entry(
                 entry, entry.get('taxonomy_code', GENERIC_TRAINING_CODE), all_entries)
+            # Its comment hook records the row against `source_entry` (#534, #1205).
             self._add_table_row_with_mixed_content(
                 table,
                 [[(record.training_type, False, "")],
