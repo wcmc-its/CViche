@@ -48,6 +48,7 @@ from typing import Any, TypedDict
 
 from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
 
+from ..parsing.dates import _MONTH_NAME_TO_NUM, _parse_date_components
 from .authors import _normalize_author_names, carry_cv_suffixes
 from .citation_matching import (
     _append_missing_stage5d_values,
@@ -99,6 +100,9 @@ class PublicationFields(TypedDict, total=False):
     #: one that has a citation (#1810).
     conference_name: str
     location: str
+    #: An S8 abstract's own number ("K-20", "W59"). Printed by the meeting
+    #: trailer only when the entry's line writes it (#1570).
+    abstract_number: str
     volume: str
     issue: str
     pages: str
@@ -154,6 +158,14 @@ class ResolvedPublication:
     #: lost both, so 5d could not reject a citation without losing them too.
     conference_name: str = ''
     location: str = ''
+    #: An S8 abstract's number, kept only when the entry's line writes it
+    #: outside its leading CV list number (`_abstract_number`, #1570).
+    abstract_number: str = ''
+    #: An S8 meeting's date with the month, and the day, the entry's line
+    #: writes: "2023 October" for a stored "2023-10" (`_meeting_date`, #1570).
+    #: '' when the line names no such month; the meeting trailer then prints
+    #: `year` as it always did.
+    meeting_date: str = ''
     volume: str = ''
     issue: str = ''
     pages: str = ''
@@ -204,6 +216,62 @@ def _scalar_text(value: object) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         return ''
     return str(value)
+
+
+#: A CV's own list number at the head of an entry's line: "10. ", "(3) ".
+#: The same shape stage 5d strips before its call (`_LEADING_LIST_NUMBER_RE`
+#: in `stage_5d_citation_formatter.py`).
+_LEADING_LIST_NUMBER_RE = re.compile(r'^\s*(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
+
+#: A month name or abbreviation, longest first so "September" is not read as
+#: "Sep" with "tember" left over.
+_MONTH_WORD = '|'.join(sorted(_MONTH_NAME_TO_NUM, key=len, reverse=True))
+#: A month written next to its year in an entry's line, with the day on
+#: either side when the line gives one: "October 2023", "Nov. 2023",
+#: "12 September 2018", "May 22, 2000".
+_WRITTEN_MONTH_DATE_RE = re.compile(
+    rf'\b(?:(?P<day_before>\d{{1,2}})\s+)?(?P<month>{_MONTH_WORD})\.?\s+'
+    r'(?:(?P<day_after>\d{1,2}),?\s+)?(?P<year>\d{4})(?!\d)', re.IGNORECASE)
+
+
+def _abstract_number(value: object, source_text: str) -> str:
+    """An S8 `abstract_number` that the entry's own line writes, else ''.
+
+    The value has to stand in the line as its own token, and not as the
+    line's leading list number: stage 4 stores the CV's "56." as the
+    abstract number (YUYVIG ECXGAT 369, 489), and printed, that would be a
+    number the CV never gave the abstract (#1570).
+    """
+    number = _scalar_text(value).strip()
+    if not number:
+        return ''
+    line = _LEADING_LIST_NUMBER_RE.sub('', source_text, count=1)
+    return number if re.search(rf'(?<!\w){re.escape(number)}(?!\w)', line) else ''
+
+
+def _meeting_date(value: object, source_text: str) -> str:
+    """Stage 4's `year`, as "<year> <Month>[ <day>]" with the month the
+    entry's line writes, or '' when it holds no month the line names.
+
+    Stage 4 stores "October 2023" as "2023-10", which the S8 fallback
+    printed as written: the month was a source word the line lost (QQGKXR
+    158/159, SQMWHM 425, #1570). The month is the line's own word, in the
+    line's own spelling, so the fallback adds no word the CV lacks; the day
+    is printed only when the line writes the same day next to that month.
+    The order is Vancouver's, the one stage 5d's S8 citations use.
+    """
+    year, month, day = _parse_date_components(_scalar_text(value))
+    if not (year and month):
+        return ''
+    for match in _WRITTEN_MONTH_DATE_RE.finditer(source_text):
+        if (int(match['year']) != year
+                or _MONTH_NAME_TO_NUM[match['month'].lower()] != month):
+            continue
+        written_day = match['day_before'] or match['day_after']
+        if day and written_day and int(written_day) == day:
+            return f"{year} {match['month']} {day}"
+        return f"{year} {match['month']}"
+    return ''
 
 
 def _resolved_authors(entry: dict[str, Any], fields: dict, enrichment: dict) -> str:
@@ -324,6 +392,7 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
 
     editors = _text(fields.get('editors'))
     publisher = _text(fields.get('publisher'))
+    source_text = _text(entry.get('text'))
 
     # The stage-5d reconciliation, done here so the renderer receives a
     # citation that is already whole (points 2/10/11). A citation 5d's LLM
@@ -383,6 +452,8 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         year=_scalar_text(fields.get('year')),
         conference_name=_text(fields.get('conference_name')),
         location=_text(fields.get('location')),
+        abstract_number=_abstract_number(fields.get('abstract_number'), source_text),
+        meeting_date=_meeting_date(fields.get('year'), source_text),
         volume=(_scalar_text(enrichment.get('pubmed_volume'))
                 or _scalar_text(fields.get('volume'))),
         issue=(_scalar_text(enrichment.get('pubmed_issue'))

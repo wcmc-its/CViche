@@ -446,6 +446,72 @@ def test_fallback_record_with_a_publisher_keeps_the_book_trailer():
 
 
 # ---------------------------------------------------------------------------
+# #1570: the S8 fallback also keeps the abstract number and the month the
+# entry's own line writes (YUYVIG IXJMKS 267, QQGKXR 158/159, SQMWHM 425)
+# ---------------------------------------------------------------------------
+
+def _s8_entry(fields, text):
+    return dict(_entry(fields), text=text)
+
+
+def test_fallback_s8_entry_renders_an_abstract_number_its_line_writes():
+    """IXJMKS 267's shape: stage 4 put "K-20" in `abstract_number`, which no
+    renderer printed, so the fallback lost it where the 5d citation kept it."""
+    fields = dict(_S8_MEETING_FIELDS, abstract_number='K-20')
+    text = ('A Talk on Larks. Annual Meeting of the Quillfern Society, '
+            'Larchmere, ZZ, 2004, K-20')
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation == ('3. A Talk on Larks. Annual Meeting of the Quillfern '
+                        'Society; 2004; Larchmere, ZZ. K-20.')
+
+
+def test_fallback_s8_entry_drops_an_abstract_number_that_is_the_list_number():
+    """ECXGAT 369/489: stage 4 stored the CV's own list number "56." as the
+    abstract number. Printed, it would read as a number the CV never gave
+    this abstract."""
+    fields = dict(_S8_MEETING_FIELDS, abstract_number='56')
+    text = '56. A Talk on Larks. Annual Meeting of the Quillfern Society, 2004'
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation == ('3. A Talk on Larks. Annual Meeting of the Quillfern '
+                        'Society; 2004; Larchmere, ZZ.')
+
+
+@pytest.mark.parametrize('year,text,expected_date', [
+    # QQGKXR 158: "(October 2023)", stored as "2023-10".
+    ('2023-10', 'Rook J (October 2023). A Talk on Larks.', '2023 October'),
+    # SQMWHM 425: "12 September 2018", stored as "2018-09-12".
+    ('2018-09-12', 'A Talk on Larks. Larchmere, 12 September 2018.', '2018 September 12'),
+    # A month the line abbreviates keeps the line's spelling.
+    ('2023-11', 'A Talk on Larks. Nov. 2023.', '2023 Nov'),
+    # The line names no month: the stored value renders as it always did.
+    ('2011-06', '06/2011 A Talk on Larks.', '2011-06'),
+])
+def test_fallback_s8_meeting_date_uses_the_month_its_line_writes(year, text, expected_date):
+    fields = dict(_S8_MEETING_FIELDS, year=year)
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 4)
+
+    assert citation == ('4. A Talk on Larks. Annual Meeting of the Quillfern '
+                        f'Society; {expected_date}; Larchmere, ZZ.')
+
+
+def test_fallback_journal_trailer_prints_no_abstract_number():
+    """An abstract PubMed matched to a journal supplement is cited as the
+    article: its volume and pages, not a meeting's abstract number."""
+    fields = dict(_S8_MEETING_FIELDS, volume='12', pages='S3', abstract_number='W59')
+
+    citation, _, _ = _format_citation(dict(
+        _s8_entry(fields, 'W59. A Talk on Larks. Biol Larks 12:S3, 2004.'),
+        enrichment_data={'pubmed_journal': 'Biol Larks'}), 6)
+
+    assert citation == '6. A Talk on Larks. Biol Larks. 2004;12:S3.'
+
+
+# ---------------------------------------------------------------------------
 # #481: the stage-5d safety net (the HU4DXA "GNYHA" case)
 # ---------------------------------------------------------------------------
 

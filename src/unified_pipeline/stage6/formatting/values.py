@@ -171,10 +171,20 @@ def _meeting_trailer_parts(pub: ResolvedPublication) -> list[str]:
     them with a journal takes the journal trailer instead. The closing period
     is the renderer's, so a last part that already ends in one ("Washington,
     D.C.") keeps a single period, as the title does.
+
+    The date is the meeting's month and day where the entry's line writes
+    them ("2023 October"), else the stored year; an abstract number the line
+    writes follows the trailer as its own part, where stage 5d puts it
+    ("...; Los Angeles. K-20."). Both are resolved against the line by
+    `resolve_publication`, so neither can add a word the CV lacks (#1570).
     """
-    trailer = "; ".join(part for part in (pub.conference_name, pub.year, pub.location)
+    date = pub.meeting_date or pub.year
+    trailer = "; ".join(part for part in (pub.conference_name, date, pub.location)
                         if part)
-    return [trailer.rstrip('.') + "."]
+    parts = [trailer.rstrip('.') + "."]
+    if pub.abstract_number:
+        parts.append(pub.abstract_number.rstrip('.') + ".")
+    return parts
 
 
 def _identifier_parts(pub: ResolvedPublication) -> list[str]:
