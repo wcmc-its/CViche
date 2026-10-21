@@ -426,6 +426,56 @@ def test_author_normalization_runs_exactly_once_per_entry(monkeypatch):
 # Points 2/10/11: the stage-5d reconciliation happens before any rendering
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# #481: a chapter PubMed indexed under its book series (NTCULM 184, ZCTARO
+# 280). Titles and names are invented.
+# ---------------------------------------------------------------------------
+
+_SERIES_CHAPTER = {
+    'extracted_fields': {
+        'chapter_title': 'Chapter 4: Dissecting example helicases',
+        'book_title': 'Methods in Example Science',
+        'editors': 'Doe J, Roe R',
+        'publisher': 'Example Press',
+    },
+    'enrichment_data': {
+        'pubmed_title': 'Dissecting example helicases.',
+        'pubmed_journal': 'Methods Example Sci',
+    },
+}
+
+
+def test_a_chapter_pubmed_indexed_under_its_series_resolves_the_series():
+    resolved = resolve_publication(_SERIES_CHAPTER)
+
+    assert resolved.series == 'Methods Example Sci'
+    # The journal is kept, so dedup's identity keys read what they always read.
+    assert resolved.journal == 'Methods Example Sci'
+
+
+@pytest.mark.parametrize('case, fields, enrichment', [
+    ('no book title: an article with a stray publisher stays an article',
+     {'book_title': None}, {}),
+    ('no publisher: nothing for the book trailer to name',
+     {'publisher': ''}, {}),
+    ('PubMed matched another chapter of the same CV line (2054_Opresko_Cv 396)',
+     {}, {'pubmed_title': 'Targeted formation of example lesions'}),
+    ('PubMed gave no title to compare',
+     {}, {'pubmed_title': ''}),
+    ('no PubMed journal',
+     {}, {'pubmed_journal': ''}),
+    ('a publisher carrying the line\'s citation tail (ECXGAT 297): not a publisher',
+     {'publisher': 'Example Press, Totowa, NJ. Methods Example Sci. 2001;165:257-67.'}, {}),
+])
+def test_series_is_resolved_only_for_that_shape(case, fields, enrichment):
+    entry = {
+        'extracted_fields': {**_SERIES_CHAPTER['extracted_fields'], **fields},
+        'enrichment_data': {**_SERIES_CHAPTER['enrichment_data'], **enrichment},
+    }
+
+    assert resolve_publication(entry).series == '', case
+
+
 def test_a_stage5d_citation_arrives_already_topped_up():
     resolved = resolve_publication({'extracted_fields': {
         'formatted_citation': 'Welcome to parenting. 2010.',
@@ -433,7 +483,7 @@ def test_a_stage5d_citation_arrives_already_topped_up():
         'publisher': 'GNYHA',
     }})
 
-    assert resolved.formatted_citation == 'Welcome to parenting. 2010. GNYHA.'
+    assert resolved.formatted_citation == 'Welcome to parenting. GNYHA; 2010.'
 
 
 @pytest.mark.parametrize('fields', [

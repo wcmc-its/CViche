@@ -41,6 +41,7 @@ renderer:
     ResolvedPublication   what it actually gets: every field already text
     resolve_publication   the one function that reads raw pipeline shapes
 """
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
@@ -159,6 +160,12 @@ class ResolvedPublication:
     doi: str = ''
     pmid: str = ''
     pmcid: str = ''
+    #: The book series a chapter appeared in, when PubMed indexes the series
+    #: as a journal (#481: NTCULM 184, ZCTARO 280, "Methods in enzymology",
+    #: "Vitamins and hormones"). Set only by `_chapter_series`; `journal` keeps
+    #: the same value so dedup's identity keys do not move. A renderer that
+    #: finds it set prints the chapter's book and cites the series after it.
+    series: str = ''
     #: Non-empty only for a stage-5d LLM citation, and already topped up with
     #: the editors/publisher its own text omitted (#481). A renderer that
     #: finds it set prints it and stops; it never has to ask who wrote it.
@@ -218,6 +225,55 @@ def _group_filled_year(entry: dict[str, Any], fields: dict) -> str:
     return year if year == group_year else ''
 
 
+#: A word of a title, for `_same_work`'s comparison.
+_TITLE_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def _title_words(title: str) -> str:
+    """`title` casefolded to its words, single-spaced."""
+    return " ".join(_TITLE_WORD_RE.findall(title.casefold()))
+
+
+def _same_work(pubmed_title: str, cv_title: str) -> bool:
+    """True when PubMed's title and the CV's title name the same work: one's
+    words run inside the other's ("Chapter 6: Modulation of TRAIL Signaling
+    Complex" holds "Modulation of TRAIL signaling complex")."""
+    pubmed, cv = _title_words(pubmed_title), _title_words(cv_title)
+    return bool(pubmed and cv) and (pubmed in cv or cv in pubmed)
+
+
+#: A year inside a stage-4 publisher value: stage 4 ran on past the publisher
+#: into the line's own citation tail ("Humana Press, Inc., Totowa, NJ. Methods
+#: Mol Biol. 2001;165:257-67. PMID: 11217392", ECXGAT 297).
+_YEAR_IN_PUBLISHER_RE = re.compile(r"\b(?:19|20)\d\d\b")
+
+
+def _chapter_series(fields: dict, enrichment: dict) -> str:
+    """The PubMed journal, when it is the series of the chapter stage 4 read.
+
+    PubMed indexes some book series as journals, so an enriched chapter
+    carries a `pubmed_journal` and rendered as a journal article, without
+    its book, editors or publisher (#481: the pilot's NTCULM 184, EBYSBC's
+    ZCTARO 280). Stage 4's record is a chapter when it names a book and its
+    publisher: an article with a stray publisher names no book, so it stays
+    an article. And PubMed's record must be that chapter. One stored CV
+    line holds two chapters, PubMed matched the first and stage 4 read the
+    book of the second (2054_Opresko_Cv 396). Without the title check its
+    citation would join one chapter's title to the other's book. A publisher
+    that carries a year is a citation tail stage 4 swept in, not a
+    publisher; the book trailer would print it whole, so the PubMed journal
+    form stays.
+    """
+    series = _text(enrichment.get('pubmed_journal'))
+    publisher = _text(fields.get('publisher'))
+    if not (series and _text(fields.get('book_title')) and publisher):
+        return ''
+    if _YEAR_IN_PUBLISHER_RE.search(publisher):
+        return ''
+    cv_title = _text(fields.get('chapter_title')) or _text(fields.get('title'))
+    return series if _same_work(_text(enrichment.get('pubmed_title')), cv_title) else ''
+
+
 def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     """Read one raw bibliography entry and return the record a renderer prints.
 
@@ -270,10 +326,9 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     publisher = _text(fields.get('publisher'))
 
     # The stage-5d reconciliation, done here so the renderer receives a
-    # citation that is already whole (points 2/10/11). Stage 5d's copy-back
-    # loop never writes editors/publisher back onto the entry, so a citation
-    # its LLM formatted without one of them has no later stage that can add
-    # it -- except this one (#481).
+    # citation that is already whole (points 2/10/11). A citation 5d's LLM
+    # formatted without the editors or publisher the entry carries has no
+    # later stage that can add them -- except this one (#481).
     formatted_citation = _text(fields.get('formatted_citation'))
     if formatted_citation and fields.get('formatting_source') == _STAGE_5D_FORMATTING_SOURCE:
         # 5d's "first 6, et al." rule cut the CV owner from their own
@@ -315,6 +370,7 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
                or _text(fields.get('chapter_title'))),
         journal=_text(enrichment.get('pubmed_journal')) or _text(fields.get('journal')),
         book_title=_text(fields.get('book_title')),
+        series=_chapter_series(fields, enrichment),
         editors=editors,
         publisher=publisher,
         # Through the same coercer as every other scalar. The renderer this

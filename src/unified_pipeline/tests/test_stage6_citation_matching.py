@@ -190,7 +190,9 @@ def test_append_missing_stage5d_values_appends_both_when_both_absent():
     """Moved with its subject. The call now takes the two values as text
     rather than a stage-4 field dict -- the type guard it used to carry moved
     to `resolve_publication`, which is the only reader of raw stage-4 JSON --
-    but the assertion is the one it always made."""
+    The values now go where Vancouver puts them (#481): the publisher in
+    front of the bare year, and the editors -- with no "In: " to follow --
+    at the end."""
     result = _append_missing_stage5d_values(
         'Smith J. A Chapter. 2021.',
         'Totally Different Names',
@@ -198,14 +200,14 @@ def test_append_missing_stage5d_values_appends_both_when_both_absent():
     )
 
     assert result == (
-        'Smith J. A Chapter. 2021. Totally Different Names, eds. '
-        'Totally Different Press.'
+        'Smith J. A Chapter. Totally Different Press; 2021. '
+        'Totally Different Names, eds.'
     )
 
 
 #: (case, citation, editors, publisher, expected). One row per branch of the
-#: safety net, so the ordering rule ("editors clause first"), each half firing
-#: alone, and every reason not to fire are all stated in one place.
+#: safety net, so where each value goes, each half firing alone, and every
+#: reason not to fire are all stated in one place.
 _APPEND_ROWS = [
     ('neither value carried',
      'Doe J. A chapter. In: Book. 2020.', '', '',
@@ -213,22 +215,21 @@ _APPEND_ROWS = [
     ('editors alone, absent from the text',
      'Yount K. Family and modernity. In: Book. 2008.',
      'M. Moaddel and M. Gelfand', '',
-     'Yount K. Family and modernity. In: Book. 2008. '
-     'M. Moaddel and M. Gelfand, eds.'),
+     'Yount K. Family and modernity. In: M. Moaddel and M. Gelfand, eds. Book. 2008.'),
     ('publisher alone, absent from the text',
      'Welcome to parenting. 2010.', '', 'GNYHA',
-     'Welcome to parenting. 2010. GNYHA.'),
-    ('both absent -- editors clause comes first',
+     'Welcome to parenting. GNYHA; 2010.'),
+    ('both absent -- each in its Vancouver place',
      'Doe J. A chapter. In: Book. 2020.', 'Adams Q, Baker R', 'Zenith House',
-     'Doe J. A chapter. In: Book. 2020. Adams Q, Baker R, eds. Zenith House.'),
+     'Doe J. A chapter. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.'),
     ('editors already referenced, publisher not',
      'Doe J. In: Adams Q, Baker R, eds. Book. 2020.',
      'Adams Q, Baker R', 'Zenith House',
-     'Doe J. In: Adams Q, Baker R, eds. Book. 2020. Zenith House.'),
+     'Doe J. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.'),
     ('publisher already referenced, editors not',
      'Doe J. A chapter. In: Book. Zenith House; 2020.',
      'Adams Q, Baker R', 'Zenith House',
-     'Doe J. A chapter. In: Book. Zenith House; 2020. Adams Q, Baker R, eds.'),
+     'Doe J. A chapter. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.'),
     ('both already referenced -- citation untouched',
      'Doe J. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.',
      'Adams Q, Baker R', 'Zenith House',
@@ -236,6 +237,181 @@ _APPEND_ROWS = [
     ('reworded publisher still counts as present',
      'Smith J. A Chapter. In: Springer; 2021.', '', 'Springer-Verlag, NY',
      'Smith J. A Chapter. In: Springer; 2021.'),
+    # The stored-corpus shapes behind #481's position fix. Names invented.
+    ('editors spelled out in full, 5d abbreviated them in its clause: present',
+     'Ash A. A chapter. In: Diler RS, ed. Book. Nova; 2007:167-177.',
+     'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Diler RS, ed. Book. Nova; 2007:167-177.'),
+    # Every person must be named. A credential split off as its own
+    # "person" ("PhD") is not in the clause, so the value is appended at the
+    # end, exactly as base does: a duplicate, never a loss.
+    ('a credential stage 4 kept reads as an unnamed person: the whole value at the end, as base',
+     'Ash A. A chapter. In: Waldstein S, eds. Book. Springer; 2023.',
+     'Shari Waldstein, PhD', '',
+     'Ash A. A chapter. In: Waldstein S, eds. Book. Springer; 2023. Shari Waldstein, PhD, eds.'),
+    ('two of four people named in the clause: the whole value at the end, as base',
+     'Smith J. Ch. In: Munoz R, Schmitt C, eds. Critical Care. Springer; 2010.',
+     'Ricardo Munoz, Carol Schmitt, Victor Morell, Eduardo da Cruz', '',
+     'Smith J. Ch. In: Munoz R, Schmitt C, eds. Critical Care. Springer; 2010. '
+     'Ricardo Munoz, Carol Schmitt, Victor Morell, Eduardo da Cruz, eds.'),
+    ('an editor named only as the chapter author, outside the editors '
+     'clause, is not printed: the value goes at the end',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010.',
+     'Jonathan Quincy Doe', '',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010. '
+     'Jonathan Quincy Doe, eds.'),
+    ('one editor in the clause and one only as the author: the whole value '
+     'goes at the end',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010.',
+     'Alan Bernard Smith, John Quincy Doe', '',
+     'Doe J. Chapter title. In: Smith A, ed. Book. Acme; 2010. '
+     'Alan Bernard Smith, John Quincy Doe, eds.'),
+    ('an editor surname that appears only in the title is not printed',
+     'Roe R. Heart failure. In: Smith A, ed. Book. Acme; 2010.',
+     'Alan Bernard Smith, Mary Elizabeth Heart', '',
+     'Roe R. Heart failure. In: Smith A, ed. Book. Acme; 2010. '
+     'Alan Bernard Smith, Mary Elizabeth Heart, eds.'),
+    ('a clause naming fewer than half the people: the rest go at the end, '
+     'not into a second clause',
+     'Ash A. A chapter. In: Rey J, ed. Book.',
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O', '',
+     'Ash A. A chapter. In: Rey J, ed. Book. '
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O, eds.'),
+    ('with no editors clause, authors who share the editors surnames do not '
+     'stand in for them',
+     'Fedor S, Rich A. A chapter. In: Book. Humana; 1992.',
+     'Samuel Thomas Fedor, Alice Mary Rich', '',
+     'Fedor S, Rich A. A chapter. In: Samuel Thomas Fedor, Alice Mary Rich, eds. '
+     'Book. Humana; 1992.'),
+    ('a publisher too short to match and no place: at the end, as before',
+     'Ash A. A book. AP; 2001.', '', 'AP',
+     'Ash A. A book. AP; 2001. AP.'),
+    ('publisher absent, the year already has a publisher before it: at the end',
+     'Ash A. A book. Nova; 2007.', '', 'Zenith House',
+     'Ash A. A book. Nova; 2007. Zenith House.'),
+    ('no "In: " to follow: editors at the end',
+     'Ash A. A book. Nova; 2007.', 'Birch B', '',
+     'Ash A. A book. Nova; 2007. Birch B, eds.'),
+    ('publisher named with a place of its own already: left as 5d wrote it',
+     'Ash A. A chapter. In: Book. New York: Saunders; 2003.',
+     '', 'Saunders (New York)',
+     'Ash A. A chapter. In: Book. New York: Saunders; 2003.'),
+    ('publisher named, a different place already in its slot: the whole value '
+     'at the end, as before',
+     'Ash A. A chapter. In: Book. Philadelphia: W.B. Saunders; 2000:549-560.',
+     '', 'W.B. Saunders, Phil. USA',
+     'Ash A. A chapter. In: Book. Philadelphia: W.B. Saunders; 2000:549-560. '
+     'W.B. Saunders, Phil. USA.'),
+    ('publisher absent, the year already follows "; ": at the end',
+     'Ash A. A chapter. In: Book. Elsevier; 2018. In press.', '', 'Esliever',
+     'Ash A. A chapter. In: Book. Elsevier; 2018. In press. Esliever.'),
+    ('publisher absent, a journal trailer: at the end, not inside it',
+     'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368.',
+     '', 'Zenith House',
+     'Ash A. A chapter. In: Book. Endocrinol Clin. 2002 Jun;31(2):353-368. Zenith House.'),
+    # A publisher value that carries a place is never split (#481's review,
+    # round 4): each row below is what origin/dev prints. 5d prints a split
+    # name as the tail of a longer one ("John Wiley;"), or in the title, so
+    # a search for "Name;" would put the place inside a name. Names real,
+    # citations invented.
+    ('a name printed, its place dropped: the whole value at the end, as before',
+     'Ash A. A chapter. In: Book. Humana Press; 1992:97-104.', '',
+     'Humana Press, Totowa, New Jersey',
+     'Ash A. A chapter. In: Book. Humana Press; 1992:97-104. Humana Press, Totowa, New Jersey.'),
+    ('a city and a country: the whole value at the end, as before',
+     'Ash A. A chapter. In: Book. Zenith; 2004.', '', 'Zenith, Berlin, Germany',
+     'Ash A. A chapter. In: Book. Zenith; 2004. Zenith, Berlin, Germany.'),
+    ('the name is the tail of "John Wiley": at the end, not inside it',
+     'Ash A. A chapter. In: Book. John Wiley; 2004.', '', 'Wiley, Hoboken, New Jersey',
+     'Ash A. A chapter. In: Book. John Wiley; 2004. Wiley, Hoboken, New Jersey.'),
+    ('the name is the tail of "Elsevier Mosby": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Elsevier Mosby; 2006.', '', 'Mosby, St. Louis, Missouri',
+     'Ash A. A chapter. In: Book. Elsevier Mosby; 2006. Mosby, St. Louis, Missouri.'),
+    ('the name is the tail of "Mosby Elsevier", which has a place: at the end',
+     'Ash A. A chapter. In: Book. Philadelphia: Mosby Elsevier; 2009.', '',
+     'Elsevier, St. Louis, Missouri',
+     'Ash A. A chapter. In: Book. Philadelphia: Mosby Elsevier; 2009. '
+     'Elsevier, St. Louis, Missouri.'),
+    ('the name is the tail of "JB Lippincott": at the end, not inside it',
+     'Ash A. A chapter. In: Book. JB Lippincott; 2001.', '',
+     'Lippincott, Philadelphia, Pennsylvania',
+     'Ash A. A chapter. In: Book. JB Lippincott; 2001. Lippincott, Philadelphia, Pennsylvania.'),
+    ('the name follows a "/": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Elsevier/Academic Press; 2015.', '',
+     'Academic Press, San Diego, California',
+     'Ash A. A chapter. In: Book. Elsevier/Academic Press; 2015. '
+     'Academic Press, San Diego, California.'),
+    ('the name follows "Springer Nature/": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Springer Nature/Humana Press; 2019.', '',
+     'Humana Press, Totowa, New Jersey',
+     'Ash A. A chapter. In: Book. Springer Nature/Humana Press; 2019. '
+     'Humana Press, Totowa, New Jersey.'),
+    ('the name is the tail of "Lippincott Williams & Wilkins": at the end',
+     'Ash A. A chapter. In: Book. Lippincott Williams & Wilkins; 2005.', '',
+     'Williams & Wilkins, Baltimore, Maryland, USA',
+     'Ash A. A chapter. In: Book. Lippincott Williams & Wilkins; 2005. '
+     'Williams & Wilkins, Baltimore, Maryland, USA.'),
+    ('the name is the tail of "W.B. Saunders": at the end, not inside it',
+     'Ash A. A chapter. In: Book. W.B. Saunders; 2000.', '',
+     'Saunders, Philadelphia, Pennsylvania',
+     'Ash A. A chapter. In: Book. W.B. Saunders; 2000. Saunders, Philadelphia, Pennsylvania.'),
+    ('the name is the tail of "Wiley-Blackwell": at the end, not inside it',
+     'Ash A. A chapter. In: Book. Wiley-Blackwell; 2012.', '',
+     'Blackwell, Oxford, United Kingdom',
+     'Ash A. A chapter. In: Book. Wiley-Blackwell; 2012. Blackwell, Oxford, United Kingdom.'),
+    ('the name also printed in the title: at the end, the title untouched',
+     'Smith J. Springer; a history. In: Book. Springer; 2004.', '',
+     'Springer, New York, New York',
+     'Smith J. Springer; a history. In: Book. Springer; 2004. Springer, New York, New York.'),
+    # The publisher-before-year slot is the closing year alone, never a
+    # name: it matches neither inside a printed name nor in the title.
+    ('publisher absent, the year follows "John Wiley; ": at the end',
+     'John Wiley; 2004.', '', 'Wiley, Hoboken, New Jersey',
+     'John Wiley; 2004. Wiley, Hoboken, New Jersey.'),
+    ('publisher absent, a "Name;" in the title: before the closing year only',
+     'Smith J. Springer; a history. In: Book. 2004.', '', 'Zenith House',
+     'Smith J. Springer; a history. In: Book. Zenith House; 2004.'),
+    ('publisher absent, a title that starts with a year: before the closing year only',
+     'Smith J. 2004 in review. In: Book. 2010.', '', 'Zenith House',
+     'Smith J. 2004 in review. In: Book. Zenith House; 2010.'),
+    ('editors clause written "(Ed.)": present, no second clause',
+     'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.', 'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Diler RS (Ed.). Book. Nova; 2007.'),
+    ('editors clause written ", Ed.": present, no second clause',
+     'Ash A. A chapter. In: Diler RS, Ed. Book. Nova; 2007.', 'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Diler RS, Ed. Book. Nova; 2007.'),
+    ('editors clause written "(Eds.)": present, no second clause',
+     'Ash A. A chapter. In: Diler RS, Rey J (Eds.). Book. Nova; 2007.',
+     'Rasim Somer Diler, Joseph Rey', '',
+     'Ash A. A chapter. In: Diler RS, Rey J (Eds.). Book. Nova; 2007.'),
+    ('an "(eds)" clause naming fewer than half: the rest at the end, not inline',
+     'Ash A. A chapter. In: Rey J (eds). Book.',
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O', '',
+     'Ash A. A chapter. In: Rey J (eds). Book. '
+     'Joseph Rey; Achembach TM, Fung D, Omigbodum O, eds.'),
+    ('", 2nd ed." is an edition, not an editors clause: editors go after "In: "',
+     'Ash A. A chapter. In: Book, 2nd ed. Nova; 2007.', 'Rasim Somer Diler', '',
+     'Ash A. A chapter. In: Rasim Somer Diler, eds. Book, 2nd ed. Nova; 2007.'),
+    ('"(ED)" as an abbreviation is not an editors clause: editors go after "In: "',
+     'Ash A. A chapter. In: Emergency department (ED) care. Nova; 2007.', 'Birch B', '',
+     'Ash A. A chapter. In: Birch B, eds. Emergency department (ED) care. Nova; 2007.'),
+    # The editors slot is an "In: " at a sentence break, the last one. An
+    # "In: " inside a title is not it.
+    ('"In: " inside the title and at a sentence break: editors after the second',
+     'Smith J. Living In: a memoir of care. In: Book. 2010.', 'Roe R', '',
+     'Smith J. Living In: a memoir of care. In: Roe R, eds. Book. 2010.'),
+    ('"In: " only inside the title: the editors at the end, as base',
+     'Smith J. Living In: a memoir of care. 2010.', 'Roe R', '',
+     'Smith J. Living In: a memoir of care. 2010. Roe R, eds.'),
+    ('"In: " opening the citation: editors after it',
+     'In: Book. 2010.', 'Roe R', '',
+     'In: Roe R, eds. Book. 2010.'),
+    ('two "In: " at sentence breaks: editors after the last',
+     'Smith J. A note. In: Proceedings. In: Book. 2010.', 'Roe R', '',
+     'Smith J. A note. In: Proceedings. In: Roe R, eds. Book. 2010.'),
+    ('an editors clause, editors with no significant word: the whole value at the end, as base',
+     'Ash A. A chapter. In: Rey J, ed. Book. 2010.', 'J, K', '',
+     'Ash A. A chapter. In: Rey J, ed. Book. 2010. J, K, eds.'),
 ]
 
 

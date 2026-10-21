@@ -455,7 +455,9 @@ def test_stage5d_entry_with_missing_publisher_token_gets_it_appended():
     though stage 4 extracted it. The editors string ("Melanie Wilson Taylor;
     Susan Bostwick; Evelyn Lipper") IS referenced -- its surnames (Wilson,
     Taylor, Bostwick, Lipper) already appear in the LLM's abbreviated author
-    list -- so only publisher is appended, not a redundant editors clause."""
+    list -- so only publisher is added, not a redundant editors clause. It
+    goes in front of the year, where Vancouver puts a book's publisher, not
+    after it."""
     fields = {
         'authors': 'Taylor MW, Bostwick S, Lipper E',
         'editors': 'Melanie Wilson Taylor; Susan Bostwick; Evelyn Lipper',
@@ -472,7 +474,7 @@ def test_stage5d_entry_with_missing_publisher_token_gets_it_appended():
     citation, target_name, _ = _format_citation(_entry(fields), 2)
 
     assert citation == (
-        '2. Wilson Taylor M, Bostwick S, Lipper E. Welcome to parenting. 2010. GNYHA.'
+        '2. Wilson Taylor M, Bostwick S, Lipper E. Welcome to parenting. GNYHA; 2010.'
     )
     assert target_name == 'Susan Bostwick'
 
@@ -555,7 +557,8 @@ def test_stage5d_entry_with_no_editors_or_publisher_fields_is_untouched():
 def test_stage5d_editors_matching_only_on_a_stopword_are_appended():
     """The wire case, not just the helper: an editors value whose only
     overlap with the LLM's citation is the word "and" must still be treated
-    as missing and appended. This is the entry shape #481 exists for."""
+    as missing and added, after the citation's "In: ". This is the entry
+    shape #481 exists for."""
     fields = {
         'editors': 'M. Moaddel and M. Gelfand',
         'formatted_citation': 'Yount K. Family and modernity. In: Book. 2008.',
@@ -565,8 +568,8 @@ def test_stage5d_editors_matching_only_on_a_stopword_are_appended():
     citation, _, _ = _format_citation(_entry(fields), 8)
 
     assert citation == (
-        '8. Yount K. Family and modernity. In: Book. 2008. '
-        'M. Moaddel and M. Gelfand, eds.'
+        '8. Yount K. Family and modernity. In: M. Moaddel and M. Gelfand, eds. '
+        'Book. 2008.'
     )
 
 
@@ -987,8 +990,8 @@ def test_stage5d_publisher_sharing_one_token_of_three_is_appended():
     citation, _, _ = _format_citation(_entry(fields), 11)
 
     assert citation == (
-        '11. Smith J. A paper. Oxford Medical Journal. 2020. '
-        'Oxford University Press.'
+        '11. Smith J. A paper. Oxford Medical Journal. '
+        'Oxford University Press; 2020.'
     )
 
 
@@ -1317,8 +1320,8 @@ def test_stage5d_both_values_absent_are_appended_editors_first():
     """Both branches firing on one entry, at the wire rather than on the
     helper (where test_stage6_citation_matching.py's
     test_append_missing_stage5d_values_appends_both_when_both_absent pins it):
-    the editors clause is appended before the publisher, and both sit after
-    the LLM's own text."""
+    each goes where Vancouver puts it -- the editors after "In: ", the
+    publisher in front of the year."""
     fields = {
         'editors': 'Adams Q, Baker R',
         'publisher': 'Zenith House',
@@ -1329,8 +1332,70 @@ def test_stage5d_both_values_absent_are_appended_editors_first():
     citation, _, _ = _format_citation(_entry(fields), 15)
 
     assert citation == (
-        '15. Doe J. A chapter. In: Book. 2020. Adams Q, Baker R, eds. Zenith House.'
+        '15. Doe J. A chapter. In: Adams Q, Baker R, eds. Book. Zenith House; 2020.'
     )
+
+
+# ---------------------------------------------------------------------------
+# #481: a chapter PubMed indexed under its book series (the pilot's NTCULM
+# 184, EBYSBC's ZCTARO 280) renders as the chapter it is. Names invented.
+# ---------------------------------------------------------------------------
+
+def _series_chapter(**enrichment):
+    return _entry(
+        {'chapter_title': 'Dissecting example helicases',
+         'book_title': 'Methods in Example Science', 'editors': 'Doe J, Roe R',
+         'publisher': 'Example Press', 'year': '2012', 'pmid': '123'},
+        {'pubmed_title': 'Dissecting example helicases.',
+         'pubmed_journal': 'Methods Example Sci', 'pubmed_volume': '511',
+         'pubmed_pages': '289-321', **enrichment})
+
+
+def test_a_chapter_in_a_series_pubmed_indexes_renders_its_book_and_the_series():
+    citation, _, _ = _format_citation(_series_chapter(), 4)
+
+    assert citation == (
+        '4. Dissecting example helicases. In: Doe J, Roe R, eds. Methods in Example '
+        'Science. Example Press; 2012:289-321. (Methods Example Sci; vol 511). PMID:123.'
+    )
+
+
+def test_a_series_with_no_volume_is_cited_by_name_alone():
+    citation, _, _ = _format_citation(_series_chapter(pubmed_volume=''), 4)
+
+    assert citation.endswith('Example Press; 2012:289-321. (Methods Example Sci). PMID:123.')
+
+
+def test_a_series_issue_is_cited_with_its_volume():
+    """The journal form printed "511(3)"; the series keeps the issue."""
+    citation, _, _ = _format_citation(_series_chapter(pubmed_issue='3'), 4)
+
+    assert citation.endswith('Example Press; 2012:289-321. (Methods Example Sci; vol 511, no. 3). PMID:123.')
+
+
+def test_a_series_issue_with_no_volume_is_cited_alone():
+    citation, _, _ = _format_citation(_series_chapter(pubmed_volume='', pubmed_issue='3'), 4)
+
+    assert citation.endswith('Example Press; 2012:289-321. (Methods Example Sci; no. 3). PMID:123.')
+
+
+def test_pubmed_matched_to_another_chapter_keeps_the_journal_citation():
+    """2054_Opresko_Cv 396: one CV line held two chapters. PubMed matched
+    the first and stage 4 read the second's book, so the book shape would
+    join one chapter's title to another's book."""
+    citation, _, _ = _format_citation(
+        _series_chapter(pubmed_title='Targeted formation of example lesions'), 4)
+
+    assert citation == ('4. Targeted formation of example lesions. Methods Example Sci. '
+                        '2012;511:289-321. PMID:123.')
+
+
+def test_an_article_with_a_stray_publisher_is_still_an_article():
+    citation, _, _ = _format_citation(_entry(
+        {'title': 'A study', 'publisher': 'Example Press', 'year': '2012'},
+        {'pubmed_journal': 'J Example', 'pubmed_title': 'A study', 'pubmed_volume': '5'}), 4)
+
+    assert citation == '4. A study. J Example. 2012;5.'
 
 
 # ---------------------------------------------------------------------------

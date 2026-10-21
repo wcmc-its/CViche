@@ -68,8 +68,13 @@ def _source_parts(pub: ResolvedPublication) -> list[str]:
     Neither, for the two shapes that have no source line at all -- an S3 book,
     whose own title already rendered above, and an S7 paper that is still in
     review and has nowhere to have appeared yet.
+
+    A chapter whose journal is really its book's series (`pub.series`, set
+    by the resolver only for a chapter PubMed indexed under its series)
+    takes the chapter line, and the series follows the trailer
+    (`_series_parts`).
     """
-    if pub.journal:
+    if pub.journal and not pub.series:
         return [pub.journal + "."]
     if not pub.book_title:
         return []
@@ -122,6 +127,23 @@ def _book_trailer_parts(pub: ResolvedPublication) -> list[str]:
     if year_pages:
         trailer = f"{trailer}; {year_pages}"
     return [trailer.rstrip('.') + "."]
+
+
+def _series_parts(pub: ResolvedPublication) -> list[str]:
+    """`(Series; vol Volume, no. Issue).` -- the series a chapter appeared
+    in, as zero or one part (#481).
+
+    Where NLM's Citing Medicine puts it, after the book's own trailer. The
+    volume and issue are the ones PubMed gave the series, which the book
+    trailer has no slot for; the journal form printed both.
+    """
+    if not pub.series:
+        return []
+    numbering = [label for label in (pub.volume and f"vol {pub.volume}",
+                                     pub.issue and f"no. {pub.issue}") if label]
+    if not numbering:
+        return [f"({pub.series})."]
+    return [f"({pub.series}; {', '.join(numbering)})."]
 
 
 def _is_meeting(pub: ResolvedPublication) -> bool:
@@ -188,7 +210,9 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     record (round-4 review of PR #737, points 1/2/3 and 8-15). That is why no
     pipeline key appears below.
 
-    One decision is left, and it is a rendering decision: a record that names
+    One decision is left, and it is a rendering decision: a chapter in a
+    series PubMed indexed as a journal ends in the book trailer and the
+    series (#481), a record that names
     a publisher and no journal ends in the book trailer, a meeting with no
     journal, book or publisher in the meeting trailer (#1570), everything else
     in the journal trailer. It is deliberately not two whole-citation "shape"
@@ -217,7 +241,10 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     if pub.title:
         parts.append(pub.title.rstrip('.') + ".")
     parts.extend(_source_parts(pub))
-    if pub.publisher and not pub.journal:
+    if pub.series:
+        parts.extend(_book_trailer_parts(pub))
+        parts.extend(_series_parts(pub))
+    elif pub.publisher and not pub.journal:
         parts.extend(_book_trailer_parts(pub))
     elif _is_meeting(pub):
         parts.extend(_meeting_trailer_parts(pub))
