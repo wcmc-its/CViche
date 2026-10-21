@@ -640,6 +640,21 @@ def _archived_before(storage: RunStorage, run_id: str, cutoff: datetime) -> bool
         return False
 
 
+def find_rowless_archives_or_none(db: Session, *, caller: str) -> list[str] | None:
+    """find_rowless_archives, or None when storage or the lookup fails.
+
+    For the admin views that report the sweep beside other results (the
+    reap-orphans response, the Overview stats): None reads as "could not
+    check", never as a clean store, and the failure is logged with its
+    traceback and ``caller`` instead of turning the whole response into a 500.
+    """
+    try:
+        return find_rowless_archives(db)
+    except Exception:
+        logger.exception("Rowless-archive sweep failed during %s (#802)", caller)
+        return None
+
+
 def _claim_stale_run(db: Session, run: Run, seen_started_at: datetime, **values: object) -> bool:
     """Atomically take a stale run this sweep read; False if another pod got it first.
 

@@ -864,6 +864,65 @@ class TestAdminService:
         assert stats["feedback_count"] == 0
         assert stats["runs_today"] == 1
 
+    @staticmethod
+    def _aged_archive(store, run_id, *, age_hours):
+        """An input archive like create_run_archive's, with its manifest aged."""
+        from datetime import timedelta
+
+        from app.storage.base import INPUT_MANIFEST_KEY
+        store.put_file_exclusive(run_id, INPUT_MANIFEST_KEY, b"{}")
+        store.put_file_exclusive(run_id, "input/cv.docx", b"x")
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).timestamp()
+        os.utime(store._resolve(run_id, INPUT_MANIFEST_KEY), (stamp, stamp))
+
+    def test_admin_stats_counts_rowless_archives(self, db, tmp_path):
+        """#802: the Overview's count is the storage-keyed sweep's -- an old
+        archive with no row counts; one with a row, or one still young enough
+        to be an upload in flight, does not."""
+        from unittest.mock import patch
+
+        from app.services.admin_service import get_admin_stats
+        from app.storage.local_storage import LocalRunStorage
+        store = LocalRunStorage(base_dir=str(tmp_path))
+        self._aged_archive(store, "SBGBHZ", age_hours=3)
+        self._aged_archive(store, "HASROW", age_hours=3)
+        self._aged_archive(store, "YOUNG1", age_hours=0)
+        db.add(Run(id="HASROW", filename="cv.docx", file_type="docx", status="complete",
+                   started_at=datetime.now(timezone.utc)))
+        db.commit()
+        with patch("app.services.run_service.get_storage", return_value=store):
+            assert get_admin_stats(db).rowless_archives == 1
+
+    def test_admin_stats_rowless_count_is_zero_for_a_clean_store(self, db, tmp_path):
+        from unittest.mock import patch
+
+        from app.services.admin_service import get_admin_stats
+        from app.storage.local_storage import LocalRunStorage
+        store = LocalRunStorage(base_dir=str(tmp_path))
+        with patch("app.services.run_service.get_storage", return_value=store):
+            assert get_admin_stats(db).rowless_archives == 0
+
+    def test_admin_stats_rowless_count_is_none_when_storage_cannot_be_listed(self, db, caplog):
+        """An unlistable store is None (unknown), not 0, logged with its
+        traceback, and the rest of the stats still return."""
+        from unittest.mock import patch
+
+        from app.services.admin_service import get_admin_stats
+
+        class _Unlistable:
+            def list_run_ids(self):
+                raise RuntimeError("AccessDenied on ListBucket")
+
+        with caplog.at_level(logging.ERROR), patch(
+            "app.services.run_service.get_storage", return_value=_Unlistable()
+        ):
+            stats = get_admin_stats(db)
+        assert stats.rowless_archives is None
+        assert stats.total_runs == 0
+        failures = [r for r in caplog.records
+                    if r.getMessage() == "Rowless-archive sweep failed during admin stats (#802)"]
+        assert len(failures) == 1 and failures[0].exc_info is not None
+
 
 class TestNormalizeEmail:
     """#348: shared email normalization keeps the identity key consistent."""

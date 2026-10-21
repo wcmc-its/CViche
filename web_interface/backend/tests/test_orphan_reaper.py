@@ -574,6 +574,16 @@ def test_admin_reap_reports_rowless_archives(client, db, local_store):
     assert resp.json()["rowless_run_ids"] == ["SBGBHZ"]
 
 
+def test_admin_stats_reports_the_rowless_count_for_the_overview(client, db, local_store):
+    """The Overview tab reads the count from GET /api/admin/stats, not from
+    the reap-orphans POST no frontend code calls."""
+    _archive(local_store, "SBGBHZ", age_hours=3)
+    with patch("app.services.run_service.get_storage", return_value=local_store):
+        resp = _as_admin(client, lambda: client.get("/api/admin/stats"))
+    assert resp.status_code == 200
+    assert resp.json()["rowless_archives"] == 1
+
+
 def test_admin_reap_reports_unknown_when_storage_cannot_be_listed(client, db, caplog):
     """A failed listing is None, not 0, logged with its traceback, and does not
     turn the reap's own result into a 500."""
@@ -590,5 +600,6 @@ def test_admin_reap_reports_unknown_when_storage_cannot_be_listed(client, db, ca
     assert resp.status_code == 200
     assert resp.json()["rowless_archives"] is None
     assert resp.json()["rowless_run_ids"] == []
-    failures = [r for r in caplog.records if "Rowless-archive sweep failed" in r.getMessage()]
-    assert failures and failures[0].exc_info is not None
+    failures = [r for r in caplog.records
+                if r.getMessage() == "Rowless-archive sweep failed during admin reap-orphans (#802)"]
+    assert len(failures) == 1 and failures[0].exc_info is not None
