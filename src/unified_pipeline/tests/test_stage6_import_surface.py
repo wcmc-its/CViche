@@ -213,6 +213,7 @@ HOME_ONLY_IMPORTS = {
                                       "SPLIT_SIBLING_METRIC", "_drop_split_siblings",
                                       "_citation_identity_text", "_citation_fullness",
                                       "_citation_identity_keys", "_citations_conflict", "_first_author",
+                                      "_first_author_names",
                                       "_field_dates_text", "_split_record_family",
                                       "_is_sibling_of",
                                       "_undated_split_record_absorbs_date",
