@@ -32,7 +32,9 @@ overflow pass skips an entry that has a sub-point, and the recovery reads
 each sub-point with its line (`SubPoint.as_rendered_line`), so an entry whose
 prose is now a sub-point is not also re-emitted whole -- as a blue overflow
 bullet or into the Appendix (owner decision 2026-10-08: duty prose goes under
-the appointment, not to the Appendix).
+the appointment, not to the Appendix). A family whose records stay the
+recovery's (`RECOVERY_RECORD_CODES`) is the exception: the recovery reads
+none of its sub-points, so none of them changes a line it re-emits.
 
 The duties #1641 splits off an appointment title are written by the
 positions writer itself, as a deleted row under the appointment
@@ -112,6 +114,7 @@ from .parsing.text import (
 )
 from .pii_pass import PII_WITHHELD_KEY
 from .render_check import (
+    _OPEN_TERM_WORDS,
     _RECORD_DATE_PREFIX_RE,
     _RENDER_TOKEN_RE,
     _norm,
@@ -285,10 +288,10 @@ POSTDOCTORAL_CODES = frozenset({'C'})
 #: membership offers none (`_own_membership_line`): the last of stage 4's
 #: records offers only its own segment, and a line holding several dated
 #: records, or naming another society, offers nothing, nor does an entry
-#: stage 4 listed memberships under. A part the #221 recovery reads as one
-#: of the entry's records is left to it (`plan_subpoints`' `record_lines`):
-#: dev already re-emits such a dated office to the Appendix, and as a
-#: sub-point it would be in the accepted document nowhere. The section is
+#: stage 4 listed memberships under. The entry's records the #221 recovery
+#: reads, a dated office among them, stay the recovery's
+#: (`RECOVERY_RECORD_CODES`): dev re-emits such an office to the Appendix,
+#: and the sub-points must not stop it. The section is
 #: found by the heading its writer looks up (the generator's
 #: `_SUBPOINT_SECTION_HEADERS`): `_get_wcm_section_header` names none for I.
 #: A family joining after C yields a fragment a family before it is offered
@@ -314,6 +317,18 @@ SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_COD
 #: the appointment after it (D1) can hold one duty line, each on its own
 #: line (YUYVIG LTTYWI 76 and 80): the appointment keeps it, as before C.
 _LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES)
+#: The families whose records stay the #221 recovery's: a membership's
+#: dated offices ("Chair, <name> Committee, <years>"), each a record the
+#: recovery re-emits to the Appendix when no row prints it. A fragment
+#: holding, or held by, one of them is not offered (`plan_subpoints`'
+#: `record_lines`), so Reject All does not print it twice. And the recovery
+#: reads none of these families' sub-points as rendered (the generator
+#: leaves them out of `_subpoint_lines`). Prose naming an office's committee
+#: holds every word of the office's line, and `_record_rendered`'s token
+#: overlap read it as the office rendered: the office was then in neither
+#: the accepted nor the rejected document. So no membership sub-point
+#: changes a line the recovery re-emits.
+RECOVERY_RECORD_CODES = MEMBERSHIP_CODES
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -479,19 +494,26 @@ MEMBERSHIP_TYPE_FIELDS = ('membership_type', 'fellowship_designation', 'role')
 _MEMBERSHIP_PLAIN_FIELDS = tuple(sorted(_RENDERED_FIELDS['I'] - {*MEMBERSHIP_ORGANIZATION_FIELDS,
                                                                  *MEMBERSHIP_TYPE_FIELDS}))
 #: The kinds of body a membership is held in, capitalised as a name is
-#: ("American Statistical Association", "Society of Example Studies"). A
-#: membership's line naming another one names another membership
-#: (`_names_another_society`). A committee, task force, working group,
-#: chapter or section is not one -- the society's own, it is the
-#: membership's detail -- nor is an institute, a centre or a university.
-_SOCIETY_BODIES = ('Society', 'Association', 'College', 'Academy')
+#: ("American Statistical Association", "Society of Example Studies",
+#: "Federation of Example Societies", "Union for Example Studies"), each
+#: singular and plural. A membership's line naming another one names
+#: another membership (`_names_another_society`). A committee, task force,
+#: working group, chapter or section is not one -- the society's own, it is
+#: the membership's detail -- nor is an institute, a centre or a university.
+_SOCIETY_BODIES = ('Society', 'Societies', 'Association', 'Associations', 'College', 'Colleges',
+                   'Academy', 'Academies', 'Federation', 'Federations', 'Union', 'Unions')
 #: A society's name as a line writes it (`_body_name_re`).
 _SOCIETY_NAME_RE = _body_name_re(_SOCIETY_BODIES)
-#: A society name more than this share of whose distinctive words are in the
-#: membership's organization is that organization, as the line words it
-#: (its type run into the name: "Fellow American College of Example
-#: Studies"); another society shares little more than "American" and the
-#: word for its kind.
+#: The words for a society's kind, which every society of that kind holds:
+#: not the name's own words (`_society_name_words`).
+_SOCIETY_KIND_WORDS = frozenset(body.casefold() for body in _SOCIETY_BODIES)
+#: A society name more than this share of whose own words
+#: (`_society_name_words`) are in the membership's organization is that
+#: organization, as the line words it ("Example Society of Estuarine
+#: Ecologists" for "... Ecology", or with another type than the row's run
+#: into it). Another society of the same kind and place shares half of
+#: them: "Norvale" of a "Norvale College of Physicians" against a "Norvale
+#: College of Cardiology" membership.
 _OWN_SOCIETY_MIN_SHARE = 0.5
 #: A part of a talk's line split before each date it holds, so a date
 #: inside the part can be read as opening a record (`_opens_dated_record`),
@@ -523,8 +545,9 @@ _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 RowsWritten = Callable[[Mapping], Iterable[BaseOxmlElement]]
 #: The record lines the #221 recovery (`_recover_unrendered_records`) looks
 #: for in an entry of a code, and re-emits when the document holds none of
-#: them (`sections.appendix.recovery_candidates`). Read for a membership
-#: (`MEMBERSHIP_CODES`), whose dated offices are those lines.
+#: them (`sections.appendix.recovery_candidates`). Read for the families
+#: whose records stay the recovery's (`RECOVERY_RECORD_CODES`): a
+#: membership's dated offices are those lines.
 RecordLines = Callable[[str, Mapping], Sequence[str]]
 
 
@@ -588,7 +611,9 @@ class SubPoint(NamedTuple):
     def as_rendered_line(self) -> str:
         """The entry as a reader who rejects the deletion sees it: its line,
         then its prose. `_recover_unrendered_records` reads this, so a record
-        whose prose is now a sub-point is not also sent to the Appendix."""
+        whose prose is now a sub-point is not also sent to the Appendix. The
+        recovery reads none for a family whose records stay its own
+        (`RECOVERY_RECORD_CODES`)."""
         return ' '.join((self.anchor.text, *self.paragraphs))
 
 
@@ -1115,16 +1140,28 @@ def _own_training_line(entry: Mapping) -> str:
     return own
 
 
-def _names_another_society(line: str, own_name: set[str]) -> bool:
+def _society_name_words(name: str, own_type: Collection[str]) -> set[str]:
+    """A named society's own distinctive words. Not the word for its kind
+    (`_SOCIETY_KIND_WORDS`), which every society of that kind holds, nor the
+    words a line writes beside a name that `_SOCIETY_NAME_RE` takes in with
+    it: an open term's end ("<year>-Present Society of ...",
+    `_OPEN_TERM_WORDS`) and the membership's own type (`own_type`, run into
+    the name or after a tab: "<Society>\tAssociate Member")."""
+    return _tokens(name) - _SOCIETY_KIND_WORDS - _OPEN_TERM_WORDS - set(own_type)
+
+
+def _names_another_society(line: str, own_name: set[str], own_type: Collection[str] = ()) -> bool:
     """Whether `line` names a society (`_SOCIETY_NAME_RE`) other than the
     membership's organization (`own_name`): one no more than
-    `_OWN_SOCIETY_MIN_SHARE` of whose distinctive words are the
-    organization's. Read name by name: a sentence listing the entry's own
-    society among three others holds every word of its own name and is still
-    four memberships. With no organization to hold, whose a named society is
-    cannot be shown."""
-    return any(len(named & own_name) <= _OWN_SOCIETY_MIN_SHARE * len(named)
-               for named in (_tokens(match.group()) for match in _SOCIETY_NAME_RE.finditer(line)))
+    `_OWN_SOCIETY_MIN_SHARE` of whose own words (`_society_name_words`, the
+    membership's type `own_type` aside) are the organization's. A name with
+    no own word ("the Society's meeting") names no other society. Read name
+    by name: a sentence listing the entry's own society among three others
+    holds every word of its own name and is still four memberships. With no
+    organization to hold, whose a named society is cannot be shown."""
+    return any(named and len(named & own_name) <= _OWN_SOCIETY_MIN_SHARE * len(named)
+               for named in (_society_name_words(match.group(), own_type)
+                             for match in _SOCIETY_NAME_RE.finditer(line)))
 
 
 def _own_membership_line(entry: Mapping) -> str:
@@ -1143,13 +1180,14 @@ def _own_membership_line(entry: Mapping) -> str:
 
     An office, a committee, a working group or a chapter of the same society
     is the membership's own detail. Not seen: another society named without
-    the word for its kind (an acronym, a "<name> Foundation")."""
+    one of `_SOCIETY_BODIES`' words (an acronym, a "<name> Foundation", a
+    "<name> Guild")."""
     fields = entry.get('extracted_fields')
     fields = fields if isinstance(fields, Mapping) else {}
     own = _own_record_line(entry)
-    _membership_type, organization = membership_cell_values(fields)
+    membership_type, organization = membership_cell_values(fields)
     if (_lists_records(fields, MEMBERSHIP_ORGANIZATION_FIELDS)
-            or _names_another_society(own, _tokens(organization))):
+            or _names_another_society(own, _tokens(organization), _tokens(membership_type))):
         return ''
     return own
 
@@ -1262,7 +1300,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     committee's is, and none is offered when its line names another society
     or stage 4 listed memberships under its fields (`_own_membership_line`);
     a fragment holding, or held by, one of the entry's records the #221
-    recovery reads (`record_lines`) is left to that recovery.
+    recovery reads (`record_lines`) is left to that recovery
+    (`RECOVERY_RECORD_CODES`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -1277,7 +1316,7 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
         in_section = _section_candidates(code, candidates, spans)
         for entry in entries_by_code[code]:
             text = _prose_text(code, entry, entries_by_code)
-            records = record_lines(code, entry) if record_lines and code in MEMBERSHIP_CODES else ()
+            records = record_lines(code, entry) if record_lines and code in RECOVERY_RECORD_CODES else ()
             fragments = [f for f in unrendered_prose(entry, code, haystack, text)
                          if f not in offered and not _held_by_records(f, records)]
             if not fragments or _withholds_prose(entry):

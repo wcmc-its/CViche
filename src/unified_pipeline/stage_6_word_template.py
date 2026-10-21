@@ -1614,8 +1614,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # deletion means nothing without track changes, so it also needs
         # emit_track_changes.
         self.supplementary_subpoints = supplementary_subpoints
-        # Each written sub-point with its line, for the #221 recovery, and
-        # the entries it was written for, which the overflow pass skips.
+        # Each written sub-point with its line, for the #221 recovery (none
+        # for a family whose records stay the recovery's,
+        # `supplementary.RECOVERY_RECORD_CODES`), and the entries it was
+        # written for, which the overflow pass skips.
         self._subpoint_lines: list[str] = []
         self._subpoint_entry_ids: set[int] = set()
         # Whose each written sub-point is, for the render-warnings sidecar.
@@ -3972,7 +3974,9 @@ Now analyze the text above:"""
         """#1205: tracked-deleted sub-points first, then the content-overflow
         routing, which skips an entry a sub-point now carries, so its prose is
         not re-emitted whole as a blue bullet or into the Appendix. The #221
-        recovery after this reads the sub-points too (`_subpoint_lines`)."""
+        recovery after this reads the sub-points too (`_subpoint_lines`),
+        except those of a family whose records stay its own
+        (`supplementary.RECOVERY_RECORD_CODES`)."""
         self._add_supplementary_subpoints(entries_by_code)
         self._route_overflow_entries()
 
@@ -3990,7 +3994,8 @@ Now analyze the text above:"""
         position's or a membership's prose goes only under its own
         (`supplementary._own_rows`). A membership's dated office the #221
         recovery after this reads as one of its records
-        (`recovery_candidates`) is left to that recovery."""
+        (`recovery_candidates`) is left to that recovery, which reads no
+        membership sub-point (`supplementary.RECOVERY_RECORD_CODES`)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(
@@ -4009,12 +4014,13 @@ Now analyze the text above:"""
             subpoint = subpoint._replace(paragraphs=tuple(
                 self._sanitize_run_text(text) for text in subpoint.paragraphs))
             supplementary.write_subpoint(subpoint, revision)
-            self._subpoint_lines.append(subpoint.as_rendered_line())
+            if subpoint.code not in supplementary.RECOVERY_RECORD_CODES:
+                self._subpoint_lines.append(subpoint.as_rendered_line())
             self._subpoint_entry_ids.add(subpoint.entry_id)
             self._subpoint_placements.append(supplementary.SubpointPlacement(
                 subpoint.element_idx_start, subpoint.code, subpoint.paragraphs))
         self._revision_id = revision.next_id
-        self.stats['supplementary_subpoints'] = len(self._subpoint_lines)
+        self.stats['supplementary_subpoints'] = len(self._subpoint_placements)
         self.stats['track_changes_added'] += sum(len(sp.paragraphs) for sp in planned)
 
     def _subpoint_section_spans(self) -> dict[str, supplementary.SectionSpan]:

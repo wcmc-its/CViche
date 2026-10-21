@@ -1528,6 +1528,21 @@ def test_an_off_schema_type_counts_only_when_the_row_prints_it(field):
     # place, shared with the membership's own (EBYSBC TXTATQ 22's two colleges).
     ("Fellow Kestrel College of Physicians, appointed to its ethics council",
      "Kestrel College of Clinical Pharmacy", True),
+    # #1205 review of I: three words, two of them the kind and the place it
+    # shares with the membership's own. The kind's word is every such
+    # society's, so the name's own words share half.
+    ("Norvale College of Physicians, elected to its ethics and professionalism council",
+     "Norvale College of Cardiology", True),
+    ("Member, Norvale Medical Association", "Norvale Heart Association", True),
+    ("Norvale Society of Hematology", "Norvale Society of Clinical Oncology", True),
+    # A federation, a union, and a kind in the plural are societies too.
+    ("Member, Norvale Federation for Tidal Research and Clinical Investigation", _SOCIETY, True),
+    ("Federation of Kestrel Societies for Experimental Biology", _SOCIETY, True),
+    ("Kestrel Union Against Marsh Erosion", _SOCIETY, True),
+    # Its own society, worded another way: two of its three own words.
+    ("Member, Example Society of Estuarine Ecologists, its northern chapter", _SOCIETY, False),
+    # Its own society by the kind's word alone.
+    ("Chaired the Society's annual meeting and edited its proceedings", _SOCIETY, False),
     # Its own society, the type run into its name.
     (f"Fellow {_SOCIETY}; served on its council", _SOCIETY, False),
     # A committee, working group, task force or chapter of it is its detail.
@@ -1540,7 +1555,9 @@ def test_an_off_schema_type_counts_only_when_the_row_prints_it(field):
     # With no organization to hold, a named society is another's.
     ("Member of the Kestrel Statistical Association", "", True),
     (PROSE, "", False),
-], ids=["sentence_list", "chapter_and_college", "interleaved", "same_kind_and_place", "own_with_type",
+], ids=["sentence_list", "chapter_and_college", "interleaved", "same_kind_and_place",
+        "three_words_kind_and_place", "association_of_its_place", "longer_own_name", "federation",
+        "plural", "union", "own_worded_otherwise", "own_by_its_kind", "own_with_type",
         "own_details", "lowercase", "institute", "word_begins", "no_own_name", "none_named"])
 def test_a_membership_line_naming_another_society(line, own, another):
     assert sp._names_another_society(line, sp._tokens(own)) is another
@@ -1554,6 +1571,48 @@ def test_a_membership_line_naming_another_society_offers_none():
     assert _plan_membership(entry) == []
     # The same prose on a line naming only its own society is offered.
     assert [p.paragraphs for p in _plan_membership(_membership())] == [(PROSE,)]
+
+
+@pytest.mark.parametrize("line, own, own_type, another", [
+    # An open term's end before the name, and the row's own type after a tab,
+    # are words the name pattern takes in, not the society's.
+    ("2016-Present Society for the Restoration of Tidal Marshes",
+     "Society for the Restoration of Tidal Marshes", "Member", False),
+    ("Norvale Association of Limnologists\tAssociate Member, 2004-2016",
+     "Norvale Association of Limnologists", "Associate Member", False),
+    # Set aside, they hide no other society.
+    ("2015-Present Norvale College of Physicians", "Norvale College of Cardiology", "Member", True),
+    ("Fellow Norvale College of Physicians", "Norvale College of Cardiology", "Fellow", True),
+], ids=["open_term", "own_type_after_a_tab", "open_term_other", "own_type_other"])
+def test_a_named_society_is_read_without_an_open_term_or_the_rows_type(line, own, own_type, another):
+    assert sp._names_another_society(line, sp._tokens(own), sp._tokens(own_type)) is another
+
+
+def test_a_membership_line_holding_its_own_type_after_a_tab_offers_its_prose():
+    own = "Norvale Association of Limnologists"
+    entry = _membership(f"{own}\tAssociate Member, 2004-2016\t{PROSE}", organization=own,
+                        membership_type="Associate Member", start_date="2004", end_date="2016")
+    assert sp._own_membership_line(entry) == entry["text"]
+    assert [p.paragraphs for p in _plan_membership(entry, [f"Associate Member, {own}", "2004-2016"])] \
+        == [(PROSE,)]
+
+
+@pytest.mark.parametrize("kind", ["Society", "Societies", "Association", "Associations", "College",
+                                  "Colleges", "Academy", "Academies", "Federation", "Federations",
+                                  "Union", "Unions"])
+def test_every_kind_of_society_names_another_membership(kind):
+    assert sp._names_another_society(f"Member, Kestrel {kind} of Marsh Science", sp._tokens(_SOCIETY))
+
+
+def test_a_membership_line_naming_another_college_of_its_place_offers_none():
+    """#1205 review of I: the line goes on into another college of the same
+    kind and place. Offered, Reject All would print that membership under
+    this one's row."""
+    own = "Norvale College of Cardiology"
+    other = "Norvale College of Physicians, elected to its ethics and professionalism council"
+    entry = _membership(f"Member, {own}, 2009-2014\t{other}", organization=own)
+    assert sp._own_membership_line(entry) == ""
+    assert _plan_membership(entry, [f"Member, {own}", "2009-2014"]) == []
 
 
 @pytest.mark.parametrize("fields, listed", [

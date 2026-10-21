@@ -3964,9 +3964,10 @@ def test_the_doctor_matches_a_leadership_sub_point_to_its_own_entry_only(tmp_pat
     assert not offered_as_subpoint(_ROLE_PROSE, subpoints, element_idx=55)
 
 
-def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P"):
+def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P", **kwargs):
     """Through `run_stage6`, so the PII pass and the date-led split (#983)
-    run as in a real render: the document and its sidecar's placements."""
+    run as in a real render: the document and its sidecar's placements.
+    `kwargs` go to `run_stage6` (`supplementary_subpoints`)."""
     from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
 
     monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
@@ -3976,7 +3977,7 @@ def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P"):
     input_path.write_text(json.dumps({"document_uid": uid,
                                       "cv_owner": {"full_name": "Quenby Marblegate"},
                                       "entries": entries}))
-    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False, **kwargs)
     sidecar = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
     return Document(out), [p["paragraphs"] for p in sidecar[SUBPOINT_PLACEMENTS_KEY]]
 
@@ -6150,6 +6151,69 @@ def test_a_dated_office_the_recovery_reads_as_a_record_is_left_to_it():
     assert on.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"] == 2
     body_text = "".join(_texts_of(on.doc.element.body))
     assert all(office in body_text for office in _OFFICES)
+    row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+_OFFICES_BESIDE_THEIR_PROSE = (
+    ("Chair, Education Committee, 2015-2018",
+     "As chair of the education committee, developed the society's continuing education curriculum"),
+    ("Chair, Annual Meeting Program Committee, 2012-2013",
+     "Chaired the annual meeting program committee sessions and selected the plenary speakers"),
+)
+
+
+def _membership_with_an_office_beside_its_prose(office, prose):
+    """A society line, a dated office held in it, then prose naming the
+    office's committee: the prose holds every distinctive word of the
+    office's line (#1205 review of I). Stage 4 extracted the membership."""
+    entry = _membership(start="2009", end="present", prose=None)
+    entry["text"] = "\t".join((f"Member, {_SOCIETY_NAME}, 2009-present", office, prose))
+    return entry
+
+
+@pytest.mark.parametrize("office, prose", _OFFICES_BESIDE_THEIR_PROSE, ids=["education", "program"])
+def test_a_dated_office_beside_prose_repeating_its_words_stays_in_the_accepted_document(
+        tmp_path, monkeypatch, office, prose):
+    """#1205 review of I, through `run_stage6`. The prose is the sub-point,
+    and the office, a record the #221 recovery reads, is not part of it. The
+    sub-point's line held every word of the office's line, so the recovery
+    read the office as rendered (`_record_rendered`'s token overlap) and left
+    it out: it was in neither the accepted nor the rejected document. The
+    recovery reads no membership sub-point (`RECOVERY_RECORD_CODES`) and
+    re-emits the office as with sub-points off."""
+    entry = _membership_with_an_office_beside_its_prose(office, prose)
+    assert recovery_candidates("I", entry)[1:] == [office]
+
+    def texts(flag):
+        doc, placements = _stage6_render(tmp_path / str(flag), monkeypatch, [copy.deepcopy(entry)],
+                                         uid="T1205J", supplementary_subpoints=flag)
+        body = doc.element.body
+        return ("".join(t.text or "" for t in body.iter(qn("w:t"))),
+                "".join(t.text or "" for t in body.iter(qn("w:delText"))), placements)
+
+    accepted_off, deleted_off, placements_off = texts(False)
+    accepted, deleted, placements = texts(True)
+    assert (deleted_off, placements_off) == ("", [])
+    assert placements == [[prose]] and deleted == prose
+    assert accepted.count(office) == accepted_off.count(office) == 1
+
+
+@pytest.mark.parametrize("office, prose", _OFFICES_BESIDE_THEIR_PROSE, ids=["education", "program"])
+def test_accept_all_of_an_office_beside_its_prose_is_the_flag_off_document(office, prose):
+    """The same through the section and the recovery: with the sub-point's
+    row removed, the document is the flag-off one."""
+    def recovered(flag):
+        entry = _membership_with_an_office_beside_its_prose(office, prose)
+        gen = _render_memberships([entry], supplementary_subpoints=flag)
+        gen._recover_unrendered_records({"I": [entry]})
+        return gen
+
+    on, off = recovered(True), recovered(False)
+    (row,) = _subpoint_rows(on)
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == prose
+    assert on.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"] == 1
     row.getparent().remove(row)
     assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
     assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
