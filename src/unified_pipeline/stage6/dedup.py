@@ -1478,21 +1478,26 @@ def _first_author(pub: ResolvedPublication) -> str:
 # author and the part number still tell two records apart (#446).
 _IDENTIFIER_KEY_KINDS = frozenset({'pmid', 'doi'})
 
-# Where the first author's name ends in an author list: the first comma or
-# semicolon, or an "and" / "&" before a second author.
-_FIRST_AUTHOR_END_RE = re.compile(r'[,;]|\s(?:and|&)\s', re.IGNORECASE)
+# Where one author ends and the next begins in an author list: a comma or
+# semicolon, or an "and" / "&" before the next author.
+_AUTHOR_END_RE = re.compile(r'[,;]|\s(?:and|&)\s', re.IGNORECASE)
+
+# "et al", "et al." or "and others", wherever it stands and with or without a
+# comma before it: no author's name, so it is struck out of the list before
+# any name is read (a comma left behind only ends an empty author).
+_ET_AL_RE = re.compile(r'\b(?:et\.?\s*al\b\.?|and\s+others\b)', re.IGNORECASE)
 
 # An all-capitals word this short is a run of initials ("JA", "JAB"), not a
 # surname; a mixed-case one ("Li", "Wu") is read as a name.
 _INITIALS_MAX_LETTERS = 3
 
-# What splits a first author's name into words: spaces and hyphens, so the
-# parts of "Garcia-Lopez" are words of their own.
+# What splits an author's name into words: spaces and hyphens, so the parts
+# of "Garcia-Lopez" are words of their own.
 _NAME_WORD_SPLIT_RE = re.compile(r'[\s\-\u2010-\u2015]+')
 
 
-def _first_author_names(pub: ResolvedPublication) -> set[str]:
-    """The first author's name words, initials left out, as accent-folded,
+def _author_names(author: str) -> set[str]:
+    """One author's name words, initials left out, as accent-folded,
     casefolded letters, plus the whole name joined.
 
     Order-blind, so "J Xander" and "Xander J" both give {"xander"}. A
@@ -1500,17 +1505,28 @@ def _first_author_names(pub: ResolvedPublication) -> set[str]:
     {"garcia", "lopez", "garcialopez"}). A particle ("van", "der") is no name
     word of its own but stays in the joined name, so "van der Berg J" and
     "Vanderberg J" share "vanderberg". Empty when no word can be read as a
-    name, or the first author is a group ("The Toy Consortium",
-    `_GROUP_AUTHOR_RE`) that one copy credits and the other leaves out; an
-    empty set tells no two copies apart."""
-    first = _FIRST_AUTHOR_END_RE.split(pub.authors.strip(), maxsplit=1)[0]
-    if _GROUP_AUTHOR_RE.search(first):
+    name, or the author is a group ("The Toy Consortium", `_GROUP_AUTHOR_RE`)
+    that one copy credits and the other leaves out; an empty set tells no two
+    copies apart."""
+    if _GROUP_AUTHOR_RE.search(author):
         return set()
-    words = (re.sub(r'[^\w]', '', word) for word in _NAME_WORD_SPLIT_RE.split(first))
+    words = (re.sub(r'[^\w]', '', word) for word in _NAME_WORD_SPLIT_RE.split(author))
     letters = [_letters(norm(word)) for word in words
                if _letters(word) and not (word.isupper() and len(word) <= _INITIALS_MAX_LETTERS)]
     joined = ''.join(letters)
     return {word for word in letters if word not in _SURNAME_PARTICLES} | ({joined} - {''})
+
+
+def _author_name_sets(pub: ResolvedPublication) -> list[set[str]]:
+    """`_author_names` of each author in the list, first author first, with
+    "et al" and "and others" struck out (`_ET_AL_RE`)."""
+    authors = _ET_AL_RE.sub('', pub.authors.strip())
+    return [_author_names(author) for author in _AUTHOR_END_RE.split(authors)]
+
+
+def _first_author_names(pub: ResolvedPublication) -> set[str]:
+    """`_author_names` of the first author in the list."""
+    return _author_name_sets(pub)[0]
 
 
 def _one_slip_apart(a: str, b: str) -> bool:
@@ -1523,14 +1539,22 @@ def _one_slip_apart(a: str, b: str) -> bool:
             and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
 
 
+def _names_an_author(names: set[str], author_sets: list[set[str]]) -> bool:
+    """A name word in `names` is a name word of some author in `author_sets`,
+    or one slip off it (`_one_slip_apart`)."""
+    return any(a == b or _one_slip_apart(a, b)
+               for a in names for author in author_sets for b in author)
+
+
 def _first_authors_differ(first: ResolvedPublication, second: ResolvedPublication) -> bool:
-    """Both copies name a first author, and no name word of one is a name word
-    of the other or one slip off it (`_one_slip_apart`). A CV's own spelling
+    """Both copies name a first author, and neither copy's first author is an
+    author of the other copy (`_names_an_author`). A CV's own spelling
     ("Xandr" or "Xadner" for "Xander", "Ibanez" for the accented form, "Garcia"
-    for "Garcia-Lopez") or name order is not a second author (RXYBVF)."""
-    names = _first_author_names(first), _first_author_names(second)
-    return bool(names[0] and names[1]) and not any(
-        a == b or _one_slip_apart(a, b) for a in names[0] for b in names[1])
+    for "Garcia-Lopez"), name order, or author order (co-first authors listed
+    the other way round) is not a second author (RXYBVF)."""
+    lists = _author_name_sets(first), _author_name_sets(second)
+    return bool(lists[0][0] and lists[1][0]) and not (
+        _names_an_author(lists[0][0], lists[1]) or _names_an_author(lists[1][0], lists[0]))
 
 
 def _part_numbers_differ(first: tuple[dict, ResolvedPublication],
@@ -1579,8 +1603,8 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
     one title by different groups, and a letter and its reply share a title,
     journal and year (farm replay, 63 runs). A PMID or DOI match ignores those
     three: a CV's own volume typo or author spelling is not a second paper
-    (RXYBVF). It still refuses when the first authors share no name
-    (`_first_authors_differ`) or the part numbers differ
+    (RXYBVF). It still refuses when neither copy's first author is an author
+    of the other copy (`_first_authors_differ`) or the part numbers differ
     (`_part_numbers_differ`): a titled commentary by another author under the
     paper's DOI, or a Part I and Part II under one DOI (#446)."""
     if kind == 'citation':

@@ -24,6 +24,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
     _GROUP_HEADER_RE,
     SPLIT_SIBLING_METRIC,
+    _author_name_sets,
     _bare_occasion_apart,
     _carries_record,
     _companion_title,
@@ -2245,6 +2246,9 @@ def test_a_part_number_on_one_copy_only_still_drops():
     ("van der Berg J", "Vanderberg J"),             # particles run together
     ("Xander J", "Xadner J"),                       # two letters swapped
     ("The Toy Consortium, Xander J", "Xander J, Pike S"),  # a group credited first
+    ("Xander JA, Pike S", "Pike S, Xander JA"),     # co-first authors the other way round
+    ("Pike S et al.", "Quill A, Brandt B, Pike S"),  # first author later in the other list
+    ("Quill A, Brandt B, Pike S", "Pike S et al."),  # the same, the other copy first
 ])
 def test_a_shared_doi_drops_when_the_first_authors_can_be_one_person(first_authors,
                                                                      second_authors):
@@ -2262,8 +2266,52 @@ def test_a_shared_doi_drops_when_the_first_authors_can_be_one_person(first_autho
     assert decisions[0]["metric"] == "citation_doi"
 
 
+def test_a_shared_pmid_drops_when_co_first_authors_are_listed_the_other_way_round():
+    # The owner lists themself first on a co-first paper; PubMed lists the
+    # other co-first author first. One paper, so one copy is dropped, as on dev.
+    title = "Edge crispness of gizmos"
+    a = _enriched("first source line", "11111112", title + ".", authors="Xander JA, Pike S",
+                  title=title, year=2012)
+    b = _enriched("second source line, longer", "11111112", title + ".",
+                  authors="Pike S, Xander JA", title=title, year=2012)
+    decisions = []
+    assert deduplicate_entries([a, b], decisions=decisions, code="S1") == [b]
+    assert decisions[0]["metric"] == "citation_pmid"
+
+
+@pytest.mark.parametrize("paper_authors, commentary_authors", [
+    ("Xander JA et al.", "Pike S et al."),
+    ("Xander JA, et al", "Pike S, et al."),
+    # A bogus author "others" would sit one letter off a "Rothers".
+    ("Xander JA and others", "Rothers J"),
+])
+def test_a_titled_commentary_by_et_al_authors_keeps_both(paper_authors, commentary_authors):
+    # #446 round 3: "et al" is no author's name, so "Pike S et al." and
+    # "Xander JA et al." share no author and the commentary keeps its line.
+    paper = _pub("first source line", doi="10.9999/giz.9", authors=paper_authors,
+                 title="Gizmo outcomes in a toy cohort", year=2019)
+    commentary = _pub("second source line, longer", doi="10.9999/giz.9",
+                      authors=commentary_authors,
+                      title="Editorial: Gizmo outcomes in a toy cohort", year=2019)
+    assert deduplicate_entries([paper, commentary], code="S1") == [paper, commentary]
+
+
+@pytest.mark.parametrize("authors, name_sets", [
+    ("Xander J, Pike S and Quill A", [{"xander"}, {"pike"}, {"quill"}]),
+    ("Xander J; Pike S & Quill A, et al.", [{"xander"}, {"pike"}, {"quill"}, set()]),
+    ("Xander J and others", [{"xander"}]),
+])
+def test_author_name_sets(authors, name_sets):
+    assert _author_name_sets(ResolvedPublication(authors=authors)) == name_sets
+
+
 @pytest.mark.parametrize("authors, names", [
     ("Xander J, Pike S", {"xander"}),
+    ("Pike S et al.", {"pike"}),                    # "et al" is no name
+    ("Pike S et. al, Xander J", {"pike"}),
+    ("Pike S and others", {"pike"}),
+    ("Bouquet Al", {"bouquet", "al", "bouquetal"}),  # "et Al" inside a name is no "et al"
+    ("Roux et Alba J", {"roux", "et", "alba", "rouxetalba"}),
     ("J Xander", {"xander"}),
     ("Jane A. Xander and Sam Pike", {"jane", "xander", "janexander"}),
     ("Xander, J.; Pike, S.", {"xander"}),
