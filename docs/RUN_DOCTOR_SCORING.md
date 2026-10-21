@@ -31,7 +31,7 @@ The doctor and the score exist for the person reviewing a converted CV. They sho
 
 | # | Goal | Measured by | Baseline (YUYVIG, held-out) | Target | Current (YUY-HO) |
 |---|---|---|---|---|---|
-| 1 | **Catch what matters.** Every serious defect is flagged, on the entry where it occurs. | Share of verified HIGH defects that a finding names, by entry | 4 of 53 fully caught, 6 partly; 121 of 444 defects at any severity (27%) | Half of HIGH (approved 2026-10-08, Paul) | 19 of 53 HIGH caught; 13 of them out of sample, the other 6 from lints written from these runs |
+| 1 | **Catch what matters.** Every serious defect is flagged, on the entry where it occurs. | Share of verified HIGH defects that a finding names, by entry | 4 of 53 fully caught, 6 partly; 121 of 444 defects at any severity (27%) | Half of HIGH (approved 2026-10-08, Paul) | 19 of 53 HIGH caught; 13 of them out of sample, the other 6 from lints written from these runs. On the R1 labels after the 2026-10-21 re-index, with the doctor at `9a9c8e18`: 209 of 315 HIGH named by entry (154 at WARN or above, 55 at INFO only), 101 not named, 5 tied to no entry. A label spanning many entries can match a finding about another defect: 3 of the 15 WARN matches on the 46 re-indexed labels were such coincidences |
 | 2 | **Don't waste the reviewer's time.** What the reviewer is shown is right. | Precision of findings shown to users (WARN and above, and Word comments in the review copy) | 279 of 397 WARN (70%); about 67 of 401 review-copy comments come from two lints that are mostly false positives (#1585) | 90% of what is shown (approved 2026-10-08, Paul) | 278 of 396 WARN true (70%) on the dev-259 doctor; about 282 of 338 (83%) on the current doctor, not re-judged and partly in-sample |
 | 3 | **A quiet doctor means something.** No finding never reads as "checked and fine" when the doctor couldn't check. | Every run has a doctor outcome, and every run lists what the doctor can't see | IXJMKS scored GREEN 97 with no doctor report (#1593). Runs with nothing to flag get no review copy, and no "not checked" list exists (#1589) | Every run | |
 | 4 | **GREEN means ship.** The score predicts the cleanup a run needs. | Share of GREEN runs carrying a verified HIGH; fit of the score to the review form's correction-time answers | 22 of 31 GREEN runs carry a verified HIGH, including all 6 runs at 100 (#822) | Under 1 in 10 GREEN runs with a HIGH (approved 2026-10-08, Paul) | 16 of 24 GREEN runs carry a HIGH with the #1595 score (YUYVIG, whose verdicts now feed the weights); bounded by goal 1, see "Measured (#1595)". On the R1 labels after the 2026-10-20 recheck, with the doctor as of #1963: 36 of 71 over the 207 labelled runs |
@@ -365,6 +365,10 @@ the action and record count of 99 R1 promotions: 82 from a batch's LOW, and 17
 from MED on GREEN runs. Two readers each saw neither grade. They agreed that 65
 were graded too high, because R1's inferred action was wrong (an empty note box,
 for example, had been read as protected data shown): HIGH 380 → 315.
+On 2026-10-21 the 51 HIGH labels with no entry index were re-read. Two readers
+worked from the autopsy's description and the run's entries, without the
+doctor's findings, and agreed on all 51: 46 got the entries both named, and 5
+concern content no entry holds (dropped before stage 2, or the owner's identity).
 
 The `misleads` rule is not applied to the stored labels. The flag was set on
 an 80-finding sample only, so applying it would grade a finding by whether it
