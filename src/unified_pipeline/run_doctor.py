@@ -1669,10 +1669,11 @@ def _load_json(path: Path | None, label: str | None = None,
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.warning("run_doctor could not read %s (%s): %s",
-                       label or path, type(e).__name__, e)
+        logger.warning("run_doctor could not read %s (%s)",
+                       label or path, redacted_error_label(e))
+        logger.debug("run_doctor could not read %s: %s", label or path, e)
         if on_unreadable is not None:
-            on_unreadable(label or str(path), f"{type(e).__name__}: {e}")
+            on_unreadable(label or str(path), redacted_error_label(e))
         return None
     problem = _artifact_shape_error(data, spec) if spec is not None else None
     if problem is None:
@@ -1697,7 +1698,7 @@ def _load_stage_errors(path: Path, on_unreadable: Callable[[str, str], None]) ->
     except (OSError, ValueError) as e:
         logger.warning("run_doctor could not read %s (%s)", path, redacted_error_label(e))
         logger.debug("run_doctor could not read %s: %s", path, e)
-        on_unreadable("stage_errors", f"{type(e).__name__}: {e}")
+        on_unreadable("stage_errors", redacted_error_label(e))
         return None
 
 
@@ -1707,10 +1708,11 @@ def _try(fn, label: str | None = None, on_unreadable=None):
     try:
         return fn()
     except Exception as e:
-        logger.warning("run_doctor could not read %s (%s): %s",
-                       label or "docx", type(e).__name__, e)
+        logger.warning("run_doctor could not read %s (%s)",
+                       label or "docx", redacted_error_label(e))
+        logger.debug("run_doctor could not read %s: %s", label or "docx", e)
         if on_unreadable is not None:
-            on_unreadable(label or "docx", f"{type(e).__name__}: {e}")
+            on_unreadable(label or "docx", redacted_error_label(e))
         return None
 
 
@@ -1757,9 +1759,10 @@ def _run_lint(lint_id: str, rule: Callable[..., list[dict]],
     try:
         findings.extend(rule(*args))
     except Exception as e:
-        logger.exception("run_doctor: lint %s crashed", lint_id)
+        logger.error("run_doctor: lint %s crashed: %s", lint_id, redacted_error_label(e))
+        logger.debug("run_doctor: lint %s crashed", lint_id, exc_info=True)  # the traceback ends in str(e) (§4.7)
         findings.append(_finding(
-            lint_id, "ERROR", f"lint {lint_id} crashed: {type(e).__name__}: {e}"))
+            lint_id, "ERROR", f"lint {lint_id} crashed: {redacted_error_label(e)}"))
 
 
 class LintSpec(NamedTuple):

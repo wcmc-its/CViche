@@ -23,6 +23,7 @@ from typing import NamedTuple, TypedDict
 from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
+from ..log_redaction import redacted_error_label
 from .context import TaxonomyContext
 from .fragment_merge import SKIP_ORGANIZATION, merge_into_parent
 from .header_pin import is_note_not_record
@@ -942,10 +943,9 @@ Respond with a JSON array of objects, one per entry:
     except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
         raise
     except Exception as exc:
-        logger.exception(
-            "Stage 3b T-validation failed",
-            extra={"t_entries_reviewed": len(t_entries)},
-        )
+        logger.error("Stage 3b T-validation failed: %s", redacted_error_label(exc),
+                     extra={"t_entries_reviewed": len(t_entries)})
+        logger.debug("Stage 3b T-validation failed", exc_info=True)  # the traceback ends in str(e) (§4.7)
         # Nothing was applied: updated_entries only gets built after a
         # successful parse above, so the caller's original entries -- never
         # mutated -- come back untouched on any failure here.
@@ -1146,10 +1146,11 @@ Fragment at index {idx}:
     except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
         raise
     except Exception as e:
-        logger.exception(
-            "Stage 3b fragment reconnection failed",
+        logger.error(
+            "Stage 3b fragment reconnection failed: %s", redacted_error_label(e),
             extra={"fragments_reviewed": len(fragment_candidates)},
         )
+        logger.debug("Stage 3b fragment reconnection failed", exc_info=True)  # the traceback ends in str(e) (§4.7)
         # Report reconnections already applied to entries before the error.
         return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": locals().get("reconnected_count", 0), "cost": 0.0, "error": str(e)}
 

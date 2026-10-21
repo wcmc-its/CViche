@@ -80,6 +80,7 @@ except ImportError as exc:
     ) from exc
 
 from ...core.docx_structure_extractor import open_source_docx
+from ...log_redaction import redacted_error_label
 from ..formatting import _set_cell_text, _set_font
 from ..normalization import (
     CAT_HOME_CONTACT,
@@ -1875,7 +1876,7 @@ class PersonalDataSection:
             logger.warning(
                 "Could not read original document for personal data "
                 "fallback (uid=%s, path=%s): %s",
-                document_uid, original_doc_path, e, exc_info=True,
+                document_uid, original_doc_path, redacted_error_label(e), exc_info=True,
             )
             self.stats['personal_data_fallback_failed'] = (
                 self.stats.get('personal_data_fallback_failed', 0) + 1

@@ -70,8 +70,9 @@ def get_step_detail(
             output_files = json.loads(step.output_files)
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning(
-                "Malformed output_files for run=%s step=%s: %s", run_id, step_number, exc
+                "Malformed output_files for run=%s step=%s: %s", run_id, step_number, type(exc).__name__
             )
+            logger.debug("Malformed output_files for run=%s step=%s: %s", run_id, step_number, exc)
             output_files = []
 
     # Try to load preview of first output file. The pipeline stores absolute
@@ -136,8 +137,9 @@ def get_data_file(
         except Exception as e:
             # Fall back to local serving if storage is unreachable.
             logger.warning(
-                "Storage lookup failed for %s/%s: %s", run_id, resolved.storage_key, e
+                "Storage lookup failed for %s/%s: %s", run_id, resolved.storage_key, type(e).__name__
             )
+            logger.debug("Storage lookup failed for %s/%s: %s", run_id, resolved.storage_key, e)
 
     if resolved.local_path is None:
         raise not_found("File not found")
@@ -262,8 +264,9 @@ def get_json_content(
             })
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             logger.warning(
-                "JSON viewer read failed for %s/%s: %s", run_id, resolved.basename, exc
+                "JSON viewer read failed for %s/%s: %s", run_id, resolved.basename, type(exc).__name__
             )
+            logger.debug("JSON viewer read failed for %s/%s: %s", run_id, resolved.basename, exc)
             raise internal_error("Error reading file")
 
     # Durable storage fallback (S3 in prod): the file may live in S3 but not on

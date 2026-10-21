@@ -447,7 +447,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 2 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 0 | ratchet |
-| 5.4 blind `except Exception` (BLE001) | falling | 59 | ratchet |
+| 5.4 blind `except Exception` (BLE001) | falling | 58 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
 | 7.1 print() in library code (T201) | falling | 464 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |

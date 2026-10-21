@@ -469,20 +469,26 @@ def test_a_crashing_lint_becomes_an_error_finding_and_the_rest_still_run(
         mod, bucket_status=_boom,
         duplicate_records=lambda *args: ran_after.append(args) or []))
 
-    with caplog.at_level(logging.ERROR, logger="unified_pipeline.run_doctor"):
+    with caplog.at_level(logging.DEBUG, logger="unified_pipeline.run_doctor"):
         payload = mod.run_doctor(_build_clean_run(tmp_path), _UID)
 
     assert [f for f in payload["findings"] if f["lint"] == "bucket_status"] == [{
         "lint": "bucket_status", "severity": "ERROR",
-        "message": "lint bucket_status crashed: RuntimeError: synthetic lint failure",
+        "message": "lint bucket_status crashed: RuntimeError",
         "evidence": [], "status": "ran", "reason": ""}]
     assert ran_after, "duplicate_records, dispatched after the crash, never ran"
     assert payload["counts"]["ERROR"] == 1
     assert payload["worst_severity"] == "ERROR"
     assert not any(f["severity"] == "ERROR" for f in payload["findings"]
                    if f["lint"] != "bucket_status")
+    # The ERROR line names the class; the traceback, which ends in the
+    # exception text, goes to DEBUG (#639, CODING_STANDARDS §4.7).
     logged = [r for r in caplog.records if "bucket_status" in r.getMessage()]
-    assert logged and logged[0].exc_info, "the traceback must reach the log"
+    assert [r.getMessage() for r in logged if r.levelno == logging.ERROR] == [
+        "run_doctor: lint bucket_status crashed: RuntimeError"]
+    assert not any("synthetic lint failure" in r.getMessage() for r in logged)
+    assert any(r.levelno == logging.DEBUG and r.exc_info for r in logged), \
+        "the traceback must reach the log at DEBUG"
 
 
 def test_the_two_hard_fail_gates_run_inside_the_same_boundary(tmp_path, monkeypatch):
@@ -497,7 +503,7 @@ def test_the_two_hard_fail_gates_run_inside_the_same_boundary(tmp_path, monkeypa
     gate = [f for f in payload["findings"] if f["lint"] == "pipeline_errors_present"]
     assert gate == [{
         "lint": "pipeline_errors_present", "severity": "ERROR",
-        "message": "lint pipeline_errors_present crashed: RuntimeError: synthetic lint failure",
+        "message": "lint pipeline_errors_present crashed: RuntimeError",
         "evidence": [], "status": "ran", "reason": ""}]
     assert payload["worst_severity"] == "ERROR"
 
@@ -645,3 +651,65 @@ if __name__ == "__main__":
     test_the_surface_list_is_not_silently_empty()
     test_ten_of_the_surface_is_private()
     print("OK")
+
+
+# --- #639: an unreadable artifact's record and log carry the class only -----
+
+_RAW_TEXT_SENTINEL = "Jane Q. Example quoted from a CV entry"
+
+
+def _unreadable_outcome(caplog, load):
+    """Run one loader against a failure carrying the sentinel text; return the
+    on_unreadable records and (level, message) of every run_doctor log line."""
+    records = []
+    with caplog.at_level(logging.DEBUG, logger="unified_pipeline.run_doctor"):
+        assert load(lambda label, detail: records.append((label, detail))) is None
+    return records, [(r.levelno, r.getMessage()) for r in caplog.records
+                     if r.name == "unified_pipeline.run_doctor"]
+
+
+def _assert_class_only(records, logged, label, cls):
+    assert records == [(label, cls)]
+    assert not any(_RAW_TEXT_SENTINEL in msg for lvl, msg in logged if lvl > logging.DEBUG)
+    assert any(cls in msg for lvl, msg in logged if lvl == logging.WARNING)
+    assert any(_RAW_TEXT_SENTINEL in msg for lvl, msg in logged if lvl == logging.DEBUG)
+
+
+def test_load_json_records_an_unreadable_artifact_by_class_only(tmp_path, monkeypatch, caplog):
+    mod = _module()
+    path = tmp_path / "x.json"
+    path.write_text("{}")
+
+    def _raise(*_a, **_k):
+        raise ValueError(_RAW_TEXT_SENTINEL)
+
+    monkeypatch.setattr(mod.json, "loads", _raise)
+    records, logged = _unreadable_outcome(
+        caplog, lambda note: mod._load_json(path, "stage_4", on_unreadable=note))
+    monkeypatch.undo()
+    _assert_class_only(records, logged, "stage_4", "ValueError")
+
+
+def test_try_records_an_unreadable_docx_by_class_only(caplog):
+    mod = _module()
+
+    def _boom():
+        raise KeyError(_RAW_TEXT_SENTINEL)
+
+    records, logged = _unreadable_outcome(
+        caplog, lambda note: mod._try(_boom, "source_docx", on_unreadable=note))
+    _assert_class_only(records, logged, "source_docx", "KeyError")
+
+
+def test_load_stage_errors_records_an_unreadable_file_by_class_only(tmp_path, monkeypatch, caplog):
+    mod = _module()
+    path = tmp_path / "stage_errors.json"
+    path.write_text("[]")
+
+    def _boom(_path):
+        raise ValueError(_RAW_TEXT_SENTINEL)
+
+    monkeypatch.setattr(mod, "read_stage_errors", _boom)
+    records, logged = _unreadable_outcome(
+        caplog, lambda note: mod._load_stage_errors(path, note))
+    _assert_class_only(records, logged, "stage_errors", "ValueError")

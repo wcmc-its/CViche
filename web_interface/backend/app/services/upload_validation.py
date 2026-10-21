@@ -326,7 +326,7 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
                         parts.append(cell.text)
         return "\n".join(parts)
     except _DOCX_READ_ERRORS as e:
-        logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, e, exc_info=True)
+        logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, type(e).__name__, exc_info=True)
         return None
     finally:
         os.unlink(tmp_path)

@@ -1222,7 +1222,8 @@ class PubMedEnricher:
                 if self.verbose:
                     # No logger.exception/exc_info: _sanitize_error() redacts the NCBI api_key here; a traceback would leak it unredacted.
                     # Info, not warning/error: _log_api_failure() above already emits the one deduplicated ERROR record per failure class per run; logging this per-citation line at warning/error would reintroduce the flood that dedup exists to prevent (see also _fetch_pubmed_batch and _convert_pmcids_to_pmids below).
-                    logger.info(f"    ⚠️ DOI search error for {doi}: {_sanitize_error(e)}")
+                    logger.info("    ⚠️ DOI search error for %s: %s", doi, redacted_error_label(e))
+                    logger.debug("DOI search error detail for %s: %s", doi, _sanitize_error(e))
 
             if pmid:
                 records = self._fetch_pubmed_batch([pmid])
@@ -1706,7 +1707,8 @@ class PubMedEnricher:
             self._log_api_failure('efetch', e)
             if self.verbose:
                 # Info, not error: see the note at _enrich_by_doi's DOI search error above.
-                logger.info(f"    ❌ API error: {_sanitize_error(e)}")
+                logger.info("    ❌ API error: %s", redacted_error_label(e))
+                logger.debug("API error detail: %s", _sanitize_error(e))
             return None
 
     def _parse_pubmed_article(self, article: ET.Element) -> tuple[str | None, dict | None]:
@@ -1827,7 +1829,8 @@ class PubMedEnricher:
                 self._log_api_failure('pmcid_conversion', e)
                 if self.verbose:
                     # Info, not error: see the note at _enrich_by_doi's DOI search error above.
-                    logger.info(f"    ❌ ID conversion error: {_sanitize_error(e)}")
+                    logger.info("    ❌ ID conversion error: %s", redacted_error_label(e))
+                    logger.debug("ID conversion error detail: %s", _sanitize_error(e))
         if self.verbose and unique:
             logger.info(f"    → Converted {len(pmids)}/{len(unique)} PMCIDs to PMIDs")
         return _PmcidConversion(pmids, frozenset(failed))

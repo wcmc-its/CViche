@@ -325,7 +325,11 @@ def test_acs_rejects_wrong_issuer(acs_env, acs_app, caplog):
     """Signed with the TRUSTED key, but issued by an entity not in the SP's
     IdP metadata."""
     resp = acs_app(_mint(acs_env["rogue"]))
-    _assert_rejected(resp, caplog, f"SAML signature validation failed: {_ROGUE_IDP_EID}")
+    # The issuer is named by pysaml2's own line; the app's WARNING names the
+    # exception class only, its text going to DEBUG (#639, CODING_STANDARDS §4.7).
+    _assert_rejected(resp, caplog, f"Signature Error: {_ROGUE_IDP_EID}")
+    assert "[SECURITY] SAML signature validation failed: MissingKey" in caplog.text
+    assert f"SAML signature validation failed: {_ROGUE_IDP_EID}" not in caplog.text
 
 
 def test_acs_rejects_expired_assertion(acs_env, acs_app, caplog):

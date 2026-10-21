@@ -1062,6 +1062,7 @@ def test_restart_fails_after_exhausting_run_id_attempts(db, tmp_path, caplog):
     """
     user = _make_user(db, email="restart-exhausted@example.com")
     original = _make_original(db, user, "ORIGB2")
+    caplog.set_level(logging.DEBUG, logger="app.api.runs")
 
     storage = MagicMock()
     storage.put_file_exclusive.side_effect = StorageKeyExists("always collides")
@@ -1084,9 +1085,18 @@ def test_restart_fails_after_exhausting_run_id_attempts(db, tmp_path, caplog):
     assert exc.value.detail["error"] == "storage_unavailable"
     assert draw.call_count == upload_module._RUN_ID_ATTEMPTS
     assert storage.put_file_exclusive.call_count == upload_module._RUN_ID_ATTEMPTS
-    # #797: exhaustion is not silent -- the caller logs it at ERROR.
+    # #797: exhaustion is not silent -- the caller logs it at ERROR, by class
+    # only; the exception text goes to DEBUG (#639, CODING_STANDARDS §4.7).
     assert any(
-        r.levelno == logging.ERROR and "could not allocate a collision-free run id" in r.getMessage()
+        r.levelno == logging.ERROR and r.getMessage().endswith(": RunIdAttemptsExhausted")
+        for r in caplog.records
+    )
+    assert not any(
+        r.levelno > logging.DEBUG and "collision-free run id" in r.getMessage()
+        for r in caplog.records
+    )
+    assert any(
+        r.levelno == logging.DEBUG and "collision-free run id" in r.getMessage()
         for r in caplog.records
     )
     storage.put_global.assert_not_called()

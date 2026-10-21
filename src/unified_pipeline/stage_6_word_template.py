@@ -2500,8 +2500,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         try:
             return fn()
         except Exception as exc:
-            logger.exception(
-                "Stage 6: section %s failed; rendering the remaining sections", label)
+            logger.error(
+                "Stage 6: section %s failed; rendering the remaining sections: %s",
+                label, redacted_error_label(exc))
+            logger.debug("Stage 6: section %s failed", label, exc_info=True)  # the traceback ends in str(e) (§4.7)
             evidence = [line[:200] for line in traceback.format_exc().splitlines()[-3:]]
             self._section_failures.append({
                 "check": "section_render_failed",
@@ -4875,9 +4877,8 @@ Now analyze the text above:"""
         except Exception as e:
             if self.verbose:
                 logger.warning("  Warning: Could not create comments.xml: %s", redacted_error_label(e))
-                logger.debug("  Warning: Could not create comments.xml: %s", e)
-                import traceback
-                traceback.print_exc()
+                # The traceback goes to DEBUG with the raw text, not to stderr (§4.7).
+                logger.debug("  Warning: Could not create comments.xml: %s", e, exc_info=True)
 
     def _create_comments_xml(self) -> str:
         """Create XML content for comments.xml."""

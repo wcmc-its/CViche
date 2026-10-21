@@ -965,11 +965,11 @@ class TestSamlAcsContract:
 
     @pytest.mark.parametrize("exc, level, message", [
         (CertificateError("bad cert"), logging.WARNING,
-         "[SECURITY] SAML signature validation failed: bad cert"),
+         "[SECURITY] SAML signature validation failed: CertificateError"),
         (OSError("metadata unreachable"), logging.ERROR,
-         "SAML ACS processing failed: metadata unreachable"),
+         "SAML ACS processing failed: OSError"),
         (SourceNotFound("https://idp/metadata"), logging.ERROR,
-         "SAML ACS processing failed: https://idp/metadata"),
+         "SAML ACS processing failed: SourceNotFound"),
     ], ids=["CertificateError", "OSError", "SourceNotFound"])
     @patch("app.services.saml_service.get_saml_client")
     def test_parse_exception_is_logged_by_its_own_clause(

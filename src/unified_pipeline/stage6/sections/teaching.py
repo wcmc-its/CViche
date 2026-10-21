@@ -125,6 +125,7 @@ from unified_pipeline.core.render_check import (
     entry_lines,
     wrapped_row_text,
 )
+from unified_pipeline.log_redaction import redacted_error_label
 
 from ..formatting import (
     DATE_SPAN_SEPARATOR,
@@ -578,7 +579,8 @@ class SourceCellLevels:
             if not self._warned:
                 self._warned = True
                 logger.warning("Could not read source cell levels from %s, "
-                               "section K stays flat: %s", self._path, e)
+                               "section K stays flat: %s", self._path, redacted_error_label(e))
+                logger.debug("Source cell-level read detail: %s", e)
             return None
         matches = [flags for texts, flags in rows if _row_matches_lines(texts, lines)]
         if not matches or any(m != matches[0] for m in matches):

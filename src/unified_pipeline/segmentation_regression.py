@@ -59,6 +59,7 @@ from unified_pipeline.core.text_norm import (
     norm,
     squash,
 )
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.stage6.normalization.pii import redact_pre_llm_values
 
 # Aliases for callers that predate the move to core.text_norm.
@@ -736,7 +737,8 @@ def _snapshot_cv(docx_path: Path, snap_dir: Path) -> SnapshotResult:
 
         metrics = compute_metrics(iter_source_lines(str(docx_path)), stage1a, stage2)
     except Exception as exc:
-        logger.exception("snapshot: %s failed", uid)
+        logger.error("snapshot: %s failed: %s", uid, redacted_error_label(exc))
+        logger.debug("snapshot: %s failed", uid, exc_info=True)  # the traceback ends in str(e) (§4.7)
         return {"uid": uid, "metrics": None, "error": str(exc), "cost": cost}
     return {"uid": uid, "metrics": metrics, "error": None, "cost": cost}
 

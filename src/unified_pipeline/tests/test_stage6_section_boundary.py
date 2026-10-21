@@ -131,7 +131,7 @@ def test_nonfatal_section_failure_isolated_to_that_section(tmp_path, caplog):
         {"text": "The DISTINCTIVE_LATER_TOKEN unmapped content",
          "taxonomy_code": "T", "extracted_fields": {}, "element_idx_start": 5},
     ]
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.DEBUG):
         op = _render(gen, tmp_path, entries)
 
     assert op.exists(), "one section raising must not cost the whole document"
@@ -152,11 +152,16 @@ def test_nonfatal_section_failure_isolated_to_that_section(tmp_path, caplog):
     assert record["evidence"], "evidence must not be empty"
     assert all(len(line) <= 200 for line in record["evidence"])
 
-    # Logged with its traceback (§5.4 -- never just str(exc)), at ERROR.
-    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert any("honors" in r.getMessage() for r in error_records)
-    assert any(r.exc_info is not None for r in error_records), \
-        "the failure must be logged with logger.exception (traceback attached)"
+    # Logged at ERROR by class, with its traceback (§5.4) at DEBUG: the
+    # traceback ends in str(exc), which stays out of ERROR (#639, §4.7).
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR
+                     and "honors" in r.getMessage()]
+    assert [r.getMessage() for r in error_records] == [
+        "Stage 6: section honors failed; rendering the remaining sections: RuntimeError"]
+    assert all(r.exc_info is None for r in error_records)
+    assert any(r.levelno == logging.DEBUG and r.exc_info is not None
+               and "honors" in r.getMessage() for r in caplog.records), \
+        "the failure's traceback must reach the log at DEBUG"
 
 
 def test_log_validation_warnings_banner_and_message_at_warning(tmp_path, caplog):

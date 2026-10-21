@@ -149,8 +149,9 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         logger.warning(
             "Durable input lookup FAILED for run %s (%s); using local copy only. "
             "May indicate an S3/IAM/KMS problem rather than a missing object.",
-            run_id, e,
+            run_id, type(e).__name__,
         )
+        logger.debug("Durable input lookup failure detail for run %s: %s", run_id, e)
         return
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
