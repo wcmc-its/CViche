@@ -280,6 +280,7 @@ from unified_pipeline.stage6.sections.mentoring import (
     outcome_mentee_warnings,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
+from unified_pipeline.stage6.sections.postdoc_training import POSTDOC_TRAINING_HEADING
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
 from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VERBATIM_M1
 from unified_pipeline.stage6.sections.service import EXTRAMURAL_ORGANIZATION_FIELDS
@@ -604,6 +605,16 @@ RENDER_ROUTED_CODES = frozenset({
 # dates under the same title, so a different date is a different record there
 # too (#666, EBYSBC KDAZOM-03, DPEHSZ-01).
 _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1', 'K1', 'K4', 'R'})
+
+# #1205: the heading a sub-point code's section span starts at, for a code
+# `_get_wcm_section_header` names none for: the one its writer looks up.
+# Read by `_subpoint_section_spans` only. `_insert_reconsidered_segment` (the
+# reconsider pass and the #221 recovery) reads that lookup too, and a C
+# mapping there would move a recovered C record out of the Appendix into the
+# section, a recovery change this pass does not make (it made 0 C calls over
+# the 102 farm renders).
+_SUBPOINT_SECTION_HEADERS = MappingProxyType(
+    {code: POSTDOC_TRAINING_HEADING for code in supplementary.POSTDOCTORAL_CODES})
 
 # Codes routed by the entry's own publication status, not by the heading it
 # sits under: a submitted / in-review / in-preparation manuscript (S7) belongs
@@ -3972,8 +3983,8 @@ Now analyze the text above:"""
         positions writer made sub-points (`_add_title_duties`); they join the
         haystack, so the same duties are not planned again from the entry's
         text. The row-receipt ledger says which rows each entry wrote: a
-        degree's, a leadership role's, a committee's or a talk's prose goes
-        only under its own (`supplementary._own_rows`)."""
+        degree's, a leadership role's, a committee's, a talk's or a training
+        position's prose goes only under its own (`supplementary._own_rows`)."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(
@@ -4001,15 +4012,17 @@ Now analyze the text above:"""
 
     def _subpoint_section_spans(self) -> dict[str, supplementary.SectionSpan]:
         """Per `SUBPOINT_CODES` code, the body span of its WCM section: from the
-        heading `_get_wcm_section_header` names to the next major heading
-        (`_find_section_end_paragraph_idx`). A code whose heading is not in the
-        document has no span, and its prose is not placed."""
+        heading `_SUBPOINT_SECTION_HEADERS` or else `_get_wcm_section_header`
+        names to the next major heading (`_find_section_end_paragraph_idx`). A
+        code whose heading is not in the document has no span, and its prose
+        is not placed."""
         body = list(self.doc.element.body.iterchildren())
         position = {id(element): i for i, element in enumerate(body)}
         paragraphs = self.doc.paragraphs
         spans = {}
         for code in sorted(supplementary.SUBPOINT_CODES):
-            header_idx = self._find_header_paragraph(self._get_wcm_section_header(code))
+            header_idx = self._find_header_paragraph(
+                _SUBPOINT_SECTION_HEADERS.get(code) or self._get_wcm_section_header(code))
             if header_idx is None:
                 continue
             end_idx = self._find_section_end_paragraph_idx(header_idx)

@@ -191,7 +191,8 @@ class RowReceiptLedger:
         """The rows and paragraphs recorded for `entry` itself, by identity and
         in write order: not a fan-out sibling's, which shares its index. The
         #1205 sub-point pass anchors a degree's, a leadership role's, a
-        committee's or a talk's prose only under one of them."""
+        committee's, a talk's or a training position's prose only under one
+        of them."""
         return [element for _section, owner, element in self._written if owner is entry]
 
     def _live(self, appendix_section: str) -> tuple[_EntrySet, _EntrySet]:
