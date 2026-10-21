@@ -978,15 +978,8 @@ def _orcid_profile_entry(orcid: str, s0_text: str) -> dict | None:
 _WORK_PHONE_IN_TEXT_RE = re.compile(
     rf'\b(?:phone|tel|telephone|office|work)\b[ \t.:#-]*(?P<number>{_PHONE_NUMBER_PATTERN})',
     re.IGNORECASE)
-#: The words that make a number another kind of number than the owner's
-#: office line, each matched as a whole token: "Cellphone:", "Mob:", "Res.:",
-#: "Telefax:", "(personal)", "(cel)" (#1222).
-_OTHER_PHONE_KIND_WORDS = (
-    'home', 'res', 'residence', 'cell', 'cel', 'cellphone', 'cellular', 'mob', 'mobile',
-    'beeper', 'pager', 'fax', 'facsimile', 'telefax', 'personal', 'private', 'spouse')
-_OTHER_PHONE_KIND_ALTERNATION = '|'.join(_OTHER_PHONE_KIND_WORDS)
 #: Words before a phone label that make it another kind of number.
-_OTHER_PHONE_KIND_RE = re.compile(rf'\b(?:{_OTHER_PHONE_KIND_ALTERNATION})\W*$', re.IGNORECASE)
+_OTHER_PHONE_KIND_RE = re.compile(r'\b(?:home|cell|mobile|fax|pager|residence)\W*$', re.IGNORECASE)
 _STREET_LINE_RE = re.compile(
     r'^\d+[A-Za-z]?\s+(?:.*\s)?(?:street|st|avenue|ave|road|rd|drive|dr|boulevard|blvd|lane|ln'
     r'|way|place|pl|plaza|court|ct|parkway|pkwy|highway|hwy|circle|terrace)\b', re.IGNORECASE)
@@ -1019,63 +1012,72 @@ def _street_address_in(text: str) -> str | None:
     return None
 
 
-#: A short parenthetical after a number: "(clinical)", "(h)".
-_NUMBER_QUALIFIER_PATTERN = r'[ \t]*\([^()\n]{1,20}\)'
-#: A word or letter anywhere in a label or qualifier that makes a number
-#: another kind of number: "Cell Phone:", "Fax Number:", "(h)", "H:", "(c)",
-#: "M:" (#1222).
-_OTHER_PHONE_KIND_WORD_RE = re.compile(
-    rf'\b(?:{_OTHER_PHONE_KIND_ALTERNATION})\b'
-    r'|\([hcmf]\)|(?<![\w.])[hcmf][ \t]*:', re.IGNORECASE)
+#: A short parenthetical after a number on its line: "(clinical)", "(h)".
+#: It holds no digit, so the next number's "(555)" area code is not one.
+_NUMBER_QUALIFIER_PATTERN = r' *\([^()\d\t\n]{1,20}\)'
 
 
 def _labelled_work_number_in(text: str) -> str | None:
-    """The first number a work phone label introduces in `text`; a number
-    whose qualifier names another kind ("Phone: ... (h)") is not taken."""
+    """The first number a work phone label introduces in `text`."""
     for match in _WORK_PHONE_IN_TEXT_RE.finditer(text):
-        qualifier = re.match(_NUMBER_QUALIFIER_PATTERN, text[match.end():])
         if (len(_digits(match.group('number'))) >= _MIN_PHONE_DIGITS
-                and not _OTHER_PHONE_KIND_RE.search(text[:match.start()])
-                and not (qualifier and _OTHER_PHONE_KIND_WORD_RE.search(qualifier.group()))):
+                and not _OTHER_PHONE_KIND_RE.search(text[:match.start()])):
             return match.group('number')
     return None
 
 
-#: The shapes an unlabelled line must have to be read as a phone number: a
-#: North American number, or an international one written with its "+"
-#: country code. A label is what lets `_PHONE_NUMBER_PATTERN` take any digit
-#: groups; without one, "2019 1234 5678" or "1999-2004" is an identifier or a
-#: date (#1222).
+#: The shapes an unlabelled number must have: a North American number, or
+#: an international one written with its "+" country code. A label is what
+#: lets `_PHONE_NUMBER_PATTERN` take any digit groups; without one, "2019
+#: 1234 5678" or "1999-2004" is an identifier or a date (#1222).
 _BARE_PHONE_PATTERN = (
     r'(?:\+?1[-.\s]?)?(?:\([2-9]\d\d\)[-.\s]?|[2-9]\d\d[-.\s/])[2-9]\d\d[-.\s]\d{4}'
     r'|\+[2-9]\d{0,2}(?:[-.\s]?\(?\d{1,5}\)?){2,6}'
 )
-#: A line that is only a phone number, with at most a short qualifier after
-#: it: "(555) 555-0100", "(555) 555-0101 (clinical)".
-_BARE_NUMBER_LINE_RE = re.compile(
-    rf'(?P<number>{_BARE_PHONE_PATTERN})(?P<qualifier>{_NUMBER_QUALIFIER_PATTERN})?')
+#: A phone-shaped number anywhere in a block, with the short qualifier after
+#: it if there is one: "(555) 555-0101 (O)".
+_PHONE_SHAPE_RE = re.compile(
+    rf'(?<![\d+])(?P<number>{_BARE_PHONE_PATTERN})(?!\d)'
+    rf'(?P<qualifier>{_NUMBER_QUALIFIER_PATTERN})?')
 
-
-def _bare_work_numbers_in(text: str) -> str | None:
-    """Every tab- or newline-separated line of `text` that is only a phone
-    number, joined by "; "; None when there is none (#1222, NECRGC EYTHNB 10,
-    WYNUCX 5-17: a contact block lists its office numbers with no label, so
-    the labelled-number scan found none and Office telephone stayed empty).
-    A line is skipped when its qualifier, or the last line before it that is
-    not itself a number, names another kind of number anywhere ("Cell
-    Phone:", "(h)"), or when it has too few digits."""
-    label = ''
-    numbers = []
-    for line in (line.strip() for line in re.split(r'[\t\n]', text)):
-        match = _BARE_NUMBER_LINE_RE.fullmatch(line)
-        if match is None:
-            label = line or label
-            continue
-        if (len(_digits(match.group('number'))) >= _MIN_PHONE_DIGITS
-                and not _OTHER_PHONE_KIND_WORD_RE.search(match.group('qualifier') or '')
-                and not _OTHER_PHONE_KIND_WORD_RE.search(label)):
-            numbers.append(line)
-    return '; '.join(numbers) or None
+# #1222's positive evidence. The net's two new paths, the preamble anchor
+# and the unlabelled-number scan, act only on what says "office"; anything
+# else gives nothing, so no list of other kinds has to be complete.
+#: An explicit office or work label in a block.
+_OFFICE_BLOCK_LABEL_RE = re.compile(r'\b(?:office|work|business|department)\b', re.IGNORECASE)
+#: What may stand on a line before a phone label on the new paths: nothing,
+#: or a work word ("Office Phone:", "Business Tel."). "Emergency Phone:" or
+#: "Mob Tel:" is not taken.
+_WORK_LABEL_PREFIX_RE = re.compile(r'[ \t]*(?:(?:office|work|business|direct|main)[ \t]+)?',
+                                   re.IGNORECASE)
+#: The qualifiers a number on the new paths may carry: an office word, or a
+#: fax word on a fax number, which the scan never takes.
+_OFFICE_NUMBER_QUALIFIER_RE = re.compile(
+    r' *\((?:office|work|business|direct|main|clinic|clinical|lab|o|w|fax|f)\.?\)',
+    re.IGNORECASE)
+#: A fax label or qualifier: the one other kind of number an office block
+#: lists, and the one the scan does not count (#1222, NECRGC EYTHNB 10).
+_FAX_LABEL_RE = re.compile(r'\b(?:fax|facsimile|telefax)\b|\(f\)|(?<![\w.])f[ \t]*:',
+                           re.IGNORECASE)
+#: A word for a personal number anywhere in a block: cell, mobile and the
+#: like, or the labels "H:", "C:", "M:". Home and residence words are
+#: `_HOME_LABEL`'s, and a "(h)" after a number is no office qualifier.
+_PERSONAL_NUMBER_WORD_RE = re.compile(
+    r'\b(?:res|cell|cel|cellphone|cellular|mob|mobile|beeper|pager|personal|private)\b'
+    r'|(?<![\w.])[hcm][ \t]*:', re.IGNORECASE)
+#: A label naming another person whose contact a CV can list: an emergency
+#: contact or next of kin, a spouse or parent, a referee, or a reference
+#: followed by a name or "Dr." (not "National Reference Center"). With
+#: `_STAFF_ROLE_RE` (#1578).
+_THIRD_PARTY_ROLE_RE = re.compile(
+    r'\b(?:emergency\s+contacts?|next\s+of\s+kin|spouse|wife|husband|parents?|guardian'
+    r'|referees?|references?(?=[ \t]*:[ \t]*(?-i:[A-Z])|[ \t]+(?:dr|prof)\.))', re.IGNORECASE)
+#: A person named with an honorific at the start of a line or after a label:
+#: "Dr. Jane Roe", "Mentor: Dr. Jane Roe".
+_HONORIFIC_NAME_RE = re.compile(r'(?:^|[\t\n:])[ \t]*(?:Dr|Prof|Mr|Mrs|Ms|Miss)\.?[ \t]+[A-Z]')
+#: A word for an identifier whose digits can look like a phone number.
+_IDENTIFIER_WORD_RE = re.compile(
+    r'\b(?:npi|upin|dea|ssn|social\s+security|passport|licen[cs]e|ecfmg)\b', re.IGNORECASE)
 
 
 def _is_preamble_entry(entry: dict) -> bool:
@@ -1099,60 +1101,90 @@ def _names_a_permanent_address(text: str) -> bool:
     return False
 
 
-#: An address label that says nothing of where the address is: "Present
-#: Address", "Mailing Address", or a line that opens "Address:" (#1222).
-_UNQUALIFIED_ADDRESS_LABEL_RE = re.compile(
-    r'\b(?:present|mailing)\s+address\b|(?:^|[\t\n])[ \t]*address[ \t]*:', re.IGNORECASE)
-
-
-def _is_unqualified_address_block(text: str) -> bool:
-    """Whether a block's address is labelled only "Present Address",
-    "Mailing Address" or "Address:" and the block names no workplace: the
-    same reading #1426 gives a "Current Address"
-    (`_is_unlabelled_home_address`), so it counts as home (#1222). The
-    street address is cut from `text`, so `text` is the only place to look."""
-    return (_UNQUALIFIED_ADDRESS_LABEL_RE.search(text) is not None
-            and _WORKPLACE_TOKEN_RE.search(text) is None)
-
-
-def _is_home_contact_block(text: str, address: str | None, pii_fragments: list[str]) -> bool:
+def _is_home_contact_block(text: str, pii_fragments: list[str]) -> bool:
     """Whether a contact block is the owner's home contact or carries a
-    birthplace, so the net takes nothing from it: a home or residence word,
-    a "Current Address" naming no workplace (`_is_unlabelled_home_address`,
-    #1426) or a "Present", "Mailing" or bare address naming none
-    (`_is_unqualified_address_block`), or a permanent address (#1222)."""
+    birthplace: a home or residence word, or a permanent address (#1222). An
+    address labelled "Current", "Present" or "Mailing" in a block naming no
+    workplace (#1426's reading) has no office evidence anyway."""
     return bool(_HOME_LABEL.search(text.lower())
-                or _is_unlabelled_home_address(text, address)
-                or _is_unqualified_address_block(text)
                 or _names_a_permanent_address(text)
                 or any(_BIRTH_WORD_RE.search(part) for part in (text, *pii_fragments)))
 
 
-#: A label naming another person whose contact a CV can list: an emergency
-#: contact or next of kin, a spouse, a reference or referee (#1222). With
-#: `_STAFF_ROLE_RE` (#1578), it marks where the owner's own lines end.
-_THIRD_PARTY_ROLE_RE = re.compile(
-    r'\b(?:emergency\s+contacts?|next\s+of\s+kin|spouse|references?|referees?)\b',
-    re.IGNORECASE)
+def _names_someone_or_something_else(text: str, pii_fragments: list[str]) -> bool:
+    """Whether a block, or a fragment the pii pass cut from it, names
+    another person (`_STAFF_ROLE_RE`, `_THIRD_PARTY_ROLE_RE`, an honorific),
+    a personal number, an identifier, or qualifies a number with anything
+    but an office or fax word (#1222)."""
+    people = (_STAFF_ROLE_RE, _THIRD_PARTY_ROLE_RE, _HONORIFIC_NAME_RE)
+    return bool(any(pattern.search(part) for part in (text, *pii_fragments) for pattern in people)
+                or _PERSONAL_NUMBER_WORD_RE.search(text) or _IDENTIFIER_WORD_RE.search(text)
+                or any(match.group('qualifier')
+                       and not _OFFICE_NUMBER_QUALIFIER_RE.fullmatch(match.group('qualifier'))
+                       for match in _PHONE_SHAPE_RE.finditer(text)))
 
 
-def _other_person_role_at(text: str) -> int | None:
-    """Where the first word naming another person's role starts in `text`
-    (`_STAFF_ROLE_RE`, `_THIRD_PARTY_ROLE_RE`); None when there is none."""
-    starts = [match.start() for pattern in (_STAFF_ROLE_RE, _THIRD_PARTY_ROLE_RE)
-              if (match := pattern.search(text))]
-    return min(starts) if starts else None
+#: How strongly a block shows it is the owner's office contact.
+_NO_OFFICE_EVIDENCE, _NAMES_A_WORKPLACE, _OFFICE_LABELLED = 0, 1, 2
 
 
-def _owner_part_of_block(text: str) -> str:
-    """The lines of a contact block before the first line that names another
-    person's role (`_other_person_role_at`); "" when the block opens with
-    one. A number or address on or after that line is the assistant's,
-    spouse's or referee's, never the owner's Office (#1222)."""
-    first = _other_person_role_at(text)
-    if first is None:
-        return text
-    return text[:max(text.rfind('\t', 0, first), text.rfind('\n', 0, first)) + 1]
+def _office_evidence_of(text: str, pii_fragments: list[str]) -> int:
+    """The positive evidence a block is the owner's office contact, which is
+    all the net's new paths act on (#1222): an explicit office or work label
+    (`_OFFICE_BLOCK_LABEL_RE`), else a workplace word (`_WORKPLACE_TOKEN_RE`);
+    none when the block names neither, is a home block, or names anyone or
+    anything else (`_names_someone_or_something_else`)."""
+    if (_is_home_contact_block(text, pii_fragments)
+            or _names_someone_or_something_else(text, pii_fragments)):
+        return _NO_OFFICE_EVIDENCE
+    if _OFFICE_BLOCK_LABEL_RE.search(text):
+        return _OFFICE_LABELLED
+    return _NAMES_A_WORKPLACE if _WORKPLACE_TOKEN_RE.search(text) else _NO_OFFICE_EVIDENCE
+
+
+def _work_labelled_number_in(text: str) -> str | None:
+    """The first number in `text` whose phone label has nothing but a work
+    word before it on its line and whose qualifier, if any, is an office
+    word: the preamble anchor's labelled number (#1222)."""
+    for match in _WORK_PHONE_IN_TEXT_RE.finditer(text):
+        line_start = max(text.rfind('\t', 0, match.start()), text.rfind('\n', 0, match.start())) + 1
+        qualifier = re.match(_NUMBER_QUALIFIER_PATTERN, text[match.end():])
+        if (len(_digits(match.group('number'))) >= _MIN_PHONE_DIGITS
+                and _WORK_LABEL_PREFIX_RE.fullmatch(text[line_start:match.start()])
+                and (qualifier is None
+                     or _OFFICE_NUMBER_QUALIFIER_RE.fullmatch(qualifier.group()))):
+            return match.group('number')
+    return None
+
+
+def _sole_bare_number_in(text: str) -> str | None:
+    """The block's one unlabelled office number (#1222, NECRGC EYTHNB 10: an
+    office block lists its number with no label). Taken only when it is the
+    block's only phone-shaped number other than a fax number, it fills its
+    whole tab- or newline-separated line, and the line before it holds a
+    digit, as an address line does; None otherwise."""
+    lines = [line.strip() for line in re.split(r'[\t\n]', text) if line.strip()]
+    found = []
+    for index, line in enumerate(lines):
+        before = lines[index - 1] if index else ''
+        for match in _PHONE_SHAPE_RE.finditer(line):
+            label = line[:match.start()] or ('' if re.search(r'\d', before) else before)
+            if not _FAX_LABEL_RE.search(label + (match.group('qualifier') or '')):
+                found.append((index, match))
+    if len(found) != 1:
+        return None
+    index, match = found[0]
+    if (match.span() != (0, len(lines[index])) or not index
+            or not re.search(r'\d', lines[index - 1])
+            or len(_digits(match.group('number'))) < _MIN_PHONE_DIGITS):
+        return None
+    return lines[index]
+
+
+def _unprotected(value: str | None, pii_fragments: list[str]) -> str | None:
+    """`value`, unless it is empty or was cut from a protected-data fragment
+    (#1367)."""
+    return value if value and not _from_pii_fragment(value, pii_fragments) else None
 
 
 def _work_contact_in_entries(entries: list[dict], work_email: str | None
@@ -1160,38 +1192,36 @@ def _work_contact_in_entries(entries: list[dict], work_email: str | None
     """(office phone, office address) from the non-A entry that is the
     owner's contact block; (None, None) when there is none. Stage 3b coded
     the block as a position (#1222, EBYSBC E10: BZZNRL 7, HZGJFM 729,
-    MUHLLD 10, GJXIWD 2; NECRGC EYTHNB 10, O). Two things make a block the
-    owner's and not a referee's: it holds the owner's work email, and the
-    first such block wins; failing one, it sits in the Personal Data section
-    and holds both a street address and a phone number with no other
-    person's role anywhere in it, nor in a fragment the pii pass cut (#1578).
-    On either anchor, only the lines before another person's role are read
-    (`_owner_part_of_block`). A labelled work number wins; failing one, the
-    lines that are only a number are taken (`_bare_work_numbers_in`), unless
-    the pii pass cut a fragment naming another person. A home block
-    (`_is_home_contact_block`) is skipped whole, and a value cut from a
-    protected-data fragment is not taken (#1367 must keep holding)."""
-    preamble_block = None
+    MUHLLD 10, GJXIWD 2; NECRGC EYTHNB 10, O). The first block holding the
+    owner's work email wins, read as dev reads it; when it has no labelled
+    work number, its sole unlabelled number (`_sole_bare_number_in`) is
+    taken if the block shows office evidence (`_office_evidence_of`).
+    Failing an email block, a Personal Data entry (`_is_preamble_entry`)
+    with office evidence, a work-labelled or sole unlabelled number and a
+    street address is taken, an office-labelled block over one that only
+    names a workplace. An entry carrying a home, residence or birth word is
+    skipped whole, and a value cut from a protected-data fragment is not
+    taken (#1367 must keep holding)."""
+    best, best_evidence = (None, None), _NO_OFFICE_EVIDENCE
     for entry in entries:
         text = entry.get('text') or ''
         pii_fragments = entry.get('_pii_fragments', [])
-        owner_text = _owner_part_of_block(text)
-        # The pii pass cut a "Spouse: ..." label out of the text, so nothing
-        # says which unlabelled lines are that person's.
-        cut_role = any(_other_person_role_at(part) is not None for part in pii_fragments)
-        address = _street_address_in(owner_text)
-        if entry.get('taxonomy_code') == 'A' or _is_home_contact_block(text, address, pii_fragments):
+        if (entry.get('taxonomy_code') == 'A' or _HOME_LABEL.search(text.lower())
+                or any(_BIRTH_WORD_RE.search(part) for part in (text, *pii_fragments))):
             continue
-        phone = (_labelled_work_number_in(owner_text)
-                 or (None if cut_role else _bare_work_numbers_in(owner_text)))
-        values = ((phone if phone and not _from_pii_fragment(phone, pii_fragments) else None),
-                  (address if address and not _from_pii_fragment(address, pii_fragments) else None))
+        evidence = _office_evidence_of(text, pii_fragments)
         if work_email and work_email.lower() in text.lower():
-            return values
-        if (preamble_block is None and _is_preamble_entry(entry) and phone and address
-                and owner_text == text and not cut_role):
-            preamble_block = values
-    return preamble_block or (None, None)
+            phone = (_labelled_work_number_in(text)
+                     or (_sole_bare_number_in(text) if evidence else None))
+            return (_unprotected(phone, pii_fragments),
+                    _unprotected(_street_address_in(text), pii_fragments))
+        if evidence > best_evidence and _is_preamble_entry(entry):
+            phone = _work_labelled_number_in(text) or _sole_bare_number_in(text)
+            address = _street_address_in(text)
+            if phone and address:
+                best = _unprotected(phone, pii_fragments), _unprotected(address, pii_fragments)
+                best_evidence = evidence
+    return best
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
