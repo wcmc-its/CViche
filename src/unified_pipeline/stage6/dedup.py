@@ -18,7 +18,7 @@ import re
 from types import MappingProxyType
 from typing import NamedTuple
 
-from unified_pipeline.core.text_norm import is_placeholder_title
+from unified_pipeline.core.text_norm import is_placeholder_title, norm
 
 from .fan_out import (
     _FORMATTED_KEYS,
@@ -27,7 +27,12 @@ from .fan_out import (
     LAST_STAGE4_RECORD,
 )
 from .normalization import _squash
-from .normalization.authors import _letters, _one_edit_apart
+from .normalization.authors import (
+    _GROUP_AUTHOR_RE,
+    _SURNAME_PARTICLES,
+    _letters,
+    _one_edit_apart,
+)
 from .normalization.publication import ResolvedPublication, resolve_publication
 from .parsing import (
     _MONTH_NAME_TO_NUM,
@@ -1481,36 +1486,62 @@ _FIRST_AUTHOR_END_RE = re.compile(r'[,;]|\s(?:and|&)\s', re.IGNORECASE)
 # surname; a mixed-case one ("Li", "Wu") is read as a name.
 _INITIALS_MAX_LETTERS = 3
 
+# What splits a first author's name into words: spaces and hyphens, so the
+# parts of "Garcia-Lopez" are words of their own.
+_NAME_WORD_SPLIT_RE = re.compile(r'[\s\-\u2010-\u2015]+')
+
 
 def _first_author_names(pub: ResolvedPublication) -> set[str]:
-    """The first author's name words, initials left out, as casefolded letters.
+    """The first author's name words, initials left out, as accent-folded,
+    casefolded letters, plus the whole name joined.
 
-    Order-blind, so "J Xander" and "Xander J" both give {"xander"} and
-    "Jane A. Xander" gives {"jane", "xander"}. Empty when no word can be read
-    as a name, which then tells no two copies apart."""
+    Order-blind, so "J Xander" and "Xander J" both give {"xander"}. A
+    hyphenated surname gives each part and the whole ("Garcia-Lopez M":
+    {"garcia", "lopez", "garcialopez"}). A particle ("van", "der") is no name
+    word of its own but stays in the joined name, so "van der Berg J" and
+    "Vanderberg J" share "vanderberg". Empty when no word can be read as a
+    name, or the first author is a group ("The Toy Consortium",
+    `_GROUP_AUTHOR_RE`) that one copy credits and the other leaves out; an
+    empty set tells no two copies apart."""
     first = _FIRST_AUTHOR_END_RE.split(pub.authors.strip(), maxsplit=1)[0]
-    words = (re.sub(r'[^\w]', '', word) for word in first.split())
-    return {_letters(word) for word in words
-            if _letters(word) and not (word.isupper() and len(word) <= _INITIALS_MAX_LETTERS)}
+    if _GROUP_AUTHOR_RE.search(first):
+        return set()
+    words = (re.sub(r'[^\w]', '', word) for word in _NAME_WORD_SPLIT_RE.split(first))
+    letters = [_letters(norm(word)) for word in words
+               if _letters(word) and not (word.isupper() and len(word) <= _INITIALS_MAX_LETTERS)]
+    joined = ''.join(letters)
+    return {word for word in letters if word not in _SURNAME_PARTICLES} | ({joined} - {''})
+
+
+def _one_slip_apart(a: str, b: str) -> bool:
+    """`_one_edit_apart`, or two neighbouring letters swapped ("xander" and
+    "xadner")."""
+    if _one_edit_apart(a, b):
+        return True
+    diff = [i for i, (x, y) in enumerate(zip(a, b, strict=False)) if x != y]
+    return (len(a) == len(b) and len(diff) == 2 and diff[1] == diff[0] + 1
+            and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
 
 
 def _first_authors_differ(first: ResolvedPublication, second: ResolvedPublication) -> bool:
     """Both copies name a first author, and no name word of one is a name word
-    of the other or one letter off it. A CV's own spelling ("Xandr" for
-    "Xander") or name order is not a second author (RXYBVF)."""
+    of the other or one slip off it (`_one_slip_apart`). A CV's own spelling
+    ("Xandr" or "Xadner" for "Xander", "Ibanez" for the accented form, "Garcia"
+    for "Garcia-Lopez") or name order is not a second author (RXYBVF)."""
     names = _first_author_names(first), _first_author_names(second)
     return bool(names[0] and names[1]) and not any(
-        a == b or _one_edit_apart(a, b) for a in names[0] for b in names[1])
+        a == b or _one_slip_apart(a, b) for a in names[0] for b in names[1])
 
 
 def _part_numbers_differ(first: tuple[dict, ResolvedPublication],
                          second: tuple[dict, ResolvedPublication]) -> bool:
-    """The printed titles, or the CV's own titles, name different part numbers
-    (`_part_numbers`): a Part I and a Part II under one DOI."""
+    """Both printed titles, or both of the CV's own titles, name a part number
+    (`_part_numbers`), and the numbers differ: a Part I and a Part II under one
+    DOI. A title that names no part says nothing about which part it is."""
     (first_entry, first_pub), (second_entry, second_pub) = first, second
-    return (_part_numbers(first_pub.title) != _part_numbers(second_pub.title)
-            or _part_numbers(_source_title(first_entry))
-            != _part_numbers(_source_title(second_entry)))
+    return any(a and b and a != b for a, b in (
+        (_part_numbers(first_pub.title), _part_numbers(second_pub.title)),
+        (_part_numbers(_source_title(first_entry)), _part_numbers(_source_title(second_entry)))))
 
 
 def _source_title(entry: dict) -> str:

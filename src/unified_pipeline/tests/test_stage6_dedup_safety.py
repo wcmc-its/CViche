@@ -42,6 +42,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _names_a_sibling,
     _names_record,
     _narrower_committee,
+    _one_slip_apart,
     _other_journal_same_row,
     _other_series_member,
     _part_numbers,
@@ -2173,7 +2174,6 @@ def test_a_titled_commentary_under_the_papers_doi_keeps_both():
 @pytest.mark.parametrize("first_title, second_title", [
     ("Widget care across the ages, part I", "Widget care across the ages, part II"),
     ("Widget care across the ages, part 1", "Widget care across the ages, part 2"),
-    ("Widget care across the ages, part I", "Widget care across the ages"),
 ])
 def test_two_parts_under_one_doi_keep_both(first_title, second_title):
     a = _pub("Quill A. " + first_title + ". J Toy Care. 2020.", doi="10.9999/wid.3",
@@ -2195,16 +2195,38 @@ def test_two_parts_under_one_pubmed_record_keep_both_on_the_cvs_own_titles():
     assert deduplicate_entries([a, b], code="S1") == [a, b]
 
 
-def test_a_part_number_only_pubmed_prints_keeps_both():
-    # The CV lists the paper twice without its part; PubMed's title on the
-    # enriched copy names Part II, so the plain copy may be Part I.
+
+def test_two_parts_only_pubmed_titles_keep_both():
+    # No CV title on either copy; the PubMed titles name Part I and Part II.
+    # Seven words beside the numeral, so the titles still agree (Jaccard 7/8).
+    title = "Widget care across seven northern toy ages, part "
+    a = _enriched("first source line", "", title + "I.", doi="10.9999/wid.5",
+                  authors="Quill A", year=2020)
+    b = _enriched("second source line, longer", "", title + "II.", doi="10.9999/wid.5",
+                  authors="Quill A", year=2020)
+    assert deduplicate_entries([a, b], code="S1") == [a, b]
+
+def test_a_part_number_on_one_copy_only_still_drops():
+    # A title that names no part says nothing about which part it is, so a
+    # shared DOI or PMID still drops one copy, as on dev.
     # Nine words beside "part II", so the printed titles still agree (9/11).
     title = "Widget care across seven northern toy ages in winter clinics"
     plain = _pub("first source line", doi="10.9999/wid.4", authors="Quill A",
                  title=title, year=2020)
     enriched = _enriched("second source line, longer", "", title + ", part II.",
                          doi="10.9999/wid.4", authors="Quill A", title=title, year=2020)
-    assert deduplicate_entries([plain, enriched], code="S1") == [plain, enriched]
+    assert deduplicate_entries([plain, enriched], code="S1") == [enriched]
+    a = _pub("first source line", doi="10.9999/wid.3", authors="Quill A",
+             title="Widget care across the ages, part I", year=2020)
+    b = _pub("second source line, longer", doi="10.9999/wid.3", authors="Quill A",
+             title="Widget care across the ages", year=2020)
+    assert deduplicate_entries([a, b], code="S1") == [b]
+    # One copy has no CV title; both PubMed titles name Part II.
+    title = "Edge crispness of gizmos, part II"
+    no_title = _enriched("first source line", "11111111", title, authors="Xander J", year=2012)
+    titled = _enriched("second source line, longer", "11111111", title,
+                       authors="Xander J", title=title, year=2012)
+    assert deduplicate_entries([no_title, titled], code="S1") == [titled]
 
 
 @pytest.mark.parametrize("first_authors, second_authors", [
@@ -2215,14 +2237,26 @@ def test_a_part_number_only_pubmed_prints_keeps_both():
     ("JA", "Xander J"),                             # no name word on one copy
     ("", "Xander J"),                               # no author list on one copy
     ("2012", "Xander J"),                           # a year read as the author list
+    ("Ibáñez J, Pike S", "Ibanez J, Pike S"),       # two accents dropped
+    ("Gómez-Sánchez J", "Gomez-Sanchez J"),         # accented compound surname
+    ("Garcia-Lopez M", "Garcia Lopez M"),           # hyphen or space
+    ("Garcia-Lopez M", "Garcia M"),                 # one part of a compound
+    ("Smith-Jones A", "Jones A"),                   # the other part
+    ("van der Berg J", "Vanderberg J"),             # particles run together
+    ("Xander J", "Xadner J"),                       # two letters swapped
+    ("The Toy Consortium, Xander J", "Xander J, Pike S"),  # a group credited first
 ])
 def test_a_shared_doi_drops_when_the_first_authors_can_be_one_person(first_authors,
                                                                      second_authors):
     # Source lines that share no words, so only the identity pass can drop one.
+    # Journal, volume and pages agree too, but the authors' first words
+    # differ, so the title, journal and year key cannot drop one either.
     a = _pub("first source line", doi="10.9999/edge.1", authors=first_authors,
-             title="Edge crispness of gizmos", year=2012)
+             title="Edge crispness of gizmos", journal="J Toy Care", volume="4",
+             pages="1-9", year=2012)
     b = _pub("second source line, longer", doi="10.9999/edge.1", authors=second_authors,
-             title="Edge crispness of gizmos", year=2012)
+             title="Edge crispness of gizmos", journal="J Toy Care", volume="4",
+             pages="1-9", year=2012)
     decisions = []
     assert deduplicate_entries([a, b], decisions=decisions, code="S1") == [b]
     assert decisions[0]["metric"] == "citation_doi"
@@ -2231,17 +2265,32 @@ def test_a_shared_doi_drops_when_the_first_authors_can_be_one_person(first_autho
 @pytest.mark.parametrize("authors, names", [
     ("Xander J, Pike S", {"xander"}),
     ("J Xander", {"xander"}),
-    ("Jane A. Xander and Sam Pike", {"jane", "xander"}),
+    ("Jane A. Xander and Sam Pike", {"jane", "xander", "janexander"}),
     ("Xander, J.; Pike, S.", {"xander"}),
     ("XANDER JA", {"xander"}),
     ("LI J", set()),                                # all capitals, as short as initials
     ("Li J", {"li"}),
     ("", set()),
     ("12, Xander J", set()),                        # a list number, no name word
+    ("Gómez-Sánchez J", {"gomez", "sanchez", "gomezsanchez"}),
+    ("van der Berg J", {"berg", "vanderberg"}),     # particles only in the joined name
+    ("Le K", {"le"}),                               # a particle-shaped surname
+    ("The Toy Consortium, Xander J", set()),        # a group author
 ])
 def test_first_author_names(authors, names):
     assert _first_author_names(ResolvedPublication(authors=authors)) == names
 
+
+
+@pytest.mark.parametrize("a, b, slip", [
+    ("xander", "xadner", True),                     # two neighbours swapped
+    ("xander", "xandr", True),                      # one letter dropped
+    ("xander", "xbcder", False),                    # two neighbours changed, not swapped
+    ("ab", "bacd", False),                          # a swap at the start, then two more letters
+    ("xander", "xander", False),                    # equal is not a slip (the caller checks ==)
+])
+def test_one_slip_apart(a, b, slip):
+    assert _one_slip_apart(a, b) is slip
 
 def test_untitled_fragments_share_no_identity_key():
     # Two split-off place names with the same 5d citation and no title are
