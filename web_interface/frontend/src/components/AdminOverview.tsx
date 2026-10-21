@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { XCircle, Clock, Loader2 } from 'lucide-react'
+import { XCircle, Clock, Loader2, AlertTriangle } from 'lucide-react'
 import type { AdminRun, FeedbackData, Stats } from '../types'
 import { exportFeedbackCsv, getAdminRuns } from '../api/admin'
 import { formatCost, formatDate, formatDuration } from '../utils'
@@ -30,6 +30,24 @@ function StatTile({ label, value, sublabel }: { label: string; value: string; su
       <p className="mt-1 text-[26px] leading-8 font-semibold text-gray-900 tabular-nums">{value}</p>
       <p className="mt-1 text-xs text-gray-500">{sublabel}</p>
     </div>
+  )
+}
+
+/**
+ * Uploaded files in storage with no run row (#802). Hidden when the count is 0
+ * or the stats have not loaded; null means the backend could not list storage,
+ * which must not read as "none".
+ */
+function RowlessArchivesNotice({ count }: { count: number | null | undefined }) {
+  if (count === undefined || count === 0) return null
+  return (
+    <p role="status" className={`${CARD} flex items-start gap-2 px-[18px] py-3 text-sm text-gray-700`}>
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-600" aria-hidden="true" />
+      {count === null
+        ? 'Could not check storage for uploaded files with no run.'
+        : `${count.toLocaleString()} uploaded ${count === 1 ? 'file is' : 'files are'} in storage with no run. ` +
+          'POST /api/admin/runs/reap-orphans lists their run IDs; they cannot be deleted yet.'}
+    </p>
   )
 }
 
@@ -233,6 +251,7 @@ export default function AdminOverview({
           sublabel="of completed runs"
         />
       </div>
+      <RowlessArchivesNotice count={stats?.rowless_archives} />
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-start">
         <WhoSubmitsCard split={stats?.submissions} />
       </div>
