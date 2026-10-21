@@ -319,6 +319,36 @@ def test_n1_pin_skips_a_fallback_answer():
     assert n == 0 and out == entry
 
 
+# --- #1977: an O answer under an L3 sub-heading ----------------------------------
+
+L3_HEADING = ("CLINICAL PRACTICE, INNOVATION, and LEADERSHIP", "Clinical Leadership")
+L3_CTX = _ctx(meta=_node("CLINICAL PRACTICE, INNOVATION, and LEADERSHIP", "L", 0.6),
+              section=_node("Clinical Leadership", "L3"))
+
+
+def test_o_under_an_l3_sub_heading_becomes_l3():
+    entry = _row("O", "2031-present Vice Chair for Education, Department of Example, Example Hospital",
+                 confidence=0.8, hierarchy=L3_HEADING)
+    (out,), n = apply_header_pin([entry], L3_CTX)
+    assert n == 1 and out["taxonomy_code"] == "L3" and out["pre_pin_code"] == "O"
+    assert "category L3" in out["classification_reasoning"]
+
+
+@pytest.mark.parametrize("code", ["K3", "P", "L1", "L2", "Q2", "T"])
+def test_l3_sub_heading_leaves_other_codes_alone(code):
+    entry = _row(code, "2031-present Example clinical role, Example Hospital", hierarchy=L3_HEADING)
+    (out,), n = apply_header_pin([entry], L3_CTX)
+    assert n == 0 and out == entry
+
+
+def test_l3_sub_heading_below_the_floor_does_not_pin():
+    below = _ctx(meta=_node("CLINICAL PRACTICE, INNOVATION, and LEADERSHIP", "L", 0.6),
+                 section=_node("Clinical Leadership", "L3", HEADER_PIN_MIN_CONFIDENCE - 0.01))
+    entry = _row("O", "2031-present Vice Chair for Education, Example Hospital", hierarchy=L3_HEADING)
+    (out,), n = apply_header_pin([entry], below)
+    assert n == 0 and out == entry
+
+
 # --- YUYVIG (#1577): an unsure grant answer under an H pin --------------------------
 
 H_CTX = _ctx(meta=_node("Awards and Honors", "H"))
