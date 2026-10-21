@@ -94,6 +94,7 @@ from ..normalization import (
     _phone_cell_text,
     _pii_category_of,
 )
+from ..normalization.pii import _WORKPLACE_TOKEN_RE
 from ..parsing import _extract_name_from_uid
 
 logger = logging.getLogger(__name__)
@@ -977,8 +978,15 @@ def _orcid_profile_entry(orcid: str, s0_text: str) -> dict | None:
 _WORK_PHONE_IN_TEXT_RE = re.compile(
     rf'\b(?:phone|tel|telephone|office|work)\b[ \t.:#-]*(?P<number>{_PHONE_NUMBER_PATTERN})',
     re.IGNORECASE)
+#: The words that make a number another kind of number than the owner's
+#: office line, each matched as a whole token: "Cellphone:", "Mob:", "Res.:",
+#: "Telefax:", "(personal)", "(cel)" (#1222).
+_OTHER_PHONE_KIND_WORDS = (
+    'home', 'res', 'residence', 'cell', 'cel', 'cellphone', 'cellular', 'mob', 'mobile',
+    'beeper', 'pager', 'fax', 'facsimile', 'telefax', 'personal', 'private', 'spouse')
+_OTHER_PHONE_KIND_ALTERNATION = '|'.join(_OTHER_PHONE_KIND_WORDS)
 #: Words before a phone label that make it another kind of number.
-_OTHER_PHONE_KIND_RE = re.compile(r'\b(?:home|cell|mobile|fax|pager|residence)\W*$', re.IGNORECASE)
+_OTHER_PHONE_KIND_RE = re.compile(rf'\b(?:{_OTHER_PHONE_KIND_ALTERNATION})\W*$', re.IGNORECASE)
 _STREET_LINE_RE = re.compile(
     r'^\d+[A-Za-z]?\s+(?:.*\s)?(?:street|st|avenue|ave|road|rd|drive|dr|boulevard|blvd|lane|ln'
     r'|way|place|pl|plaza|court|ct|parkway|pkwy|highway|hwy|circle|terrace)\b', re.IGNORECASE)
@@ -1013,10 +1021,11 @@ def _street_address_in(text: str) -> str | None:
 
 #: A short parenthetical after a number: "(clinical)", "(h)".
 _NUMBER_QUALIFIER_PATTERN = r'[ \t]*\([^()\n]{1,20}\)'
-#: A word or letter that makes a number another kind of number: "Cell
-#: Phone:", "Fax Number:", "(h)", "H:", "(c)", "M:" (#1222).
+#: A word or letter anywhere in a label or qualifier that makes a number
+#: another kind of number: "Cell Phone:", "Fax Number:", "(h)", "H:", "(c)",
+#: "M:" (#1222).
 _OTHER_PHONE_KIND_WORD_RE = re.compile(
-    r'\b(?:home|cell(?:ular)?|mobile|fax|pager|residence)\b'
+    rf'\b(?:{_OTHER_PHONE_KIND_ALTERNATION})\b'
     r'|\([hcmf]\)|(?<![\w.])[hcmf][ \t]*:', re.IGNORECASE)
 
 
@@ -1090,15 +1099,60 @@ def _names_a_permanent_address(text: str) -> bool:
     return False
 
 
+#: An address label that says nothing of where the address is: "Present
+#: Address", "Mailing Address", or a line that opens "Address:" (#1222).
+_UNQUALIFIED_ADDRESS_LABEL_RE = re.compile(
+    r'\b(?:present|mailing)\s+address\b|(?:^|[\t\n])[ \t]*address[ \t]*:', re.IGNORECASE)
+
+
+def _is_unqualified_address_block(text: str) -> bool:
+    """Whether a block's address is labelled only "Present Address",
+    "Mailing Address" or "Address:" and the block names no workplace: the
+    same reading #1426 gives a "Current Address"
+    (`_is_unlabelled_home_address`), so it counts as home (#1222). The
+    street address is cut from `text`, so `text` is the only place to look."""
+    return (_UNQUALIFIED_ADDRESS_LABEL_RE.search(text) is not None
+            and _WORKPLACE_TOKEN_RE.search(text) is None)
+
+
 def _is_home_contact_block(text: str, address: str | None, pii_fragments: list[str]) -> bool:
     """Whether a contact block is the owner's home contact or carries a
     birthplace, so the net takes nothing from it: a home or residence word,
     a "Current Address" naming no workplace (`_is_unlabelled_home_address`,
-    #1426), or a permanent address (#1222)."""
+    #1426) or a "Present", "Mailing" or bare address naming none
+    (`_is_unqualified_address_block`), or a permanent address (#1222)."""
     return bool(_HOME_LABEL.search(text.lower())
                 or _is_unlabelled_home_address(text, address)
+                or _is_unqualified_address_block(text)
                 or _names_a_permanent_address(text)
                 or any(_BIRTH_WORD_RE.search(part) for part in (text, *pii_fragments)))
+
+
+#: A label naming another person whose contact a CV can list: an emergency
+#: contact or next of kin, a spouse, a reference or referee (#1222). With
+#: `_STAFF_ROLE_RE` (#1578), it marks where the owner's own lines end.
+_THIRD_PARTY_ROLE_RE = re.compile(
+    r'\b(?:emergency\s+contacts?|next\s+of\s+kin|spouse|references?|referees?)\b',
+    re.IGNORECASE)
+
+
+def _other_person_role_at(text: str) -> int | None:
+    """Where the first word naming another person's role starts in `text`
+    (`_STAFF_ROLE_RE`, `_THIRD_PARTY_ROLE_RE`); None when there is none."""
+    starts = [match.start() for pattern in (_STAFF_ROLE_RE, _THIRD_PARTY_ROLE_RE)
+              if (match := pattern.search(text))]
+    return min(starts) if starts else None
+
+
+def _owner_part_of_block(text: str) -> str:
+    """The lines of a contact block before the first line that names another
+    person's role (`_other_person_role_at`); "" when the block opens with
+    one. A number or address on or after that line is the assistant's,
+    spouse's or referee's, never the owner's Office (#1222)."""
+    first = _other_person_role_at(text)
+    if first is None:
+        return text
+    return text[:max(text.rfind('\t', 0, first), text.rfind('\n', 0, first)) + 1]
 
 
 def _work_contact_in_entries(entries: list[dict], work_email: str | None
@@ -1109,25 +1163,33 @@ def _work_contact_in_entries(entries: list[dict], work_email: str | None
     MUHLLD 10, GJXIWD 2; NECRGC EYTHNB 10, O). Two things make a block the
     owner's and not a referee's: it holds the owner's work email, and the
     first such block wins; failing one, it sits in the Personal Data section
-    and holds both a street address and a phone number with no staff role
-    beside them (#1578). A labelled work number wins; failing one, the lines
-    that are only a number are taken (`_bare_work_numbers_in`). A home block
+    and holds both a street address and a phone number with no other
+    person's role anywhere in it, nor in a fragment the pii pass cut (#1578).
+    On either anchor, only the lines before another person's role are read
+    (`_owner_part_of_block`). A labelled work number wins; failing one, the
+    lines that are only a number are taken (`_bare_work_numbers_in`), unless
+    the pii pass cut a fragment naming another person. A home block
     (`_is_home_contact_block`) is skipped whole, and a value cut from a
     protected-data fragment is not taken (#1367 must keep holding)."""
     preamble_block = None
     for entry in entries:
         text = entry.get('text') or ''
         pii_fragments = entry.get('_pii_fragments', [])
-        address = _street_address_in(text)
+        owner_text = _owner_part_of_block(text)
+        # The pii pass cut a "Spouse: ..." label out of the text, so nothing
+        # says which unlabelled lines are that person's.
+        cut_role = any(_other_person_role_at(part) is not None for part in pii_fragments)
+        address = _street_address_in(owner_text)
         if entry.get('taxonomy_code') == 'A' or _is_home_contact_block(text, address, pii_fragments):
             continue
-        phone = _labelled_work_number_in(text) or _bare_work_numbers_in(text)
+        phone = (_labelled_work_number_in(owner_text)
+                 or (None if cut_role else _bare_work_numbers_in(owner_text)))
         values = ((phone if phone and not _from_pii_fragment(phone, pii_fragments) else None),
                   (address if address and not _from_pii_fragment(address, pii_fragments) else None))
         if work_email and work_email.lower() in text.lower():
             return values
         if (preamble_block is None and _is_preamble_entry(entry) and phone and address
-                and _STAFF_ROLE_RE.search(text) is None):
+                and owner_text == text and not cut_role):
             preamble_block = values
     return preamble_block or (None, None)
 
