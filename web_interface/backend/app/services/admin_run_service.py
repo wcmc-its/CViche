@@ -39,7 +39,7 @@ from app.services.quality_score_service import (
 from app.services.review_loop_service import doctor_on_stored_outputs
 from app.services.run_service import (
     delete_run_and_artifacts,
-    find_rowless_archives,
+    find_rowless_archives_or_none,
     find_run,
     queue_db_view,
     reap_orphaned_created_runs,
@@ -179,7 +179,7 @@ def reap_orphans(db: Session, admin: User, *, older_than_hours: int | None, dry_
     result = reap_orphaned_created_runs(
         db, older_than_hours=older_than_hours, dry_run=dry_run
     )
-    rowless = _rowless_archives_or_none(db)
+    rowless = find_rowless_archives_or_none(db, caller="admin reap-orphans")
     result["rowless_archives"] = None if rowless is None else len(rowless)
     result["rowless_run_ids"] = rowless or []
     logger.info(
@@ -188,16 +188,6 @@ def reap_orphans(db: Session, admin: User, *, older_than_hours: int | None, dry_
         result["rowless_archives"],
     )
     return result
-
-
-def _rowless_archives_or_none(db: Session) -> list[str] | None:
-    """find_rowless_archives, or None (logged with its traceback) when storage
-    or the lookup fails, so the reap result above still reaches the admin."""
-    try:
-        return find_rowless_archives(db)
-    except Exception:
-        logger.exception("Rowless-archive sweep failed during admin reap-orphans (#802)")
-        return None
 
 
 def queue_stats(db: Session) -> QueueStatsResponse:

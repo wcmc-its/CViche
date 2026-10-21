@@ -74,11 +74,11 @@ def test_date_range_matches_each_documented_format_whole():
         assert text_norm._DATE_RANGE_RE.search(text) is None, text
 
 
-def test_edge_date_range_prefers_the_range_at_the_start():
+def testedge_date_range_prefers_the_range_at_the_start():
     part = "2001-2003 Chair of the Quokka Board, then member 2004-2006"
-    assert text_norm._edge_date_range(part) == "2001-2003"
-    assert text_norm._edge_date_range("Chair of the Quokka Board, member 2004-2006") == "2004-2006"
-    assert text_norm._edge_date_range("A sentence that holds 2001-2003 in its middle part") is None
+    assert text_norm.edge_date_range(part) == "2001-2003"
+    assert text_norm.edge_date_range("Chair of the Quokka Board, member 2004-2006") == "2004-2006"
+    assert text_norm.edge_date_range("A sentence that holds 2001-2003 in its middle part") is None
 
 
 def test_tab_record_segments_needs_two_dated_parts_with_words():
@@ -169,6 +169,38 @@ def test_tab_record_segments_takes_a_range_at_the_start_or_end_of_a_part_only():
     assert text_norm.tab_record_segments(
         "Chair of the Wombat Panel 2006-2012\tServed on the quokka committee 2010-2012 as chair of its work group"
     ) == []
+
+
+# #1243: a society line whose posts are mostly dated by one year (BFSUMA 98's
+# shape): two of its six parts hold a range, so the half-dated share failed.
+_ONE_YEAR_POSTS = ("Quokka College of Pharmacy, 1979-present\tFounding Member, 1979\tFellow, 1985\t"
+                   "Research Affairs Committee, 1985\tChairperson, Scientific Session, 1985 Annual Meeting\t"
+                   "Chairperson, Awards Committee, 1987-1988")
+
+
+def test_tab_record_segments_reads_parts_dated_by_one_year_beside_two_ranges():
+    assert text_norm.tab_record_segments(_ONE_YEAR_POSTS) == [
+        "Quokka College of Pharmacy, 1979-present", "Founding Member, 1979",
+        "Research Affairs Committee, 1985", "Chairperson, Awards Committee, 1987-1988"]
+    # A year at the start dates a part too; a year in the middle does not.
+    assert text_norm.tab_record_segments(
+        "2005-present Founding President of the Wombat Forum\t2009 Conference Director, Wombat Congress\t"
+        "Held the yearly 2011 meeting of the Wombat Congress in Norvale\t2016-present Wombat Fellowship director"
+    ) == ["2005-present Founding President of the Wombat Forum", "2009 Conference Director, Wombat Congress",
+          "2016-present Wombat Fellowship director"]
+
+
+def test_tab_record_segments_still_needs_two_ranges_besides_one_year_parts():
+    # One-year parts help a line reach its share; they are not its two ranges.
+    assert text_norm.tab_record_segments(
+        "Founding Member of the Quokka Society, 1979\tResearch Affairs Committee, 1985\t"
+        "Chair of the Wombat Panel 2006-2012") == []
+
+
+def test_tab_record_segments_does_not_date_details_after_a_label_by_their_years():
+    # A part ending in a colon labels the parts after it: details of one record.
+    assert text_norm.tab_record_segments(_ONE_YEAR_POSTS + "\tCommittee service:") == []
+    assert text_norm.tab_record_segments(_ONE_YEAR_POSTS.replace("\tFellow, 1985", "\tFellow, 1985:")) == []
 
 
 def test_tab_record_segments_needs_parts_long_enough_to_carry_words():
