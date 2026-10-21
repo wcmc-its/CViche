@@ -6,7 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from unified_pipeline.log_redaction import redacted_error_label  # noqa: E402
+from unified_pipeline.log_redaction import (  # noqa: E402
+    RedactingFormatter,
+    format_exception_redacted,
+    redacted_error_label,
+)
 
 _CV_TEXT_SENTINEL = "Jane Q. Example, 12 Synthetic Lane"
 
@@ -20,14 +24,134 @@ def test_label_brackets_the_caller_supplied_safe_detail() -> None:
     assert label == "KeyError[line 3, column 5]"
 
 
+# --- tracebacks above DEBUG (#639) -----------------------------------------
+#
+# The secrets are module constants, never literals on a `raise` line: a frame's
+# source line is part of what the redacted traceback keeps.
+
+import logging  # noqa: E402
+
+_MSG = "SECRET_CV_TEXT"
+_MSG2 = "SECRET2"
+
+
+def _inner() -> None:
+    raise KeyError(_MSG2)
+
+
+def _outer() -> None:
+    try:
+        _inner()
+    except KeyError as exc:
+        raise ValueError(_MSG) from exc
+
+
+def _chained_exc_info():
+    try:
+        _outer()
+    except ValueError:
+        return sys.exc_info()
+
+
+def _record(level: int, exc_info) -> logging.LogRecord:
+    return logging.LogRecord("probe", level, __file__, 1, "Stage failed", None, exc_info)
+
+
+def test_redacted_traceback_keeps_frames_and_classes_but_no_message() -> None:
+    text = format_exception_redacted(_chained_exc_info())
+    assert _MSG not in text and _MSG2 not in text
+    assert text.count("Traceback (most recent call last):") == 2
+    assert "in _inner" in text and "in _outer" in text and "raise KeyError(_MSG2)" in text
+    assert "The above exception was the direct cause of the following exception:" in text
+    # Oldest first, as the stdlib prints it; each link ends in its bare class.
+    assert text.index("\nKeyError\n") < text.index("direct cause") < text.rindex("ValueError")
+    assert text.endswith("\nValueError")
+
+
+def _raise_with_note(err: Exception) -> None:
+    err.add_note(_MSG)
+    raise err
+
+
+def test_redacted_traceback_follows_an_implicit_context_and_drops_notes() -> None:
+    try:
+        try:
+            raise OSError(_MSG2)
+        except OSError:
+            _raise_with_note(RuntimeError(_MSG))  # implicit __context__, no `from`
+    except RuntimeError:
+        text = format_exception_redacted(sys.exc_info())
+    assert _MSG not in text and _MSG2 not in text
+    assert "During handling of the above exception, another exception occurred:" in text
+    assert "\nOSError\n" in text and text.endswith("\nRuntimeError")
+
+
+def test_redacted_traceback_honours_raise_from_none() -> None:
+    try:
+        try:
+            raise OSError(_MSG2)
+        except OSError:
+            raise RuntimeError(_MSG) from None
+    except RuntimeError:
+        text = format_exception_redacted(sys.exc_info())
+    assert "OSError" not in text and text.endswith("\nRuntimeError")
+
+
+def test_redacted_traceback_names_every_exception_group_member() -> None:
+    try:
+        raise ExceptionGroup(_MSG, [TypeError(_MSG2), ValueError(_MSG2)])
+    except ExceptionGroup:
+        text = format_exception_redacted(sys.exc_info())
+    assert _MSG not in text and _MSG2 not in text
+    assert "ExceptionGroup\n" in text and "| TypeError" in text and "| ValueError" in text
+
+
+def test_a_redacted_syntax_error_drops_its_source_excerpt() -> None:
+    try:
+        compile(_MSG + " = (", "<cv>", "exec")
+    except SyntaxError:
+        text = format_exception_redacted(sys.exc_info())
+    assert _MSG not in text and text.endswith("SyntaxError")
+
+
+def test_the_formatter_redacts_above_debug_and_keeps_debug_whole() -> None:
+    formatter = RedactingFormatter("%(levelname)s %(message)s")
+    error = formatter.format(_record(logging.ERROR, _chained_exc_info()))
+    assert error.startswith("ERROR Stage failed\nTraceback") and "in _inner" in error
+    assert _MSG not in error and _MSG2 not in error
+    debug = formatter.format(_record(logging.DEBUG, _chained_exc_info()))
+    assert f"ValueError: {_MSG}" in debug and f"KeyError: '{_MSG2}'" in debug
+
+
+def test_the_formatter_ignores_and_preserves_another_formatter_s_exc_text_cache() -> None:
+    record = _record(logging.ERROR, _chained_exc_info())
+    plain = logging.Formatter("%(message)s")
+    full = plain.format(record)  # fills record.exc_text with the full traceback
+    assert _MSG in record.exc_text
+    assert _MSG not in RedactingFormatter("%(message)s").format(record)
+    assert plain.format(record) == full, "the redacted text leaked into the shared cache"
+
+    fresh = _record(logging.ERROR, _chained_exc_info())
+    RedactingFormatter("%(message)s").format(fresh)
+    assert fresh.exc_text is None
+    assert _MSG in plain.format(fresh)
+
+
+def test_the_formatter_leaves_stack_info_as_is() -> None:
+    record = _record(logging.ERROR, _chained_exc_info())
+    record.stack_info = "Stack (most recent call last):\n  File probe"
+    assert RedactingFormatter("%(message)s").format(record).endswith(record.stack_info)
+
+
 # --- the codebase-wide gate (#639) ------------------------------------------
 #
 # A line grep missed 25 multi-line call sites, so this walks the AST. Inside an
 # `except ... as NAME` handler it flags a `logger.<level>(...)` call above
 # DEBUG whose arguments reach NAME other than through `type(NAME)` or
 # `redacted_error_label(NAME)`, and a `logger.exception(...)` (its traceback
-# ends in str(NAME)). Out of scope here, and named in #639's residual: a bare
-# `except:` handler's `logger.exception` and `exc_info=True` above DEBUG.
+# ends in str(NAME)). A bare `except:` handler's `logger.exception` and
+# `exc_info=True` above DEBUG are out of scope here: RedactingFormatter, which
+# both logging configs install, drops the message from those tracebacks.
 
 import ast  # noqa: E402
 
