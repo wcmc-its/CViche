@@ -9662,8 +9662,10 @@ def test_session_title_missing_flags_an_r_title_cell_opening_with_a_year():
 
 
 @pytest.mark.parametrize("stage4, rows", [
-    # A stage-4 title that opens with a year is the title.
+    # A stage-4 title that opens with a year is the title, under either name.
     ({"entries": [_talk(title="2019 update on widgets")]}, _talk_rows("2019 update on widgets")),
+    ({"entries": [_talk(presentation_title="2019 update on widgets")]},
+     _talk_rows("2019 update on widgets")),
     # A raw line with no year restates no Dates cell.
     ({"entries": [_talk("Example Department Grand Rounds")]},
      _talk_rows("Example Department Grand Rounds")),

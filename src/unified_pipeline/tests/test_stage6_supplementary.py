@@ -69,10 +69,10 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_and_committees():
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_and_talks():
     assert sorted(sp.SUBPOINT_CODES) == ["B1", "D1", "D2", "D3", "H", "K1", "K2", "K3", "K4",
                                          "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B", "O",
-                                         "P", "Q1", "Q2"]
+                                         "P", "Q1", "Q2", "R"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -871,6 +871,283 @@ def test_plan_offers_no_prose_of_a_committee_the_pii_pass_withheld():
     entry["_pii_withheld"] = True
     assert sp.plan_subpoints({"P": [entry]}, _haystack(), lines, spans,
                              rows_written=lambda e: [table.rows[0]._tr]) == []
+
+
+_TALK = "Example Advances in Coastal Wetland Hydrology"
+_TALK_ROW = [_TALK, "Example Grand Rounds, Norvale University", "2016"]
+
+
+def _talk_rows(*rows):
+    """A line naming the talk and its venue, then a talk table, one row of
+    cells per item; and their anchor candidates."""
+    doc = Document()
+    doc.add_paragraph(f"{_TALK}, Norvale University")
+    table = doc.add_table(rows=len(rows), cols=3)
+    for row, cells in zip(table.rows, rows, strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    return table, list(sp.anchor_candidates(doc))
+
+
+def _talk(text=f"{_TALK}, Example Grand Rounds, Norvale University, 2016\t{PROSE}", **fields):
+    return _entry(text, code="R", **{"title": _TALK, "event_name": "Example Grand Rounds",
+                                     "location": "Norvale University", "date": "2016", **fields})
+
+
+def _plan_talk(entry, *rows):
+    table, lines = _talk_rows(*(rows or (_TALK_ROW,)))
+    return sp.plan_subpoints({"R": [entry]}, _haystack(), lines, {"R": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [table.rows[0]._tr] if e is entry else [])
+
+
+def test_plan_places_a_talk_only_under_its_own_row():
+    # One talk given twice: the rows differ only in their years, which are
+    # digits, and words alone take the first row holding them.
+    table, lines = _talk_rows([*_TALK_ROW[:2], "2019"], _TALK_ROW)
+    entry, spans = _talk(), {"R": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "R"), lines) is lines[1]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({"R": [entry]}, _haystack(), lines, spans,
+                                   rows_written=written([table.rows[1]._tr]))
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+    assert (planned.code, planned.entry_id) == ("R", id(entry))
+    # No row recorded for it, a paragraph outside any table, or no ledger: none.
+    stray = Document().add_paragraph(_TALK)._p
+    for rows_written in (written([]), written([stray]), None):
+        assert sp.plan_subpoints({"R": [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_takes_a_talks_one_own_row_whatever_its_words():
+    # An acronym title at an acronym's venue holds no distinctive word.
+    entry = _entry(f"IBD, NVU, 2016\t{PROSE}", code="R", title="IBD", location="NVU", date="2016")
+    table, lines = _talk_rows(["IBD", "NVU", "2016"])
+    assert sp.best_anchor(sp._value_tokens(entry, "R"), lines[1:]) is None
+    (planned,) = sp.plan_subpoints({"R": [entry]}, _haystack(), lines, {"R": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+
+
+@pytest.mark.parametrize("field", sp._PRESENTATION_ROW_FIELDS)
+def test_a_talk_rows_fallback_fields_count_as_its_rendered_values(field):
+    # The row prints them when the schema's are empty, though
+    # `_RENDERED_FIELDS` cannot list them. Another code's are its own.
+    entry = _entry("Invited talk", code="R", **{field: "Estuarine Sediment Geochemistry"})
+    assert {"estuarine", "sediment", "geochemistry"} <= sp._value_tokens(entry, "R")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="H"), "H")
+
+
+def test_the_talk_row_fields_are_the_writers_cells_and_their_off_schema_names():
+    # The writer's precedence per cell, and the names the schema does not define.
+    from unified_pipeline.stage6 import formatting
+    from unified_pipeline.stage6.sections import presentations
+
+    assert sp.PRESENTATION_TITLE_FIELDS == ("title", "presentation_title")
+    assert sp.PRESENTATION_VENUE_FIELDS == ("institution", "location", "venue")
+    assert sp.PRESENTATION_EVENT_FIELDS == ("event_name", "conference_name")
+    assert sp.PRESENTATION_DATE_FIELDS == ("year", "date", "start_date")
+    assert sp._PRESENTATION_ROW_FIELDS == ("presentation_title", "institution", "venue",
+                                           "conference_name", "year", "start_date", "end_date")
+    assert presentations._TALK_DATE_KEYS is sp.PRESENTATION_DATE_FIELDS
+    assert presentations._TALK_EVENT_KEYS is sp.PRESENTATION_EVENT_FIELDS
+    # The Dates cell's fields are the ones its builder reads.
+    assert sp.PRESENTATION_DATE_FIELDS is formatting.PRESENTATION_DATE_FIELDS
+    assert sp.PRESENTATION_END_DATE_FIELD is formatting.PRESENTATION_END_DATE_FIELD
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its own.
+    (["Wetland line", f"Estuary line, {PROSE}"], 1, f"Estuary line, {PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    (["Wetland line", PROSE, "Estuary line"], 1, ""),
+    # An earlier record: the line fan-out gave it, whatever it holds.
+    ([f"Wetland line, {PROSE}", "Estuary line"], 0, f"Wetland line, {PROSE}\tEstuary line"),
+])
+def test_a_talk_reads_its_prose_from_its_own_line(segments, index, read):
+    entry = _degree_record("\t".join(segments), index, 2)
+    entry["taxonomy_code"] = "R"
+    assert sp._prose_text("R", entry, {}) == read
+
+
+_OTHER_TALK = "Estuary Sediment Transport in Tidal Marshes, Kestrel Institute"
+
+
+@pytest.mark.parametrize("text, own", [
+    # One talk and its year, then its audience: its own line.
+    (f"{_TALK}, Norvale University, 2016\t{PROSE}", True),
+    # Its year opens the line, and its full date closes it: one talk.
+    (f"2016 {_TALK}, Norvale University, March 2016\t{PROSE}", True),
+    # Two talks, each ending in its year, stage 2's tabs between them.
+    (f"{_OTHER_TALK}, 2014\t{OTHER_PROSE}\t{_TALK}, Norvale University, 2016\t{PROSE}", False),
+    # Each opening with its year (`_holds_dated_records`'s shape).
+    (f"2014 {_OTHER_TALK}\t{OTHER_PROSE}\t2016 {_TALK}\t{PROSE}", False),
+    # Each opening with its year, in one paragraph: one part.
+    (f"2014 {_OTHER_TALK}: {OTHER_PROSE} 2016 {_TALK}, Norvale University. {PROSE}", False),
+    # The same with a month before each year.
+    (f"May 2014 {_OTHER_TALK}. {OTHER_PROSE} March 2016 {_TALK}. {PROSE}", False),
+    # Each ending in its year in brackets.
+    (f"{_OTHER_TALK}, Osprey Bay (2014)\t{_TALK}, Norvale University (2016).\t{PROSE}", False),
+], ids=["one_talk", "year_then_date", "trailing_years", "leading_years", "one_paragraph",
+        "month_years", "bracketed_years"])
+def test_a_talk_line_holding_several_dated_talks_offers_none(text, own):
+    """Which talk a prose line is about cannot be told: the other's text
+    would be offered as the extracted one's prose, under its row."""
+    entry = _talk(text)
+    assert sp._own_talk_line(entry, "R") == (text if own else "")
+    assert [p.paragraphs for p in _plan_talk(entry)] == ([(PROSE,)] if own else [])
+
+
+def test_a_talk_with_no_date_kept_and_one_dated_part_is_one_talk():
+    # The Dates cell prints nothing, and one part opens with a date: one talk.
+    text = f"2016 {_TALK}, Norvale University\t{PROSE}"
+    entry = _entry(text, code="R", title=_TALK, location="Norvale University")
+    assert sp._talk_dates(entry["extracted_fields"], "R") == 0
+    assert sp._own_talk_line(entry, "R") == text
+
+
+@pytest.mark.parametrize("dates, own", [
+    # The Dates cell prints both years: the two dated parts are this talk's.
+    ({"date": "2014; 2016"}, True),
+    ({"date": "2016", "additional_dates": ["2014"]}, True),
+    ({"year": None, "date": None, "additional_dates": ["2014", "2016"]}, True),
+    # It prints one: the other dated part is a talk the row does not print.
+    ({"date": "2016"}, False),
+    # Three dated parts, two dates printed: one more talk than the row prints.
+    ({"date": "2014; 2016"}, "three"),
+], ids=["date_list", "further_span", "spans_only", "one_date", "one_too_many"])
+def test_one_talk_given_on_several_dates_is_one_record(dates, own):
+    parts = [f"2014 {_TALK}, Kestrel Institute", f"2016 {_TALK}, Norvale University", PROSE]
+    if own == "three":
+        parts.insert(2, f"2018 {_OTHER_TALK}")
+    text = "\t".join(parts)
+    entry = _talk(text, **dates)
+    entry["extracted_fields"] = {k: v for k, v in entry["extracted_fields"].items() if v is not None}
+    assert sp._own_talk_line(entry, "R") == (text if own is True else "")
+
+
+@pytest.mark.parametrize("fields, dates", [
+    ({}, 0),
+    ({"date": "2016"}, 1),
+    ({"year": "2016", "date": "2010"}, 1),
+    ({"date": "2014; 2016"}, 2),
+    # A list repeating one year prints it once.
+    ({"date": "2016-03-01; 2016-05-02"}, 1),
+    ({"start_date": "2016", "additional_dates": ["2014", "2018"]}, 3),
+    # A further span repeating the talk's own date is not printed again.
+    ({"date": "2016", "additional_dates": ["2016"]}, 1),
+    # The string "None" is no date.
+    ({"year": "None", "additional_dates": ["2016"]}, 1),
+    ({"year": "None"}, 0),
+])
+def test_a_talks_dates_are_counted_as_its_dates_cell_prints_them(fields, dates):
+    from unified_pipeline.stage6.sections import presentations
+
+    assert sp._talk_dates(fields, "R") == dates
+    cell = presentations._talk_date_cell(fields)
+    assert (len(cell.split(", ")) if cell else 0) == dates
+
+
+@pytest.mark.parametrize("dates", [
+    {"date": "2016", "additional_dates": ["2016"]},
+    {"year": "None", "date": None, "additional_dates": ["2016"]},
+], ids=["span_repeats_its_date", "none_string"])
+def test_a_date_its_dates_cell_does_not_print_marks_no_talk_of_its_own(dates):
+    # The cell prints one date, so the other dated talk is not this one.
+    text = "\t".join([f"{_OTHER_TALK}, 2014", f"{_TALK}, Norvale University, 2016", PROSE])
+    entry = _talk(text, **dates)
+    entry["extracted_fields"] = {k: v for k, v in entry["extracted_fields"].items() if v is not None}
+    assert sp._own_talk_line(entry, "R") == ""
+    assert _plan_talk(entry) == []
+
+
+@pytest.mark.parametrize("line, records", [
+    ("Example lecture, Norvale University, 2016", 1),
+    ("2016 Example lecture, Norvale University", 1),
+    # A year inside the meeting's name: one record.
+    ("Example Summit 2016, Norvale University", 1),
+    ("2014 Example lecture\t2016 Example seminar", 2),
+    ("Example lecture, 2014\tExample seminar, 2016", 2),
+    ("2014 Example lecture, Kestrel Institute 2016 Example seminar, Norvale University", 2),
+    ("May 2014 Example lecture. March 2016 Example seminar. April 2018 Example panel", 3),
+    # A numeric month before each year (EBYSBC DPEHSZ 227's shape).
+    ("11/2014 Example lecture, Kestrel Institute 1/2016 Example seminar", 2),
+    # A range opens one record, whatever its two years.
+    ("2010 - 2012 Example lecture series", 1),
+    # A year in brackets ending a part, before a full stop or not; a range in
+    # brackets, anywhere.
+    ("Example lecture, Norvale University (2016)", 1),
+    ("Example lecture, Kestrel Institute (2014)\tExample seminar, Norvale University (2016).", 2),
+    ("Example lecture series (2010-2012)\tExample seminar, 2016", 2),
+    # A bracketed year inside a part does not end it.
+    ("Example lecture (2014), Kestrel Institute\tExample seminar, 2016", 1),
+])
+def test_a_talk_lines_dates_mark_its_records(line, records):
+    assert sp._talk_records(line) == records
+
+
+@pytest.mark.parametrize("line, another", [
+    # Its own title, quoted, punctuated or cased differently.
+    (f"“{_TALK.lower()}.” Example Grand Rounds", False),
+    (f'"{_TALK}", Example Grand Rounds', False),
+    # Its meeting, quoted.
+    (f"{_TALK}, “Example Grand Rounds”", False),
+    # A word in quotes is no title.
+    (f"{_TALK}, a “Student Choice” lecture", False),
+    # Another title, in either kind of quotes, of three words or more.
+    (f"“{_TALK}”. “Estuary Sediment Transport in Tidal Marshes”", True),
+    (f'{_TALK}. "Estuary Sediment Transport in Tidal Marshes", Kestrel Institute', True),
+    (f"{_TALK}. “Tidal Marsh Sediments”", True),
+    # Half its words the talk's own: another; more than half: its own.
+    (f"{_TALK}. “Coastal Wetland Restoration Funding”", True),
+    ("“Coastal Wetland Hydrology Funding Review”", False),
+], ids=["own_lower", "own_straight", "own_meeting", "short_quote", "another_curly",
+        "another_straight", "another_three_words", "half_shared", "most_shared"])
+def test_a_quoted_title_not_the_talks_own_is_another_talk(line, another):
+    assert sp._quotes_another_talk(line, _talk()["extracted_fields"]) is another
+
+
+def test_a_quoted_title_of_a_talk_with_no_title_or_meeting_cannot_be_shown_its_own():
+    line = f"“{_TALK}”, Norvale University"
+    assert sp._quotes_another_talk(line, {"location": "Norvale University"})
+    assert not sp._quotes_another_talk("Norvale University seminar", {})
+
+
+@pytest.mark.parametrize("fields, listed", [
+    ({"additional_presentations": [{"title": "Estuary Sediment Transport", "date": "2014"}]}, True),
+    ({"stage4_records": [{"location": "Kestrel Institute"}, {"event_name": "Example Seminar"}]}, True),
+    # A record naming its venue alone is a talk too.
+    ({"additional_presentations": [{"location": "Kestrel Institute", "date": "2014"}]}, True),
+    # Date spans are no talks, nor is a list of strings.
+    ({"additional_dates": [{"start_date": "2014", "end_date": "2015"}]}, False),
+    ({"date": ["2014", "2016"]}, False),
+    ({"title": _TALK}, False),
+])
+def test_a_list_of_talks_under_a_field_is_several_records(fields, listed):
+    assert sp._lists_talks(fields) is listed
+    text = f"{_TALK}, Norvale University, 2016\t{PROSE}"
+    assert sp._own_talk_line(_talk(text, **fields), "R") == ("" if listed else text)
+
+
+def test_only_a_talk_reads_its_line_for_several_talks():
+    # The degree and leadership rules read date-led parts only, and the
+    # committee rule names no talk: a line of two talks in one paragraph is
+    # one part to each of them.
+    text = f"2014 {_OTHER_TALK}: {OTHER_PROSE} 2016 {_TALK}, Norvale University. {PROSE}"
+    assert sp._own_talk_line(_talk(text), "R") == ""
+    for code in ("O", "B1", "P"):
+        assert sp._prose_text(code, dict(_talk(text), taxonomy_code=code), {}) == text
+
+
+def test_plan_offers_no_prose_of_a_talk_the_pii_pass_withheld():
+    entry = _talk()
+    (planned,) = _plan_talk(entry)
+    assert planned.paragraphs == (PROSE,)
+
+    entry["_pii_withheld"] = True
+    assert _plan_talk(entry) == []
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():

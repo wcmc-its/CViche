@@ -585,6 +585,64 @@ def further_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[st
     return shown
 
 
+# The field names an invited talk's (R's) own date arrives under, most specific
+# first, and the one that makes that date a range (`_own_talk_dates`).
+PRESENTATION_DATE_FIELDS = ('year', 'date', 'start_date')
+PRESENTATION_END_DATE_FIELD = 'end_date'
+# Field extraction writes the STRING "None" for a missing talk date often
+# enough that every one is checked for it: a literal "None" in the Dates column
+# is worse than a blank one.
+_NONE_STRING = 'none'
+
+
+def _talk_date_field(fields: Mapping[str, Any], key: str) -> str | Mapping:
+    """`fields[key]`, or '' when it is missing, empty or the string "None"
+    field extraction emits for a missing value."""
+    value = fields.get(key) or ''
+    return '' if str(value).strip().lower() == _NONE_STRING else value
+
+
+def _own_talk_dates(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
+    """The talk's own dates (yyyy), from its date fields.
+
+    The first of `PRESENTATION_DATE_FIELDS` holding one is the talk's date.
+    When stage 4 also found an `end_date`, it is the range: a talk given "2006
+    to present" renders "2006-Present", not "2006" (OTBUCZ 116/119/125,
+    #1346). A multi-day talk within one year still renders its one year,
+    because the range collapses when both ends format to the same string. A
+    `{start_date, end_date}` mapping (#1233) already carries its own end, so a
+    separate `end_date` is not appended to it. A list of dates under one field
+    ("1999-09-30; 1999-10-14") is each date formatted, not the string verbatim
+    (`format_date_list`, OIEPQD GOWQKA 531/533, #1245).
+    """
+    start = next((v for v in (_talk_date_field(fields, k) for k in PRESENTATION_DATE_FIELDS)
+                  if v), '')
+    listed = format_date_list(start, taxonomy_code)
+    if listed:
+        return listed.split(DATE_SPAN_SEPARATOR)
+    end = _talk_date_field(fields, PRESENTATION_END_DATE_FIELD)
+    if start and end and not isinstance(start, Mapping):
+        own = format_date_range(start, end, taxonomy_code)
+    else:
+        own = format_date_for_section(start, taxonomy_code) if start else ''
+    return [own] if own else []
+
+
+def presentation_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
+    """The dates an invited talk's Dates cell prints, in order: its own
+    (`_own_talk_dates`), then each further span stage 4 kept under an
+    off-schema span key (`further_date_spans`) that reads differently from
+    the own ones as the cell joins them. The presentations writer joins them
+    with `DATE_SPAN_SEPARATOR`, and the #1205 sub-point pass counts them, so
+    the count is of the dates the row prints. A talk whose dates are only
+    under `additional_dates` prints them instead of an empty cell (X6 VPMMFM
+    531, #1245)."""
+    own = _own_talk_dates(fields, taxonomy_code)
+    own_cell = DATE_SPAN_SEPARATOR.join(own)
+    return [*own, *(span for span in further_date_spans(fields, taxonomy_code)
+                    if span != own_cell)]
+
+
 def with_extra_date_spans(dates: str, fields: Mapping[str, Any],
                           taxonomy_code: str) -> str:
     """`dates` (the record's own range, as its renderer formatted it) followed

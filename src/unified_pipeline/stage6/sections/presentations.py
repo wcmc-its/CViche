@@ -20,10 +20,16 @@ unclassifiable talk is published in the middle bucket rather than dropped.
 Dates arrive under four different field names and field extraction emits the
 STRING "None" often enough that it is checked for explicitly on every one; a
 literal "None" in the year column is worse than a blank one. An `end_date`
-makes the Dates cell a range (`_own_talk_date`), and further dates under an
-off-schema span key follow it (`_talk_date_cell`, #1245). A title-less entry is titled by `_untitled_talk_title`: role and
+makes the Dates cell a range, and further dates under an off-schema span key
+follow it (`_talk_date_cell`, #1245). Its dates are `formatting`'s
+`presentation_date_spans`, which the #1205 sub-point pass counts. A title-less entry is titled by `_untitled_talk_title`: role and
 event name when the source line holds nothing else, otherwise the source line
 without the list number, year and venue the other two cells already show.
+
+Every row written is recorded in the row-receipt ledger against the entry it
+renders (#534), so the #1205 sub-point pass anchors a talk's prose only under
+that entry's own row. The fields each cell is read from are
+`supplementary`'s, which that pass counts as the row's.
 """
 import logging
 import re
@@ -33,14 +39,17 @@ from itertools import pairwise
 from ..fan_out import fallback_text
 from ..formatting import (
     DATE_SPAN_SEPARATOR,
+    PRESENTATION_DATE_FIELDS,
     _set_font,
-    format_date_for_section,
-    format_date_list,
-    format_date_range,
-    further_date_spans,
+    presentation_date_spans,
     with_event_status,
 )
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import (
+    PRESENTATION_EVENT_FIELDS,
+    PRESENTATION_TITLE_FIELDS,
+    PRESENTATION_VENUE_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,76 +210,44 @@ def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
     return title.lstrip(_TITLE_START_EDGES)
 
 
-# The field names a talk's date arrives under, most specific first.
-_TALK_DATE_KEYS = ('year', 'date', 'start_date')
+# The field names a talk's date arrives under, most specific first: the
+# Dates cell's (`presentation_date_spans`).
+_TALK_DATE_KEYS = PRESENTATION_DATE_FIELDS
 # The field names the meeting that hosted a talk arrives under: R's own, then
 # S8's, for an abstract a hierarchy mismatch moved here (#1570, YUYVIG
 # SQMWHM 1047 rendered without its meeting).
-_TALK_EVENT_KEYS = ('event_name', 'conference_name')
-_TALK_END_DATE_KEY = 'end_date'
-_NONE_STRING = 'none'
+_TALK_EVENT_KEYS = PRESENTATION_EVENT_FIELDS
+
+
+def _first_value(fields: Mapping, keys: tuple[str, ...]) -> object:
+    """The first filled value of `keys`, as stored, else ''."""
+    return next((fields[key] for key in keys if fields.get(key)), '')
 
 
 def _talk_event_value(fields: Mapping) -> object:
     """The first filled `_TALK_EVENT_KEYS` value, as stored, else ''."""
-    return next((fields[key] for key in _TALK_EVENT_KEYS if fields.get(key)), '')
-
-
-def _date_field(fields: dict, key: str) -> str | Mapping:
-    """`fields[key]`, or '' when it is missing, empty or the string "None"
-    field extraction emits for a missing value."""
-    value = fields.get(key) or ''
-    return '' if str(value).strip().lower() == _NONE_STRING else value
-
-
-def _own_talk_date(fields: dict) -> str:
-    """The talk's own date (yyyy), from its schema date keys.
-
-    The first of `year`, `date`, `start_date` is the talk's date. When stage
-    4 also found an `end_date`, the cell is the range: a talk given "2006 to
-    present" renders "2006-Present", not "2006" (OTBUCZ 116/119/125, #1346).
-    A multi-day talk within one year still renders its one year, because the
-    range collapses when both ends format to the same string. A `{start_date,
-    end_date}` mapping (#1233) already carries its own end, so a separate
-    `end_date` is not appended to it. A list of dates under one key
-    ("1999-09-30; 1999-10-14") is each date formatted, not the string
-    verbatim (`format_date_list`, OIEPQD GOWQKA 531/533, #1245).
-    """
-    start = next((v for v in (_date_field(fields, k) for k in _TALK_DATE_KEYS) if v), '')
-    listed = format_date_list(start, 'R')
-    if listed:
-        return listed
-    end = _date_field(fields, _TALK_END_DATE_KEY)
-    if start and end and not isinstance(start, Mapping):
-        return format_date_range(start, end, 'R')
-    return format_date_for_section(start, 'R') if start else ''
+    return _first_value(fields, _TALK_EVENT_KEYS)
 
 
 def _talk_date_cell(fields: dict) -> str:
-    """The Dates cell of an R entry: its own date (`_own_talk_date`), then
-    each further date stage 4 kept under an off-schema span key
-    (`further_date_spans`) that reads differently, joined with
-    `DATE_SPAN_SEPARATOR`. A talk whose dates are only under
-    `additional_dates` renders them instead of an empty cell (X6 VPMMFM 531,
-    #1245)."""
-    own = _own_talk_date(fields)
-    shown = [own] if own else []
-    for span in further_date_spans(fields, 'R'):
-        if span not in shown:
-            shown.append(span)
-    return DATE_SPAN_SEPARATOR.join(shown)
+    """The Dates cell of an R entry: the dates `presentation_date_spans`
+    lists (its own date, then each further date stage 4 kept under an
+    off-schema span key that reads differently), joined with
+    `DATE_SPAN_SEPARATOR`."""
+    return DATE_SPAN_SEPARATOR.join(presentation_date_spans(fields, 'R'))
 
 
 class PresentationsSection:
     """Section R writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_presentations(self, entries: list[dict]):
+    def _fill_presentations(self, entries: list[dict]) -> None:
         """Fill R. INVITATIONS TO SPEAK/PRESENT section.
 
         WCM template has tables for Regional/National/International:
         Table structure: Title | Institution/Location | Dates (yyyy)
 
         Uses cv_owner_location to classify geographic scope of each entry.
+        Each row is recorded against its entry in the row-receipt ledger.
         """
         if not entries:
             return
@@ -343,8 +320,8 @@ class PresentationsSection:
                 fields = entry.get('extracted_fields', {}) or {}
                 taxonomy_code = entry.get('taxonomy_code', 'R')
 
-                title = fields.get('title') or fields.get('presentation_title') or ''
-                institution = fields.get('institution') or fields.get('location') or fields.get('venue') or ''
+                title = _first_value(fields, PRESENTATION_TITLE_FIELDS)
+                institution = _first_value(fields, PRESENTATION_VENUE_FIELDS)
 
                 formatted_date = _talk_date_cell(fields)
 
@@ -392,3 +369,4 @@ class PresentationsSection:
                         for run in para.runs:
                             _set_font(run)
                 self.stats['entries_inserted'] += 1
+                self._row_receipts.wrote(row._tr, entry)  # the talk's own row (#534, #1205)
