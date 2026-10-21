@@ -446,6 +446,132 @@ def test_fallback_record_with_a_publisher_keeps_the_book_trailer():
 
 
 # ---------------------------------------------------------------------------
+# #1570: the S8 fallback also keeps the abstract number and the month the
+# entry's own line writes (YUYVIG IXJMKS 267, QQGKXR 158/159, SQMWHM 425)
+# ---------------------------------------------------------------------------
+
+def _s8_entry(fields, text):
+    return dict(_entry(fields), text=text)
+
+
+def test_fallback_s8_entry_renders_an_abstract_number_its_line_writes():
+    """IXJMKS 267's shape: stage 4 put "K-20" in `abstract_number`, which no
+    renderer printed, so the fallback lost it where the 5d citation kept it."""
+    fields = dict(_S8_MEETING_FIELDS, abstract_number='K-20')
+    text = ('A Talk on Larks. Annual Meeting of the Quillfern Society, '
+            'Larchmere, ZZ, 2004, K-20')
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation == ('3. A Talk on Larks. Annual Meeting of the Quillfern '
+                        'Society; 2004; Larchmere, ZZ. K-20.')
+
+
+def test_fallback_s8_entry_drops_an_abstract_number_that_is_the_list_number():
+    """ECXGAT 369/489: stage 4 stored the CV's own list number "56." as the
+    abstract number. Printed, it would read as a number the CV never gave
+    this abstract."""
+    fields = dict(_S8_MEETING_FIELDS, abstract_number='56')
+    text = '56. A Talk on Larks. Annual Meeting of the Quillfern Society, 2004'
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation == ('3. A Talk on Larks. Annual Meeting of the Quillfern '
+                        'Society; 2004; Larchmere, ZZ.')
+
+
+@pytest.mark.parametrize('year,text,expected_date', [
+    # QQGKXR 158: "(October 2023)", stored as "2023-10".
+    ('2023-10', 'Rook J (October 2023). A Talk on Larks.', '2023 October'),
+    # SQMWHM 425: "12 September 2018", stored as "2018-09-12".
+    ('2018-09-12', 'A Talk on Larks. Larchmere, 12 September 2018.', '2018 September 12'),
+    # A month the line abbreviates keeps the line's spelling.
+    ('2023-11', 'A Talk on Larks. Nov. 2023.', '2023 Nov'),
+    # The line names no month: the stored value renders as it always did.
+    ('2011-06', '06/2011 A Talk on Larks.', '2011-06'),
+])
+def test_fallback_s8_meeting_date_uses_the_month_its_line_writes(year, text, expected_date):
+    fields = dict(_S8_MEETING_FIELDS, year=year)
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 4)
+
+    assert citation == ('4. A Talk on Larks. Annual Meeting of the Quillfern '
+                        f'Society; {expected_date}; Larchmere, ZZ.')
+
+
+@pytest.mark.parametrize('extra,text,expected_tail', [
+    # web198 91: the title already prints "LB-043".
+    ({'title': 'Abstract LB-043: A Talk on Larks', 'abstract_number': 'LB-043'},
+     'Abstract LB-043: A Talk on Larks. Annual Meeting, Larchmere, 2004',
+     'Abstract LB-043: A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; Larchmere, ZZ.'),
+    # web47 338: a garbled `doi` already prints "s223".
+    ({'doi': 'Acad Emerg Med 2004;21(s1):s223', 'abstract_number': 's223'},
+     'A Talk on Larks. Annual Meeting, Larchmere, 2004. Acad Emerg Med 2004;21(s1):s223',
+     'A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; Larchmere, ZZ. '
+     'doi:Acad Emerg Med 2004;21(s1):s223.'),
+    # RXYBVF 425: the place already prints the year the number repeats.
+    ({'location': 'Larchmere, May 2-4, 2004', 'abstract_number': '2004 10 (Pt 2): 636-43'},
+     'A Talk on Larks. Annual Meeting, Larchmere, May 2-4, 2004, Larks 2004 10 (Pt 2): 636-43',
+     'A Talk on Larks. Annual Meeting of the Quillfern Society; 2004; Larchmere, May 2-4, 2004.'),
+])
+def test_fallback_s8_entry_prints_no_abstract_number_the_line_already_prints(
+        extra, text, expected_tail):
+    """#1570 round 2: printed again after the trailer, the number would be
+    the same source text twice."""
+    fields = dict(_S8_MEETING_FIELDS, **extra)
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation == f'3. {expected_tail}'
+
+
+def test_fallback_s8_entry_keeps_an_abstract_number_its_line_writes_twice():
+    """The rule is against repeating the line, not against a word recurring:
+    a line that writes "12" twice may print it twice."""
+    fields = dict(_S8_MEETING_FIELDS, title='A Talk on 12 Larks', abstract_number='12')
+    text = 'A Talk on 12 Larks. Annual Meeting, Larchmere, 2004, abstract 12'
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation.endswith('; 2004; Larchmere, ZZ. 12.')
+
+
+def test_fallback_s8_entry_initials_do_not_count_as_a_repeat():
+    """An author list prints initials many times over ("Rook J, Wren J"),
+    more often than a line that spells the names out; the "J" of "J-5" is
+    not a repeat of them."""
+    fields = dict(_S8_MEETING_FIELDS, authors='Rook J, Wren J', abstract_number='J-5')
+    text = 'Jay Rook, Jo Wren. A Talk on Larks. Annual Meeting, 2004, J-5'
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation.endswith('; 2004; Larchmere, ZZ. J-5.')
+
+
+def test_fallback_s8_meeting_month_the_place_already_prints_keeps_the_stored_date():
+    """A stored "2004-05" whose month the place already writes ("Larchmere,
+    2-4 May 2004") prints the stored value, not "May" twice."""
+    fields = dict(_S8_MEETING_FIELDS, year='2004-05', location='Larchmere, 2-4 May 2004')
+    text = 'A Talk on Larks. Annual Meeting, Larchmere, 2-4 May 2004'
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation.endswith('Society; 2004-05; Larchmere, 2-4 May 2004.')
+
+
+def test_fallback_journal_trailer_prints_no_abstract_number():
+    """An abstract PubMed matched to a journal supplement is cited as the
+    article: its volume and pages, not a meeting's abstract number."""
+    fields = dict(_S8_MEETING_FIELDS, volume='12', pages='S3', abstract_number='W59')
+
+    citation, _, _ = _format_citation(dict(
+        _s8_entry(fields, 'W59. A Talk on Larks. Biol Larks 12:S3, 2004.'),
+        enrichment_data={'pubmed_journal': 'Biol Larks'}), 6)
+
+    assert citation == '6. A Talk on Larks. Biol Larks. 2004;12:S3.'
+
+
+# ---------------------------------------------------------------------------
 # #481: the stage-5d safety net (the HU4DXA "GNYHA" case)
 # ---------------------------------------------------------------------------
 
