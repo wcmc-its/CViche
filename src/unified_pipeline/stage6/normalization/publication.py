@@ -223,9 +223,9 @@ def _scalar_text(value: object) -> str:
 #: in `stage_5d_citation_formatter.py`).
 _LEADING_LIST_NUMBER_RE = re.compile(r'^\s*(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
 
-#: A month name or abbreviation, longest first so "September" is not read as
-#: "Sep" with "tember" left over.
-_MONTH_WORD = '|'.join(sorted(_MONTH_NAME_TO_NUM, key=len, reverse=True))
+#: A month name or abbreviation. The `\.?\s+` after it in the pattern below
+#: makes the alternation's order immaterial: "Sep" in "Sept." backtracks.
+_MONTH_WORD = '|'.join(_MONTH_NAME_TO_NUM)
 #: A month written next to its year in an entry's line, with the day on
 #: either side when the line gives one: "October 2023", "Nov. 2023",
 #: "12 September 2018", "May 22, 2000".

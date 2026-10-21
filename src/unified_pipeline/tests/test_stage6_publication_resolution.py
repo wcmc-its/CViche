@@ -660,6 +660,7 @@ def test_abstract_number_resolves_only_when_its_line_writes_it(value, text, expe
     ('2018-09-12', 'A Talk. Larchmere, September 2018.', '2018 September'),
     ('2018-09-12', 'A Talk. Larchmere, 14 September 2018.', '2018 September'),
     ('2023-11', 'A Talk. Nov. 2023.', '2023 Nov'),
+    ('2019-09', 'A Talk. Sept. 2019.', '2019 Sept'),
     # No month in the line, another month, another year, or no month stored.
     ('2011-06', '06/2011 A Talk.', ''),
     ('2023-10', 'A Talk. September 2023.', ''),
