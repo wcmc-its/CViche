@@ -630,6 +630,72 @@ def test_an_int_year_equal_to_the_group_year_is_added():
 
 
 # ---------------------------------------------------------------------------
+# #1570: an S8 abstract number and meeting month, only as the line writes them
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('value,text,expected', [
+    ('K-20', 'A Talk. Larks Meeting, Larchmere, May 22, 2000, K-20', 'K-20'),
+    ('3(6):476-477', '202. Rook J. A Talk. Proc Larks 3(6):476-477, 2006.', '3(6):476-477'),
+    (175, 'Rook J. A Talk. Larks Day, abstract 175, 2025.', '175'),
+    # The CV's own list number is not the abstract's (ECXGAT 369, 489), in
+    # every shape the corpus opens a line with one (#1570 round 2: QZWBKQ,
+    # WYNUCX, LTTYWI 387, TQXZNI 130, RGUNJV, web053 473).
+    ('56', '56. Rook J. A Talk on Larks', ''),
+    ('175', '175. Rook J. A Talk. Larks Day, 2016-2024.', ''),
+    ('56', '*56. A Talk on Larks', ''),
+    ('61', '61.* Rook J. A Talk on Larks', ''),
+    ('112', '112.Analgesia for Larks. Larks Day', ''),
+    ('100', '100.Rook J. A Talk on Larks', ''),
+    ('2', '2 Rook J, A Talk on Larks', ''),
+    ('56', '[56] A Talk on Larks', ''),
+    ('56', '(56) A Talk on Larks', ''),
+    ('56', '56) A Talk on Larks', ''),
+    ('1056', '1056. A Talk on Larks', ''),
+    ('608', '608: A Talk on Larks', ''),
+    ('56.', '56. A Talk on Larks', ''),
+    # Another number opening the line does not hide the abstract's.
+    ('K-20', '3. A Talk on Larks, K-20', 'K-20'),
+    ('12', '3. A Talk on Larks, abstract 12', '12'),
+    # A longer opening number is not this one, and "56" in "1056" is no token.
+    ('56', '1056. A Talk on Larks', ''),
+    # Not written in the line at all, or only inside a longer number.
+    ('W59', 'Rook J. A Talk on Larks', ''),
+    ('20', 'Rook J. A Talk. Larks Day, 2020.', ''),
+    (None, 'Rook J. A Talk on Larks', ''),
+    (True, 'Rook J. A Talk on Larks', ''),
+])
+def test_abstract_number_resolves_only_when_its_line_writes_it(value, text, expected):
+    entry = {'text': text, 'extracted_fields': {'abstract_number': value}}
+
+    assert resolve_publication(entry).abstract_number == expected
+
+
+@pytest.mark.parametrize('year,text,expected', [
+    ('2023-10', 'Rook J (October 2023). A Talk.', '2023 October'),
+    ('2018-09-12', 'A Talk. Larchmere, 12 September 2018.', '2018 September 12'),
+    ('2000-05-22', 'A Talk. Larchmere, May 22, 2000, K-20', '2000 May 22'),
+    # The line has the month but another day, or no day: the month alone.
+    ('2018-09-12', 'A Talk. Larchmere, September 2018.', '2018 September'),
+    ('2018-09-12', 'A Talk. Larchmere, 14 September 2018.', '2018 September'),
+    ('2023-11', 'A Talk. Nov. 2023.', '2023 Nov'),
+    ('2019-09', 'A Talk. Sept. 2019.', '2019 Sept'),
+    # No month in the line, another month, another year, or no month stored.
+    ('2011-06', '06/2011 A Talk.', ''),
+    ('2023-10', 'A Talk. September 2023.', ''),
+    ('2023-10', 'A Talk. October 2022.', ''),
+    # A month name inside a longer word is not the month.
+    ('2023-05', 'A Talk. Dismay 2023.', ''),
+    ('2023', 'A Talk. October 2023.', ''),
+    (2023, 'A Talk. October 2023.', ''),
+    (None, 'A Talk. October 2023.', ''),
+])
+def test_meeting_date_is_the_month_and_day_its_line_writes(year, text, expected):
+    entry = {'text': text, 'extracted_fields': {'year': year}}
+
+    assert resolve_publication(entry).meeting_date == expected
+
+
+# ---------------------------------------------------------------------------
 # Drift guard against stage 4's own schemas
 # ---------------------------------------------------------------------------
 
@@ -649,9 +715,11 @@ _PUBLICATION_CODES = ('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9')
 #: chapters rendered the book and never the chapter. `location` left it in
 #: #1810: it places a group-filled year in a meeting citation. `conference_name`
 #: left it in #1570: an S8 entry with no stage-5d citation renders its meeting
-#: and place. `narrative` and the rest are genuinely not part of a Vancouver citation.
+#: and place. `abstract_number` left it in #1570 too: the same fallback
+#: prints it when the entry's line writes it. `narrative` and the rest are
+#: genuinely not part of a Vancouver citation.
 _SCHEMA_KEYS_NOT_RENDERED = frozenset({
-    'abstract_number', 'edition', 'isbn',
+    'edition', 'isbn',
     'media_type', 'narrative', 'publication_venue',
     'report_number', 'status', 'target_journal', 'url', 'venue',
 })

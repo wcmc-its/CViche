@@ -27,6 +27,18 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
+
+# The redaction policy lives in the pipeline package (src/unified_pipeline),
+# which nothing has put on sys.path yet this early in startup (see app.main).
+_SRC = Path(__file__).resolve().parents[3] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from unified_pipeline.log_redaction import (  # noqa: E402
+    RedactingFormatter,
+    exception_text,
+)
 
 # ContextVar populated by RequestIDMiddleware per request. The logging filter
 # reads it onto every LogRecord so the formatter can include it. Falls back
@@ -61,7 +73,8 @@ class JSONFormatter(logging.Formatter):
     Always emits: timestamp, level, logger, message, request_id.
     Optional fields (user_id, run_id) only appear when the caller passed them
     via ``extra={...}``. Exceptions are flattened into an ``exc_info`` string
-    so the line stays valid JSON.
+    so the line stays valid JSON; above DEBUG that string drops every
+    exception's message (#639, ``unified_pipeline.log_redaction``).
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -80,7 +93,7 @@ class JSONFormatter(logging.Formatter):
             if value is not None:
                 payload[field] = value
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = exception_text(self, record)
         return json.dumps(payload, default=str)
 
 
@@ -122,7 +135,9 @@ def _build_config(level: str, fmt: str) -> dict:
     """Build the dictConfig payload."""
     formatters = {
         "text": {
-            "format": "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s",
+            # Above DEBUG, a traceback keeps frames and classes, not str(e) (#639).
+            "()": RedactingFormatter,
+            "fmt": "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
         "json": {

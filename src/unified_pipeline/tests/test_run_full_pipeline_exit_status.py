@@ -1150,6 +1150,54 @@ def test_tracebacks_go_to_stderr_and_never_into_the_parsed_stdout(tmp_path):
     assert proc.stdout.count("Models: ") == 1
 
 
+# -- #639: a traceback above DEBUG drops str(e) -------------------------------
+# Mutant that kills this: give configure_cli_logging()'s "plain" or
+# "message_only" formatter a plain "format" key again (logging.Formatter).
+
+_CV_TEXT = "SECRET_CV_TEXT"
+_PROVIDER_TEXT = "SECRET2"
+
+
+def _raise_chained() -> None:
+    try:
+        raise KeyError(_PROVIDER_TEXT)
+    except KeyError as exc:
+        raise ValueError(_CV_TEXT) from exc
+
+
+def test_the_cli_logs_a_stage_traceback_without_the_exception_text(capsys):
+    _configure_cli_logging_keeping_pytests_handlers()
+    probe = logging.getLogger("unified_pipeline.probe_639")
+    try:
+        _raise_chained()
+    except ValueError:
+        probe.exception("Stage 6 failed")
+    err = capsys.readouterr().err
+    assert "ERROR unified_pipeline.probe_639 Stage 6 failed" in err
+    assert "in _raise_chained" in err and "direct cause" in err
+    assert "\nKeyError\n" in err and err.rstrip().endswith("\nValueError")
+    assert _CV_TEXT not in err and _PROVIDER_TEXT not in err
+
+    probe.setLevel(logging.DEBUG)
+    try:
+        try:
+            _raise_chained()
+        except ValueError:
+            probe.debug("detail", exc_info=True)
+    finally:
+        probe.setLevel(logging.NOTSET)
+    err = capsys.readouterr().err
+    assert f"ValueError: {_CV_TEXT}" in err and f"KeyError: '{_PROVIDER_TEXT}'" in err
+
+    # The narration handler (stdout, "message_only") redacts too.
+    try:
+        _raise_chained()
+    except ValueError:
+        run_full_pipeline.logger.info("narration", exc_info=True)
+    out = capsys.readouterr().out
+    assert out.startswith("narration\nTraceback") and _CV_TEXT not in out
+
+
 @pytest.mark.parametrize("args", [
     ("nonexistent.pdf",),                    # full run
     ("nonexistent.pdf", "--stage", "1a"),    # segmentation reads the docx
