@@ -1011,46 +1011,61 @@ def _street_address_in(text: str) -> str | None:
     return None
 
 
+#: A short parenthetical after a number: "(clinical)", "(h)".
+_NUMBER_QUALIFIER_PATTERN = r'[ \t]*\([^()\n]{1,20}\)'
+#: A word or letter that makes a number another kind of number: "Cell
+#: Phone:", "Fax Number:", "(h)", "H:", "(c)", "M:" (#1222).
+_OTHER_PHONE_KIND_WORD_RE = re.compile(
+    r'\b(?:home|cell(?:ular)?|mobile|fax|pager|residence)\b'
+    r'|\([hcmf]\)|(?<![\w.])[hcmf][ \t]*:', re.IGNORECASE)
+
+
 def _labelled_work_number_in(text: str) -> str | None:
-    """The first number a work phone label introduces in `text`."""
+    """The first number a work phone label introduces in `text`; a number
+    whose qualifier names another kind ("Phone: ... (h)") is not taken."""
     for match in _WORK_PHONE_IN_TEXT_RE.finditer(text):
+        qualifier = re.match(_NUMBER_QUALIFIER_PATTERN, text[match.end():])
         if (len(_digits(match.group('number'))) >= _MIN_PHONE_DIGITS
-                and not _OTHER_PHONE_KIND_RE.search(text[:match.start()])):
+                and not _OTHER_PHONE_KIND_RE.search(text[:match.start()])
+                and not (qualifier and _OTHER_PHONE_KIND_WORD_RE.search(qualifier.group()))):
             return match.group('number')
     return None
 
 
+#: The shapes an unlabelled line must have to be read as a phone number: a
+#: North American number, or an international one written with its "+"
+#: country code. A label is what lets `_PHONE_NUMBER_PATTERN` take any digit
+#: groups; without one, "2019 1234 5678" or "1999-2004" is an identifier or a
+#: date (#1222).
+_BARE_PHONE_PATTERN = (
+    r'(?:\+?1[-.\s]?)?(?:\([2-9]\d\d\)[-.\s]?|[2-9]\d\d[-.\s/])[2-9]\d\d[-.\s]\d{4}'
+    r'|\+[2-9]\d{0,2}(?:[-.\s]?\(?\d{1,5}\)?){2,6}'
+)
 #: A line that is only a phone number, with at most a short qualifier after
 #: it: "(555) 555-0100", "(555) 555-0101 (clinical)".
 _BARE_NUMBER_LINE_RE = re.compile(
-    rf'(?P<number>{_PHONE_NUMBER_PATTERN})(?P<qualifier>[ \t]*\([^()\n]{{1,20}}\))?')
-#: A qualifier word that makes a bare number another kind of number.
-_OTHER_PHONE_KIND_WORD_RE = re.compile(
-    r'\b(?:home|cell(?:ular)?|mobile|fax|pager|residence)\b', re.IGNORECASE)
-#: "1999-2004" on a line of its own is a date range, not a number.
-_YEAR_RANGE_RE = re.compile(r'(?:19|20)\d\d\s*[-\u2013]\s*(?:19|20)\d\d')
+    rf'(?P<number>{_BARE_PHONE_PATTERN})(?P<qualifier>{_NUMBER_QUALIFIER_PATTERN})?')
 
 
-def _bare_work_numbers_in(text: str, address: str | None) -> str | None:
+def _bare_work_numbers_in(text: str) -> str | None:
     """Every tab- or newline-separated line of `text` that is only a phone
     number, joined by "; "; None when there is none (#1222, NECRGC EYTHNB 10,
     WYNUCX 5-17: a contact block lists its office numbers with no label, so
     the labelled-number scan found none and Office telephone stayed empty).
-    A line is skipped when its qualifier or the line before it names another
-    kind of number (fax, home, cell), when it is a line of `address` (a
-    ZIP+4 is number-shaped), or when it is a year range."""
-    address_lines = set((address or '').split('\n'))
-    lines = [line.strip() for line in re.split(r'[\t\n]', text)]
+    A line is skipped when its qualifier, or the last line before it that is
+    not itself a number, names another kind of number anywhere ("Cell
+    Phone:", "(h)"), or when it has too few digits."""
+    label = ''
     numbers = []
-    for i, line in enumerate(lines):
+    for line in (line.strip() for line in re.split(r'[\t\n]', text)):
         match = _BARE_NUMBER_LINE_RE.fullmatch(line)
-        if (match is None or line in address_lines
-                or len(_digits(match.group('number'))) < _MIN_PHONE_DIGITS
-                or _YEAR_RANGE_RE.fullmatch(match.group('number'))
-                or _OTHER_PHONE_KIND_WORD_RE.search(match.group('qualifier') or '')
-                or (i and _OTHER_PHONE_KIND_RE.search(lines[i - 1]))):
+        if match is None:
+            label = line or label
             continue
-        numbers.append(line)
+        if (len(_digits(match.group('number'))) >= _MIN_PHONE_DIGITS
+                and not _OTHER_PHONE_KIND_WORD_RE.search(match.group('qualifier') or '')
+                and not _OTHER_PHONE_KIND_WORD_RE.search(label)):
+            numbers.append(line)
     return '; '.join(numbers) or None
 
 
@@ -1063,35 +1078,58 @@ def _is_preamble_entry(entry: dict) -> bool:
             and str(hierarchy[0]).strip().lower() == _PERSONAL_DATA_SECTION_LABEL.lower())
 
 
+def _names_a_permanent_address(text: str) -> bool:
+    """Whether a line of `text` is labelled a permanent address, which is a
+    home qualifier unless an office word outranks it, as `_classify_label`
+    reads it (#1222)."""
+    for line in re.split(r'[\t\n]', text.lower()):
+        head = line.split(':', 1)[0]
+        if ('address' in head and _PERMANENT_LABEL.search(head)
+                and not _OFFICE_QUALIFIER.search(head)):
+            return True
+    return False
+
+
+def _is_home_contact_block(text: str, address: str | None, pii_fragments: list[str]) -> bool:
+    """Whether a contact block is the owner's home contact or carries a
+    birthplace, so the net takes nothing from it: a home or residence word,
+    a "Current Address" naming no workplace (`_is_unlabelled_home_address`,
+    #1426), or a permanent address (#1222)."""
+    return bool(_HOME_LABEL.search(text.lower())
+                or _is_unlabelled_home_address(text, address)
+                or _names_a_permanent_address(text)
+                or any(_BIRTH_WORD_RE.search(part) for part in (text, *pii_fragments)))
+
+
 def _work_contact_in_entries(entries: list[dict], work_email: str | None
                              ) -> tuple[str | None, str | None]:
-    """(office phone, office address) from the first non-A entry that is the
+    """(office phone, office address) from the non-A entry that is the
     owner's contact block; (None, None) when there is none. Stage 3b coded
     the block as a position (#1222, EBYSBC E10: BZZNRL 7, HZGJFM 729,
     MUHLLD 10, GJXIWD 2; NECRGC EYTHNB 10, O). Two things make a block the
-    owner's and not a referee's: it holds the owner's work email, or it sits
-    in the Personal Data section and holds both a street address and a phone
-    number with no staff role beside them (#1578). A labelled work number
-    wins; failing one, the lines that are only a number are taken
-    (`_bare_work_numbers_in`). An entry carrying a home, residence or birth
-    word is skipped whole, and a value cut from a protected-data fragment is
-    not taken (#1367 must keep holding)."""
+    owner's and not a referee's: it holds the owner's work email, and the
+    first such block wins; failing one, it sits in the Personal Data section
+    and holds both a street address and a phone number with no staff role
+    beside them (#1578). A labelled work number wins; failing one, the lines
+    that are only a number are taken (`_bare_work_numbers_in`). A home block
+    (`_is_home_contact_block`) is skipped whole, and a value cut from a
+    protected-data fragment is not taken (#1367 must keep holding)."""
+    preamble_block = None
     for entry in entries:
         text = entry.get('text') or ''
         pii_fragments = entry.get('_pii_fragments', [])
-        if (entry.get('taxonomy_code') == 'A' or _HOME_LABEL.search(text.lower())
-                or any(_BIRTH_WORD_RE.search(part) for part in (text, *pii_fragments))):
-            continue
         address = _street_address_in(text)
-        phone = _labelled_work_number_in(text) or _bare_work_numbers_in(text, address)
-        holds_work_email = bool(work_email) and work_email.lower() in text.lower()
-        is_preamble_block = (_is_preamble_entry(entry) and bool(phone and address)
-                             and _STAFF_ROLE_RE.search(text) is None)
-        if not (holds_work_email or is_preamble_block):
+        if entry.get('taxonomy_code') == 'A' or _is_home_contact_block(text, address, pii_fragments):
             continue
-        return ((phone if phone and not _from_pii_fragment(phone, pii_fragments) else None),
-                (address if address and not _from_pii_fragment(address, pii_fragments) else None))
-    return None, None
+        phone = _labelled_work_number_in(text) or _bare_work_numbers_in(text)
+        values = ((phone if phone and not _from_pii_fragment(phone, pii_fragments) else None),
+                  (address if address and not _from_pii_fragment(address, pii_fragments) else None))
+        if work_email and work_email.lower() in text.lower():
+            return values
+        if (preamble_block is None and _is_preamble_entry(entry) and phone and address
+                and _STAFF_ROLE_RE.search(text) is None):
+            preamble_block = values
+    return preamble_block or (None, None)
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
