@@ -143,6 +143,14 @@ DATED_SEGMENT_MIN_SHARE = 0.5
 # A part states a record only with words besides its date range: three letters
 # anywhere in the part once the range is cut out. A bare date column fails.
 _WORDS_BESIDE_RANGE_RE = re.compile(r"[^\W\d_]{3,}")
+# A year standing alone, outside any date range: the date of a record held in
+# one year ("Founding Member, 1979", "2004  Quimby Farrow"). Same year span
+# as `_DATE_RANGE_RE`'s start year.
+_LONE_YEAR_RE = re.compile(r"\b(?:19\d{2}|20[0-3]\d)\b")
+# A part that ends in a colon labels the parts after it ("Awards/Distinctions:",
+# "Papers related to dissertation work:"): they are details of one record,
+# whatever years they carry.
+_DETAIL_LABEL_SUFFIX = ":"
 
 
 def _join_wrapped_parts(parts: list[str]) -> list[str]:
@@ -160,7 +168,7 @@ def _join_wrapped_parts(parts: list[str]) -> list[str]:
     return joined
 
 
-def _edge_date_range(part: str) -> str | None:
+def edge_date_range(part: str) -> str | None:
     """The first date range of `part`, in reading order, that starts or ends
     it, or None. When both edges hold one, the range at the start wins: it is
     the earlier match."""
@@ -168,6 +176,24 @@ def _edge_date_range(part: str) -> str | None:
         if match.start() <= DATED_SEGMENT_EDGE_CHARS or len(part) - match.end() <= DATED_SEGMENT_EDGE_CHARS:
             return match.group()
     return None
+
+
+def _edge_lone_year(part: str) -> str | None:
+    """The first year of `part` that stands outside every date range and starts
+    or ends it, or None ("Research Affairs Committee, 1985")."""
+    outside_ranges = _DATE_RANGE_RE.sub(lambda match: " " * len(match.group()), part)
+    for match in _LONE_YEAR_RE.finditer(outside_ranges):
+        if match.start() <= DATED_SEGMENT_EDGE_CHARS or len(part) - match.end() <= DATED_SEGMENT_EDGE_CHARS:
+            return match.group()
+    return None
+
+
+def _is_dated_record_part(part: str) -> bool:
+    """Whether `part` is long enough to be a record, not prose, and has words
+    besides its dates (`_WORDS_BESIDE_RANGE_RE`)."""
+    undated = _LONE_YEAR_RE.sub(" ", _DATE_RANGE_RE.sub(" ", part))
+    return (DATED_SEGMENT_MIN_CHARS <= len(part) <= DATED_SEGMENT_MAX_CHARS
+            and _WORDS_BESIDE_RANGE_RE.search(undated) is not None)
 
 
 def tab_record_segments(line: str) -> list[str]:
@@ -182,19 +208,27 @@ def tab_record_segments(line: str) -> list[str]:
     the dated parts give at least two different ranges and are at least half of
     its parts: an entry with one dated record and dated details (an award list,
     a role and its period, a description that repeats the title's years) is one
-    record. A part's range is the one at its start or end (`_edge_date_range`).
+    record. A part's range is the one at its start or end (`edge_date_range`).
     Each condition removed a case where the recovery pass wrote a detail of one
     record a second time beside its row, in the render of 302 corpus CVs.
+
+    A part dated by one year at its start or end ("Fellow of the Society,
+    1985") is a record too, once the line has its two ranges: a society's
+    one-year posts and a lab's one-year trainees sit beside its ranged ones.
+    Not on a line with a part that ends in a colon: the parts after such a
+    label are details of one record (a mentee's awards and papers).
     """
     parts = _join_wrapped_parts([part.strip() for part in line.split("\t") if part.strip()])
-    candidates = [(part, _edge_date_range(part)) for part in parts]
-    dated = [(part, date_range) for part, date_range in candidates
-             if date_range and DATED_SEGMENT_MIN_CHARS <= len(part) <= DATED_SEGMENT_MAX_CHARS
-             and _WORDS_BESIDE_RANGE_RE.search(_DATE_RANGE_RE.sub(" ", part))]
-    distinct = {date_range for _, date_range in dated}
-    run_of_records = (len(distinct) >= DATED_SEGMENT_MIN_DISTINCT_RANGES
-                      and len(dated) / len(parts) >= DATED_SEGMENT_MIN_SHARE)
-    return [part for part, _ in dated] if run_of_records else []
+    ranged = [(part, edge_date_range(part)) for part in parts]
+    distinct = {date_range for part, date_range in ranged
+                if date_range and _is_dated_record_part(part)}
+    if len(distinct) < DATED_SEGMENT_MIN_DISTINCT_RANGES:
+        return []
+    years_date_parts = not any(part.endswith(_DETAIL_LABEL_SUFFIX) for part in parts)
+    dated = [part for part, date_range in ranged
+             if (date_range or (years_date_parts and _edge_lone_year(part)))
+             and _is_dated_record_part(part)]
+    return dated if len(dated) / len(parts) >= DATED_SEGMENT_MIN_SHARE else []
 
 
 #: A whole value in square brackets: "[Title not provided]".
