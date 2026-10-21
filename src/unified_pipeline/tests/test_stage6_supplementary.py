@@ -69,8 +69,8 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_and_talks():
-    assert sorted(sp.SUBPOINT_CODES) == ["B1", "D1", "D2", "D3", "H", "K1", "K2", "K3", "K4",
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_and_training():
+    assert sorted(sp.SUBPOINT_CODES) == ["B1", "C", "D1", "D2", "D3", "H", "K1", "K2", "K3", "K4",
                                          "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B", "O",
                                          "P", "Q1", "Q2", "R"]
     # The owner decision's exclusions stay out.
@@ -1148,6 +1148,239 @@ def test_plan_offers_no_prose_of_a_talk_the_pii_pass_withheld():
 
     entry["_pii_withheld"] = True
     assert _plan_talk(entry) == []
+
+
+_RESIDENCY = "Example Pharmacy Residency"
+_RESIDENCY_ROW = [_RESIDENCY, "Norvale General Hospital", "07/09-06/10"]
+
+
+def _training_rows(*rows):
+    """A line naming the hospital, then a training table, one row of cells
+    per item; and their anchor candidates."""
+    doc = Document()
+    doc.add_paragraph("Norvale General Hospital")
+    table = doc.add_table(rows=len(rows), cols=3)
+    for row, cells in zip(table.rows, rows, strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    return table, list(sp.anchor_candidates(doc))
+
+
+def _training(text=f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t{PROSE}",
+              **fields):
+    return _entry(text, code="C", **{"training_type": _RESIDENCY,
+                                     "institution": "Norvale General Hospital",
+                                     "start_date": "2009-07", "end_date": "2010-06", **fields})
+
+
+def _plan_training(entry, *rows):
+    table, lines = _training_rows(*(rows or (_RESIDENCY_ROW,)))
+    return sp.plan_subpoints({"C": [entry]}, _haystack(), lines, {"C": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [table.rows[0]._tr] if e is entry else [])
+
+
+def test_plan_places_a_training_position_only_under_its_own_row():
+    # A second-year residency at the same hospital renders first and holds
+    # every distinctive word of the first year's row: only its dates, digits,
+    # tell them apart, and words alone take the first row holding them.
+    table, lines = _training_rows([_RESIDENCY, "Norvale General Hospital", "07/10-06/11"],
+                                  _RESIDENCY_ROW)
+    entry, spans = _training(), {"C": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "C"), lines) is lines[1]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({"C": [entry]}, _haystack(), lines, spans,
+                                   rows_written=written([table.rows[1]._tr]))
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+    assert (planned.code, planned.entry_id) == ("C", id(entry))
+    # No row recorded for it, a paragraph outside any table, or no ledger: none.
+    stray = Document().add_paragraph(_RESIDENCY)._p
+    for rows_written in (written([]), written([stray]), None):
+        assert sp.plan_subpoints({"C": [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_takes_a_training_positions_one_own_row_whatever_its_words():
+    # A type and an institution of acronyms hold no distinctive word.
+    entry = _entry(f"PGY-1, NGH, 2009\t{PROSE}", code="C", training_type="PGY-1",
+                   institution="NGH", start_date="2009")
+    table, lines = _training_rows(["PGY-1", "NGH", "2009"])
+    assert sp.best_anchor(sp._value_tokens(entry, "C"), lines[1:]) is None
+    (planned,) = sp.plan_subpoints({"C": [entry]}, _haystack(), lines, {"C": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+
+
+@pytest.mark.parametrize("field", ["title", "field_of_study", "location"])
+def test_a_training_rows_fallback_fields_count_as_its_rendered_values(field):
+    # The row prints them when the schema's are empty, though
+    # `_RENDERED_FIELDS` cannot list them. Another code's are its own.
+    entry = _entry("Fellowship", code="C", **{field: "Estuarine Sediment Geochemistry"})
+    assert {"estuarine", "sediment", "geochemistry"} <= sp._value_tokens(entry, "C")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="H"), "H")
+
+
+def test_the_training_row_fields_are_the_writers_cells_and_its_other_fields():
+    # The writer's precedence per cell, read from here, and the fields it
+    # prints whatever the rest hold: C's rendered fields outside the two
+    # cells, and `resolution`'s location fallback.
+    from unified_pipeline.stage6.resolution import institution
+    from unified_pipeline.stage6.sections import postdoc_training
+
+    assert sp.POSTDOC_TYPE_FIELDS == ("training_type", "title")
+    assert sp.POSTDOC_FIELD_OF_STUDY_FIELDS == ("field_of_study", "specialty")
+    assert sp.POSTDOC_DATE_FIELDS == ("start_date", "end_date")
+    assert sp._POSTDOC_PLAIN_FIELDS == ("end_date", "institution", "role", "start_date", "location")
+    assert postdoc_training.POSTDOC_TYPE_FIELDS is sp.POSTDOC_TYPE_FIELDS
+    assert postdoc_training.POSTDOC_FIELD_OF_STUDY_FIELDS is sp.POSTDOC_FIELD_OF_STUDY_FIELDS
+    assert postdoc_training.POSTDOC_DATE_FIELDS is sp.POSTDOC_DATE_FIELDS
+    assert postdoc_training.training_cell_value is sp.training_cell_value
+    assert sp.FALLBACK_LOCATION_FIELD is institution.FALLBACK_LOCATION_FIELD
+
+
+@pytest.mark.parametrize("cell", [sp.POSTDOC_TYPE_FIELDS, sp.POSTDOC_FIELD_OF_STUDY_FIELDS])
+def test_a_training_cell_counts_only_the_alias_it_prints(cell):
+    # The cell prints the first alias holding a value; the other one's words
+    # are not the row's, so a fragment restating them is not held back.
+    printed, shadowed = cell
+    entry = _training(**{printed: "Estuarine Geochemistry", shadowed: "Saltmarsh Restoration Track"})
+    assert sp.training_cell_value(entry["extracted_fields"], cell) == "Estuarine Geochemistry"
+    tokens = sp._value_tokens(entry, "C")
+    assert {"estuarine", "geochemistry"} <= tokens and not {"saltmarsh", "restoration"} & tokens
+    entry["extracted_fields"][printed] = ""
+    assert sp.training_cell_value(entry["extracted_fields"], cell) == "Saltmarsh Restoration Track"
+    assert {"saltmarsh", "restoration"} <= sp._value_tokens(entry, "C")
+    assert sp.training_cell_value({}, cell) is None
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its own.
+    (["Residency line", f"Fellowship line, {PROSE}"], 1, f"Fellowship line, {PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    (["Residency line", PROSE, "Fellowship line"], 1, ""),
+    # An earlier record: the line fan-out gave it, whatever it holds.
+    ([f"Residency line, {PROSE}", "Fellowship line"], 0, f"Residency line, {PROSE}\tFellowship line"),
+])
+def test_a_training_position_reads_its_prose_from_its_own_line(segments, index, read):
+    entry = dict(_degree_record("\t".join(segments), index, 2), taxonomy_code="C")
+    assert sp._prose_text("C", entry, {}) == read
+
+
+def test_a_training_line_holding_several_dated_records_offers_none():
+    # A residency and a fellowship on one line, each opening with its dates
+    # and followed by its prose; stage 4 returned the fellowship. Which one a
+    # prose line is about cannot be told.
+    fellowship = "2010-2012 Example Critical Care Fellowship, Norvale General Hospital"
+    dates = {"start_date": "2010-07", "end_date": "2012-06"}
+    own = _training(f"{fellowship}\t{PROSE}", **dates)
+    assert [p.paragraphs for p in _plan_training(own)] == [(PROSE,)]
+    two = _training(f"2007-2010 {_RESIDENCY}, Norvale General Hospital\t{OTHER_PROSE}\t"
+                    f"{fellowship}\t{PROSE}", **dates)
+    assert sp._own_record_line(two) == ""
+    assert _plan_training(two) == []
+
+
+@pytest.mark.parametrize("fields, listed", [
+    # Stage 4 listed positions under a key the schema does not define, and
+    # fan-out kept the list whole: the row prints the entry's own fields only.
+    ({"positions": [{"training_type": "Example Surgical Internship",
+                     "institution": "Kestrel Institute"}]}, True),
+    ({"positions": [{"institution": "Kestrel Institute"}]}, True),
+    ({"positions": [{"field_of_study": "Example Marine Studies"}]}, True),
+    # A list of date spans, or of bare strings, names no position.
+    ({"additional_dates": [{"start_date": "2004", "end_date": "2006"}]}, False),
+    ({"positions": ["Example Surgical Internship, Kestrel Institute"]}, False),
+], ids=["type", "institution", "field", "date_spans", "strings"])
+def test_a_list_of_positions_under_a_field_offers_none(fields, listed):
+    text = f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t{PROSE}"
+    entry = _training(text, **fields)
+    assert sp._own_training_line(entry) == ("" if listed else text)
+    assert [p.paragraphs for p in _plan_training(entry)] == ([] if listed else [(PROSE,)])
+    # Only a training position reads its fields for listed positions.
+    assert sp._prose_text("O", dict(entry, taxonomy_code="O"), {}) == text
+
+
+@pytest.mark.parametrize("fields", [None, ["Example Surgical Internship"], "Residency"])
+def test_a_training_position_whose_fields_are_not_a_mapping_reads_its_own_line(fields):
+    # Its row prints no dates, so a line holding a year holds no year it
+    # prints (`_dates_another_position`).
+    text = f"{_RESIDENCY}\tNorvale General Hospital\t{PROSE}"
+    entry = {"taxonomy_code": "C", "text": text, "extracted_fields": fields}
+    assert sp._own_training_line(entry) == text
+    assert sp._own_training_line(dict(entry, text=f"{text}\t2009-2010")) == ""
+
+
+_FELLOWSHIP = "Example Critical Care Fellowship, Kestrel Institute"
+
+
+@pytest.mark.parametrize("line, start, end, offered", [
+    # Another position, its dates ending its part, as a range or in months,
+    # or inside it; or the one before, opening it.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-2010\t{_FELLOWSHIP}, 2010-2013", "2009-07", "2010-06", False),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-2010\t{_FELLOWSHIP}, July 2010 - June 2013",
+     "2009-07", "2010-06", False),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-2010\t{_FELLOWSHIP} (2010-2013)", "2009-07", "2010-06", False),
+    (f"2006-2009 {_FELLOWSHIP}\t{_RESIDENCY}, Norvale General Hospital, 2009-2010", "2009-07", "2010-06", False),
+    # A year inside the span is the position's own: a chief year, its own
+    # dates written twice, a running position's later year.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2008-2012\tChief resident -2011-12- {PROSE}",
+     "2008-07", "2012-06", True),
+    (f"{_RESIDENCY} July 2009 to July 2010\tNorvale General Hospital, 2009-July 2010- {PROSE}",
+     "July 2009", "July 2010", True),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-present\tChief resident 2013, {PROSE}", "2009", "present", True),
+    # No end: the start's year alone; no start: the end's.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009\t{_FELLOWSHIP}, 2010", "2009", "", False),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2010\t{PROSE}", "", "2010-06", True),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2010\t{_FELLOWSHIP}, 2007", "", "2010-06", False),
+    # No dates: any year is another position's. Digits of a number are none.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2010\t{PROSE}", "", "", False),
+    (f"{_RESIDENCY}, Norvale General Hospital\tLicence: Q207731, 5550192837\t{PROSE}", "", "", True),
+], ids=["ending", "months", "inside", "opening", "chief_year", "written_twice", "running",
+        "no_end", "no_start", "no_start_other", "no_dates", "number"])
+def test_a_training_line_holding_a_year_outside_its_rows_span_offers_none(line, start, end, offered):
+    # The #221 recovery reads a sub-point line as rendered, so another
+    # position offered as this one's prose would be in the accepted document
+    # nowhere (#1205 review).
+    entry = _training(line, start_date=start, end_date=end)
+    assert sp._own_training_line(entry) == (line if offered else "")
+    assert bool(_plan_training(entry)) is offered
+
+
+def test_plan_offers_no_prose_of_a_training_position_the_pii_pass_withheld():
+    entry = _training()
+    (planned,) = _plan_training(entry)
+    assert planned.paragraphs == (PROSE,)
+
+    entry["_pii_withheld"] = True
+    assert _plan_training(entry) == []
+
+
+def test_families_joining_after_r_are_offered_after_every_family_before_them():
+    assert sorted(["R", "C", "D1", "B1", "Q2"], key=sp._offer_order) == ["B1", "D1", "Q2", "R", "C"]
+    assert sp._LATER_FAMILIES[0] is sp.POSTDOCTORAL_CODES
+
+
+def test_a_line_a_training_position_and_an_appointment_both_hold_stays_the_appointments():
+    # Both a residency and the appointment after it name one duty, each on
+    # its own line (YUYVIG LTTYWI 76 and 80's shape). The appointment, a
+    # family shipped before C, keeps it; the residency keeps its other line.
+    duty = "Provided anaesthesia services for the hospital's clinical caseload"
+    table, lines = _training_rows(_RESIDENCY_ROW)
+    residency = _training(f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t"
+                          f"{duty}\t{PROSE}")
+    appointment = _appointment(f"Associate Professor\tExample University\t{duty}")
+    appointment_line = _candidate("Associate Professor | Example University | 2010-2015", position=5)
+    spans = {"C": sp.SectionSpan(0, 3), "D1": sp.SectionSpan(5, None)}
+    planned = sp.plan_subpoints({"C": [residency], "D1": [appointment]}, _haystack(),
+                                [*lines, appointment_line], spans,
+                                rows_written=lambda e: [table.rows[0]._tr] if e is residency else [])
+    assert [(p.code, p.paragraphs) for p in planned] == [("D1", (duty,)), ("C", (PROSE,))]
+    # With no appointment holding it, the residency offers both.
+    (alone,) = sp.plan_subpoints({"C": [residency]}, _haystack(), lines, spans,
+                                 rows_written=lambda e: [table.rows[0]._tr])
+    assert alone.paragraphs == (duty, PROSE)
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():

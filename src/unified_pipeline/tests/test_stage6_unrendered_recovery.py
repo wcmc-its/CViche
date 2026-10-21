@@ -3396,13 +3396,12 @@ def _render_grouped_education(entries, **kwargs):
     return gen, grouped
 
 
-def test_a_degree_rerouted_out_of_b1_follows_its_destination_and_gets_no_sub_point():
+def test_a_degree_rerouted_out_of_b1_follows_its_destinations_rule():
     """B2 is excluded: a school with no degree renders under Other
-    Educational Experiences (`_route_precollegiate_education`). C is not
-    offered either, and its heading lookup finds the title block, not its
-    section: a training row stage 3b coded B1 under a postdoctoral heading
-    renders as C. Neither the degree row of the same institution nor any
-    other carries their prose."""
+    Educational Experiences (`_route_precollegiate_education`), and neither
+    the degree row of the same institution nor any other carries its prose.
+    A training row stage 3b coded B1 under a postdoctoral heading renders as
+    C: its prose is a deleted row under its own training row."""
     school = _degree(idx=32, degree=None, discipline=None, institution="Example Preparatory School",
                      prose="Completed the advanced laboratory sequence in marine field methods")
     training = _rerouted(_degree(idx=31, degree=None, year=None, discipline=None,
@@ -3415,7 +3414,10 @@ def test_a_degree_rerouted_out_of_b1_follows_its_destination_and_gets_no_sub_poi
     assert [e["element_idx_start"] for e in grouped["B2"]] == [32]
     assert [e["element_idx_start"] for e in grouped["C"]] == [31]
     assert "Example Preparatory School" in "".join(_texts_of(gen.doc.element.body))
-    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+    (row,) = _subpoint_rows(gen)
+    assert _table_header(row).startswith("Title, include area of training")
+    assert _deleted_texts(gen) == "Trained in quantitative methods for estuarine monitoring programmes"
+    assert [(p.element_idx_start, p.code) for p in gen._subpoint_placements] == [(31, "C")]
 
 
 def test_a_record_rerouted_into_b1_follows_the_degree_rule():
@@ -3836,10 +3838,10 @@ def test_generic_list_fan_out_children_offer_nothing_their_fields_do_not_hold():
 
 def test_a_leadership_role_rerouted_out_of_o_follows_its_destination_and_gets_no_sub_point():
     """N1 is excluded: a role under a mentoring-programmes heading renders as
-    N1. C is not offered, and its heading lookup finds the title block, not
-    its section: a record holding only an institution and a start date under
-    a training heading renders as C. Neither the role row of the same
-    institution nor any other carries their prose."""
+    N1. A record holding only an institution and a start date under a
+    training heading renders as C, whose prose goes only under its own C row
+    (none is written here). Neither the role row of the same institution
+    nor any other carries their prose."""
     programme = _rerouted(_role(idx=70), "N1", "MENTORING PROGRAMS")
     training = _rerouted(_role(idx=71, title=None, end=None,
                                prose="Trained in quantitative methods for community outreach "
@@ -4485,10 +4487,10 @@ def test_generic_list_fan_out_children_of_committees_offer_nothing_their_fields_
 
 def test_a_committee_rerouted_out_of_p_follows_its_destination_and_gets_no_sub_point():
     """N1 is excluded: a committee under a mentoring-programmes heading
-    renders as N1. C is not offered, and its heading lookup finds the title
-    block, not its section: a record holding only an institution and a start
-    year under a training heading renders as C. Neither the committee row of
-    the same institution nor any other carries their prose."""
+    renders as N1. A record holding only an institution and a start year
+    under a training heading renders as C, whose prose goes only under its
+    own C row (none is written here). Neither the committee row of the same
+    institution nor any other carries their prose."""
     programme = _rerouted(_committee(idx=70), "N1", "MENTORING PROGRAMS")
     training = _rerouted(_committee(idx=71, name=None, role=None, end=None,
                                     prose="Trained in quantitative methods for clerkship "
@@ -5246,6 +5248,575 @@ def test_talk_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
 
     doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
                                      [protect(_talk(), _TALK_PROSE)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+# --- #1205: C postdoctoral training, the next code family --------------------
+# The postdoctoral-training section writes every C entry as one row of its
+# three-column table, so the prose is a deleted row under the position's own
+# row: the one row the writer recorded for that entry (the row-receipt
+# ledger). A line holding several dated records offers none.
+
+_TRAINING_PROSE = ("Program director: Doctor Bramwell Fenn; rotations in paediatric surgery, "
+                   "neonatal intensive care and transport medicine")
+_TRAINING_TYPE = "Example Pharmacy Residency"
+_TRAINING_SITE = "Norvale General Hospital"
+
+
+def _training(idx=113, ttype=_TRAINING_TYPE, site=_TRAINING_SITE, start="2009-07", end="2010-06",
+              prose=_TRAINING_PROSE, code="C", **fields):
+    """A residency whose source line goes on past its type, hospital and
+    dates into who directed it, as EBYSBC TXTATQ 113's did. The next year's
+    residency at the same hospital shares every distinctive word of its row:
+    only the dates, digits, tell them apart. A value passed as None is in
+    neither the line nor the fields."""
+    named = {"training_type": ttype, "institution": site, "start_date": start, "end_date": end}
+    dates = "-".join(value for value in (start, end) if value)
+    line = "\t".join(value for value in (ttype, site, dates) if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _later_training(ttype=_TRAINING_TYPE):
+    """The next year's residency at the same hospital, with no prose: it
+    renders first, reverse chronologically."""
+    return _training(idx=108, ttype=ttype, start="2010-07", end="2011-06", prose="")
+
+
+def _render_training(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_postdoc_training({"C": entries}, entries)
+    gen._add_supplementary_subpoints({"C": entries})
+    return gen
+
+
+def _training_table_row():
+    """The same residency read from a source table: stage 2 joins the row's
+    cells with pipes, and its position names the row ("29.2")."""
+    entry = _training()
+    entry["element_idx_start"] = "29.2"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+_TRAINING_ROW = f"{_TRAINING_TYPE}{_TRAINING_SITE}07/09-06/10"
+_LATER_TRAINING_ROW = f"{_TRAINING_TYPE}{_TRAINING_SITE}07/10-06/11"
+_TRAINING_HEADER = "Title, include area of trainingInstitution, city and stateDates (mm/yy - mm/yy)"
+
+
+@pytest.mark.parametrize("entry", [_training, _training_table_row])
+def test_training_prose_is_a_deleted_row_under_the_position_row(entry):
+    gen = _render_training([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TRAINING_ROW
+    assert _table_header(row) == _TRAINING_HEADER
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _TRAINING_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "3"
+    assert gen.stats["supplementary_subpoints"] == 1
+    (placement,) = gen._subpoint_placements
+    assert (placement.element_idx_start, placement.code) == (entry()["element_idx_start"], "C")
+
+
+def test_a_positions_several_prose_lines_are_one_row_of_paragraphs_in_source_order():
+    lines = (_TRAINING_PROSE, "Research topic: nutrient cycling in tidal marsh sediments and their microbes")
+    gen = _render_training([_training(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TRAINING_ROW
+    assert ["".join(t.text for t in p.iter(qn("w:delText"))) for p in row.iter(qn("w:p"))] \
+        == list(lines)
+
+
+@pytest.mark.parametrize("later", [
+    # One title held twice at one hospital: the rows differ in their dates only.
+    _TRAINING_TYPE,
+    # A later combined position holding every word of this one's type
+    # (EBYSBC MOFVYH 43, a residency under a residency-and-fellowship row).
+    f"{_TRAINING_TYPE} and Example Critical Care Fellowship",
+])
+def test_training_prose_goes_under_its_own_row_among_positions_at_one_hospital(later):
+    """The later position renders first and holds every distinctive word of
+    the earlier one's row, so words alone put the earlier one's prose under
+    the later row. Only the row the writer recorded for the earlier entry
+    takes it."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_training([_later_training(later), _training()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert _row_text(above) == _TRAINING_ROW
+    assert _row_text(above.getprevious()) == f"{later}{_TRAINING_SITE}07/10-06/11"
+    # Words alone would have taken the later position's row.
+    lines = list(supplementary.anchor_candidates(_render_training(
+        [_later_training(later), _training()], supplementary_subpoints=False).doc))
+    rows = [line for line in lines if _TRAINING_SITE in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(_training(), "C"), rows) is rows[0]
+    assert rows[0].text.startswith(later)
+
+
+def test_positions_at_one_hospital_each_take_their_own_prose():
+    """Two residencies at one hospital, each with its program director
+    (EBYSBC TXTATQ 108 and 113): each prose goes under its own row."""
+    later_prose = ("Program director: Doctor Ottoline Marsh; rotations in critical care "
+                   "pharmacotherapy and toxicology")
+    later = _training(idx=108, start="2010-07", end="2011-06", prose=later_prose)
+    gen = _render_training([later, _training()], supplementary_subpoints=True)
+
+    by_text = {"".join(t.text for t in row.iter(qn("w:delText"))): row for row in _subpoint_rows(gen)}
+    assert set(by_text) == {later_prose, _TRAINING_PROSE}
+    assert _row_text(by_text[later_prose].getprevious()) == _LATER_TRAINING_ROW
+    assert _row_text(by_text[_TRAINING_PROSE].getprevious()) == _TRAINING_ROW
+    assert [(p.element_idx_start, p.paragraphs) for p in gen._subpoint_placements] \
+        == [(108, (later_prose,)), (113, (_TRAINING_PROSE,))]
+
+
+def test_training_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_training([_later_training(), _training()], supplementary_subpoints=False)
+    on = _render_training([_later_training(), _training()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _TRAINING_PROSE in rejected
+    assert _TRAINING_PROSE not in "".join(_texts_of(off.doc.element.body))
+    assert len(_subpoint_rows(on)) == 1
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_a_short_positions_prose_goes_under_its_own_row():
+    """A type and a hospital of acronyms hold no distinctive word, too few
+    for the word test: the writer's record says the one row is the entry's
+    own (`_pick_anchor`)."""
+    gen = _render_training([_training(ttype="PGY-1", site="NGH")], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == "PGY-1NGH07/09-06/10"
+    assert _deleted_texts(gen) == _TRAINING_PROSE
+
+
+def _position_typed_by_its_prose():
+    """The prose is the type stage 4 extracted."""
+    return _training(ttype=_TRAINING_PROSE, prose=None)
+
+
+def _position_with_its_prose_as_role():
+    """The prose is the role stage 4 extracted, which the type cell folds in."""
+    return _training(role=_TRAINING_PROSE)
+
+
+@pytest.mark.parametrize("entry", [_position_typed_by_its_prose, _position_with_its_prose_as_role])
+def test_training_prose_already_in_its_row_is_not_offered_again(entry):
+    """The row prints it (`_record_rendered`), so it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_training([entry()], supplementary_subpoints=True)
+    assert _TRAINING_PROSE in "".join(_row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "C", haystack) == []
+
+
+def _position_with_only(field, marker):
+    entry = _training(ttype=None, site=None, start=None, end=None, prose="")
+    entry["extracted_fields"] = {field: marker}
+    entry["text"] = "Example training position"
+    return entry
+
+
+def test_every_training_row_field_the_pass_counts_is_printed_in_the_training_row():
+    """The off-schema names among the fields `_value_tokens` counts for a
+    training position (`_RENDERED_FIELDS` marks schema fields only): each
+    one, alone on an entry, is counted and reaches the row."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    off_schema = [name for name in (*supplementary.POSTDOC_TYPE_FIELDS,
+                                    *supplementary.POSTDOC_FIELD_OF_STUDY_FIELDS,
+                                    *supplementary._POSTDOC_PLAIN_FIELDS)
+                  if name not in _RENDERED_FIELDS["C"]]
+    assert off_schema == ["title", "field_of_study", "location"]
+    for field in off_schema:
+        marker = f"Zq{field}Z"
+        entry = _position_with_only(field, marker)
+        assert supplementary._tokens(marker) <= supplementary._value_tokens(entry, "C"), field
+        gen = _render_training([entry], supplementary_subpoints=True)
+        assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
+
+
+def test_every_field_the_training_row_prints_is_one_the_pass_counts():
+    """The other direction: a field the row prints that `_value_tokens` does
+    not count would offer a fragment restating the row. The names are the
+    fields of the codes an entry is rerouted into C from (B1, O), of the
+    codes stage 3b confuses with it (D1, D2, K2, N3B), and the writer's
+    own, each alone on an entry."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    names = set().union(*(_RENDERED_FIELDS[code] for code in
+                          ("B1", "O", "D1", "D2", "K2", "N3B") if code in _RENDERED_FIELDS),
+                        supplementary.POSTDOC_TYPE_FIELDS, supplementary.POSTDOC_FIELD_OF_STUDY_FIELDS,
+                        {"location", "department", "mentor", "organization", "position", "name"})
+    for field in sorted(names):
+        marker = f"Zq{field}Z"
+        entry = _position_with_only(field, marker)
+        gen = _render_training([entry], supplementary_subpoints=True)
+        printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+        counted = supplementary._tokens(marker) <= supplementary._value_tokens(entry, "C")
+        assert not printed or counted, field
+
+
+_SHADOWED_ALIAS = "Saltmarsh restoration and estuarine sediment track"
+
+
+@pytest.mark.parametrize("printed, shadowed", [("training_type", "title"),
+                                               ("field_of_study", "specialty")])
+def test_a_line_restating_the_alias_its_row_does_not_print_is_offered(printed, shadowed):
+    """A cell prints the first of its aliases holding a value
+    (`training_cell_value`). The other one's words are in no line of the
+    document, so a line restating it is the position's prose, not its row."""
+    entry = _training(prose=_SHADOWED_ALIAS, **{printed: "Example Geochemistry",
+                                                 shadowed: _SHADOWED_ALIAS})
+    gen = _render_training([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert "Example Geochemistry" in _row_text(row.getprevious())
+    assert _SHADOWED_ALIAS not in _row_text(row.getprevious())
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _SHADOWED_ALIAS
+
+
+def _positions_each_opening_with_their_dates():
+    """A residency and the fellowship after it on one line, each opening
+    with its dates and followed by its prose; stage 4 returned the
+    fellowship. Which one a prose line is about cannot be told."""
+    return _training(start="2010-07", end="2012-06", prose=None) | {
+        "text": (f"2007-2010 {_TRAINING_TYPE}, {_TRAINING_SITE}\t{_TRAINING_PROSE}\t"
+                 "2010-2012 Example Critical Care Fellowship, Norvale General Hospital\t"
+                 "Research topic: nutrient cycling in tidal marsh sediments and their microbes")}
+
+
+def _a_position_then_the_next_dated_at_its_end():
+    """A residency, then on the same line the fellowship after it, its
+    dates ending its part; stage 4 returned the residency (#1205 review)."""
+    return _training(prose=None) | {
+        "text": (f"{_TRAINING_TYPE}, {_TRAINING_SITE}, 2009-2010\t"
+                 "Example Critical Care Fellowship, Kestrel Institute, 2010-2013")}
+
+
+def _a_position_then_the_next_dated_in_months():
+    """The same, the fellowship's dates in months."""
+    return _training(prose=None) | {
+        "text": (f"{_TRAINING_TYPE}, {_TRAINING_SITE}, 2009-2010\t"
+                 "Example Critical Care Fellowship, Kestrel Institute, July 2010 - June 2013")}
+
+
+@pytest.mark.parametrize("positions", [_positions_each_opening_with_their_dates,
+                                       _a_position_then_the_next_dated_at_its_end,
+                                       _a_position_then_the_next_dated_in_months])
+@pytest.mark.parametrize("flag", [True, False])
+def test_a_line_of_several_dated_positions_offers_none_and_its_records_are_recovered(flag, positions):
+    """#1205 comment 6275741663: the #221 recovery reads every sub-point
+    line as rendered, so a position offered as another's prose would be in
+    the accepted document nowhere and still not be recovered. None is
+    offered, and the recovery re-emits the same lines with sub-points on as
+    off, wherever the other position's part puts its dates."""
+    entry = positions()
+    gen = _render_training([entry], supplementary_subpoints=flag)
+    assert len(gen._row_receipts.elements_for(entry)) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+    gen._recover_unrendered_records({"C": [entry]})
+    off = _render_training([positions()], supplementary_subpoints=False)
+    off._recover_unrendered_records({"C": [positions()]})
+
+    assert gen.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"]
+    assert _texts_of(gen.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+def test_a_position_the_section_writes_no_row_for_gets_no_sub_point():
+    """An entry no row was written for -- one the section skipped -- has no
+    row of its own: its prose goes under no other line of the document,
+    though the other position's row holds every distinctive word of its
+    line."""
+    skipped, later = _training(), _later_training()
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_postdoc_training({"C": [later]}, [later])
+    gen._add_supplementary_subpoints({"C": [later, skipped]})
+
+    assert gen._row_receipts.elements_for(skipped) == []
+    assert gen._row_receipts.elements_for(later)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_the_training_span_starts_at_the_heading_its_writer_looks_up():
+    """The span starts at the heading the writer looks its table up by
+    (`POSTDOC_TRAINING_HEADING`), and holds that table. The other callers of
+    the code's heading lookup still name none for C: the reconsider pass and
+    the #221 recovery keep a C record in the Appendix, as before C's
+    sub-points."""
+    gen = _render_training([_training()], supplementary_subpoints=True)
+    span = gen._subpoint_section_spans()["C"]
+    heading = gen.doc.element.body[span.start]
+    assert "".join(t.text or "" for t in heading.iter(qn("w:t"))).startswith("POSTDOCTORAL TRAINING")
+    (row,) = _subpoint_rows(gen)
+    assert span.start < list(gen.doc.element.body).index(row.getparent()) < span.end
+    assert WCMTemplateGenerator._get_wcm_section_header("C") == ""
+    assert gen._insert_reconsidered_segment("Example Pharmacy Residency, 2009-2010", "C") is False
+
+
+def test_the_training_span_is_not_an_earlier_heading_naming_training():
+    """A heading that names training before the postdoctoral one (a training
+    grants table) is neither the writer's table nor the span's start."""
+    gen = _generator(supplementary_subpoints=True)
+    gen.doc = Document()
+    gen.doc.add_paragraph("INSTITUTIONAL TRAINING GRANTS")
+    gen.doc.add_table(rows=1, cols=3)
+    heading = gen.doc.add_paragraph("C. POSTDOCTORAL TRAINING")
+    table = gen.doc.add_table(rows=1, cols=3)
+    entry = _training()
+    gen._fill_postdoc_training({"C": [entry]}, [entry])
+    gen._add_supplementary_subpoints({"C": [entry]})
+
+    body = list(gen.doc.element.body)
+    assert body[gen._subpoint_section_spans()["C"].start] is heading._p
+    (row,) = _subpoint_rows(gen)
+    assert row.getparent() is table._tbl
+
+
+def test_a_template_with_no_training_heading_places_no_training_prose():
+    """Without the heading neither the writer nor the span finds the
+    section: no row is written, and the prose goes under no other line."""
+    gen = _generator(supplementary_subpoints=True)
+    gen.doc = Document()
+    gen.doc.add_paragraph("A. PERSONAL DATA")
+    entry = _training()
+    gen._fill_postdoc_training({"C": [entry]}, [entry])
+    gen._add_supplementary_subpoints({"C": [entry]})
+
+    assert "C" not in gen._subpoint_section_spans()
+    assert _deleted_texts(gen) == ""
+
+
+def _render_grouped_training(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_postdoc_training(grouped, [e for group in grouped.values() for e in group])
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def _training_line(text, *positions):
+    """One source line stage 4 returned as a record per (type, hospital,
+    start), the entry's own fields being the last record's. Fan-out gives
+    every earlier record a line of its own and the last one the whole line."""
+    records = [{"training_type": ttype, "institution": site, "start_date": start}
+               for ttype, site, start in positions]
+    return {"element_idx_start": 663, "taxonomy_code": "C", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_INTERNSHIP = ("Example Surgical Internship", "Kestrel Institute", "2007")
+_RESIDENCY = (_TRAINING_TYPE, _TRAINING_SITE, "2009")
+_INTERNSHIP_LINE = "Example Surgical Internship, Kestrel Institute, 2007"
+_RESIDENCY_LINE = f"{_TRAINING_TYPE}, {_TRAINING_SITE}, 2009"
+_INTERNSHIP_PROSE = ("Rotated through the trauma, burns and vascular services under the "
+                     "chief of surgery")
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own position.
+    ([f"{_INTERNSHIP_LINE}. {_INTERNSHIP_PROSE}", _RESIDENCY_LINE],
+     [("Example Surgical Internship", f"{_INTERNSHIP_LINE}. {_INTERNSHIP_PROSE}")]),
+    ([_INTERNSHIP_LINE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}"],
+     [(_TRAINING_TYPE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}")]),
+    # They do not: which position the prose is about cannot be told, so neither takes it.
+    ([_INTERNSHIP_LINE, _TRAINING_PROSE, _RESIDENCY_LINE], []),
+])
+def test_prose_on_a_line_of_several_positions_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the position's line as well as its prose brings the type, hospital
+    and year along, and Reject All prints them a second time, under the row
+    that holds them (the shape every family has; #1205, 2026-10-09)."""
+    entry = _training_line("\t".join(segments), _INTERNSHIP, _RESIDENCY)
+    gen, grouped = _render_grouped_training([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["C"][-1] and len(grouped["C"]) == 2
+    assert [(_row_texts_of(row.getprevious())[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def test_generic_list_fan_out_children_of_positions_offer_nothing_their_fields_do_not_hold():
+    """Fan-out splits a record list stage 4 filed under a key the schema does
+    not define only when the fields hold every word of the text, and each
+    child's text is then the line built from its fields: nothing is prose.
+    With prose in the text the list is not split, the entry renders its own
+    fields, and the list is positions the row does not print
+    (`_own_training_line`): their lines would be offered as its prose."""
+    records = [{"training_type": _INTERNSHIP[0], "institution": _INTERNSHIP[1],
+                "start_date": _INTERNSHIP[2]},
+               {"training_type": _RESIDENCY[0], "institution": _RESIDENCY[1],
+                "start_date": _RESIDENCY[2]}]
+    for text, children in ((f"{_INTERNSHIP_LINE}\t{_RESIDENCY_LINE}", 2),
+                           (f"{_INTERNSHIP_LINE}\t{_RESIDENCY_LINE}\t{_TRAINING_PROSE}", 1)):
+        entry = {"element_idx_start": 664, "taxonomy_code": "C", "text": text,
+                 "extracted_fields": {"positions": copy.deepcopy(records)}}
+        gen, grouped = _render_grouped_training([entry], supplementary_subpoints=True)
+        assert len(grouped["C"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["C"])
+        assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("N1", "MENTORING PROGRAMS"), ("S0", "BIBLIOGRAPHY")])
+def test_a_position_rerouted_out_of_c_to_an_excluded_code_gets_no_sub_point(code, heading):
+    """N1 and S0 are excluded: a position rendered as either is that code's
+    record, so neither the training row of the same hospital nor any other
+    carries its prose."""
+    gen, grouped = _render_grouped_training([_later_training(), _rerouted(_training(), code, heading)],
+                                            supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[code]] == [113]
+    assert [e["element_idx_start"] for e in grouped["C"]] == [108]
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("I", "PROFESSIONAL ORGANIZATIONS"),
+                                           ("F2", "Board Certification"), ("D1", "ACADEMIC APPOINTMENTS")])
+def test_a_refused_reroute_keeps_the_training_rule(code, heading):
+    """A position rerouted to I or F2, whose span the heading lookup does not
+    find, or to D1, keeps its C code: their renderers would drop its type
+    (`_fields_lost_in_reroute`). It renders as a C row and its prose is a
+    deleted row under that row."""
+    gen, grouped = _render_grouped_training([_rerouted(_training(), code, heading)],
+                                            supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["C"]] == [113]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TRAINING_ROW
+
+
+def _residency_coded_as_a_role():
+    """A residency stage 3b coded O, naming only its hospital and start."""
+    return _training(code="O", ttype=None, end=None)
+
+
+def _residency_coded_as_a_degree():
+    """A residency stage 3b coded B1, naming no degree."""
+    return _training(code="B1", ttype=None, end=None)
+
+
+@pytest.mark.parametrize("make", [_residency_coded_as_a_role, _residency_coded_as_a_degree])
+def test_a_record_rerouted_into_c_follows_the_training_rule(make):
+    """A residency under the postdoctoral-training heading that stage 3b
+    coded O or B1 renders as a C row: its prose is a deleted row under that
+    row, recorded as C."""
+    gen, grouped = _render_grouped_training(
+        [_rerouted(make(), "C", "POSTDOCTORAL TRAINING")], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["C"]] == [113]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()).startswith("Postdoctoral")
+    assert _TRAINING_SITE in _row_text(row.getprevious())
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _TRAINING_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.code == "C"
+
+
+def test_a_position_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass touched the entry. What is left can still describe
+    what was withheld, so none of it is offered."""
+    withheld = _training()
+    withheld["_pii_withheld"] = True
+    gen = _render_training([_later_training(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_text(tr) == _TRAINING_ROW for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_position_dedup_drops_offers_its_prose_once_under_the_kept_row():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no row, so its
+    prose goes only under the row of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_training(idx=113), _training(idx=114)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["C"]) == 2 and len(kept["C"]) == 1
+    gen._fill_postdoc_training(kept, kept["C"])
+    gen._add_supplementary_subpoints(before)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _TRAINING_ROW
+    assert _deleted_texts(gen) == _TRAINING_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["C"][0]["element_idx_start"]
+
+
+def test_a_low_coverage_position_with_a_sub_point_is_not_also_sent_whole_to_the_appendix():
+    """The content-overflow pass skips an entry whose prose is a sub-point.
+    It reads the entry the row's comment hook recorded, so the writer hands
+    that hook the entry stage 6 grouped, not a copy of it."""
+    long_prose = "\t".join(f"{_TRAINING_PROSE}, block {n} of the rotation schedule" for n in range(9))
+    entry = _training(prose=long_prose)
+    entry["extraction_coverage"] = {"extraction_coverage_percent": 10.0}
+    assert len(entry["text"]) > 1000
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_postdoc_training({"C": [entry]}, [entry])
+    assert [queued for queued, _para, _code in gen._overflow_entries] == [entry]
+    assert gen._overflow_entries[0][0] is entry
+    gen._place_unrendered_prose({"C": [entry]})
+
+    assert len(_subpoint_rows(gen)) == 1
+    assert gen._appendix_pending == []
+
+
+def test_the_doctor_matches_a_training_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier residency's
+    sub-point under its own index and C, and the doctor's per-entry match
+    counts it for that entry, not for the later residency that shares its
+    words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+
+    doc, placements = _stage6_render(tmp_path, monkeypatch, [_later_training(), _training()],
+                                     uid="T1205C")
+    assert placements == [[_TRAINING_PROSE]]
+    sidecar = json.loads((tmp_path / "T1205C_render_warnings.json").read_text())
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    assert [(p["element_idx_start"], p["code"]) for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(113, "C")]
+    subpoints = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_TRAINING_PROSE, subpoints, element_idx=113)
+    assert not offered_as_subpoint(_TRAINING_PROSE, subpoints, element_idx=108)
+
+
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_training_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, protect, value):
+    """The PII pass drops a field named for protected data and marks the
+    entry withheld; no scope withholds a phone number in the middle of a
+    line (#1205 review of O). The same position without them still has its
+    sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [_training()])
+    assert placements == [[_TRAINING_PROSE]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
+                                     [protect(_training(), _TRAINING_PROSE)])
     assert placements == []
     assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
 

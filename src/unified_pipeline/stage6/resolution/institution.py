@@ -150,6 +150,12 @@ def _names_a_foreign_country(enrichment: Mapping) -> bool:
             and code.strip().upper() != _US_COUNTRY_CODE)
 
 
+# The stage-4 field `_get_institution_location` falls back to when stage 5b
+# found no location. The #1205 sub-point pass reads it as a value the
+# postdoctoral-training row prints (`supplementary._POSTDOC_PLAIN_FIELDS`).
+FALLBACK_LOCATION_FIELD = 'location'
+
+
 def _get_institution_location(entry: dict) -> tuple[str, bool]:
     """Get formatted location string from institution enrichment data.
 
@@ -256,9 +262,9 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
     # Fall back to extracted_fields.location (not from enrichment) -- unless
     # stage 5b wrote it there from the lookup just rejected (`enriched_fields`).
     fields = entry.get('extracted_fields') or {}
-    if not names_it and 'location' in (entry.get('enriched_fields') or ()):
+    if not names_it and FALLBACK_LOCATION_FIELD in (entry.get('enriched_fields') or ()):
         return ('', False)
-    return (fields.get('location', ''), False)  # False = not from enrichment
+    return (fields.get(FALLBACK_LOCATION_FIELD, ''), False)  # False = not from enrichment
 
 
 # The Postdoctoral Training codes (postdoc_training.POSTDOC_TRAINING_CODES,
