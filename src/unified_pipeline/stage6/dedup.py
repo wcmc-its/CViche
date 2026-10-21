@@ -27,6 +27,7 @@ from .fan_out import (
     LAST_STAGE4_RECORD,
 )
 from .normalization import _squash
+from .normalization.authors import _letters, _one_edit_apart
 from .normalization.publication import ResolvedPublication, resolve_publication
 from .parsing import (
     _MONTH_NAME_TO_NUM,
@@ -1466,12 +1467,63 @@ def _first_author(pub: ResolvedPublication) -> str:
     return match.group(0).lower() if match else ''
 
 
+# The key kinds that name a paper by an identifier. A titled commentary carries
+# the paper's own DOI or PMID ("Editorial: <its title>", by another author),
+# and a Part I and Part II can share one DOI, so on these two kinds the first
+# author and the part number still tell two records apart (#446).
+_IDENTIFIER_KEY_KINDS = frozenset({'pmid', 'doi'})
+
+# Where the first author's name ends in an author list: the first comma or
+# semicolon, or an "and" / "&" before a second author.
+_FIRST_AUTHOR_END_RE = re.compile(r'[,;]|\s(?:and|&)\s', re.IGNORECASE)
+
+# An all-capitals word this short is a run of initials ("JA", "JAB"), not a
+# surname; a mixed-case one ("Li", "Wu") is read as a name.
+_INITIALS_MAX_LETTERS = 3
+
+
+def _first_author_names(pub: ResolvedPublication) -> set[str]:
+    """The first author's name words, initials left out, as casefolded letters.
+
+    Order-blind, so "J Xander" and "Xander J" both give {"xander"} and
+    "Jane A. Xander" gives {"jane", "xander"}. Empty when no word can be read
+    as a name, which then tells no two copies apart."""
+    first = _FIRST_AUTHOR_END_RE.split(pub.authors.strip(), maxsplit=1)[0]
+    words = (re.sub(r'[^\w]', '', word) for word in first.split())
+    return {_letters(word) for word in words
+            if _letters(word) and not (word.isupper() and len(word) <= _INITIALS_MAX_LETTERS)}
+
+
+def _first_authors_differ(first: ResolvedPublication, second: ResolvedPublication) -> bool:
+    """Both copies name a first author, and no name word of one is a name word
+    of the other or one letter off it. A CV's own spelling ("Xandr" for
+    "Xander") or name order is not a second author (RXYBVF)."""
+    names = _first_author_names(first), _first_author_names(second)
+    return bool(names[0] and names[1]) and not any(
+        a == b or _one_edit_apart(a, b) for a in names[0] for b in names[1])
+
+
+def _part_numbers_differ(first: tuple[dict, ResolvedPublication],
+                         second: tuple[dict, ResolvedPublication]) -> bool:
+    """The printed titles, or the CV's own titles, name different part numbers
+    (`_part_numbers`): a Part I and a Part II under one DOI."""
+    (first_entry, first_pub), (second_entry, second_pub) = first, second
+    return (_part_numbers(first_pub.title) != _part_numbers(second_pub.title)
+            or _part_numbers(_source_title(first_entry))
+            != _part_numbers(_source_title(second_entry)))
+
+
+def _source_title(entry: dict) -> str:
+    """The title stage 4 read off the CV itself ('' when it read none)."""
+    fields = entry.get('extracted_fields') or {}
+    title = fields.get('title') or fields.get('chapter_title')
+    return title if isinstance(title, str) else ''
+
+
 def _source_title_words(entry: dict) -> set[str]:
     """The significant words of the title stage 4 read off the CV itself,
     before any PubMed title replaced it."""
-    fields = entry.get('extracted_fields') or {}
-    title = fields.get('title') or fields.get('chapter_title')
-    return _significant_words(title) if isinstance(title, str) else set()
+    return _significant_words(_source_title(entry))
 
 
 def _titles_disagree(first: set[str], second: set[str]) -> bool:
@@ -1496,7 +1548,10 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
     one title by different groups, and a letter and its reply share a title,
     journal and year (farm replay, 63 runs). A PMID or DOI match ignores those
     three: a CV's own volume typo or author spelling is not a second paper
-    (RXYBVF)."""
+    (RXYBVF). It still refuses when the first authors share no name
+    (`_first_authors_differ`) or the part numbers differ
+    (`_part_numbers_differ`): a titled commentary by another author under the
+    paper's DOI, or a Part I and Part II under one DOI (#446)."""
     if kind == 'citation':
         return False
     (first_entry, first_pub), (second_entry, second_pub) = first, second
@@ -1510,6 +1565,9 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
         pairs += [(_alnum(first_pub.volume), _alnum(second_pub.volume)),
                   (_alnum(first_pub.pages), _alnum(second_pub.pages)),
                   (_first_author(first_pub), _first_author(second_pub))]
+    if kind in _IDENTIFIER_KEY_KINDS and (_first_authors_differ(first_pub, second_pub)
+                                          or _part_numbers_differ(first, second)):
+        return True
     return any(a and b and a != b for a, b in pairs)
 
 
