@@ -611,8 +611,8 @@ _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1', 'K1', 'K4', 'R
 # Read by `_subpoint_section_spans` only. `_insert_reconsidered_segment` (the
 # reconsider pass and the #221 recovery) reads that lookup too, and a C
 # mapping there would move a recovered C record out of the Appendix into the
-# section, a recovery change this pass does not make (`_insert_reconsidered_
-# segment` made 0 C calls over the 102 farm renders).
+# section, a recovery change this pass does not make (it made 0 C calls over
+# the 102 farm renders).
 _SUBPOINT_SECTION_HEADERS = MappingProxyType(
     {code: POSTDOC_TRAINING_HEADING for code in supplementary.POSTDOCTORAL_CODES})
 

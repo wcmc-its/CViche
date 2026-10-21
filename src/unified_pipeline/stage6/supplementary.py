@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import NamedTuple
 
 from docx.document import Document
@@ -96,6 +96,7 @@ from .formatting import (
     plain_entry_level,
     presentation_date_spans,
 )
+from .formatting.dates import _span_years
 from .normalization import _pii_fragments, _squash
 from .normalization.pii import _BARE_PHONE_SHAPE
 from .parsing import _looks_like_multiple_records, _refold_shattered
@@ -114,6 +115,7 @@ from .render_check import (
     _norm,
     _record_rendered,
 )
+from .resolution.institution import FALLBACK_LOCATION_FIELD
 
 #: The switch both drivers read. Unset, it is `SUBPOINT_FLAG_DEFAULT` (on); an
 #: off word (`_SUBPOINT_OFF_VALUES`, "0" for ops) renders exactly as before the
@@ -247,14 +249,15 @@ PRESENTATION_CODES = frozenset({'R'})
 #: study and a role folded in, the institution and its location, the dates),
 #: so a sub-point is a deleted row under the position's row. The row prints
 #: stage 4's off-schema type, field of study and location when the schema's
-#: (and stage 5b's) are empty (`POSTDOC_TYPE_FIELDS` and the two after it),
-#: which a line mostly restating is not offered for. Only the one row
+#: (and stage 5b's) are empty (`_training_row_values`), which a line mostly
+#: restating is not offered for. Only the one row
 #: the writer recorded for that entry can anchor it (`_own_rows`, the
 #: row-receipt ledger, taken with no word test): two residencies at one
 #: hospital, or a residency and the combined residency-and-fellowship row
 #: above it, share their rows' words. The last of stage 4's records offers
 #: only its own segment of the line, and a line holding several dated
-#: records offers none, nor does an entry stage 4 listed positions under
+#: records offers none, nor does an entry stage 4 listed positions under,
+#: nor a line holding a year outside the span its row prints
 #: (`_own_training_line`). The section is found by the
 #: heading its writer looks up (the generator's `_SUBPOINT_SECTION_HEADERS`):
 #: `_get_wcm_section_header` names none for C. C1-C3 render in the same table
@@ -403,24 +406,28 @@ _PRESENTATION_ROW_FIELDS = tuple(
 #: The fields the postdoctoral-training writer reads a position's type cell
 #: from, each in its one precedence: its type (the schema's, then stage 4's
 #: off-schema name, then the code's default) and the field of study it adds
-#: (stage 4's off-schema name, then the schema's). The role it folds in, the
-#: institution and the dates are schema fields, which `_RENDERED_FIELDS`
-#: lists. The writer reads these from here, so the row and `_value_tokens`
-#: cannot drift apart.
+#: (stage 4's off-schema name, then the schema's). The cell prints the first
+#: of each that holds a value and no other (`training_cell_value`), which
+#: the writer reads and `_value_tokens` counts.
 POSTDOC_TYPE_FIELDS = ('training_type', 'title')
 POSTDOC_FIELD_OF_STUDY_FIELDS = ('field_of_study', 'specialty')
-#: The location the institution cell prints when stage 5b found none:
-#: `resolution._get_institution_location`'s fallback, which that docx-free
-#: layer reads by its own literal (it cannot import this module). A test
-#: renders it into the row.
-_POSTDOC_LOCATION_FIELD = 'location'
-#: The off-schema ones among them: `_value_tokens` adds them for C.
-_POSTDOC_ROW_FIELDS = tuple(name for name in (*POSTDOC_TYPE_FIELDS, *POSTDOC_FIELD_OF_STUDY_FIELDS,
-                                              _POSTDOC_LOCATION_FIELD)
-                            if name not in _RENDERED_FIELDS['C'])
+#: The start and the end the Dates cell prints (`format_date_range`). The
+#: writer reads them from here, and so does `_dates_another_position`.
+POSTDOC_DATE_FIELDS = ('start_date', 'end_date')
+#: The other fields the row prints, whatever the rest hold: C's rendered
+#: fields outside the two aliased cells (the role it folds into the type
+#: cell, the institution, the dates) and the location the institution cell
+#: prints when stage 5b found none (`resolution`'s fallback field).
+_POSTDOC_PLAIN_FIELDS = (*sorted(_RENDERED_FIELDS['C'] - {*POSTDOC_TYPE_FIELDS,
+                                                          *POSTDOC_FIELD_OF_STUDY_FIELDS}),
+                         FALLBACK_LOCATION_FIELD)
 #: The fields naming a training position, as a record stage 4 listed under
 #: one of an entry's fields names it (`_own_training_line`). Dates name none.
 _POSTDOC_RECORD_FIELDS = (*POSTDOC_TYPE_FIELDS, *POSTDOC_FIELD_OF_STUDY_FIELDS, 'institution')
+#: A year a training position's line holds (`_dates_another_position`): one
+#: of this century or the last, standing alone ("2006-2009", "06/2012"), not
+#: the digits of a licence or phone number.
+_LINE_YEAR_RE = re.compile(rf'\b{_RECORD_YEAR}\b')
 #: A part of a talk's line split before each date it holds, so a date
 #: inside the part can be read as opening a record (`_opens_dated_record`),
 #: as one opening the part is: a CV that writes its talks in one paragraph
@@ -601,13 +608,30 @@ class _Haystack(NamedTuple):
     line_tokens: list[set[str]]
 
 
+def training_cell_value(fields: Mapping, names: Sequence[str]) -> object:
+    """What a training row's cell prints of its aliases `names`
+    (`POSTDOC_TYPE_FIELDS`, `POSTDOC_FIELD_OF_STUDY_FIELDS`): the value of the
+    first that holds one, None when none does."""
+    return next((fields[name] for name in names if fields.get(name)), None)
+
+
+def _training_row_values(fields: Mapping) -> list[object]:
+    """The values a training position's row prints: of each aliased cell
+    only the alias it prints (`training_cell_value`), so a fragment restating
+    one it does not print is not taken for the row, then the fields it
+    prints whatever the rest hold (`_POSTDOC_PLAIN_FIELDS`)."""
+    return [*(training_cell_value(fields, names)
+              for names in (POSTDOC_TYPE_FIELDS, POSTDOC_FIELD_OF_STUDY_FIELDS)),
+            *(fields.get(name) for name in _POSTDOC_PLAIN_FIELDS)]
+
+
 def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
     (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
     leadership role `_LEADERSHIP_ROW_FIELDS`, for a committee
-    `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`, for
-    a training position `_POSTDOC_ROW_FIELDS`), or of every scalar field for
-    a code rendered from its text."""
+    `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`; for
+    a training position, what its row prints, `_training_row_values`), or of
+    every scalar field for a code rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
@@ -620,9 +644,8 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
         names = (*names, *_ADMINISTRATIVE_ROW_FIELDS)
     elif code in PRESENTATION_CODES:
         names = (*names, *_PRESENTATION_ROW_FIELDS)
-    elif code in POSTDOCTORAL_CODES:
-        names = (*names, *_POSTDOC_ROW_FIELDS)
-    values = [fields.get(name) for name in names]
+    values = (_training_row_values(fields) if code in POSTDOCTORAL_CODES
+              else [fields.get(name) for name in names])
     return set().union(*(_tokens(str(value)) for value in values
                          if isinstance(value, (str, int, float)) and value))
 
@@ -942,16 +965,45 @@ def _own_talk_line(entry: Mapping, code: str) -> str:
     return own
 
 
+def _dates_another_position(line: str, fields: Mapping) -> bool:
+    """Whether `line` holds a year outside the span the position's Dates cell
+    prints (`POSTDOC_DATE_FIELDS`, read as `_span_years` reads a span: a
+    running one has no last year, one with no end is its start's year, one
+    with no start its end's): another position's, wherever its part dates
+    it, at its start, its end or inside it -- the residency before the
+    fellowship, or the fellowship after it, "<fellowship>, <hospital>,
+    2006-2009". A row printing no year shows no span, so any year is
+    another's. A year inside the span (a chief residency year) is the
+    position's own. Not seen: another position held within the span, or
+    named with no year."""
+    start, end = (fields.get(name) for name in POSTDOC_DATE_FIELDS)
+    span = _span_years(start, end) or _span_years(end, end)
+    years = [int(year) for year in _LINE_YEAR_RE.findall(line)]
+    if span is None:
+        return bool(years)
+    first, last = span
+    return any(not first <= year <= last for year in years)
+
+
 def _own_training_line(entry: Mapping) -> str:
     """The text a training position's prose is read from (`_own_record_line`),
-    and nothing when stage 4 listed positions under one of its fields
-    (`_lists_records`, `_POSTDOC_RECORD_FIELDS`): the writer prints the
-    entry's own fields only, so the list's positions are records its row does
-    not print, which would be offered as its prose, under its row."""
+    and nothing when it holds another position than the one its row prints,
+    as that position's text would be offered as this one's prose, under its
+    row:
+
+    - stage 4 listed positions under one of its fields (`_lists_records`,
+      `_POSTDOC_RECORD_FIELDS`): the writer prints the entry's own fields
+      only;
+    - it holds a year outside the span the row prints
+      (`_dates_another_position`). The #221 recovery reads a sub-point line
+      as rendered, so that position would be in the accepted document
+      nowhere, and not recovered either (#1205 comment 6275741663)."""
     fields = entry.get('extracted_fields')
-    if isinstance(fields, Mapping) and _lists_records(fields, _POSTDOC_RECORD_FIELDS):
+    fields = fields if isinstance(fields, Mapping) else {}
+    own = _own_record_line(entry)
+    if _lists_records(fields, _POSTDOC_RECORD_FIELDS) or _dates_another_position(own, fields):
         return ''
-    return _own_record_line(entry)
+    return own
 
 
 def _prose_text(code: str, entry: Mapping,
@@ -1045,7 +1097,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     (`_own_committee_row`). A talk's is read the same way, and none is
     offered when its line holds another talk (`_own_talk_line`). A training
     position's is read as a degree's is, and none is offered when stage 4
-    listed positions under its fields (`_own_training_line`).
+    listed positions under its fields or its line holds a year outside the
+    span its row prints (`_own_training_line`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing

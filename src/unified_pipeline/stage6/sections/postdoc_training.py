@@ -61,7 +61,12 @@ from ..resolution import (
     _recover_institution_from_nearby_entries,
 )
 from ..sorting import sort_entries_reverse_chronological
-from ..supplementary import POSTDOC_FIELD_OF_STUDY_FIELDS, POSTDOC_TYPE_FIELDS
+from ..supplementary import (
+    POSTDOC_DATE_FIELDS,
+    POSTDOC_FIELD_OF_STUDY_FIELDS,
+    POSTDOC_TYPE_FIELDS,
+    training_cell_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,18 +171,18 @@ def _normalize_training_entry(
     # A fused multi-record entry extracts these as a list, one item per
     # record (corpus CV FIHL8A), not a string -- join before any string
     # method sees it.
-    # Each cell's aliases, in order, are `supplementary`'s, so the #1205
-    # sub-point pass counts what this row prints (`_value_tokens`).
+    # Each cell's aliases, in order, and the alias it prints are
+    # `supplementary`'s, so the #1205 sub-point pass counts what this row
+    # prints and no other alias (`_value_tokens`).
     training_type = _join_if_list(
-        next((fields[name] for name in POSTDOC_TYPE_FIELDS if fields.get(name)), None)
+        training_cell_value(fields, POSTDOC_TYPE_FIELDS)
         or DEFAULT_TRAINING_TYPES.get(taxonomy_code, FALLBACK_TRAINING_TYPE))
     # Replace tabs with comma-space for cleaner display
     if '\t' in training_type:
         training_type = ', '.join(part.strip()
                                   for part in training_type.split('\t')
                                   if part.strip())
-    field_of_study = _join_if_list(
-        next((fields[name] for name in POSTDOC_FIELD_OF_STUDY_FIELDS if fields.get(name)), None))
+    field_of_study = _join_if_list(training_cell_value(fields, POSTDOC_FIELD_OF_STUDY_FIELDS))
     if field_of_study and field_of_study.casefold() not in training_type.casefold():
         training_type = (f"{training_type}, {field_of_study}"
                          if training_type else field_of_study)
@@ -201,6 +206,7 @@ def _normalize_training_entry(
     location, location_is_enriched = _get_institution_location(entry)
     if _location_already_in_institution(location, institution):
         location = ''
+    start_date, end_date = (fields.get(name, '') for name in POSTDOC_DATE_FIELDS)
 
     return PostdocTrainingRecord(
         taxonomy_code=taxonomy_code,
@@ -209,8 +215,7 @@ def _normalize_training_entry(
         location=location,
         location_is_enriched=location_is_enriched,
         # Dates - format according to C/C1/C2/C3 requirements (mm/yy - mm/yy)
-        dates=format_date_range(fields.get('start_date', ''),
-                                fields.get('end_date', ''), taxonomy_code,
+        dates=format_date_range(start_date, end_date, taxonomy_code,
                                 entry.get('text', '')),
         source_entry=entry,
     )

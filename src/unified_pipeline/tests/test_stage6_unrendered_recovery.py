@@ -5406,15 +5406,22 @@ def _position_with_only(field, marker):
 
 
 def test_every_training_row_field_the_pass_counts_is_printed_in_the_training_row():
-    """`supplementary._POSTDOC_ROW_FIELDS`, the off-schema names among the
-    fields the writer reads its cells from (`_RENDERED_FIELDS` marks schema
-    fields only): each one, alone on an entry, reaches the row."""
+    """The off-schema names among the fields `_value_tokens` counts for a
+    training position (`_RENDERED_FIELDS` marks schema fields only): each
+    one, alone on an entry, is counted and reaches the row."""
     from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
 
-    assert supplementary._POSTDOC_ROW_FIELDS
-    for field in supplementary._POSTDOC_ROW_FIELDS:
+    off_schema = [name for name in (*supplementary.POSTDOC_TYPE_FIELDS,
+                                    *supplementary.POSTDOC_FIELD_OF_STUDY_FIELDS,
+                                    *supplementary._POSTDOC_PLAIN_FIELDS)
+                  if name not in _RENDERED_FIELDS["C"]]
+    assert off_schema == ["title", "field_of_study", "location"]
+    for field in off_schema:
         marker = f"Zq{field}Z"
-        gen = _render_training([_position_with_only(field, marker)], supplementary_subpoints=True)
+        entry = _position_with_only(field, marker)
+        assert supplementary._tokens(marker) <= supplementary._value_tokens(entry, "C"), field
+        gen = _render_training([entry], supplementary_subpoints=True)
         assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
 
 
@@ -5427,16 +5434,36 @@ def test_every_field_the_training_row_prints_is_one_the_pass_counts():
     from unified_pipeline.stage6 import supplementary
     from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
 
-    counted = _RENDERED_FIELDS["C"] | set(supplementary._POSTDOC_ROW_FIELDS)
     names = set().union(*(_RENDERED_FIELDS[code] for code in
                           ("B1", "O", "D1", "D2", "K2", "N3B") if code in _RENDERED_FIELDS),
                         supplementary.POSTDOC_TYPE_FIELDS, supplementary.POSTDOC_FIELD_OF_STUDY_FIELDS,
                         {"location", "department", "mentor", "organization", "position", "name"})
     for field in sorted(names):
         marker = f"Zq{field}Z"
-        gen = _render_training([_position_with_only(field, marker)], supplementary_subpoints=True)
+        entry = _position_with_only(field, marker)
+        gen = _render_training([entry], supplementary_subpoints=True)
         printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
-        assert not printed or field in counted, field
+        counted = supplementary._tokens(marker) <= supplementary._value_tokens(entry, "C")
+        assert not printed or counted, field
+
+
+_SHADOWED_ALIAS = "Saltmarsh restoration and estuarine sediment track"
+
+
+@pytest.mark.parametrize("printed, shadowed", [("training_type", "title"),
+                                               ("field_of_study", "specialty")])
+def test_a_line_restating_the_alias_its_row_does_not_print_is_offered(printed, shadowed):
+    """A cell prints the first of its aliases holding a value
+    (`training_cell_value`). The other one's words are in no line of the
+    document, so a line restating it is the position's prose, not its row."""
+    entry = _training(prose=_SHADOWED_ALIAS, **{printed: "Example Geochemistry",
+                                                 shadowed: _SHADOWED_ALIAS})
+    gen = _render_training([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert "Example Geochemistry" in _row_text(row.getprevious())
+    assert _SHADOWED_ALIAS not in _row_text(row.getprevious())
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _SHADOWED_ALIAS
 
 
 def _positions_each_opening_with_their_dates():
@@ -5449,21 +5476,39 @@ def _positions_each_opening_with_their_dates():
                  "Research topic: nutrient cycling in tidal marsh sediments and their microbes")}
 
 
+def _a_position_then_the_next_dated_at_its_end():
+    """A residency, then on the same line the fellowship after it, its
+    dates ending its part; stage 4 returned the residency (#1205 review)."""
+    return _training(prose=None) | {
+        "text": (f"{_TRAINING_TYPE}, {_TRAINING_SITE}, 2009-2010\t"
+                 "Example Critical Care Fellowship, Kestrel Institute, 2010-2013")}
+
+
+def _a_position_then_the_next_dated_in_months():
+    """The same, the fellowship's dates in months."""
+    return _training(prose=None) | {
+        "text": (f"{_TRAINING_TYPE}, {_TRAINING_SITE}, 2009-2010\t"
+                 "Example Critical Care Fellowship, Kestrel Institute, July 2010 - June 2013")}
+
+
+@pytest.mark.parametrize("positions", [_positions_each_opening_with_their_dates,
+                                       _a_position_then_the_next_dated_at_its_end,
+                                       _a_position_then_the_next_dated_in_months])
 @pytest.mark.parametrize("flag", [True, False])
-def test_a_line_of_several_dated_positions_offers_none_and_its_records_are_recovered(flag):
+def test_a_line_of_several_dated_positions_offers_none_and_its_records_are_recovered(flag, positions):
     """#1205 comment 6275741663: the #221 recovery reads every sub-point
     line as rendered, so a position offered as another's prose would be in
     the accepted document nowhere and still not be recovered. None is
     offered, and the recovery re-emits the same lines with sub-points on as
-    off."""
-    entry = _positions_each_opening_with_their_dates()
+    off, wherever the other position's part puts its dates."""
+    entry = positions()
     gen = _render_training([entry], supplementary_subpoints=flag)
     assert len(gen._row_receipts.elements_for(entry)) == 1
     assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
 
     gen._recover_unrendered_records({"C": [entry]})
-    off = _render_training([_positions_each_opening_with_their_dates()], supplementary_subpoints=False)
-    off._recover_unrendered_records({"C": [_positions_each_opening_with_their_dates()]})
+    off = _render_training([positions()], supplementary_subpoints=False)
+    off._recover_unrendered_records({"C": [positions()]})
 
     assert gen.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"]
     assert _texts_of(gen.doc.element.body) == _texts_of(off.doc.element.body)

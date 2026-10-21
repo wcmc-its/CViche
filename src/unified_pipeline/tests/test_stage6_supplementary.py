@@ -1213,7 +1213,7 @@ def test_plan_takes_a_training_positions_one_own_row_whatever_its_words():
     assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
 
 
-@pytest.mark.parametrize("field", sp._POSTDOC_ROW_FIELDS)
+@pytest.mark.parametrize("field", ["title", "field_of_study", "location"])
 def test_a_training_rows_fallback_fields_count_as_its_rendered_values(field):
     # The row prints them when the schema's are empty, though
     # `_RENDERED_FIELDS` cannot list them. Another code's are its own.
@@ -1222,15 +1222,37 @@ def test_a_training_rows_fallback_fields_count_as_its_rendered_values(field):
     assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="H"), "H")
 
 
-def test_the_training_row_fields_are_the_writers_cells_and_their_off_schema_names():
-    # The writer's precedence per cell, and the names the schema does not define.
+def test_the_training_row_fields_are_the_writers_cells_and_its_other_fields():
+    # The writer's precedence per cell, read from here, and the fields it
+    # prints whatever the rest hold: C's rendered fields outside the two
+    # cells, and `resolution`'s location fallback.
+    from unified_pipeline.stage6.resolution import institution
     from unified_pipeline.stage6.sections import postdoc_training
 
     assert sp.POSTDOC_TYPE_FIELDS == ("training_type", "title")
     assert sp.POSTDOC_FIELD_OF_STUDY_FIELDS == ("field_of_study", "specialty")
-    assert sp._POSTDOC_ROW_FIELDS == ("title", "field_of_study", "location")
+    assert sp.POSTDOC_DATE_FIELDS == ("start_date", "end_date")
+    assert sp._POSTDOC_PLAIN_FIELDS == ("end_date", "institution", "role", "start_date", "location")
     assert postdoc_training.POSTDOC_TYPE_FIELDS is sp.POSTDOC_TYPE_FIELDS
     assert postdoc_training.POSTDOC_FIELD_OF_STUDY_FIELDS is sp.POSTDOC_FIELD_OF_STUDY_FIELDS
+    assert postdoc_training.POSTDOC_DATE_FIELDS is sp.POSTDOC_DATE_FIELDS
+    assert postdoc_training.training_cell_value is sp.training_cell_value
+    assert sp.FALLBACK_LOCATION_FIELD is institution.FALLBACK_LOCATION_FIELD
+
+
+@pytest.mark.parametrize("cell", [sp.POSTDOC_TYPE_FIELDS, sp.POSTDOC_FIELD_OF_STUDY_FIELDS])
+def test_a_training_cell_counts_only_the_alias_it_prints(cell):
+    # The cell prints the first alias holding a value; the other one's words
+    # are not the row's, so a fragment restating them is not held back.
+    printed, shadowed = cell
+    entry = _training(**{printed: "Estuarine Geochemistry", shadowed: "Saltmarsh Restoration Track"})
+    assert sp.training_cell_value(entry["extracted_fields"], cell) == "Estuarine Geochemistry"
+    tokens = sp._value_tokens(entry, "C")
+    assert {"estuarine", "geochemistry"} <= tokens and not {"saltmarsh", "restoration"} & tokens
+    entry["extracted_fields"][printed] = ""
+    assert sp.training_cell_value(entry["extracted_fields"], cell) == "Saltmarsh Restoration Track"
+    assert {"saltmarsh", "restoration"} <= sp._value_tokens(entry, "C")
+    assert sp.training_cell_value({}, cell) is None
 
 
 @pytest.mark.parametrize("segments, index, read", [
@@ -1251,10 +1273,11 @@ def test_a_training_line_holding_several_dated_records_offers_none():
     # and followed by its prose; stage 4 returned the fellowship. Which one a
     # prose line is about cannot be told.
     fellowship = "2010-2012 Example Critical Care Fellowship, Norvale General Hospital"
-    own = _training(f"{fellowship}\t{PROSE}")
+    dates = {"start_date": "2010-07", "end_date": "2012-06"}
+    own = _training(f"{fellowship}\t{PROSE}", **dates)
     assert [p.paragraphs for p in _plan_training(own)] == [(PROSE,)]
     two = _training(f"2007-2010 {_RESIDENCY}, Norvale General Hospital\t{OTHER_PROSE}\t"
-                    f"{fellowship}\t{PROSE}")
+                    f"{fellowship}\t{PROSE}", **dates)
     assert sp._own_record_line(two) == ""
     assert _plan_training(two) == []
 
@@ -1281,9 +1304,48 @@ def test_a_list_of_positions_under_a_field_offers_none(fields, listed):
 
 @pytest.mark.parametrize("fields", [None, ["Example Surgical Internship"], "Residency"])
 def test_a_training_position_whose_fields_are_not_a_mapping_reads_its_own_line(fields):
-    text = f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t{PROSE}"
+    # Its row prints no dates, so a line holding a year holds no year it
+    # prints (`_dates_another_position`).
+    text = f"{_RESIDENCY}\tNorvale General Hospital\t{PROSE}"
     entry = {"taxonomy_code": "C", "text": text, "extracted_fields": fields}
     assert sp._own_training_line(entry) == text
+    assert sp._own_training_line(dict(entry, text=f"{text}\t2009-2010")) == ""
+
+
+_FELLOWSHIP = "Example Critical Care Fellowship, Kestrel Institute"
+
+
+@pytest.mark.parametrize("line, start, end, offered", [
+    # Another position, its dates ending its part, as a range or in months,
+    # or inside it; or the one before, opening it.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-2010\t{_FELLOWSHIP}, 2010-2013", "2009-07", "2010-06", False),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-2010\t{_FELLOWSHIP}, July 2010 - June 2013",
+     "2009-07", "2010-06", False),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-2010\t{_FELLOWSHIP} (2010-2013)", "2009-07", "2010-06", False),
+    (f"2006-2009 {_FELLOWSHIP}\t{_RESIDENCY}, Norvale General Hospital, 2009-2010", "2009-07", "2010-06", False),
+    # A year inside the span is the position's own: a chief year, its own
+    # dates written twice, a running position's later year.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2008-2012\tChief resident -2011-12- {PROSE}",
+     "2008-07", "2012-06", True),
+    (f"{_RESIDENCY} July 2009 to July 2010\tNorvale General Hospital, 2009-July 2010- {PROSE}",
+     "July 2009", "July 2010", True),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009-present\tChief resident 2013, {PROSE}", "2009", "present", True),
+    # No end: the start's year alone; no start: the end's.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2009\t{_FELLOWSHIP}, 2010", "2009", "", False),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2010\t{PROSE}", "", "2010-06", True),
+    (f"{_RESIDENCY}, Norvale General Hospital, 2010\t{_FELLOWSHIP}, 2007", "", "2010-06", False),
+    # No dates: any year is another position's. Digits of a number are none.
+    (f"{_RESIDENCY}, Norvale General Hospital, 2010\t{PROSE}", "", "", False),
+    (f"{_RESIDENCY}, Norvale General Hospital\tLicence: Q207731, 5550192837\t{PROSE}", "", "", True),
+], ids=["ending", "months", "inside", "opening", "chief_year", "written_twice", "running",
+        "no_end", "no_start", "no_start_other", "no_dates", "number"])
+def test_a_training_line_holding_a_year_outside_its_rows_span_offers_none(line, start, end, offered):
+    # The #221 recovery reads a sub-point line as rendered, so another
+    # position offered as this one's prose would be in the accepted document
+    # nowhere (#1205 review).
+    entry = _training(line, start_date=start, end_date=end)
+    assert sp._own_training_line(entry) == (line if offered else "")
+    assert bool(_plan_training(entry)) is offered
 
 
 def test_plan_offers_no_prose_of_a_training_position_the_pii_pass_withheld():
