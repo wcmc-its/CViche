@@ -61,7 +61,9 @@ institutional leadership (what a role oversaw or achieved), then P
 institutional committees (a committee's remit, the member's part on it),
 then R invited presentations (the audience, the session and its
 co-presenters, what the owner organized), then C postdoctoral training (the
-mentor, advisor or program director, the research topic, the duties). The
+mentor, advisor or program director, the research topic, the duties), then
+I professional memberships (the offices and sub-roles held within the
+society, what the membership entailed). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -190,9 +192,8 @@ EDUCATION_CODES = frozenset({'B1'})
 #: records offers only its own segment of the line, and a line holding
 #: several dated records offers none (`_own_record_line`). An entry rerouted
 #: to another code before rendering is grouped under that code and follows
-#: its rule (N1 is excluded, and F2 and I are not offered: their heading
-#: lookup finds the title block, not their section); one rerouted into O
-#: follows this one.
+#: its rule (N1 is excluded, and F2 is not offered: its heading lookup finds
+#: the title block, not its section); one rerouted into O follows this one.
 LEADERSHIP_CODES = frozenset({'O'})
 #: Institutional administrative activities and committee service (WCM table
 #: 21): what the committee or activity did and what the member did on it --
@@ -203,7 +204,7 @@ LEADERSHIP_CODES = frozenset({'O'})
 #: sub-point is a deleted row under the committee's row. The row prints stage
 #: 4's off-schema committee names when the schema's is empty
 #: (`ADMINISTRATIVE_ACTIVITY_FIELDS`). Only the one row the writer recorded
-#: for that entry can anchor it (`_own_committee_row`, the row-receipt
+#: for that entry can anchor it (`_one_own_row`, the row-receipt
 #: ledger): committees of one institution, or held under one title, share
 #: their rows' words. An entry holding several records gets none, as which of
 #: them a line is about cannot be shown: one the writer prints as several
@@ -214,9 +215,8 @@ LEADERSHIP_CODES = frozenset({'O'})
 #: naming no committee and so printing no row (#256). The last of stage
 #: 4's records offers only its own segment of the line. An entry rerouted to
 #: another code before rendering is grouped under that code and follows its
-#: rule (N1 is excluded, and F2 and I are not offered: their heading lookup
-#: finds the title block, not their section); one rerouted into P follows
-#: this one.
+#: rule (N1 is excluded, and F2 is not offered: its heading lookup finds the
+#: title block, not its section); one rerouted into P follows this one.
 ADMINISTRATIVE_CODES = frozenset({'P'})
 #: Invitations to speak and present: what a talk was beyond its fields --
 #: its audience (how many, who they were), the session or panel and its
@@ -238,8 +238,8 @@ ADMINISTRATIVE_CODES = frozenset({'P'})
 #: One talk given on several dates is one record when its row prints those
 #: dates. An entry rerouted to another code before rendering is grouped under
 #: that code and follows its rule (an excluded code offers nothing, and F2
-#: and I are not offered: their heading lookup finds the title block, not
-#: their section); one rerouted into R follows this one.
+#: is not offered: its heading lookup finds the title block, not its
+#: section); one rerouted into R follows this one.
 PRESENTATION_CODES = frozenset({'R'})
 #: Postdoctoral training -- a residency, a fellowship, a postdoctoral
 #: position: what the training involved beyond its fields -- the mentor,
@@ -264,26 +264,56 @@ PRESENTATION_CODES = frozenset({'R'})
 #: and are not offered (no farm entry carries one). A family joining after R
 #: yields a fragment a family before it is offered (`_LATER_FAMILIES`). An
 #: entry rerouted to another code before rendering is grouped under that
-#: code and follows its rule (an excluded code offers nothing, and F2 and I
-#: are not offered: their heading lookup finds the title block, not their
-#: section); one rerouted into C follows this one.
+#: code and follows its rule (an excluded code offers nothing, and F2 is not
+#: offered: its heading lookup finds the title block, not its section); one
+#: rerouted into C follows this one.
 POSTDOCTORAL_CODES = frozenset({'C'})
+#: Professional organizations and society memberships: what a membership
+#: involved beyond its fields -- the offices and sub-roles held within the
+#: society (a session chaired, a committee, a working group, a chapter, a
+#: delegate's seat) and what the membership entailed. The memberships
+#: section writes each I entry as a row of its two-column table (the
+#: organization with the membership type prefixed, the dates), so a
+#: sub-point is a deleted row under the membership's row. The row prints
+#: stage 4's off-schema organization and type names when the schema's
+#: organization is empty (`membership_cell_values`), which a line mostly
+#: restating is not offered for. Only the one row the writer recorded for
+#: that entry can anchor it (`_one_own_row`, the row-receipt ledger, taken
+#: with no word test): memberships of one society, or held with one type,
+#: share their rows' words, and an entry the writer parses into several
+#: memberships, a row each, holds several records. A line holding another
+#: membership offers none (`_own_membership_line`): the last of stage 4's
+#: records offers only its own segment, and a line holding several dated
+#: records, or naming another society, offers nothing, nor does an entry
+#: stage 4 listed memberships under. A part the #221 recovery reads as one
+#: of the entry's records is left to it (`plan_subpoints`' `record_lines`):
+#: dev already re-emits such a dated office to the Appendix, and as a
+#: sub-point it would be in the accepted document nowhere. The section is
+#: found by the heading its writer looks up (the generator's
+#: `_SUBPOINT_SECTION_HEADERS`): `_get_wcm_section_header` names none for I.
+#: A family joining after C yields a fragment a family before it is offered
+#: (`_LATER_FAMILIES`). An entry rerouted to another code before rendering
+#: is grouped under that code and follows its rule (an excluded code offers
+#: nothing, and F2 is not offered: its heading lookup finds the title block,
+#: not its section); one rerouted into I follows this one.
+MEMBERSHIP_CODES = frozenset({'I'})
 #: The families whose writer records each entry's rows in the row-receipt
 #: ledger, and whose prose goes only under one of those rows (`_anchor_scope`).
 _OWN_ROW_CODES = (EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES | PRESENTATION_CODES
-                  | POSTDOCTORAL_CODES)
+                  | POSTDOCTORAL_CODES | MEMBERSHIP_CODES)
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
                   | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES
-                  | ADMINISTRATIVE_CODES | PRESENTATION_CODES | POSTDOCTORAL_CODES)
+                  | ADMINISTRATIVE_CODES | PRESENTATION_CODES | POSTDOCTORAL_CODES
+                  | MEMBERSHIP_CODES)
 #: The families that joined after R, in the order they joined. Each is
 #: offered after every family before it (`_offer_order`): a fragment two
 #: entries carry is offered once, to the first, so a family joining later
 #: never takes one a family before it is offered. Both a residency (C) and
 #: the appointment after it (D1) can hold one duty line, each on its own
 #: line (YUYVIG LTTYWI 76 and 80): the appointment keeps it, as before C.
-_LATER_FAMILIES = (POSTDOCTORAL_CODES,)
+_LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -371,13 +401,19 @@ _ADMINISTRATIVE_ROW_FIELDS = tuple(name for name in ADMINISTRATIVE_ACTIVITY_FIEL
 _COMMITTEE_BODIES = ('Committee', 'Subcommittee', 'Council', 'Board', 'Panel', 'Commission',
                      'Senate', 'Task Force', 'Taskforce', 'Working Group', 'Workgroup')
 _NAME_WORD = r"[A-Z][\w'’&.-]*"
-#: A committee's name as a line writes it: the capitalised words before one
-#: of `_COMMITTEE_BODIES`, and those an "on", "of" or "for" adds after it
-#: ("Committee on Admissions"). A word that only begins with one ("Senator",
-#: "Panelist") names none.
-_COMMITTEE_NAME_RE = re.compile(
-    rf"(?:{_NAME_WORD}\s+)*(?:{'|'.join(_COMMITTEE_BODIES)})\b"
-    rf"(?:\s+(?:on|of|for)\s+(?:the\s+)?{_NAME_WORD}(?:\s+{_NAME_WORD})*)?")
+
+
+def _body_name_re(bodies: Iterable[str]) -> re.Pattern[str]:
+    """A body's name as a line writes it: the capitalised words before one of
+    `bodies`, and those an "on", "of" or "for" adds after it ("Committee on
+    Admissions", "Society for Example Studies"). A word that only begins
+    with one ("Senator", "Panelist", "Collegiate") names none."""
+    return re.compile(rf"(?:{_NAME_WORD}\s+)*(?:{'|'.join(bodies)})\b"
+                      rf"(?:\s+(?:on|of|for)\s+(?:the\s+)?{_NAME_WORD}(?:\s+{_NAME_WORD})*)?")
+
+
+#: A committee's name as a line writes it (`_body_name_re`).
+_COMMITTEE_NAME_RE = _body_name_re(_COMMITTEE_BODIES)
 #: A committee name more than this share of whose distinctive words are in
 #: the entry's own committee name is that committee: one the CV typed with a
 #: typo, or wrapped onto the next part ("<words> Steering\tCommittee,
@@ -428,6 +464,35 @@ _POSTDOC_RECORD_FIELDS = (*POSTDOC_TYPE_FIELDS, *POSTDOC_FIELD_OF_STUDY_FIELDS, 
 #: of this century or the last, standing alone ("2006-2009", "06/2012"), not
 #: the digits of a licence or phone number.
 _LINE_YEAR_RE = re.compile(rf'\b{_RECORD_YEAR}\b')
+#: The fields the memberships writer reads a membership's Organization cell
+#: from, each in its one precedence: the organization (the schema's, then
+#: stage 4's off-schema names for it) and the membership type it prefixes
+#: (the schema's, then stage 4's off-schema names). The writer reads the
+#: off-schema names only for a row whose schema organization is empty
+#: (`memberships._organization_fallback`), and the cell prints the first of
+#: each that holds text (`membership_cell_values`), which the writer reads
+#: and `_value_tokens` counts.
+MEMBERSHIP_ORGANIZATION_FIELDS = ('organization', 'institution', 'organization_name', 'society')
+MEMBERSHIP_TYPE_FIELDS = ('membership_type', 'fellowship_designation', 'role')
+#: The other fields the row prints: I's rendered fields outside the
+#: Organization cell, the dates.
+_MEMBERSHIP_PLAIN_FIELDS = tuple(sorted(_RENDERED_FIELDS['I'] - {*MEMBERSHIP_ORGANIZATION_FIELDS,
+                                                                 *MEMBERSHIP_TYPE_FIELDS}))
+#: The kinds of body a membership is held in, capitalised as a name is
+#: ("American Statistical Association", "Society of Example Studies"). A
+#: membership's line naming another one names another membership
+#: (`_names_another_society`). A committee, task force, working group,
+#: chapter or section is not one -- the society's own, it is the
+#: membership's detail -- nor is an institute, a centre or a university.
+_SOCIETY_BODIES = ('Society', 'Association', 'College', 'Academy')
+#: A society's name as a line writes it (`_body_name_re`).
+_SOCIETY_NAME_RE = _body_name_re(_SOCIETY_BODIES)
+#: A society name more than this share of whose distinctive words are in the
+#: membership's organization is that organization, as the line words it
+#: (its type run into the name: "Fellow American College of Example
+#: Studies"); another society shares little more than "American" and the
+#: word for its kind.
+_OWN_SOCIETY_MIN_SHARE = 0.5
 #: A part of a talk's line split before each date it holds, so a date
 #: inside the part can be read as opening a record (`_opens_dated_record`),
 #: as one opening the part is: a CV that writes its talks in one paragraph
@@ -456,6 +521,11 @@ _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 #: paragraphs. Read for the families that anchor only on those
 #: (`_OWN_ROW_CODES`).
 RowsWritten = Callable[[Mapping], Iterable[BaseOxmlElement]]
+#: The record lines the #221 recovery (`_recover_unrendered_records`) looks
+#: for in an entry of a code, and re-emits when the document holds none of
+#: them (`sections.appendix.recovery_candidates`). Read for a membership
+#: (`MEMBERSHIP_CODES`), whose dated offices are those lines.
+RecordLines = Callable[[str, Mapping], Sequence[str]]
 
 
 class AnchorCandidate(NamedTuple):
@@ -625,13 +695,45 @@ def _training_row_values(fields: Mapping) -> list[object]:
             *(fields.get(name) for name in _POSTDOC_PLAIN_FIELDS)]
 
 
+def membership_cell_value(fields: Mapping, names: Sequence[str]) -> str:
+    """The first of `names` (`MEMBERSHIP_ORGANIZATION_FIELDS`,
+    `MEMBERSHIP_TYPE_FIELDS`) whose value in `fields` holds text, stripped;
+    '' when none does."""
+    return next((text for name in names if (text := str(fields.get(name) or '').strip())), '')
+
+
+def membership_cell_values(fields: Mapping) -> tuple[str, str]:
+    """(membership type, organization): what a membership row's Organization
+    cell prints of stage 4's fields. With the schema's organization, the
+    schema's two only; without it, the first of each precedence that holds
+    text (`memberships._organization_fallback`, which reads the entry's text
+    for what none holds). When that recovery would drop a word of the text,
+    the cell prints the whole text instead (`_recovery_covers_text`): a name
+    counted here then does not print, and a line restating it is not
+    offered, which errs toward offering less."""
+    names = (MEMBERSHIP_TYPE_FIELDS, MEMBERSHIP_ORGANIZATION_FIELDS)
+    if membership_cell_value(fields, MEMBERSHIP_ORGANIZATION_FIELDS[:1]):
+        names = tuple(precedence[:1] for precedence in names)
+    membership_type, organization = (membership_cell_value(fields, precedence) for precedence in names)
+    return membership_type, organization
+
+
+def _membership_row_values(fields: Mapping) -> list[object]:
+    """The values a membership's row prints: of the Organization cell only
+    the names it prints (`membership_cell_values`), so a fragment restating
+    one it does not print is not taken for the row, then its dates
+    (`_MEMBERSHIP_PLAIN_FIELDS`)."""
+    return [*membership_cell_values(fields), *(fields.get(name) for name in _MEMBERSHIP_PLAIN_FIELDS)]
+
+
 def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
     (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
     leadership role `_LEADERSHIP_ROW_FIELDS`, for a committee
     `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`; for
-    a training position, what its row prints, `_training_row_values`), or of
-    every scalar field for a code rendered from its text."""
+    a training position or a membership, what its row prints,
+    `_training_row_values`, `_membership_row_values`), or of every scalar
+    field for a code rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
@@ -644,8 +746,12 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
         names = (*names, *_ADMINISTRATIVE_ROW_FIELDS)
     elif code in PRESENTATION_CODES:
         names = (*names, *_PRESENTATION_ROW_FIELDS)
-    values = (_training_row_values(fields) if code in POSTDOCTORAL_CODES
-              else [fields.get(name) for name in names])
+    if code in POSTDOCTORAL_CODES:
+        values = _training_row_values(fields)
+    elif code in MEMBERSHIP_CODES:
+        values = _membership_row_values(fields)
+    else:
+        values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
                          if isinstance(value, (str, int, float)) and value))
 
@@ -851,7 +957,7 @@ def _own_committee_line(entry: Mapping) -> str:
       record;
     - stage 4 packed several records in a list (`_committee_records`,
       #208/#248). The writer prints a row for each one naming a committee,
-      and `_own_committee_row` then sees several, but none for one naming
+      and `_one_own_row` then sees several, but none for one naming
       none (#256): the entry has one row though it holds two.
 
     A sibling record in the same part as the committee's own ("<other>,
@@ -865,13 +971,16 @@ def _own_committee_line(entry: Mapping) -> str:
     return '' if any(_names_another_committee(part, own_name) for part in parts) else own
 
 
-def _own_committee_row(entry: Mapping, candidates: list[AnchorCandidate],
-                       rows_written: RowsWritten | None) -> list[AnchorCandidate]:
-    """A committee's own row (`_own_rows`) when the writer recorded exactly
-    one for it. Several are several records the entry held -- a list of
-    records under its committee name (#208/#248) or a block of dated lines
-    the writer re-parsed one row per line (#660, `_multiline_committee_rows`)
-    -- and which of them a prose line is about cannot be shown."""
+def _one_own_row(entry: Mapping, candidates: list[AnchorCandidate],
+                 rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """A committee's or a membership's own row (`_own_rows`) when the writer
+    recorded exactly one for it. Several are several records the entry held
+    -- for a committee, a list of records under its committee name
+    (#208/#248) or a block of dated lines the writer re-parsed one row per
+    line (#660, `_multiline_committee_rows`); for a membership, the
+    memberships the writer parsed out of a line holding several, a row each
+    (#476, `_parse_multi_membership_entry`) -- and which of them a prose line
+    is about cannot be shown."""
     rows = _own_rows(entry, candidates, rows_written)
     return rows if len(rows) == 1 else []
 
@@ -1006,6 +1115,53 @@ def _own_training_line(entry: Mapping) -> str:
     return own
 
 
+def _names_another_society(line: str, own_name: set[str]) -> bool:
+    """Whether `line` names a society (`_SOCIETY_NAME_RE`) other than the
+    membership's organization (`own_name`): one no more than
+    `_OWN_SOCIETY_MIN_SHARE` of whose distinctive words are the
+    organization's. Read name by name: a sentence listing the entry's own
+    society among three others holds every word of its own name and is still
+    four memberships. With no organization to hold, whose a named society is
+    cannot be shown."""
+    return any(len(named & own_name) <= _OWN_SOCIETY_MIN_SHARE * len(named)
+               for named in (_tokens(match.group()) for match in _SOCIETY_NAME_RE.finditer(line)))
+
+
+def _own_membership_line(entry: Mapping) -> str:
+    """The text a membership's prose is read from (`_own_record_line`), and
+    nothing when it holds another membership than the one its row prints,
+    as that membership's text would be offered as this one's prose, under
+    its row:
+
+    - it names another society than the row's organization
+      (`_names_another_society`): one sentence listing four memberships, a
+      chapter's line fused with another college's fellowship, or a line
+      interleaving columns that names other colleges;
+    - stage 4 listed memberships under one of its fields (`_lists_records`,
+      `MEMBERSHIP_ORGANIZATION_FIELDS`): the writer prints the entry's own
+      fields only.
+
+    An office, a committee, a working group or a chapter of the same society
+    is the membership's own detail. Not seen: another society named without
+    the word for its kind (an acronym, a "<name> Foundation")."""
+    fields = entry.get('extracted_fields')
+    fields = fields if isinstance(fields, Mapping) else {}
+    own = _own_record_line(entry)
+    _membership_type, organization = membership_cell_values(fields)
+    if (_lists_records(fields, MEMBERSHIP_ORGANIZATION_FIELDS)
+            or _names_another_society(own, _tokens(organization))):
+        return ''
+    return own
+
+
+def _held_by_records(fragment: str, records: Collection[str]) -> bool:
+    """Whether `fragment` holds one of `records` or is part of one, read
+    without spacing or case (`_squash`, as the #221 recovery reads its
+    haystack)."""
+    squashed = _squash(fragment)
+    return any(record and (record in squashed or squashed in record) for record in map(_squash, records))
+
+
 def _prose_text(code: str, entry: Mapping,
                 entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
     """The text `code`'s rule reads the entry's prose from; None for its own."""
@@ -1017,6 +1173,8 @@ def _prose_text(code: str, entry: Mapping,
         return _own_talk_line(entry, code)
     if code in POSTDOCTORAL_CODES:
         return _own_training_line(entry)
+    if code in MEMBERSHIP_CODES:
+        return _own_membership_line(entry)
     if code in _OWN_ROW_CODES:
         return _own_record_line(entry)
     return None
@@ -1032,8 +1190,8 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
         return _own_degree_rows(entry, in_section, rows_written)
     if code in LEADERSHIP_CODES:
         return _own_rows(entry, in_section, rows_written)
-    if code in ADMINISTRATIVE_CODES:
-        return _own_committee_row(entry, in_section, rows_written)
+    if code in ADMINISTRATIVE_CODES or code in MEMBERSHIP_CODES:
+        return _one_own_row(entry, in_section, rows_written)
     if code in PRESENTATION_CODES or code in POSTDOCTORAL_CODES:
         return _own_rows(entry, in_section, rows_written)
     return in_section
@@ -1042,12 +1200,13 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
 def _pick_anchor(code: str, entry_tokens: set[str],
                  scope: list[AnchorCandidate]) -> AnchorCandidate | None:
     """The line of `scope` the entry's prose goes under. A degree's, a
-    leadership role's, a committee's, a talk's or a training position's one
-    own row (`_own_rows`) is taken as it is: the writer's record already says
-    whose it is, and a short row ("PhD", "Kell University", "2010"; a "Dean"
-    of an acronym) holds too few distinctive words for `best_anchor`, as
-    does a degree's row whose stage-5b institution name shares few words
-    with the field. Any other scope is read by words."""
+    leadership role's, a committee's, a talk's, a training position's or a
+    membership's one own row (`_own_rows`) is taken as it is: the writer's
+    record already says whose it is, and a short row ("PhD", "Kell
+    University", "2010"; a "Dean" of an acronym) holds too few distinctive
+    words for `best_anchor`, as does a degree's row whose stage-5b
+    institution name shares few words with the field. Any other scope is
+    read by words."""
     if code in _OWN_ROW_CODES and len(scope) == 1:
         return scope[0]
     return best_anchor(entry_tokens, scope)
@@ -1080,7 +1239,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
                    candidates: list[AnchorCandidate],
                    spans: Mapping[str, SectionSpan],
                    excluded_tables: Collection[BaseOxmlElement] = (),
-                   rows_written: RowsWritten | None = None) -> list[SubPoint]:
+                   rows_written: RowsWritten | None = None,
+                   record_lines: RecordLines | None = None) -> list[SubPoint]:
     """One `SubPoint` per entry of a `SUBPOINT_CODES` code that has unrendered
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
@@ -1094,11 +1254,15 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     (`_pick_anchor`). A committee's is read the same way, and none is
     offered when its line holds another record than the one its row prints
     (`_own_committee_line`) or its writer recorded it several rows
-    (`_own_committee_row`). A talk's is read the same way, and none is
+    (`_one_own_row`). A talk's is read the same way, and none is
     offered when its line holds another talk (`_own_talk_line`). A training
     position's is read as a degree's is, and none is offered when stage 4
     listed positions under its fields or its line holds a year outside the
-    span its row prints (`_own_training_line`).
+    span its row prints (`_own_training_line`). A membership's is read as a
+    committee's is, and none is offered when its line names another society
+    or stage 4 listed memberships under its fields (`_own_membership_line`);
+    a fragment holding, or held by, one of the entry's records the #221
+    recovery reads (`record_lines`) is left to that recovery.
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -1113,7 +1277,9 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
         in_section = _section_candidates(code, candidates, spans)
         for entry in entries_by_code[code]:
             text = _prose_text(code, entry, entries_by_code)
-            fragments = [f for f in unrendered_prose(entry, code, haystack, text) if f not in offered]
+            records = record_lines(code, entry) if record_lines and code in MEMBERSHIP_CODES else ()
+            fragments = [f for f in unrendered_prose(entry, code, haystack, text)
+                         if f not in offered and not _held_by_records(f, records)]
             if not fragments or _withholds_prose(entry):
                 continue
             anchor_tokens = _value_tokens(entry, code) or (

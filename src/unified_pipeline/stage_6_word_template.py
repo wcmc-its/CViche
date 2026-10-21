@@ -275,6 +275,7 @@ from unified_pipeline.stage6.sections.appendix import (
     recovery_text,
     t_line_is_scaffolding,
 )
+from unified_pipeline.stage6.sections.memberships import MEMBERSHIPS_HEADING
 from unified_pipeline.stage6.sections.mentoring import (
     annotate_outcome_mentees,
     outcome_mentee_warnings,
@@ -609,12 +610,14 @@ _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1', 'K1', 'K4', 'R
 # #1205: the heading a sub-point code's section span starts at, for a code
 # `_get_wcm_section_header` names none for: the one its writer looks up.
 # Read by `_subpoint_section_spans` only. `_insert_reconsidered_segment` (the
-# reconsider pass and the #221 recovery) reads that lookup too, and a C
-# mapping there would move a recovered C record out of the Appendix into the
-# section, a recovery change this pass does not make (it made 0 C calls over
-# the 102 farm renders).
+# reconsider pass and the #221 recovery) reads that lookup too, and a C or I
+# mapping there would move a recovered record out of the Appendix into the
+# section, a recovery change this pass does not make: over the 102 farm
+# renders it made 0 C calls, and 11 I calls, every one the #221 recovery's
+# sending an I record to the Appendix.
 _SUBPOINT_SECTION_HEADERS = MappingProxyType(
-    {code: POSTDOC_TRAINING_HEADING for code in supplementary.POSTDOCTORAL_CODES})
+    {**{code: POSTDOC_TRAINING_HEADING for code in supplementary.POSTDOCTORAL_CODES},
+     **{code: MEMBERSHIPS_HEADING for code in supplementary.MEMBERSHIP_CODES}})
 
 # Codes routed by the entry's own publication status, not by the heading it
 # sits under: a submitted / in-review / in-preparation manuscript (S7) belongs
@@ -3983,8 +3986,11 @@ Now analyze the text above:"""
         positions writer made sub-points (`_add_title_duties`); they join the
         haystack, so the same duties are not planned again from the entry's
         text. The row-receipt ledger says which rows each entry wrote: a
-        degree's, a leadership role's, a committee's, a talk's or a training
-        position's prose goes only under its own (`supplementary._own_rows`)."""
+        degree's, a leadership role's, a committee's, a talk's, a training
+        position's or a membership's prose goes only under its own
+        (`supplementary._own_rows`). A membership's dated office the #221
+        recovery after this reads as one of its records
+        (`recovery_candidates`) is left to that recovery."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(
@@ -3995,7 +4001,8 @@ Now analyze the text above:"""
         planned = supplementary.plan_subpoints(entries_by_code, haystack, candidates,
                                                self._subpoint_section_spans(),
                                                self._subpoint_excluded_tables,
-                                               self._row_receipts.elements_for)
+                                               self._row_receipts.elements_for,
+                                               recovery_candidates)
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:

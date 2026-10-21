@@ -1271,3 +1271,49 @@ def test_a_multiline_entry_without_stage4_records_still_parses_its_lines():
              "extracted_fields": {"organization": _SOCIETIES[2]}}
 
     assert [org for org, _ in _render_memberships([entry])] == _SOCIETIES[:3]
+
+
+# --- #1205: the row each membership's sub-point goes under --------------------
+
+def test_every_membership_row_is_recorded_against_its_own_entry():
+    """The row-receipt ledger (#534) holds each row under the entry it was
+    written for, by identity, on both the single-membership path and the
+    multi-membership line parse (#476): the #1205 sub-point pass finds a
+    membership's own row there, and offers nothing for an entry the writer
+    printed as several rows."""
+    single = {"taxonomy_code": "I", "element_idx_start": 1,
+              "text": "Imaginary Society of Widgets 2001-present",
+              "extracted_fields": {"organization": "Imaginary Society of Widgets",
+                                   "start_date": "2001", "end_date": "present"}}
+    several = {"taxonomy_code": "I", "element_idx_start": 2,
+               "text": "Member\nElected Member | Example Guild of Tides\nKestrel Union of Shores | 2004\n2009",
+               "extracted_fields": {"organization": "Example Guild of Tides"}}
+    gen, table = _generator_with_table()
+    gen._fill_memberships([single, several])
+
+    rows = [row._tr for row in table.rows[1:]]
+    recorded = {id(entry): [p.getparent().getparent() for p in gen._row_receipts.elements_for(entry)]
+                for entry in (single, several)}
+    assert len(recorded[id(single)]) == 1 and len(recorded[id(several)]) == len(rows) - 1 >= 2
+    # Every row is recorded once, against the one entry it was written for.
+    assert sorted(map(id, recorded[id(single)] + recorded[id(several)])) == sorted(map(id, rows))
+    assert gen._row_receipts.elements_for(dict(single)) == []
+
+
+def test_the_writer_fills_the_table_after_the_heading_the_sub_point_pass_reads():
+    """The writer looks its table up by `MEMBERSHIPS_HEADING` first, the
+    heading the #1205 sub-point pass reads its span from. Its later
+    fallbacks would take an earlier heading that names memberships too."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("EDITORIAL BOARD MEMBERSHIPS")
+    boards = gen.doc.add_table(rows=1, cols=2)
+    gen.doc.add_paragraph(MEMBERSHIPS_HEADING)
+    societies = gen.doc.add_table(rows=1, cols=2)
+    for table in (boards, societies):
+        table.rows[0].cells[0].text, table.rows[0].cells[1].text = DEFAULT_HEADER
+    gen._fill_memberships([{"taxonomy_code": "I", "text": "Imaginary Society of Widgets",
+                            "extracted_fields": {"organization": "Imaginary Society of Widgets"}}])
+
+    assert len(boards.rows) == 1
+    assert societies.rows[1].cells[0].text == "Imaginary Society of Widgets"

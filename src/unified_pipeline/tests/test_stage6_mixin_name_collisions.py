@@ -439,10 +439,19 @@ TEMPLATE_LABEL_ANCHOR_CALLS = {
 }
 
 
+def _module_string_constants(tree):
+    """The module-level names `tree` binds to a string: a heading a writer
+    names once for its own lookup and the #1205 span's (`MEMBERSHIPS_HEADING`)."""
+    return {target.id: node.value.value for node in tree.body if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+            for target in node.targets if isinstance(target, ast.Name)}
+
+
 def _finder_calls():
     """{finder name: [(file, enclosing function, first-arg literal or None)]}
     for every `self._find_paragraph_with_text` / `self._find_header_paragraph`
-    call under `stage6/sections/` and in the monolith."""
+    call under `stage6/sections/` and in the monolith. A first argument naming
+    a string the module binds counts as that literal."""
     root = _SRC / "unified_pipeline"
     paths = sorted((root / "stage6" / "sections").glob("*.py")) + [root / "stage_6_word_template.py"]
     calls: dict[str, list[tuple[str, str, str | None]]] = {
@@ -452,8 +461,11 @@ def _finder_calls():
     }
     for path in paths:
         stack: list[str] = []
+        tree = ast.parse(path.read_text(), filename=str(path))
 
         class _Visitor(ast.NodeVisitor):
+            constants = _module_string_constants(tree)
+
             def visit_FunctionDef(self, node):  # noqa: N802
                 stack.append(node.name)
                 self.generic_visit(node)
@@ -462,11 +474,12 @@ def _finder_calls():
             def visit_Call(self, node):  # noqa: N802
                 if isinstance(node.func, ast.Attribute) and node.func.attr in calls:
                     first = node.args[0] if node.args else None
-                    literal = first.value if isinstance(first, ast.Constant) else None
+                    literal = (first.value if isinstance(first, ast.Constant)
+                               else self.constants.get(first.id) if isinstance(first, ast.Name) else None)
                     calls[node.func.attr].append((path.name, stack[-1] if stack else "<module>", literal))
                 self.generic_visit(node)
 
-        _Visitor().visit(ast.parse(path.read_text(), filename=str(path)))
+        _Visitor().visit(tree)
     return calls
 
 
