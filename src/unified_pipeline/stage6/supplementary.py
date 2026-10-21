@@ -60,7 +60,8 @@ B1 degrees (the thesis or dissertation, a minor, a research topic), then O
 institutional leadership (what a role oversaw or achieved), then P
 institutional committees (a committee's remit, the member's part on it),
 then R invited presentations (the audience, the session and its
-co-presenters, what the owner organized). The
+co-presenters, what the owner organized), then C postdoctoral training (the
+mentor, advisor or program director, the research topic, the duties). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -167,9 +168,7 @@ MENTEE_CODES = frozenset({'N3A', 'N3B'})
 #: stage 4's records offers only its own segment of the line, and a line
 #: holding several dated records offers none (`_own_record_line`). An entry
 #: rerouted to another code before rendering is grouped under that code and
-#: follows its rule (B2 is excluded, and C is not offered: its heading lookup
-#: finds the title block, not its section); one rerouted into B1 follows
-#: this one.
+#: follows its rule (B2 is excluded); one rerouted into B1 follows this one.
 EDUCATION_CODES = frozenset({'B1'})
 #: Institutional leadership (WCM table 20): what the role oversaw or
 #: achieved -- the programmes led, a budget, the staff, an initiative and its
@@ -189,7 +188,7 @@ EDUCATION_CODES = frozenset({'B1'})
 #: records offers only its own segment of the line, and a line holding
 #: several dated records offers none (`_own_record_line`). An entry rerouted
 #: to another code before rendering is grouped under that code and follows
-#: its rule (N1 is excluded, and C, F2 and I are not offered: their heading
+#: its rule (N1 is excluded, and F2 and I are not offered: their heading
 #: lookup finds the title block, not their section); one rerouted into O
 #: follows this one.
 LEADERSHIP_CODES = frozenset({'O'})
@@ -213,9 +212,9 @@ LEADERSHIP_CODES = frozenset({'O'})
 #: naming no committee and so printing no row (#256). The last of stage
 #: 4's records offers only its own segment of the line. An entry rerouted to
 #: another code before rendering is grouped under that code and follows its
-#: rule (N1 is excluded, and C, F2 and I are not offered: their heading
-#: lookup finds the title block, not their section); one rerouted into P
-#: follows this one.
+#: rule (N1 is excluded, and F2 and I are not offered: their heading lookup
+#: finds the title block, not their section); one rerouted into P follows
+#: this one.
 ADMINISTRATIVE_CODES = frozenset({'P'})
 #: Invitations to speak and present: what a talk was beyond its fields --
 #: its audience (how many, who they were), the session or panel and its
@@ -236,18 +235,52 @@ ADMINISTRATIVE_CODES = frozenset({'P'})
 #: segment, and a line holding talks the row does not print offers nothing.
 #: One talk given on several dates is one record when its row prints those
 #: dates. An entry rerouted to another code before rendering is grouped under
-#: that code and follows its rule (an excluded code offers nothing, and C,
-#: F2 and I are not offered: their heading lookup finds the title block, not
+#: that code and follows its rule (an excluded code offers nothing, and F2
+#: and I are not offered: their heading lookup finds the title block, not
 #: their section); one rerouted into R follows this one.
 PRESENTATION_CODES = frozenset({'R'})
+#: Postdoctoral training -- a residency, a fellowship, a postdoctoral
+#: position: what the training involved beyond its fields -- the mentor,
+#: advisor or program director, the research topic or project, the duties
+#: and rotations. The postdoctoral-training section writes each C entry as
+#: one row of its three-column table (the training type with its field of
+#: study and a role folded in, the institution and its location, the dates),
+#: so a sub-point is a deleted row under the position's row. The row prints
+#: stage 4's off-schema type, field of study and location when the schema's
+#: (and stage 5b's) are empty (`POSTDOC_TYPE_FIELDS` and the two after it),
+#: which a line mostly restating is not offered for. Only the one row
+#: the writer recorded for that entry can anchor it (`_own_rows`, the
+#: row-receipt ledger, taken with no word test): two residencies at one
+#: hospital, or a residency and the combined residency-and-fellowship row
+#: above it, share their rows' words. The last of stage 4's records offers
+#: only its own segment of the line, and a line holding several dated
+#: records offers none, nor does an entry stage 4 listed positions under
+#: (`_own_training_line`). The section is found by the
+#: heading its writer looks up (the generator's `_SUBPOINT_SECTION_HEADERS`):
+#: `_get_wcm_section_header` names none for C. C1-C3 render in the same table
+#: and are not offered (no farm entry carries one). A family joining after R
+#: yields a fragment a family before it is offered (`_LATER_FAMILIES`). An
+#: entry rerouted to another code before rendering is grouped under that
+#: code and follows its rule (an excluded code offers nothing, and F2 and I
+#: are not offered: their heading lookup finds the title block, not their
+#: section); one rerouted into C follows this one.
+POSTDOCTORAL_CODES = frozenset({'C'})
 #: The families whose writer records each entry's rows in the row-receipt
 #: ledger, and whose prose goes only under one of those rows (`_anchor_scope`).
-_OWN_ROW_CODES = EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES | PRESENTATION_CODES
+_OWN_ROW_CODES = (EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES | PRESENTATION_CODES
+                  | POSTDOCTORAL_CODES)
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
                   | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES
-                  | ADMINISTRATIVE_CODES | PRESENTATION_CODES)
+                  | ADMINISTRATIVE_CODES | PRESENTATION_CODES | POSTDOCTORAL_CODES)
+#: The families that joined after R, in the order they joined. Each is
+#: offered after every family before it (`_offer_order`): a fragment two
+#: entries carry is offered once, to the first, so a family joining later
+#: never takes one a family before it is offered. Both a residency (C) and
+#: the appointment after it (D1) can hold one duty line, each on its own
+#: line (YUYVIG LTTYWI 76 and 80): the appointment keeps it, as before C.
+_LATER_FAMILIES = (POSTDOCTORAL_CODES,)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -367,6 +400,27 @@ _PRESENTATION_ROW_FIELDS = tuple(
                       *PRESENTATION_EVENT_FIELDS, *PRESENTATION_DATE_FIELDS,
                       PRESENTATION_END_DATE_FIELD)
     if name not in _RENDERED_FIELDS['R'])
+#: The fields the postdoctoral-training writer reads a position's type cell
+#: from, each in its one precedence: its type (the schema's, then stage 4's
+#: off-schema name, then the code's default) and the field of study it adds
+#: (stage 4's off-schema name, then the schema's). The role it folds in, the
+#: institution and the dates are schema fields, which `_RENDERED_FIELDS`
+#: lists. The writer reads these from here, so the row and `_value_tokens`
+#: cannot drift apart.
+POSTDOC_TYPE_FIELDS = ('training_type', 'title')
+POSTDOC_FIELD_OF_STUDY_FIELDS = ('field_of_study', 'specialty')
+#: The location the institution cell prints when stage 5b found none:
+#: `resolution._get_institution_location`'s fallback, which that docx-free
+#: layer reads by its own literal (it cannot import this module). A test
+#: renders it into the row.
+_POSTDOC_LOCATION_FIELD = 'location'
+#: The off-schema ones among them: `_value_tokens` adds them for C.
+_POSTDOC_ROW_FIELDS = tuple(name for name in (*POSTDOC_TYPE_FIELDS, *POSTDOC_FIELD_OF_STUDY_FIELDS,
+                                              _POSTDOC_LOCATION_FIELD)
+                            if name not in _RENDERED_FIELDS['C'])
+#: The fields naming a training position, as a record stage 4 listed under
+#: one of an entry's fields names it (`_own_training_line`). Dates name none.
+_POSTDOC_RECORD_FIELDS = (*POSTDOC_TYPE_FIELDS, *POSTDOC_FIELD_OF_STUDY_FIELDS, 'institution')
 #: A part of a talk's line split before each date it holds, so a date
 #: inside the part can be read as opening a record (`_opens_dated_record`),
 #: as one opening the part is: a CV that writes its talks in one paragraph
@@ -551,8 +605,9 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
     (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
     leadership role `_LEADERSHIP_ROW_FIELDS`, for a committee
-    `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`), or
-    of every scalar field for a code rendered from its text."""
+    `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`, for
+    a training position `_POSTDOC_ROW_FIELDS`), or of every scalar field for
+    a code rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
@@ -565,6 +620,8 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
         names = (*names, *_ADMINISTRATIVE_ROW_FIELDS)
     elif code in PRESENTATION_CODES:
         names = (*names, *_PRESENTATION_ROW_FIELDS)
+    elif code in POSTDOCTORAL_CODES:
+        names = (*names, *_POSTDOC_ROW_FIELDS)
     values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
                          if isinstance(value, (str, int, float)) and value))
@@ -834,15 +891,22 @@ def _quotes_another_talk(line: str, fields: Mapping) -> bool:
     return False
 
 
-def _lists_talks(fields: Mapping) -> bool:
-    """Whether stage 4 listed talks under one of the entry's fields: a list
-    holding a record that names a title, a meeting or a venue (R's
-    `additional_presentations`, which fan-out keeps whole when the text holds
-    words no record does, #983). The writer prints the entry's own fields
-    only (`_LIST_LOST_WHEN_KEPT_WHOLE`). A list of date spans names none."""
-    names = (*PRESENTATION_TITLE_FIELDS, *PRESENTATION_EVENT_FIELDS, *PRESENTATION_VENUE_FIELDS)
+def _lists_records(fields: Mapping, names: Collection[str]) -> bool:
+    """Whether stage 4 listed records under one of the entry's fields: a list
+    holding a record that names one of `names`, which fan-out keeps whole
+    when the text holds words no record does (#983). A list of date spans
+    names none."""
     return any(isinstance(item, Mapping) and any(item.get(name) for name in names)
                for value in fields.values() if isinstance(value, list) for item in value)
+
+
+def _lists_talks(fields: Mapping) -> bool:
+    """Whether stage 4 listed talks under one of the entry's fields
+    (`_lists_records`): a record naming a title, a meeting or a venue (R's
+    `additional_presentations`). The writer prints the entry's own fields
+    only (`_LIST_LOST_WHEN_KEPT_WHOLE`)."""
+    return _lists_records(fields, (*PRESENTATION_TITLE_FIELDS, *PRESENTATION_EVENT_FIELDS,
+                                   *PRESENTATION_VENUE_FIELDS))
 
 
 def _own_talk_line(entry: Mapping, code: str) -> str:
@@ -878,6 +942,18 @@ def _own_talk_line(entry: Mapping, code: str) -> str:
     return own
 
 
+def _own_training_line(entry: Mapping) -> str:
+    """The text a training position's prose is read from (`_own_record_line`),
+    and nothing when stage 4 listed positions under one of its fields
+    (`_lists_records`, `_POSTDOC_RECORD_FIELDS`): the writer prints the
+    entry's own fields only, so the list's positions are records its row does
+    not print, which would be offered as its prose, under its row."""
+    fields = entry.get('extracted_fields')
+    if isinstance(fields, Mapping) and _lists_records(fields, _POSTDOC_RECORD_FIELDS):
+        return ''
+    return _own_record_line(entry)
+
+
 def _prose_text(code: str, entry: Mapping,
                 entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
     """The text `code`'s rule reads the entry's prose from; None for its own."""
@@ -887,6 +963,8 @@ def _prose_text(code: str, entry: Mapping,
         return _own_committee_line(entry)
     if code in PRESENTATION_CODES:
         return _own_talk_line(entry, code)
+    if code in POSTDOCTORAL_CODES:
+        return _own_training_line(entry)
     if code in _OWN_ROW_CODES:
         return _own_record_line(entry)
     return None
@@ -904,7 +982,7 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
         return _own_rows(entry, in_section, rows_written)
     if code in ADMINISTRATIVE_CODES:
         return _own_committee_row(entry, in_section, rows_written)
-    if code in PRESENTATION_CODES:
+    if code in PRESENTATION_CODES or code in POSTDOCTORAL_CODES:
         return _own_rows(entry, in_section, rows_written)
     return in_section
 
@@ -912,12 +990,12 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
 def _pick_anchor(code: str, entry_tokens: set[str],
                  scope: list[AnchorCandidate]) -> AnchorCandidate | None:
     """The line of `scope` the entry's prose goes under. A degree's, a
-    leadership role's, a committee's or a talk's one own row (`_own_rows`) is
-    taken as it is: the writer's record already says whose it is, and a
-    short row ("PhD", "Kell University", "2010"; a "Dean" of an acronym)
-    holds too few distinctive words for `best_anchor`, as does a degree's
-    row whose stage-5b institution name shares few words with the field. Any
-    other scope is read by words."""
+    leadership role's, a committee's, a talk's or a training position's one
+    own row (`_own_rows`) is taken as it is: the writer's record already says
+    whose it is, and a short row ("PhD", "Kell University", "2010"; a "Dean"
+    of an acronym) holds too few distinctive words for `best_anchor`, as
+    does a degree's row whose stage-5b institution name shares few words
+    with the field. Any other scope is read by words."""
     if code in _OWN_ROW_CODES and len(scope) == 1:
         return scope[0]
     return best_anchor(entry_tokens, scope)
@@ -938,6 +1016,14 @@ def _withholds_prose(entry: Mapping) -> bool:
     return bool(entry.get(PII_WITHHELD_KEY)) or bool(_pii_fragments(str(entry.get('text') or '')))
 
 
+def _offer_order(code: str) -> tuple[int, str]:
+    """`plan_subpoints`' order: the codes of the families before
+    `_LATER_FAMILIES` by name, then each later family's, in the order they
+    joined."""
+    rank = next((n for n, family in enumerate(_LATER_FAMILIES, 1) if code in family), 0)
+    return rank, code
+
+
 def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Haystack,
                    candidates: list[AnchorCandidate],
                    spans: Mapping[str, SectionSpan],
@@ -946,10 +1032,10 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     """One `SubPoint` per entry of a `SUBPOINT_CODES` code that has unrendered
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
-    the first entry that carries it (fan-out children and dedup survivors
-    share their parent's text). A mentee's prose is read from its own line
-    (`_own_mentee_line`), and its line must be a row of its own table
-    (`_own_mentee_rows`), under either mentee heading. A degree's or a
+    the first entry that carries it in `_offer_order` (fan-out children and
+    dedup survivors share their parent's text). A mentee's prose is read
+    from its own line (`_own_mentee_line`), and its line must be a row of
+    its own table (`_own_mentee_rows`), under either mentee heading. A degree's or a
     leadership role's prose is read from its own line (`_own_record_line`),
     and its line must be a row its writer recorded for it (`rows_written`,
     `_own_rows`), which it takes with no word test when it is the only one
@@ -957,7 +1043,9 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     offered when its line holds another record than the one its row prints
     (`_own_committee_line`) or its writer recorded it several rows
     (`_own_committee_row`). A talk's is read the same way, and none is
-    offered when its line holds another talk (`_own_talk_line`).
+    offered when its line holds another talk (`_own_talk_line`). A training
+    position's is read as a degree's is, and none is offered when stage 4
+    listed positions under its fields (`_own_training_line`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -966,7 +1054,7 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
 
     Nor does an entry holding protected data (`_withholds_prose`)."""
     planned, offered = [], set()
-    for code in sorted(entries_by_code):
+    for code in sorted(entries_by_code, key=_offer_order):
         if code not in SUBPOINT_CODES or code not in spans:
             continue
         in_section = _section_candidates(code, candidates, spans)
