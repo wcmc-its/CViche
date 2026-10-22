@@ -3,7 +3,7 @@
 # Pinned for reproducible test runs; fakeredis 2.39.0 is compatible with redis 8.1.0.
 -r requirements.txt
 pytest==9.1.1
-fakeredis==2.39.0   # in-memory Redis for the redis_broker tests (no server needed)
+fakeredis==2.40.0   # in-memory Redis for the redis_broker tests (no server needed)
 pytest-cov==7.1.0   # coverage measurement only; no gate -- CODING_STANDARDS.md §6.10
 # httpx: starlette/fastapi only declare it under their (unused here) "full"/
 # "standard" extras, so nothing in requirements.txt pulls it in transitively
