@@ -182,10 +182,12 @@ def _lists_disagree(kind: str, first: tuple[dict, ResolvedPublication],
     another first author or another part number: a titled commentary under
     the paper's DOI ("Editorial: <its title>" by another author), or a Part I
     and Part II that share one DOI. Inside one list `dedup._citations_conflict`
-    lets a PMID or DOI match override the first author, since a CV's own
-    spelling is not a second paper (RXYBVF); across lists a lost paper costs
-    more than a duplicate, so they stay (#446 review). A shared whole 5d
-    citation already prints both."""
+    refuses the same pairs, but matches the first author's name words
+    order-blind and one letter apart against every author of the other copy,
+    since a CV's own spelling, name order or co-first order is not a second
+    paper (RXYBVF); across lists a lost paper costs more than
+    a duplicate, so the stricter first-word reading stays (#446 review). A
+    shared whole 5d citation already prints both."""
     if kind == 'citation':
         return False
     (_first_entry, first_pub), (_second_entry, second_pub) = first, second

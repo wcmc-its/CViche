@@ -18,7 +18,7 @@ import re
 from types import MappingProxyType
 from typing import NamedTuple
 
-from unified_pipeline.core.text_norm import is_placeholder_title
+from unified_pipeline.core.text_norm import is_placeholder_title, norm
 
 from .fan_out import (
     _FORMATTED_KEYS,
@@ -27,6 +27,12 @@ from .fan_out import (
     LAST_STAGE4_RECORD,
 )
 from .normalization import _squash
+from .normalization.authors import (
+    _GROUP_AUTHOR_RE,
+    _SURNAME_PARTICLES,
+    _letters,
+    _one_edit_apart,
+)
 from .normalization.publication import ResolvedPublication, resolve_publication
 from .parsing import (
     _MONTH_NAME_TO_NUM,
@@ -1466,12 +1472,113 @@ def _first_author(pub: ResolvedPublication) -> str:
     return match.group(0).lower() if match else ''
 
 
+# The key kinds that name a paper by an identifier. A titled commentary carries
+# the paper's own DOI or PMID ("Editorial: <its title>", by another author),
+# and a Part I and Part II can share one DOI, so on these two kinds the first
+# author and the part number still tell two records apart (#446).
+_IDENTIFIER_KEY_KINDS = frozenset({'pmid', 'doi'})
+
+# Where one author ends and the next begins in an author list: a comma or
+# semicolon, or an "and" / "&" before the next author.
+_AUTHOR_END_RE = re.compile(r'[,;]|\s(?:and|&)\s', re.IGNORECASE)
+
+# "et al", "et al." or "and others", wherever it stands and with or without a
+# comma before it: no author's name, so it is struck out of the list before
+# any name is read (a comma left behind only ends an empty author).
+_ET_AL_RE = re.compile(r'\b(?:et\.?\s*al\b\.?|and\s+others\b)', re.IGNORECASE)
+
+# An all-capitals word this short is a run of initials ("JA", "JAB"), not a
+# surname; a mixed-case one ("Li", "Wu") is read as a name.
+_INITIALS_MAX_LETTERS = 3
+
+# What splits an author's name into words: spaces and hyphens, so the parts
+# of "Garcia-Lopez" are words of their own.
+_NAME_WORD_SPLIT_RE = re.compile(r'[\s\-\u2010-\u2015]+')
+
+
+def _author_names(author: str) -> set[str]:
+    """One author's name words, initials left out, as accent-folded,
+    casefolded letters, plus the whole name joined.
+
+    Order-blind, so "J Xander" and "Xander J" both give {"xander"}. A
+    hyphenated surname gives each part and the whole ("Garcia-Lopez M":
+    {"garcia", "lopez", "garcialopez"}). A particle ("van", "der") is no name
+    word of its own but stays in the joined name, so "van der Berg J" and
+    "Vanderberg J" share "vanderberg". Empty when no word can be read as a
+    name, or the author is a group ("The Toy Consortium", `_GROUP_AUTHOR_RE`)
+    that one copy credits and the other leaves out; an empty set tells no two
+    copies apart."""
+    if _GROUP_AUTHOR_RE.search(author):
+        return set()
+    words = (re.sub(r'[^\w]', '', word) for word in _NAME_WORD_SPLIT_RE.split(author))
+    letters = [_letters(norm(word)) for word in words
+               if _letters(word) and not (word.isupper() and len(word) <= _INITIALS_MAX_LETTERS)]
+    joined = ''.join(letters)
+    return {word for word in letters if word not in _SURNAME_PARTICLES} | ({joined} - {''})
+
+
+def _author_name_sets(pub: ResolvedPublication) -> list[set[str]]:
+    """`_author_names` of each author in the list, first author first, with
+    "et al" and "and others" struck out (`_ET_AL_RE`)."""
+    authors = _ET_AL_RE.sub('', pub.authors.strip())
+    return [_author_names(author) for author in _AUTHOR_END_RE.split(authors)]
+
+
+def _first_author_names(pub: ResolvedPublication) -> set[str]:
+    """`_author_names` of the first author in the list."""
+    return _author_name_sets(pub)[0]
+
+
+def _one_slip_apart(a: str, b: str) -> bool:
+    """`_one_edit_apart`, or two neighbouring letters swapped ("xander" and
+    "xadner")."""
+    if _one_edit_apart(a, b):
+        return True
+    diff = [i for i, (x, y) in enumerate(zip(a, b, strict=False)) if x != y]
+    return (len(a) == len(b) and len(diff) == 2 and diff[1] == diff[0] + 1
+            and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+
+
+def _names_an_author(names: set[str], author_sets: list[set[str]]) -> bool:
+    """A name word in `names` is a name word of some author in `author_sets`,
+    or one slip off it (`_one_slip_apart`)."""
+    return any(a == b or _one_slip_apart(a, b)
+               for a in names for author in author_sets for b in author)
+
+
+def _first_authors_differ(first: ResolvedPublication, second: ResolvedPublication) -> bool:
+    """Both copies name a first author, and neither copy's first author is an
+    author of the other copy (`_names_an_author`). A CV's own spelling
+    ("Xandr" or "Xadner" for "Xander", "Ibanez" for the accented form, "Garcia"
+    for "Garcia-Lopez"), name order, or author order (co-first authors listed
+    the other way round) is not a second author (RXYBVF)."""
+    lists = _author_name_sets(first), _author_name_sets(second)
+    return bool(lists[0][0] and lists[1][0]) and not (
+        _names_an_author(lists[0][0], lists[1]) or _names_an_author(lists[1][0], lists[0]))
+
+
+def _part_numbers_differ(first: tuple[dict, ResolvedPublication],
+                         second: tuple[dict, ResolvedPublication]) -> bool:
+    """Both printed titles, or both of the CV's own titles, name a part number
+    (`_part_numbers`), and the numbers differ: a Part I and a Part II under one
+    DOI. A title that names no part says nothing about which part it is."""
+    (first_entry, first_pub), (second_entry, second_pub) = first, second
+    return any(a and b and a != b for a, b in (
+        (_part_numbers(first_pub.title), _part_numbers(second_pub.title)),
+        (_part_numbers(_source_title(first_entry)), _part_numbers(_source_title(second_entry)))))
+
+
+def _source_title(entry: dict) -> str:
+    """The title stage 4 read off the CV itself ('' when it read none)."""
+    fields = entry.get('extracted_fields') or {}
+    title = fields.get('title') or fields.get('chapter_title')
+    return title if isinstance(title, str) else ''
+
+
 def _source_title_words(entry: dict) -> set[str]:
     """The significant words of the title stage 4 read off the CV itself,
     before any PubMed title replaced it."""
-    fields = entry.get('extracted_fields') or {}
-    title = fields.get('title') or fields.get('chapter_title')
-    return _significant_words(title) if isinstance(title, str) else set()
+    return _significant_words(_source_title(entry))
 
 
 def _titles_disagree(first: set[str], second: set[str]) -> bool:
@@ -1496,7 +1603,10 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
     one title by different groups, and a letter and its reply share a title,
     journal and year (farm replay, 63 runs). A PMID or DOI match ignores those
     three: a CV's own volume typo or author spelling is not a second paper
-    (RXYBVF)."""
+    (RXYBVF). It still refuses when neither copy's first author is an author
+    of the other copy (`_first_authors_differ`) or the part numbers differ
+    (`_part_numbers_differ`): a titled commentary by another author under the
+    paper's DOI, or a Part I and Part II under one DOI (#446)."""
     if kind == 'citation':
         return False
     (first_entry, first_pub), (second_entry, second_pub) = first, second
@@ -1510,6 +1620,9 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
         pairs += [(_alnum(first_pub.volume), _alnum(second_pub.volume)),
                   (_alnum(first_pub.pages), _alnum(second_pub.pages)),
                   (_first_author(first_pub), _first_author(second_pub))]
+    if kind in _IDENTIFIER_KEY_KINDS and (_first_authors_differ(first_pub, second_pub)
+                                          or _part_numbers_differ(first, second)):
+        return True
     return any(a and b and a != b for a, b in pairs)
 
 
