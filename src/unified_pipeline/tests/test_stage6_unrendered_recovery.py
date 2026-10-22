@@ -2445,9 +2445,12 @@ def test_duty_prose_is_a_deleted_row_under_its_appointment():
         t.text for t in above.iter(qn("w:t")))
     assert "".join(t.text for t in rows[0].iter(qn("w:delText"))) == _DUTY_PROSE
     assert gen.stats["supplementary_subpoints"] == 1
-    # The recovery reads the prose, not the sub-point's line: it stands
-    # only for the undated record line it is part of.
-    assert gen._subpoint_prose == [_DUTY_PROSE] and gen._subpoint_lines == []
+    # The recovery reads the prose with its entry's text, not the
+    # sub-point's line: it stands only for a line of that entry's it is
+    # part of.
+    (written,) = gen._subpoint_prose
+    assert written.paragraphs == (_DUTY_PROSE,) and gen._subpoint_lines == []
+    assert written.source == _squash(_duty_appointment()["text"])
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"supplementary_subpoints": True, "emit_track_changes": False}])
@@ -2476,6 +2479,26 @@ def test_the_recovery_reads_a_sub_point_as_its_entry_rendered(flag, recovered):
     gen._recover_unrendered_records({"D1": [entry]})
 
     assert gen.stats["unrendered_records_recovered"] == recovered
+
+
+def test_the_recovery_reads_no_sub_point_as_a_record_of_its_own():
+    """#1205 review: a record of its own beside the entry's
+    (`supplementary.is_sub_record`) is re-emitted though a written sub-point
+    is part of it. The planner leaves such a line to the recovery by its
+    verdict before the overflow pass, which the recovery's own can differ
+    from; read as rendered by the sub-point, the record would be in neither
+    document."""
+    from unified_pipeline.stage6.supplementary import WrittenProse
+
+    entry = _duty_appointment_with(_DUTY_SUB_RECORD)
+    recovered = []
+    for prose in ((), ("Chair, Departmental Curriculum Committee",)):
+        gen = _generator(supplementary_subpoints=True)
+        gen._fill_positions({"D1": [entry]})
+        gen._subpoint_prose = [WrittenProse(_squash(entry["text"]), prose)]
+        gen._recover_unrendered_records({"D1": [entry]})
+        recovered.append(gen.stats["unrendered_records_recovered"])
+    assert recovered[0] == recovered[1] == 2
 
 
 _TITLE_ROLE = "Visiting Fellow in Example Science"
@@ -2519,6 +2542,24 @@ def test_title_duties_are_offered_once_and_read_as_rendered():
     assert [t for t in texts[1:] if _TITLE_DUTIES in t] == []
     assert gen.stats["supplementary_subpoints"] == len(rows)
     gen._recover_unrendered_records({"D3": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_the_recovery_reads_title_duties_as_a_row_of_them_rendered():
+    """#1205 review: the recovery reads the title duties' sub-point
+    (`_subpoint_lines`) with the document, so a row of the entry's text
+    stating the duties is read as rendered and not re-emitted. Coverage for
+    the recovery's view of the document, which this round moved into
+    `_recovery_view`."""
+    gen = _generator(supplementary_subpoints=True)
+    entry = _title_duty_appointment()
+    entry["text"] += f"\nSeconded to the regional annex.\t{_TITLE_DUTIES}, as the role states"
+    assert len(recovery_candidates("D3", entry)) == 2
+    gen._fill_positions({"D3": [entry]})
+    gen._add_supplementary_subpoints({"D3": [entry]})
+
+    gen._recover_unrendered_records({"D3": [entry]})
+
     assert gen.stats["unrendered_records_recovered"] == 0
 
 
@@ -6383,11 +6424,12 @@ def _sub_record_entry(name, shape):
     return entry, sub, family["prose"]
 
 
-def _accepted_and_deleted(tmp_path, monkeypatch, entry, flag, uid):
+def _accepted_and_deleted(tmp_path, monkeypatch, entry, flag, uid, *others):
     """Through `run_stage6`: the document's accepted text (`w:t`), its
     deleted text (`w:delText`, what Reject All adds) and its sidecar's
-    sub-point placements."""
-    doc, placements = _stage6_render(tmp_path / str(flag), monkeypatch, [copy.deepcopy(entry)],
+    sub-point placements. `others` are entries listed before `entry`."""
+    entries = [copy.deepcopy(e) for e in (*others, entry)]
+    doc, placements = _stage6_render(tmp_path / str(flag), monkeypatch, entries,
                                      uid=uid, supplementary_subpoints=flag)
     body = doc.element.body
     return ("".join(t.text or "" for t in body.iter(qn("w:t"))),
@@ -6464,6 +6506,152 @@ def test_title_duties_stay_a_sub_point_through_run_stage6(tmp_path, monkeypatch)
     (duties,) = placements[0]
     assert duties.endswith(_TITLE_DUTIES) and deleted == duties
     assert accepted == accepted_off.replace(duties, "", 1) != accepted_off
+
+
+def _appointment_entry(text, title="Associate Professor", start="2010", end="present",
+                       institution="Example University"):
+    """An invented D1 entry with `text` and its row's fields."""
+    return {"element_idx_start": 30, "taxonomy_code": "D1", "text": text,
+            "extracted_fields": {"title": title, "department": "Department of Estuarine Science",
+                                 "institution": institution, "start_date": start,
+                                 "end_date": end}}
+
+
+_SURVEY = "A survey of estuarine habitats, sediment transport and nutrient cycling for second year students"
+_PRACTICUM = "A practicum in coring, sampling and laboratory analysis held at the example field station"
+_ACCRETION = "This study will measure accretion and nutrient retention across restored marshes"
+_HYPOXIA = "This study mapped invertebrate communities under seasonal hypoxia"
+_MANAGE = ("Plan the estuary survey cruises each season and keep the shared sampling archive. "
+           "Train new field staff in coring.")
+_SERVE = ("Oversee the joint tidal flats sampling station; advise visiting graduate students on "
+          "their sediment budgets.")
+_SUPERVISED = "Supervised the department's graduate teaching assistants and their laboratory sections"
+#: #1205 review: an entry of two date-led lines, each a record with its prose
+#: in a tab part. The first is the entry's own (its fields' years), which its
+#: row renders, so the #221 recovery reads it as rendered and its prose
+#: reaches the document only as the sub-point. The second is another record
+#: with years of its own (`restored`), which the recovery re-emits with
+#: sub-points off, or reads as rendered too (`restored` None). Invented text.
+_TWO_RECORD_LINES = {
+    "D1_another_appointment": dict(
+        entry=_appointment_entry(
+            f"July 2010 - present\tProfessor and Field Studies Coordinator, Department of Estuarine "
+            f"Science, Example University, Example City.\t{_MANAGE}\nMarch 2008 - present\tAdjunct "
+            f"Professor, Department of Tidal Geology, Example Coastal College\t{_SERVE}",
+            title="Professor and Field Studies Coordinator", start="July 2010"),
+        kept=(_MANAGE,), restored="Adjunct Professor, Department of Tidal Geology"),
+    "D1_both_rendered": dict(
+        entry=_appointment_entry(
+            f"2015-2020\tAssociate Professor, Department of Estuarine Science, Example University\t"
+            f"{_DUTY_PROSE}\n2010-2015\tAssistant Professor, Department of Estuarine Science, Example "
+            f"University\t{_SUPERVISED}", start="2015", end="2020"),
+        kept=(_DUTY_PROSE, _SUPERVISED), restored=None),
+    "K1": dict(
+        entry={"element_idx_start": 40, "taxonomy_code": "K1",
+               "text": (f"2010-2018\tCourse Director, Introduction to Estuarine Biology (BIOL 210)\t{_SURVEY}"
+                        f"\n2012-2016\tCourse Director, Field Methods in Marsh Ecology (BIOL 340)\t{_PRACTICUM}"),
+               "extracted_fields": {"course_title": "Introduction to Estuarine Biology", "role": "Course Director",
+                                    "institution": "Example University", "course_code": "BIOL 210",
+                                    "start_date": "2010", "end_date": "2018"}},
+        kept=(_SURVEY,), restored="Field Methods in Marsh Ecology"),
+    "M2A": dict(
+        entry={"element_idx_start": 52, "taxonomy_code": "M2A",
+               "text": (f"2018-2026\tSediment Budgets of Restored Tidal Marshes, Example Foundation, Principal "
+                        f"Investigator\t{_ACCRETION}\n2014-2017\tBenthic Invertebrates of Brackish Lagoons, "
+                        f"Example Trust, Co-Investigator\t{_HYPOXIA}"),
+               "extracted_fields": {"title": "Sediment Budgets of Restored Tidal Marshes",
+                                    "agency": "Example Foundation", "pi_role": "Principal Investigator",
+                                    "start_date": "2018", "end_date": "2026"}},
+        kept=(_ACCRETION,), restored="Benthic Invertebrates of Brackish Lagoons"),
+}
+
+
+@pytest.mark.parametrize("name", list(_TWO_RECORD_LINES))
+def test_reject_all_keeps_the_prose_of_a_record_line_the_recovery_reads_as_rendered(
+        tmp_path, monkeypatch, name):
+    """#1205 review (FINSIS 511): a fragment merely part of a dated record
+    line was left to the #221 recovery whether or not it re-emits the line.
+    It reads the entry's own line as rendered (its row prints it), so the
+    prose was then in neither document. Now only a record of its own that
+    the recovery re-emits keeps its prose (`RecordLine.lost`): Accept All is
+    the flag-off document, which re-emits the other record once, and Reject
+    All adds the own line's prose, once."""
+    case = _TWO_RECORD_LINES[name]
+    accepted_off, _, _ = _accepted_and_deleted(tmp_path, monkeypatch, case["entry"], False, "T1205R")
+    accepted, deleted, _ = _accepted_and_deleted(tmp_path, monkeypatch, case["entry"], True, "T1205R")
+
+    assert accepted == accepted_off
+    for prose in case["kept"]:
+        assert prose not in accepted_off and deleted.count(prose) == 1
+    if case["restored"]:
+        assert accepted.count(case["restored"]) == 1 and case["restored"] not in deleted
+
+
+_CORING = "Direct the sediment laboratory's coring program."
+_TWELVE = "Supervise twelve doctoral researchers in marsh hydrology."
+
+
+@pytest.mark.parametrize("entry, duties", [
+    # FINSIS 511's shape: the institution and title, then the appointment's
+    # own dates and its duties as tab parts.
+    (_appointment_entry(f"Example University Medical College / Example Hospital\tAssociate Professor of "
+                        f"Estuarine Science\n2010\u2013Present\t{_CORING}\t{_TWELVE}",
+                        title="Associate Professor of Estuarine Science",
+                        institution="Example University Medical College / Example Hospital"),
+     (_CORING, _TWELVE)),
+    # SQMWHM 29's shape, the duties' row ending on a year or a range.
+    (dict(_duty_appointment(), text=_duty_appointment()["text"] + " since 2015"),
+     (f"{_DUTY_PROSE} since 2015",)),
+    (dict(_duty_appointment(), text=_duty_appointment()["text"] + " (2012-2014)"),
+     (f"{_DUTY_PROSE} (2012-2014)",)),
+], ids=["beside_its_own_dates", "row_ends_on_a_year", "row_ends_on_a_range"])
+def test_duties_beside_their_appointments_dates_stay_its_sub_point(tmp_path, monkeypatch, entry, duties):
+    """#1205 review, owner decision 2026-10-08: duties the recovery re-emits
+    with sub-points off, beside the appointment's own dates or on a row of
+    their own that ends on a year, are no record of their own
+    (`is_sub_record`): they are the appointment's sub-point, and Accept All
+    drops the flag-off copy, as for SQMWHM 29."""
+    accepted_off, deleted_off, _ = _accepted_and_deleted(tmp_path, monkeypatch, entry, False, "T1205S")
+    accepted, deleted, placements = _accepted_and_deleted(tmp_path, monkeypatch, entry, True, "T1205S")
+
+    assert deleted_off == "" and placements == [list(duties)]
+    for duty in duties:
+        assert accepted_off.count(duty) == 1 and duty not in accepted and deleted.count(duty) == 1
+
+
+#: Another entry's row holding `_DUTY_PROSE` among cells of its own, and a
+#: second row (an invented reviewing record).
+_ROW_HOLDING_THE_DUTIES = {
+    "element_idx_start": 12, "taxonomy_code": "Q4D",
+    "text": (f"Example Sediment Science Advisory Panel Steering Group | {_DUTY_PROSE} | Example "
+             f"Regional Water Authority\nExample Coastal Monitoring Network Data Quality Board | "
+             f"Reviewed the network's monitoring protocols | Example State Agency"),
+    "extracted_fields": {"journal_name": "Example Coastal Monitoring Network Data Quality Board"}}
+
+
+@pytest.mark.parametrize("first", [True, False], ids=["read_first", "read_last"])
+def test_another_entrys_row_holding_the_duties_is_not_read_as_their_sub_point(tmp_path, monkeypatch,
+                                                                              first):
+    """#1205 review: the recovery read any line holding a sub-point's prose
+    as rendered by it. Another entry's row holding the duties, read before
+    the appointment, was then in neither document, though the recovery
+    re-emits it with sub-points off. Only a line of the sub-point's own
+    entry is read so (`WrittenProse.source`); that line vouches as its
+    re-emitted copy does with sub-points off, so a row read after it is
+    judged as it is with sub-points off."""
+    other, appointment = _ROW_HOLDING_THE_DUTIES, _duty_appointment()
+    entry, before = (appointment, other) if first else (other, appointment)
+    accepted_off, _, _ = _accepted_and_deleted(tmp_path, monkeypatch, entry, False, "T1205X", before)
+    accepted, deleted, placements = _accepted_and_deleted(tmp_path, monkeypatch, entry, True, "T1205X",
+                                                          before)
+
+    assert placements == [[_DUTY_PROSE]] and deleted == _DUTY_PROSE
+    row = "Advisory Panel Steering Group"
+    assert accepted.count(row) == accepted_off.count(row) == (1 if first else 0)
+    if first:
+        assert accepted == accepted_off
+    else:
+        assert accepted_off.count(_DUTY_PROSE) == 1 and _DUTY_PROSE not in accepted
 
 
 def test_the_membership_span_starts_at_the_heading_its_writer_looks_up():

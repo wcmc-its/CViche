@@ -805,6 +805,118 @@ def _tab_part_recovered(line: str, part_token_sets: list[set]) -> bool:
         len(tokens & held) / len(tokens) >= T_RECORD_OVERLAP for held in part_token_sets)
 
 
+class RecoveryView(NamedTuple):
+    """The document as the #221 recovery checks a record line against it:
+    its lines squashed and joined (`haystack`), each line's letter tokens,
+    and the `_record_tokens` of each line the Appendix cap left whole and of
+    each it cut (#1230). The recovery adds each line it re-emits
+    (`_vouch_for_lines`, `_vouch_for_tab_parts`)."""
+    haystack: str
+    line_token_sets: list[set]
+    t_line_token_sets: list[set]
+    t_cut_token_sets: list[set]
+
+
+def _recovery_view(out_lines: list[str], entries_by_code: dict[str, list[dict]]) -> RecoveryView:
+    """`RecoveryView` over the document's rendered lines."""
+    # A line the Appendix cap cut may have lost the tail of its record
+    # (#1230): it vouches only for a line it carries in full. A T entry can
+    # repeat a table whose rows are also entries of their own that render
+    # (#1230): a line such a row carries in full is not lost, however the
+    # render reformatted it.
+    return RecoveryView(
+        "\x00".join(_squash(line) for line in out_lines),
+        [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in out_lines],
+        [_record_tokens(line) for line in out_lines
+         if not line.endswith(APPENDIX_TRUNCATION_MARKER)],
+        [_record_tokens(line) for line in out_lines if line.endswith(APPENDIX_TRUNCATION_MARKER)]
+        + other_entry_line_tokens(entries_by_code))
+
+
+class EntryRecords(NamedTuple):
+    """The record lines the #221 recovery looks for in one entry
+    (`recovery_candidates`), with what it reads them by: the entry's
+    fields, the tab parts it splits a line into (`tab_record_segments`),
+    and each line's sibling rows and twins (#1230, #1956)."""
+    lines: list[str]
+    fields: dict
+    tab_parts: set[str]
+    siblings: dict[str, list[set[str]]]
+    twins: dict[str, list[str]]
+
+
+def _entry_records(code: str, entry: dict) -> EntryRecords | None:
+    """`EntryRecords` of `entry`, or None when it is not a fused
+    multi-record entry."""
+    records = recovery_candidates(code, entry)
+    if not records:
+        return None
+    tab_parts = {part for text_line in recovery_text(entry).split('\n')
+                 for part in tab_record_segments(text_line)}
+    return EntryRecords(records, entry.get('extracted_fields') or {}, tab_parts,
+                        render_check.record_siblings(records), render_check.record_twins(records))
+
+
+def _record_line_lost(line: str, code: str, entry: dict, records: EntryRecords,
+                      view: RecoveryView) -> bool:
+    """Whether the #221 recovery reads `line`, one of `entry`'s `records`,
+    as lost from the document `view` reads: verifiably absent, and none of
+    the lines it never re-emits (a tab part stage 4 extracted, the record
+    its fields rendered, a column-header row, template or boilerplate text).
+    What it has re-emitted so far is the caller's to check
+    (`_tab_part_recovered`), and so is a sub-point
+    (`supplementary.held_by_subpoint`)."""
+    if code == 'T' and t_line_is_scaffolding(line, entry):
+        return False
+    if code == 'T':
+        rendered = _whole_record_rendered(
+            line, view.haystack, view.t_line_token_sets, view.t_cut_token_sets)
+    else:
+        rendered = render_check.sibling_record_rendered(
+            line, records.siblings.get(line), view.haystack, view.line_token_sets,
+            view.t_line_token_sets, records.twins.get(line))
+    if rendered is None and line in records.tab_parts:
+        # Too few words for the overlap test (#1243).
+        rendered = short_tab_part_rendered(line, records.fields, view.t_line_token_sets)
+    if rendered is not False:
+        # Rendered (possibly reformatted), or too short to verify either
+        # way — never re-insert.
+        return False
+    if line in records.tab_parts and segment_held_by_fields(line, records.fields):
+        return False  # a tab part of the record stage 4 extracted (#1243)
+    if segment_already_rendered(line, records.fields):
+        # The record that DID render from extracted fields: a grant table
+        # splits its tokens across label/value rows, so the token check
+        # alone can miss it (#209).
+        return False
+    if (not re.search(r'\d', line)
+            and line.count('\t') + line.count('|') >= 2
+            and _is_column_header_row(line)):
+        # Multi-column rows with no year/number payload AND majority
+        # column-label words are tabular header rows ("State/Country
+        # License Number  Status ...") satisfying the tab-record heuristic —
+        # not CV records. A dateless multi-cell row of real content
+        # (committee membership: "Member | Committee on X | Organization
+        # Y") is still recovered.
+        return False
+    return not (is_template_instruction(line) or is_source_boilerplate(line))
+
+
+def _record_line_verdicts(view: RecoveryView, code: str,
+                          entry: dict) -> list[supplementary.RecordLine]:
+    """`supplementary.plan_subpoints`' `record_lines` (#1205): each record
+    line the #221 recovery looks for in `entry`, with whether it reads the
+    line as lost from the document `view` reads, before any sub-point is
+    written, and whether the line is a record of its own beside the
+    entry's (`supplementary.is_sub_record`)."""
+    records = _entry_records(code, entry)
+    if records is None:
+        return []
+    return [supplementary.RecordLine(line, _record_line_lost(line, code, entry, records, view),
+                                     supplementary.is_sub_record(line, records.tab_parts, entry))
+            for line in records.lines]
+
+
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     """The one code a hierarchy mismatch should reroute to, or None to skip.
 
@@ -1617,11 +1729,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # The appointment-title duties the positions writer wrote as
         # sub-points, each with its row, which the sub-point pass and the
         # #221 recovery read as rendered; the paragraphs of the sub-points
-        # the pass wrote, which the recovery reads only as an undated record
-        # line they are part of (`supplementary.held_by_subpoint`); and the
-        # entries either was written for, which the overflow pass skips.
+        # the pass wrote, each with its entry's text, which the recovery
+        # reads only as a line of that text that is no record of its own
+        # and that they are part of (`supplementary.held_by_subpoint`); and
+        # the entries either was written for, which the overflow pass skips.
         self._subpoint_lines: list[str] = []
-        self._subpoint_prose: list[str] = []
+        self._subpoint_prose: list[supplementary.WrittenProse] = []
         self._subpoint_entry_ids: set[int] = set()
         # Whose each written sub-point is, for the render-warnings sidecar.
         self._subpoint_placements: list[supplementary.SubpointPlacement] = []
@@ -3977,8 +4090,9 @@ Now analyze the text above:"""
         """#1205: tracked-deleted sub-points first, then the content-overflow
         routing, which skips an entry a sub-point now carries, so its prose is
         not re-emitted whole as a blue bullet or into the Appendix. The #221
-        recovery after this reads a sub-point as the undated record line its
-        prose is part of (`_subpoint_prose`), and as no other line."""
+        recovery after this reads a sub-point as a line of its entry's that
+        is no record of its own and that its prose is part of
+        (`_subpoint_prose`), and as no other line."""
         self._add_supplementary_subpoints(entries_by_code)
         self._route_overflow_entries()
 
@@ -3994,16 +4108,17 @@ Now analyze the text above:"""
         text. The row-receipt ledger says which rows each entry wrote: a
         degree's, a leadership role's, a committee's, a talk's, a training
         position's or a membership's prose goes only under its own
-        (`supplementary._own_rows`). A dated record line the #221 recovery
-        after this reads as one of the entry's records (`recovery_candidates`)
-        is left to that recovery, and so is any of a membership's
+        (`supplementary._own_rows`). A record of its own beside the entry's
+        that the #221 recovery after this re-emits (`_record_line_verdicts`,
+        its verdict on the document so far) is left to that recovery, and so
+        is any record line of a membership's
         (`supplementary._left_to_recovery`); the recovery reads a written
-        sub-point's paragraphs (`_subpoint_prose`) only as an undated record
-        line they are part of."""
+        sub-point's paragraphs (`_subpoint_prose`) only as a line of its
+        entry's that is no record of its own and that they are part of."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
-        haystack = supplementary.rendered_haystack(
-            self._rendered_output_lines() + self._subpoint_lines, self.doc)
+        out_lines = self._rendered_output_lines() + self._subpoint_lines
+        haystack = supplementary.rendered_haystack(out_lines, self.doc)
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
         appendix = self.doc.paragraphs[appendix_idx]._p if appendix_idx is not None else None
         candidates = list(supplementary.anchor_candidates(self.doc, appendix))
@@ -4011,11 +4126,15 @@ Now analyze the text above:"""
                                                self._subpoint_section_spans(),
                                                self._subpoint_excluded_tables,
                                                self._row_receipts.elements_for,
-                                               recovery_candidates)
+                                               functools.partial(
+                                                   _record_line_verdicts,
+                                                   _recovery_view(out_lines, entries_by_code)))
+        entries = {id(entry): entry for group in entries_by_code.values() for entry in group}
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:
-            self._subpoint_prose.extend(subpoint.paragraphs)
+            self._subpoint_prose.append(supplementary.WrittenProse(
+                _squash(recovery_text(entries[subpoint.entry_id])), subpoint.paragraphs))
             subpoint = subpoint._replace(paragraphs=tuple(
                 self._sanitize_run_text(text) for text in subpoint.paragraphs))
             supplementary.write_subpoint(subpoint, revision)
@@ -4225,95 +4344,48 @@ Now analyze the text above:"""
         lets the A-orphan recovery recognise the owner's own running header
         (#1221).
         """
-        # #1205: an appointment title's duties, written under its row.
-        out_lines = self._rendered_output_lines() + self._subpoint_lines
-        haystack = "\x00".join(_squash(line) for line in out_lines)
-
         appendix_batch = []   # (text, code, coverage) for _add_remaining_to_appendix
         n_recovered = 0
 
         if self.recover_unrendered_records:
-            line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
-                               for line in out_lines]
-            # A line the Appendix cap cut may have lost the tail of its record
-            # (#1230): it vouches only for a line it carries in full.
-            t_line_token_sets = [_record_tokens(line) for line in out_lines
-                                 if not line.endswith(APPENDIX_TRUNCATION_MARKER)]
-            t_cut_token_sets = [_record_tokens(line) for line in out_lines
-                                if line.endswith(APPENDIX_TRUNCATION_MARKER)]
-            # A T entry can repeat a table whose rows are also entries of their
-            # own that render (#1230): a line such a row carries in full is not
-            # lost, however the render reformatted it.
-            t_cut_token_sets += other_entry_line_tokens(entries_by_code)
+            # #1205: an appointment title's duties, written under its row.
+            view = _recovery_view(self._rendered_output_lines() + self._subpoint_lines,
+                                  entries_by_code)
             # Tokens (letters and number runs) of the tab parts recovered so far.
             part_token_sets: list[set] = []
 
             for code, entries in entries_by_code.items():
                 for entry in entries:
-                    records = recovery_candidates(code, entry)
-                    if not records:
+                    records = _entry_records(code, entry)
+                    if records is None:
                         continue  # not a fused multi-record entry
-                    fields = entry.get('extracted_fields') or {}
                     coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
-                    tab_parts = {part for text_line in recovery_text(entry).split('\n')
-                                 for part in tab_record_segments(text_line)}
                     deferred: list[str] = []
-                    siblings = render_check.record_siblings(records)
-                    twins = render_check.record_twins(records)
-                    for line in records:
-                        if code == 'T' and t_line_is_scaffolding(line, entry):
+                    for line in records.lines:
+                        if not _record_line_lost(line, code, entry, records, view):
                             continue
-                        if code == 'T':
-                            rendered = _whole_record_rendered(
-                                line, haystack, t_line_token_sets, t_cut_token_sets)
-                        else:
-                            rendered = render_check.sibling_record_rendered(
-                                line, siblings.get(line), haystack, line_token_sets,
-                                t_line_token_sets, twins.get(line))
-                        if rendered is None and line in tab_parts:
-                            # Too few words for the overlap test (#1243).
-                            rendered = short_tab_part_rendered(
-                                line, fields, t_line_token_sets)
-                        if rendered is not False:
-                            # Rendered (possibly reformatted), or too short to
-                            # verify either way — never re-insert.
-                            continue
-                        if supplementary.held_by_subpoint(line, self._subpoint_prose):
-                            continue  # #1205: its duties, now a sub-point under its row
-                        if line in tab_parts and segment_held_by_fields(line, fields):
-                            continue  # a tab part of the record stage 4 extracted (#1243)
                         if _tab_part_recovered(line, part_token_sets):
                             # The same record, recovered earlier as a tab part
                             # (this line may be a tab part or a plain line).
                             continue
-                        if segment_already_rendered(line, fields):
-                            # The record that DID render from extracted fields: a
-                            # grant table splits its tokens across label/value
-                            # rows, so the token check alone can miss it (#209).
-                            continue
-                        if (not re.search(r'\d', line)
-                                and line.count('\t') + line.count('|') >= 2
-                                and _is_column_header_row(line)):
-                            # Multi-column rows with no year/number payload AND
-                            # majority column-label words are tabular header rows
-                            # ("State/Country  License Number  Status ...")
-                            # satisfying the tab-record heuristic — not CV
-                            # records. A dateless multi-cell row of real content
-                            # (committee membership: "Member | Committee on X |
-                            # Organization") is still recovered.
-                            continue
-                        if is_template_instruction(line) or is_source_boilerplate(line):
-                            continue
-                        inserted = self._insert_reconsidered_segment(
-                            line, code,
-                            comment=(
-                                f"Recovered: this record from the source CV was not "
-                                f"rendered by the structured {code} section. "
-                                f"Review placement and formatting."
-                            ))
-                        if not inserted:
-                            appendix_batch.append((line, code, coverage))
+                        # #1205: a line of the entry's own that its sub-point
+                        # holds (its duties, now under its row) is not
+                        # re-emitted, and vouches below as its re-emitted copy
+                        # does with sub-points off.
+                        if (supplementary.is_sub_record(line, records.tab_parts, entry)
+                                or not supplementary.held_by_subpoint(line, self._subpoint_prose)):
+                            inserted = self._insert_reconsidered_segment(
+                                line, code,
+                                comment=(
+                                    f"Recovered: this record from the source CV was not "
+                                    f"rendered by the structured {code} section. "
+                                    f"Review placement and formatting."
+                                ))
+                            if not inserted:
+                                appendix_batch.append((line, code, coverage))
+                            self.stats['unrendered_records_recovered'] += 1
+                            n_recovered += 1
                         # Count the re-inserted line as rendered so a
                         # near-identical variant in another pre-dedup entry
                         # (trailing period, 'Sep' vs 'Sept') is verified rendered
@@ -4323,20 +4395,19 @@ Now analyze the text above:"""
                         # Tab siblings share their vocabulary and differ in the
                         # dates: one recovered part must not vouch for the next
                         # (#1243), so they vouch once the entry is done.
-                        if line in tab_parts:
+                        if line in records.tab_parts:
                             deferred.append(line)
                         else:
-                            haystack = _vouch_for_lines(
-                                [line], haystack, t_line_token_sets, line_token_sets)
-                        self.stats['unrendered_records_recovered'] += 1
-                        n_recovered += 1
-                    _vouch_for_tab_parts(deferred, t_line_token_sets, part_token_sets)
+                            view = view._replace(haystack=_vouch_for_lines(
+                                [line], view.haystack, view.t_line_token_sets,
+                                view.line_token_sets))
+                    _vouch_for_tab_parts(deferred, view.t_line_token_sets, part_token_sets)
 
             # Unconsumed A-coded orphans (#316) are part of the SAME record-
             # recovery safety net the flag above governs -- gated with it,
             # unlike the notice below.
             appendix_batch.extend(self._unconsumed_personal_data_batch(
-                haystack, _owner_signature_tokens(cv_owner)))
+                view.haystack, _owner_signature_tokens(cv_owner)))
 
         recovered: list[RecoveredLine] = []
         if appendix_batch:

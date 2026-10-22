@@ -1676,24 +1676,27 @@ def test_a_membership_part_the_recovery_reads_as_a_record_is_left_to_it():
 
     def record_lines(code, e):
         calls.append((code, e))
-        return [_OFFICE] if e is entry else []
+        # Read as rendered and as no record of its own: a membership's
+        # record lines are the recovery's whatever its verdict.
+        return [sp.RecordLine(_OFFICE, False, False)] if e is entry else []
 
     (planned,) = _plan_membership(entry, record_lines=record_lines)
     assert planned.paragraphs == (PROSE,)
     assert calls == [("I", entry)]
     # A line holding only records offers nothing.
     only = _membership(f"Member, {_SOCIETY}, 2009-2014\t{_OFFICE}")
-    assert _plan_membership(only, record_lines=lambda code, e: [_OFFICE]) == []
+    assert _plan_membership(only, record_lines=lambda code, e: [sp.RecordLine(_OFFICE, True, True)]) == []
 
 
-def test_only_a_membership_leaves_an_undated_record_line_to_the_recovery():
-    # PROSE has no date of its own: for an appointment it is duty prose, the
-    # sub-point's (owner decision 2026-10-08), whatever the recovery reads.
+def test_only_a_membership_leaves_a_line_of_its_own_to_the_recovery():
+    # PROSE is no record of its own: for an appointment it is duty prose,
+    # the sub-point's (owner decision 2026-10-08), though the recovery
+    # re-emits it with sub-points off.
     appointment = _appointment()
     line = _candidate("Associate Professor | Example University | 2010-2015")
     (planned,) = sp.plan_subpoints({"D1": [appointment]}, _haystack(), [line],
                                    {"D1": sp.SectionSpan(0, None)},
-                                   record_lines=lambda code, e: [PROSE])
+                                   record_lines=lambda code, e: [sp.RecordLine(PROSE, True, False)])
     assert planned.paragraphs == (PROSE,)
 
 
@@ -1714,7 +1717,8 @@ def test_every_family_leaves_a_dated_record_line_to_the_recovery(code):
 
     def record_lines(c, e):
         calls.append(c)
-        return ["Associate Professor, Example University, 2010-2015", _SUB_RECORD]
+        return [sp.RecordLine("Associate Professor, Example University, 2010-2015", False, False),
+                sp.RecordLine(_SUB_RECORD, True, True)]
 
     (offered,) = sp.plan_subpoints({code: [entry]}, _haystack(), [line], spans)
     assert offered.paragraphs == (_SUB_RECORD, PROSE)
@@ -1723,52 +1727,81 @@ def test_every_family_leaves_a_dated_record_line_to_the_recovery(code):
     assert planned.paragraphs == (PROSE,) and calls == [code]
 
 
-@pytest.mark.parametrize("line, dated", [
-    (_SUB_RECORD, True),
-    (f"{_SUB_RECORD}.", True),                                    # punctuation after the years
-    ("Research mentor for the example visiting programme (2005 - 2006)", True),
-    ("Fellow of the Example Society of Estuarine Ecology, 1985", True),  # a lone year
-    ("2012-2014 Director, Example Admissions Committee", True),   # date-led
-    (f"2010-2015 Associate Professor, Example University. {PROSE}, {OTHER_PROSE.lower()} "
-     f"and the example programme's accreditation review", True),  # date-led, longer than a record
-    ("July 2010 - present\tAssociate Professor, Example University", True),
-    (f"Main Annex, Example Campus.\t{PROSE}", False),              # a row by its shape alone
-    ("Chaired the example society's 2012 annual meeting and its plenary sessions", False),
-    (f"{PROSE}, {OTHER_PROSE.lower()}, and reviewed every example programme each year "
-     f"of the department's accreditation cycle, 2015", False),     # prose past the record length
-    ("Member | Example Committee on Curriculum | Example University", False),
-], ids=["trailing_range", "trailing_period", "bracketed", "lone_year", "date_led", "date_led_long",
-        "month_led", "undated_row", "year_inside", "over_record_length", "undated_pipe_row"])
-def test_a_record_line_is_dated_by_the_recoverys_own_tests(line, dated):
-    assert sp._dated_record_line(line) is dated
+def test_record_lines_are_asked_only_for_an_entry_with_prose_to_offer():
+    # The generator's verdict on each record line costs a recovery check:
+    # an entry with no fragment to offer does not need it.
+    calls = []
+    entry = _entry("Associate Professor\tExample University", title="Associate Professor",
+                   institution="Example University")
+    planned = sp.plan_subpoints({"D1": [entry]}, _haystack(), [_candidate("Associate Professor")],
+                                {"D1": sp.SectionSpan(0, None)},
+                                record_lines=lambda code, e: calls.append(code) or [])
+    assert planned == [] and calls == []
+
+
+#: The entry's own years (`_own_years`) are 2010 and 2015.
+_OWN = _entry("unused", title="Associate Professor", institution="Example University",
+              start_date="2010", end_date="2015", additional_roles=["Director, 2012-2014"])
+
+
+@pytest.mark.parametrize("line, tab_part, sub_record", [
+    (_SUB_RECORD, True, True),                                    # a tab part the recovery split out
+    ("Fellow of the Example Society of Estuarine Ecology, 1985", True, True),  # a lone year
+    (_SUB_RECORD, False, False),                                  # a row's text, not one of its tab parts
+    ("2012-2014 Director, Example Admissions Committee", False, True),   # date-led
+    ("July 2008 - present\tCourtesy Professor, Example College", False, True),  # month-led
+    (f"2010-2015\t{PROSE}", False, False),                        # the entry's own years: its duties
+    ("Associate Professor, Example University, 2010-2015", True, False),
+    (f"2010-2015\tAssociate Professor\t{PROSE} since 2012", False, True),  # a year of its own inside
+    (f"Main Annex, Example Campus.\t{PROSE}, 2012", False, False),  # a row by its shape alone
+    (f"Main Annex, Example Campus.\t{PROSE} (2012-2014)", False, False),
+    ("Member | Example Committee on Curriculum | Example University", False, False),
+], ids=["tab_part", "lone_year", "not_a_tab_part", "date_led", "month_led", "own_years",
+        "own_years_tab_part", "year_inside", "row_ends_on_a_year", "row_ends_on_a_range", "undated_row"])
+def test_a_sub_record_is_dated_by_the_recoverys_reading_with_a_year_of_its_own(line, tab_part, sub_record):
+    """#1205 review: a record of its own is a line the recovery dates (a tab
+    part it splits out, or a line a date opens) with a year the entry's
+    fields do not hold; a list field's years are another record's."""
+    assert sp.is_sub_record(line, {line} if tab_part else set(), _OWN) is sub_record
 
 
 _DUTY_ROW = f"Main Annex, Example Campus.\t{PROSE}"
+_OWN_LINE = f"2010-2015\tAssociate Professor\t{PROSE}"
 
 
 @pytest.mark.parametrize("fragment, code, records, left", [
-    (_SUB_RECORD, "D1", [_SUB_RECORD], True),
-    (f"{_SUB_RECORD}, as its first chair", "K1", [_SUB_RECORD], True),  # holds the record
-    (PROSE, "D1", [_DUTY_ROW], False),                                  # part of an undated row
-    (PROSE, "I", [_DUTY_ROW], True),                                    # a membership's: any record
+    (_SUB_RECORD, "D1", [sp.RecordLine(_SUB_RECORD, True, True)], True),
+    (f"{_SUB_RECORD}, as its first chair", "K1", [sp.RecordLine(_SUB_RECORD, True, True)], True),
+    ("Director, Example Admissions Committee", "M2A",
+     [sp.RecordLine("2012-2014\tDirector, Example Admissions Committee", True, True)], True),
+    ("Director, Example Admissions Committee", "D1",
+     [sp.RecordLine("2012-2014\tDirector, Example Admissions Committee", False, True)], False),
+    (PROSE, "D1", [sp.RecordLine(_OWN_LINE, True, False)], False),
+    (PROSE, "D1", [sp.RecordLine(_DUTY_ROW, True, False)], False),
+    (PROSE, "I", [sp.RecordLine(_DUTY_ROW, False, False)], True),
     (_SUB_RECORD, "D1", [], False),
-    (PROSE, "D1", [_SUB_RECORD], False),
-], ids=["dated_record", "holds_a_dated_record", "duties_row", "membership_row", "no_records",
-        "other_record"])
+    (PROSE, "D1", [sp.RecordLine(_SUB_RECORD, True, True)], False),
+], ids=["sub_record", "holds_a_sub_record", "part_of_a_lost_sub_record", "part_of_a_rendered_sub_record",
+        "part_of_its_own_line", "duties_row", "membership_row", "no_records", "other_record"])
 def test_a_fragment_left_to_the_recovery(fragment, code, records, left):
+    """#1205 review: a fragment merely part of a sub-record the recovery
+    reads as rendered is offered; held back, it was in neither document
+    (FINSIS 511)."""
     assert sp._left_to_recovery(fragment, code, records) is left
 
 
-@pytest.mark.parametrize("line, prose, held", [
-    (_DUTY_ROW, [PROSE], True),                    # the duties' own row
-    (PROSE, [OTHER_PROSE, PROSE], True),
-    (f"2010-2015 Associate Professor\t{PROSE}", [PROSE], False),   # a dated record line
-    (_SUB_RECORD, [f"As director of the example admissions committee, {PROSE.lower()}"], False),
-    (_DUTY_ROW, [OTHER_PROSE], False),
+_SOURCE = sp._squash(f"Associate Professor\n{_DUTY_ROW}")
+
+
+@pytest.mark.parametrize("line, written, held", [
+    (_DUTY_ROW, [sp.WrittenProse(_SOURCE, (PROSE,))], True),        # the duties' own row
+    (PROSE, [sp.WrittenProse(sp._squash(PROSE), (OTHER_PROSE, PROSE))], True),
+    (_DUTY_ROW, [sp.WrittenProse(sp._squash(f"Other\t{PROSE}"), (PROSE,))], False),  # another entry's
+    (_DUTY_ROW, [sp.WrittenProse(_SOURCE, (OTHER_PROSE,))], False),
     (_DUTY_ROW, [], False),
-], ids=["duties_row", "the_prose", "dated_line", "repeats_its_words", "other_prose", "no_sub_point"])
-def test_the_recovery_reads_a_sub_point_only_as_an_undated_record_line_it_is_part_of(line, prose, held):
-    assert sp.held_by_subpoint(line, prose) is held
+], ids=["duties_row", "the_prose", "another_entrys_sub_point", "other_prose", "no_sub_point"])
+def test_the_recovery_reads_a_sub_point_only_for_a_line_of_its_own_entry_it_is_part_of(line, written, held):
+    assert sp.held_by_subpoint(line, written) is held
 
 
 def test_plan_offers_no_prose_of_a_membership_the_pii_pass_withheld():
