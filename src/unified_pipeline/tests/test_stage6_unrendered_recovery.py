@@ -3964,9 +3964,10 @@ def test_the_doctor_matches_a_leadership_sub_point_to_its_own_entry_only(tmp_pat
     assert not offered_as_subpoint(_ROLE_PROSE, subpoints, element_idx=55)
 
 
-def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P"):
+def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P", **kwargs):
     """Through `run_stage6`, so the PII pass and the date-led split (#983)
-    run as in a real render: the document and its sidecar's placements."""
+    run as in a real render: the document and its sidecar's placements.
+    `kwargs` go to `run_stage6` (`supplementary_subpoints`)."""
     from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
 
     monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
@@ -3976,7 +3977,7 @@ def _stage6_render(tmp_path, monkeypatch, entries, uid="T1205P"):
     input_path.write_text(json.dumps({"document_uid": uid,
                                       "cv_owner": {"full_name": "Quenby Marblegate"},
                                       "entries": entries}))
-    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False, **kwargs)
     sidecar = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
     return Document(out), [p["paragraphs"] for p in sidecar[SUBPOINT_PLACEMENTS_KEY]]
 
@@ -5693,8 +5694,8 @@ def test_a_position_rerouted_out_of_c_to_an_excluded_code_gets_no_sub_point(code
 @pytest.mark.parametrize("code, heading", [("I", "PROFESSIONAL ORGANIZATIONS"),
                                            ("F2", "Board Certification"), ("D1", "ACADEMIC APPOINTMENTS")])
 def test_a_refused_reroute_keeps_the_training_rule(code, heading):
-    """A position rerouted to I or F2, whose span the heading lookup does not
-    find, or to D1, keeps its C code: their renderers would drop its type
+    """A position rerouted to I, to F2, whose span the heading lookup does
+    not find, or to D1 keeps its C code: their renderers would drop its type
     (`_fields_lost_in_reroute`). It renders as a C row and its prose is a
     deleted row under that row."""
     gen, grouped = _render_grouped_training([_rerouted(_training(), code, heading)],
@@ -5817,6 +5818,632 @@ def test_training_prose_holding_protected_data_is_not_offered_through_the_pii_pa
 
     doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
                                      [protect(_training(), _TRAINING_PROSE)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+# --- #1205: I professional memberships, the next code family -----------------
+# The memberships section writes every I entry as one row of its two-column
+# table, so the prose is a deleted row under the membership's own row: the one
+# row the writer recorded for that entry (the row-receipt ledger). A line
+# holding another membership offers none, and a dated office the #221
+# recovery reads as one of the entry's records is left to that recovery.
+
+_MEMBERSHIP_PROSE = ("Chaired the scientific session on estuarine sediment budgets at the "
+                     "annual meeting and edited its proceedings")
+_SOCIETY_NAME = "Example Society of Estuarine Ecology"
+
+
+def _membership(idx=135, org=_SOCIETY_NAME, mtype="Member", start="2009", end="2014",
+                prose=_MEMBERSHIP_PROSE, code="I", **fields):
+    """A membership whose source line goes on past its type, society and
+    years into a session the member chaired, as EBYSBC BFSUMA 98's did. A
+    later membership of the same society and type shares every distinctive
+    word of its row: only the years, digits, tell them apart. A value passed
+    as None is in neither the line nor the fields."""
+    named = {"organization": org, "membership_type": mtype, "start_date": start, "end_date": end}
+    dates = "-".join(value for value in (start, end) if value)
+    line = ", ".join(value for value in (mtype, org, dates) if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _later_membership(mtype="Member"):
+    """The same society's membership from 2015, with no prose: it renders
+    first, reverse chronologically."""
+    return _membership(idx=122, mtype=mtype, start="2015", end="present", prose="")
+
+
+def _render_memberships(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_memberships(entries)
+    gen._add_supplementary_subpoints({"I": entries})
+    return gen
+
+
+def _membership_table_row():
+    """The same membership read from a source table: stage 2 joins the row's
+    cells with pipes, and its position names the row ("88.2")."""
+    entry = _membership()
+    entry["element_idx_start"] = "88.2"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+_MEMBERSHIP_ROW = f"Member, {_SOCIETY_NAME}2009-2014"
+_LATER_MEMBERSHIP_ROW = f"Member, {_SOCIETY_NAME}2015-Present"
+_MEMBERSHIP_HEADER = "OrganizationDate (yyyy-yyyy)"
+
+
+@pytest.mark.parametrize("entry", [_membership, _membership_table_row])
+def test_membership_prose_is_a_deleted_row_under_the_membership_row(entry):
+    gen = _render_memberships([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _MEMBERSHIP_ROW
+    assert _table_header(row) == _MEMBERSHIP_HEADER
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MEMBERSHIP_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "2"
+    assert gen.stats["supplementary_subpoints"] == 1
+    (placement,) = gen._subpoint_placements
+    assert (placement.element_idx_start, placement.code) == (entry()["element_idx_start"], "I")
+
+
+def test_a_memberships_several_prose_lines_are_one_row_of_paragraphs_in_source_order():
+    lines = (_MEMBERSHIP_PROSE, "Delegate for the northern region to the annual assembly of members")
+    gen = _render_memberships([_membership(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _MEMBERSHIP_ROW
+    assert ["".join(t.text for t in p.iter(qn("w:delText"))) for p in row.iter(qn("w:p"))] \
+        == list(lines)
+
+
+@pytest.mark.parametrize("later", [
+    # One type held twice in one society: the rows differ in their years only.
+    "Member",
+    # A later fellowship of the same society, whose row holds every word of this one's.
+    "Elected Member",
+])
+def test_membership_prose_goes_under_its_own_row_among_memberships_of_one_society(later):
+    """The later membership renders first and holds every distinctive word
+    of the earlier one's row, so words alone put the earlier one's prose
+    under the later row. Only the row the writer recorded for the earlier
+    entry takes it."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_memberships([_later_membership(later), _membership()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert _row_text(above) == _MEMBERSHIP_ROW
+    assert _row_text(above.getprevious()) == f"{later}, {_SOCIETY_NAME}2015-Present"
+    # Words alone would have taken the later membership's row.
+    lines = list(supplementary.anchor_candidates(_render_memberships(
+        [_later_membership(later), _membership()], supplementary_subpoints=False).doc))
+    rows = [line for line in lines if _SOCIETY_NAME in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(_membership(), "I"), rows) is rows[0]
+    assert rows[0].text.startswith(later)
+
+
+def test_memberships_of_one_society_each_take_their_own_prose():
+    later_prose = "Organized the society's first regional workshop on tidal marsh restoration methods"
+    later = _membership(idx=122, start="2015", end="present", prose=later_prose)
+    gen = _render_memberships([later, _membership()], supplementary_subpoints=True)
+
+    by_text = {"".join(t.text for t in row.iter(qn("w:delText"))): row for row in _subpoint_rows(gen)}
+    assert set(by_text) == {later_prose, _MEMBERSHIP_PROSE}
+    assert _row_text(by_text[later_prose].getprevious()) == _LATER_MEMBERSHIP_ROW
+    assert _row_text(by_text[_MEMBERSHIP_PROSE].getprevious()) == _MEMBERSHIP_ROW
+    assert [(p.element_idx_start, p.paragraphs) for p in gen._subpoint_placements] \
+        == [(122, (later_prose,)), (135, (_MEMBERSHIP_PROSE,))]
+
+
+def test_membership_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_memberships([_later_membership(), _membership()], supplementary_subpoints=False)
+    on = _render_memberships([_later_membership(), _membership()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _MEMBERSHIP_PROSE in rejected
+    assert _MEMBERSHIP_PROSE not in "".join(_texts_of(off.doc.element.body))
+    assert len(_subpoint_rows(on)) == 1
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_a_short_memberships_prose_goes_under_its_own_row():
+    """A society of an acronym holds no distinctive word, too few for the
+    word test: the writer's record says the one row is the entry's own
+    (`_pick_anchor`)."""
+    gen = _render_memberships([_membership(org="ESEE")], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == "Member, ESEE2009-2014"
+    assert _deleted_texts(gen) == _MEMBERSHIP_PROSE
+
+
+def _membership_named_by_its_prose():
+    """The prose is the organization stage 4 extracted."""
+    return _membership(org=_MEMBERSHIP_PROSE, prose=None)
+
+
+def _membership_typed_by_its_prose():
+    """The prose is the membership type stage 4 extracted, which the
+    Organization cell prefixes."""
+    return _membership(mtype=_MEMBERSHIP_PROSE)
+
+
+@pytest.mark.parametrize("entry", [_membership_named_by_its_prose, _membership_typed_by_its_prose])
+def test_membership_prose_already_in_its_row_is_not_offered_again(entry):
+    """The row prints it (`_record_rendered`), so it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_memberships([entry()], supplementary_subpoints=True)
+    assert _MEMBERSHIP_PROSE in "".join(_row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "I", haystack) == []
+
+
+def _membership_with_only(field, marker, text="Kestrel Ornithology Union"):
+    """An entry holding `field` alone. Its text names an organization the
+    writer's fallback scan reads, so a type has an organization to prefix;
+    an organization name is its whole text, as the fallback prints a name
+    only when the entry's words all reach the row (`_recovery_covers_text`)."""
+    entry = _membership(org=None, mtype=None, start=None, end=None, prose="")
+    entry["extracted_fields"] = {field: marker}
+    entry["text"] = text
+    return entry
+
+
+def test_every_membership_row_field_the_pass_counts_is_printed_in_the_membership_row():
+    """The off-schema names among the fields `_value_tokens` counts for a
+    membership (`_RENDERED_FIELDS` marks schema fields only): each one, alone
+    on an entry, is counted and reaches the row."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    off_schema = [name for name in (*supplementary.MEMBERSHIP_ORGANIZATION_FIELDS,
+                                    *supplementary.MEMBERSHIP_TYPE_FIELDS)
+                  if name not in _RENDERED_FIELDS["I"]]
+    assert off_schema == ["institution", "organization_name", "society", "fellowship_designation", "role"]
+    for field in off_schema:
+        marker = f"Zq{field}Z"
+        names_organization = field in supplementary.MEMBERSHIP_ORGANIZATION_FIELDS
+        entry = _membership_with_only(field, marker, *([marker] if names_organization else []))
+        assert supplementary._tokens(marker) <= supplementary._value_tokens(entry, "I"), field
+        gen = _render_memberships([entry], supplementary_subpoints=True)
+        assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
+
+
+def test_every_field_the_membership_row_prints_is_one_the_pass_counts():
+    """The other direction: a field the row prints that `_value_tokens` does
+    not count would offer a fragment restating the row. The names are the
+    fields of the codes an entry is rerouted into I from (Q1, Q2), of the
+    codes stage 3b confuses with it (H, P, O), and the writer's own, each
+    alone on an entry, and beside the schema's organization."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    names = set().union(*(_RENDERED_FIELDS[code] for code in ("Q1", "Q2", "H", "P", "O")
+                          if code in _RENDERED_FIELDS),
+                        supplementary.MEMBERSHIP_ORGANIZATION_FIELDS, supplementary.MEMBERSHIP_TYPE_FIELDS,
+                        {"title", "position", "name", "department", "committee"})
+    for field in sorted(names):
+        marker = f"Zq{field}Z"
+        for entry in (_membership_with_only(field, marker),
+                      _membership(prose="", **{field: marker})):
+            gen = _render_memberships([entry], supplementary_subpoints=True)
+            printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+            counted = supplementary._tokens(marker) <= supplementary._value_tokens(entry, "I")
+            assert not printed or counted, field
+
+
+@pytest.mark.parametrize("alias, mtype", [("institution", "Member"), ("society", "Member"),
+                                          ("role", "Member"), ("role", None)])
+def test_a_line_restating_a_name_its_row_does_not_print_is_offered(alias, mtype):
+    """Beside the schema's organization the row prints no off-schema name
+    (`membership_cell_values`), not even a role when the schema names no
+    type. Its words are in no line of the document, so a line restating it
+    is the membership's prose, not its row."""
+    restated = "Coastal sediment monitoring network steering working party"
+    entry = _membership(mtype=mtype, prose=restated, **{alias: restated})
+    gen = _render_memberships([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert restated not in _row_text(row.getprevious())
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == restated
+
+
+def test_a_membership_the_writer_parses_into_several_rows_gets_no_sub_point():
+    """A line holding several memberships, one per source table row, which
+    the writer prints a row each (#476): which of them a prose line is about
+    cannot be shown."""
+    entry = _membership(prose=None)
+    entry["text"] = (f"Member | {_SOCIETY_NAME} | 2009-2014\n"
+                     "Fellow | Kestrel Academy of Tidal Studies | 2012-2016\n"
+                     f"{_MEMBERSHIP_PROSE}")
+    gen = _render_memberships([entry], supplementary_subpoints=True)
+
+    assert len(gen._row_receipts.elements_for(entry)) > 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _memberships_in_one_sentence():
+    """One sentence listing the society among others (EBYSBC NJIKGI 65's
+    shape): the writer prints the one stage 4 extracted."""
+    entry = _membership(prose=None)
+    entry["text"] = (f"Member of the {_SOCIETY_NAME}, the Kestrel Statistical Association, and the "
+                     "Norvale Academy of Tidal Studies, contributing to their annual meetings")
+    return entry
+
+
+def _a_chapter_fused_with_another_college():
+    """A chapter's line fused with another college's fellowship (YUYVIG
+    FCAAUV 30's shape)."""
+    entry = _membership(org="Theta Chapter, Example Honor Guild", start="1986", end=None, prose=None)
+    entry["text"] = ("Fellow Kestrel College of Physicians, Theta Chapter, Example Honor Guild 1986\t"
+                     f"{_MEMBERSHIP_PROSE}")
+    return entry
+
+
+@pytest.mark.parametrize("make", [_memberships_in_one_sentence, _a_chapter_fused_with_another_college])
+@pytest.mark.parametrize("flag", [True, False])
+def test_a_membership_line_naming_another_society_offers_none_and_its_records_are_recovered(make, flag):
+    """#1205 comment 6275741663: the #221 recovery reads every sub-point
+    line as rendered, so another membership offered as this one's prose
+    would be in the accepted document nowhere. None is offered, and the
+    recovery re-emits the same lines with sub-points on as off."""
+    entry = make()
+    gen = _render_memberships([entry], supplementary_subpoints=flag)
+    assert len(gen._row_receipts.elements_for(entry)) == 1
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+    gen._recover_unrendered_records({"I": [entry]})
+    off = _render_memberships([make()], supplementary_subpoints=False)
+    off._recover_unrendered_records({"I": [make()]})
+
+    assert gen.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"]
+    assert _texts_of(gen.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+_OFFICES = ("Member, Estuarine Sediment Working Group, 2003-2008",
+            "Chair, Marsh Restoration Task Force for Coastal Wetlands, 2010-2012")
+
+
+def _membership_with_dated_offices():
+    """A society line, then two offices held in it, each ending in its years,
+    then prose (EBYSBC VQFSDI 92's shape). The recovery reads the dated parts
+    as the entry's records (`recovery_candidates`); stage 4 extracted the
+    membership."""
+    entry = _membership(start="2009", end="present", prose=None)
+    entry["text"] = "\t".join((f"{_SOCIETY_NAME}, 2009-present", *_OFFICES, _MEMBERSHIP_PROSE))
+    return entry
+
+
+def test_a_dated_office_the_recovery_reads_as_a_record_is_left_to_it():
+    """#1205 comment 6317001032, 'Counts that do not add up' item 2: dev's
+    #221 recovery re-emits each office to the Appendix, with sub-points on
+    and off. Offered as a sub-point, the office's line read as rendered, so
+    the recovery left it out, and after Accept All it was in the document
+    nowhere. It stays the recovery's; the prose beside it is the sub-point,
+    and the document after Accept All is the flag-off one."""
+    entry = _membership_with_dated_offices()
+    assert recovery_candidates("I", entry)[1:] == list(_OFFICES)
+
+    def recovered(flag):
+        gen = _render_memberships([_membership_with_dated_offices()], supplementary_subpoints=flag)
+        gen._recover_unrendered_records({"I": [_membership_with_dated_offices()]})
+        return gen
+
+    on, off = recovered(True), recovered(False)
+    (row,) = _subpoint_rows(on)
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MEMBERSHIP_PROSE
+    assert on.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"] == 2
+    body_text = "".join(_texts_of(on.doc.element.body))
+    assert all(office in body_text for office in _OFFICES)
+    row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+_OFFICES_BESIDE_THEIR_PROSE = (
+    ("Chair, Education Committee, 2015-2018",
+     "As chair of the education committee, developed the society's continuing education curriculum"),
+    ("Chair, Annual Meeting Program Committee, 2012-2013",
+     "Chaired the annual meeting program committee sessions and selected the plenary speakers"),
+)
+
+
+def _membership_with_an_office_beside_its_prose(office, prose):
+    """A society line, a dated office held in it, then prose naming the
+    office's committee: the prose holds every distinctive word of the
+    office's line (#1205 review of I). Stage 4 extracted the membership."""
+    entry = _membership(start="2009", end="present", prose=None)
+    entry["text"] = "\t".join((f"Member, {_SOCIETY_NAME}, 2009-present", office, prose))
+    return entry
+
+
+@pytest.mark.parametrize("office, prose", _OFFICES_BESIDE_THEIR_PROSE, ids=["education", "program"])
+def test_a_dated_office_beside_prose_repeating_its_words_stays_in_the_accepted_document(
+        tmp_path, monkeypatch, office, prose):
+    """#1205 review of I, through `run_stage6`. The prose is the sub-point,
+    and the office, a record the #221 recovery reads, is not part of it. The
+    sub-point's line held every word of the office's line, so the recovery
+    read the office as rendered (`_record_rendered`'s token overlap) and left
+    it out: it was in neither the accepted nor the rejected document. The
+    recovery reads no membership sub-point (`RECOVERY_RECORD_CODES`) and
+    re-emits the office as with sub-points off."""
+    entry = _membership_with_an_office_beside_its_prose(office, prose)
+    assert recovery_candidates("I", entry)[1:] == [office]
+
+    def texts(flag):
+        doc, placements = _stage6_render(tmp_path / str(flag), monkeypatch, [copy.deepcopy(entry)],
+                                         uid="T1205J", supplementary_subpoints=flag)
+        body = doc.element.body
+        return ("".join(t.text or "" for t in body.iter(qn("w:t"))),
+                "".join(t.text or "" for t in body.iter(qn("w:delText"))), placements)
+
+    accepted_off, deleted_off, placements_off = texts(False)
+    accepted, deleted, placements = texts(True)
+    assert (deleted_off, placements_off) == ("", [])
+    assert placements == [[prose]] and deleted == prose
+    assert accepted.count(office) == accepted_off.count(office) == 1
+
+
+@pytest.mark.parametrize("office, prose", _OFFICES_BESIDE_THEIR_PROSE, ids=["education", "program"])
+def test_accept_all_of_an_office_beside_its_prose_is_the_flag_off_document(office, prose):
+    """The same through the section and the recovery: with the sub-point's
+    row removed, the document is the flag-off one."""
+    def recovered(flag):
+        entry = _membership_with_an_office_beside_its_prose(office, prose)
+        gen = _render_memberships([entry], supplementary_subpoints=flag)
+        gen._recover_unrendered_records({"I": [entry]})
+        return gen
+
+    on, off = recovered(True), recovered(False)
+    (row,) = _subpoint_rows(on)
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == prose
+    assert on.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"] == 1
+    row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_the_membership_span_starts_at_the_heading_its_writer_looks_up():
+    """The span starts at the heading the writer looks its table up by
+    (`MEMBERSHIPS_HEADING`), and holds that table. The other callers of the
+    code's heading lookup still name none for I: the reconsider pass and the
+    #221 recovery keep an I record in the Appendix, as before I's
+    sub-points."""
+    gen = _render_memberships([_membership()], supplementary_subpoints=True)
+    span = gen._subpoint_section_spans()["I"]
+    heading = gen.doc.element.body[span.start]
+    assert "".join(t.text or "" for t in heading.iter(qn("w:t"))).startswith("PROFESSIONAL ORGANIZATIONS")
+    (row,) = _subpoint_rows(gen)
+    assert span.start < list(gen.doc.element.body).index(row.getparent()) < span.end
+    assert WCMTemplateGenerator._get_wcm_section_header("I") == ""
+    assert gen._insert_reconsidered_segment(_OFFICES[0], "I") is False
+
+
+def test_a_template_with_no_membership_heading_places_no_membership_prose():
+    """Without the heading neither the writer nor the span finds the
+    section: no row is written, and the prose goes under no other line."""
+    gen = _generator(supplementary_subpoints=True)
+    gen.doc = Document()
+    gen.doc.add_paragraph("A. PERSONAL DATA")
+    entry = _membership()
+    gen._fill_memberships([entry])
+    gen._add_supplementary_subpoints({"I": [entry]})
+
+    assert "I" not in gen._subpoint_section_spans()
+    assert _deleted_texts(gen) == ""
+
+
+def _render_grouped_memberships(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_memberships(grouped.get("I", []))
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def _membership_line(text, *memberships):
+    """One source line stage 4 returned as a record per (type, society,
+    start), the entry's own fields being the last record's. Fan-out gives
+    every earlier record a line of its own and the last one the whole line."""
+    records = [{"membership_type": mtype, "organization": org, "start_date": start}
+               for mtype, org, start in memberships]
+    return {"element_idx_start": 663, "taxonomy_code": "I", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_FELLOWSHIP = ("Fellow", "Kestrel Academy of Tidal Studies", "2012")
+_MEMBER = ("Member", _SOCIETY_NAME, "2009")
+_FELLOWSHIP_LINE = "Fellow, Kestrel Academy of Tidal Studies, 2012"
+_MEMBER_LINE = f"Member, {_SOCIETY_NAME}, 2009"
+_FELLOWSHIP_PROSE = "Reviewed the academy's annual awards and judged its student poster competition"
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own membership.
+    ([f"{_FELLOWSHIP_LINE}. {_FELLOWSHIP_PROSE}", _MEMBER_LINE],
+     [("Fellow, Kestrel Academy of Tidal Studies", f"{_FELLOWSHIP_LINE}. {_FELLOWSHIP_PROSE}")]),
+    ([_FELLOWSHIP_LINE, f"{_MEMBER_LINE}. {_MEMBERSHIP_PROSE}"],
+     [(f"Member, {_SOCIETY_NAME}", f"{_MEMBER_LINE}. {_MEMBERSHIP_PROSE}")]),
+    # They do not: which membership the prose is about cannot be told, so neither takes it.
+    ([_FELLOWSHIP_LINE, _MEMBERSHIP_PROSE, _MEMBER_LINE], []),
+])
+def test_prose_on_a_line_of_several_memberships_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the membership's line as well as its prose brings the type,
+    society and year along, and Reject All prints them a second time, under
+    the row that holds them (the shape every family has; #1205, 2026-10-09)."""
+    entry = _membership_line("\t".join(segments), _FELLOWSHIP, _MEMBER)
+    gen, grouped = _render_grouped_memberships([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["I"][-1] and len(grouped["I"]) == 2
+    assert [(_row_texts_of(row.getprevious())[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def test_generic_list_fan_out_children_of_memberships_offer_nothing_their_fields_do_not_hold():
+    """Fan-out splits a record list stage 4 filed under a key the schema does
+    not define only when the fields hold every word of the text, and each
+    child's text is then the line built from its fields: nothing is prose.
+    With prose in the text the list is not split, the entry renders its own
+    fields, and the list is memberships the row does not print
+    (`_own_membership_line`): their lines would be offered as its prose."""
+    records = [{"membership_type": mtype, "organization": org, "start_date": start}
+               for mtype, org, start in (_FELLOWSHIP, _MEMBER)]
+    for text, children in ((f"{_FELLOWSHIP_LINE}\t{_MEMBER_LINE}", 2),
+                           (f"{_FELLOWSHIP_LINE}\t{_MEMBER_LINE}\t{_MEMBERSHIP_PROSE}", 1)):
+        entry = {"element_idx_start": 664, "taxonomy_code": "I", "text": text,
+                 "extracted_fields": {"memberships": copy.deepcopy(records)}}
+        gen, grouped = _render_grouped_memberships([entry], supplementary_subpoints=True)
+        assert len(grouped["I"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["I"])
+        assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("N1", "MENTORING PROGRAMS"), ("S0", "BIBLIOGRAPHY")])
+def test_a_membership_rerouted_out_of_i_to_an_excluded_code_gets_no_sub_point(code, heading):
+    """N1 and S0 are excluded: a membership rendered as either is that
+    code's record, so neither the membership row of the same society nor any
+    other carries its prose."""
+    gen, grouped = _render_grouped_memberships([_later_membership(), _rerouted(_membership(), code, heading)],
+                                               supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[code]] == [135]
+    assert [e["element_idx_start"] for e in grouped["I"]] == [122]
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("F2", "Board Certification"),
+                                           ("C", "POSTDOCTORAL TRAINING"),
+                                           ("Q2", "SERVICE ON BOARDS")])
+def test_a_refused_reroute_keeps_the_membership_rule(code, heading):
+    """A membership rerouted to F2, whose span the heading lookup does not
+    find, or to C or Q2, keeps its I code: their renderers write none of its
+    fields or would drop its type (`_cross_family_refusal`). It renders as an
+    I row and its prose is a deleted row under that row."""
+    gen, grouped = _render_grouped_memberships([_rerouted(_membership(), code, heading)],
+                                               supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["I"]] == [135]
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _MEMBERSHIP_ROW
+
+
+def test_a_record_rerouted_into_i_follows_the_membership_rule():
+    """A board seat stage 3b coded Q2 under the memberships heading, whose
+    role is a plain "Member" the memberships row states anyway, renders as
+    an I row: its prose is a deleted row under that row, recorded as I."""
+    seat = _membership(code="Q2", mtype=None, role="Member")
+    gen, grouped = _render_grouped_memberships(
+        [_rerouted(seat, "I", "PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS")],
+        supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["I"]] == [135]
+    (row,) = _subpoint_rows(gen)
+    assert _SOCIETY_NAME in _row_text(row.getprevious())
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MEMBERSHIP_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.code == "I"
+
+
+def test_a_membership_the_section_writes_no_row_for_gets_no_sub_point():
+    """An entry no row was written for -- one the section skipped -- has no
+    row of its own: its prose goes under no other line of the document,
+    though the other membership's row holds every distinctive word of its
+    line."""
+    skipped, later = _membership(), _later_membership()
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_memberships([later])
+    gen._add_supplementary_subpoints({"I": [later, skipped]})
+
+    assert gen._row_receipts.elements_for(skipped) == []
+    assert gen._row_receipts.elements_for(later)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_membership_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass touched the entry. What is left can still describe
+    what was withheld, so none of it is offered."""
+    withheld = _membership()
+    withheld["_pii_withheld"] = True
+    gen = _render_memberships([_later_membership(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_text(tr) == _MEMBERSHIP_ROW for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_membership_dedup_drops_offers_its_prose_once_under_the_kept_row():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no row, so its
+    prose goes only under the row of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_membership(idx=135), _membership(idx=136)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["I"]) == 2 and len(kept["I"]) == 1
+    gen._fill_memberships(kept["I"])
+    gen._add_supplementary_subpoints(before)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == _MEMBERSHIP_ROW
+    assert _deleted_texts(gen) == _MEMBERSHIP_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["I"][0]["element_idx_start"]
+
+
+def test_the_doctor_matches_a_membership_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier membership's
+    sub-point under its own index and I, and the doctor's per-entry match
+    counts it for that entry, not for the later membership that shares its
+    words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+
+    doc, placements = _stage6_render(tmp_path, monkeypatch, [_later_membership(), _membership()],
+                                     uid="T1205I")
+    assert placements == [[_MEMBERSHIP_PROSE]]
+    sidecar = json.loads((tmp_path / "T1205I_render_warnings.json").read_text())
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    assert [(p["element_idx_start"], p["code"]) for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(135, "I")]
+    subpoints = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_MEMBERSHIP_PROSE, subpoints, element_idx=135)
+    assert not offered_as_subpoint(_MEMBERSHIP_PROSE, subpoints, element_idx=122)
+
+
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_membership_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, protect, value):
+    """The PII pass drops a field named for protected data and marks the
+    entry withheld; no scope withholds a phone number in the middle of a
+    line (#1205 review of O). The same membership without them still has
+    its sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [_membership()])
+    assert placements == [[_MEMBERSHIP_PROSE]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
+                                     [protect(_membership(), _MEMBERSHIP_PROSE)])
     assert placements == []
     assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
 

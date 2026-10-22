@@ -101,6 +101,11 @@ from ..parsing import (
 from ..parsing.dates import DATE_DASH, OPEN_END, YEAR
 from ..pii_pass import PII_WITHHELD_KEY
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import (
+    MEMBERSHIP_ORGANIZATION_FIELDS,
+    MEMBERSHIP_TYPE_FIELDS,
+    membership_cell_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +113,11 @@ logger = logging.getLogger(__name__)
 # which maps it to 'yyyy'. Named because it appears in the one date-formatting
 # helper below and nowhere else; a bare 'I' at a call site reads like an index.
 _MEMBERSHIPS_TAXONOMY_CODE = 'I'
+
+# The template heading the section's table follows. The writer looks it up
+# first, and so does the #1205 sub-point pass for the section's span
+# (`_SUBPOINT_SECTION_HEADERS`), so the two cannot name different headings.
+MEMBERSHIPS_HEADING = 'PROFESSIONAL ORGANIZATIONS'
 
 # The type vocabulary `_parse_multi_membership_entry` (stage6/parsing/text.py)
 # classifies parts with, restated here so `_entry_parts`'s grammar gate accepts
@@ -136,18 +146,20 @@ _DATE_HEADER_RE = re.compile(r'\bdates?\b')
 # Fallback organization extraction.
 _FRAGMENT_SPLIT_RE = re.compile(r'[\n\t|]')
 _ORGANIZATION_FALLBACK_MAX_CHARS = 150
-# Field names other extraction shapes use for the same value as `organization`.
-_ORGANIZATION_FIELD_ALIASES = ('institution', 'organization_name', 'society')
-# ...and for the same value as `membership_type`. Stage 4 picks a field schema
-# per taxonomy code (stage4/schemas.py), so an entry that reaches section I
-# under a different code's schema names the role under that schema's key:
-# `role` is the one the farm actually produces (2082_Dr_Scot's memberships
-# carry the K-schema's course_code/institution/role shape), and
-# `fellowship_designation` is section I's own second designation field.
-# `position` is emitted by no schema at all and `title` only ever names a work
-# -- a publication, a talk, a patent -- so neither is a membership designation
-# and neither is listed here.
-_MEMBERSHIP_TYPE_FIELD_ALIASES = ('membership_type', 'fellowship_designation', 'role')
+# The names the organization and the membership type are read under, each
+# in its precedence, are `supplementary`'s (`MEMBERSHIP_ORGANIZATION_FIELDS`,
+# `MEMBERSHIP_TYPE_FIELDS`), so the #1205 sub-point pass counts the name
+# this row prints and no other. Other extraction shapes name the
+# organization `institution`, `organization_name` or `society`. Stage 4
+# picks a field schema per taxonomy code (stage4/schemas.py), so an entry
+# that reaches section I under a different code's schema names the role
+# under that schema's key: `role` is the one the farm actually produces
+# (2082_Dr_Scot's memberships carry the K-schema's
+# course_code/institution/role shape), and `fellowship_designation` is
+# section I's own second designation field. `position` is emitted by no
+# schema at all and `title` only ever names a work -- a publication, a
+# talk, a patent -- so neither is a membership designation and neither is
+# listed there.
 # A written-out month is part of the date, not part of the organization name.
 # Full names and the three-letter abbreviations, with an optional period, and
 # only ever immediately in front of a year -- so "March 2018" is a date while
@@ -172,8 +184,6 @@ _BRACKET_PAIRS = (('(', ')'), ('[', ']'))
 # The column-label vocabulary `_is_table_header_entry` scores an entry's text
 # against to decide it is the source table's own header row.
 _HEADER_KEYWORDS = ['organization', 'membership', 'society', 'date', 'member']
-# Every field that names the organization, for the header-row veto below.
-_ORGANIZATION_FIELDS = ('organization', *_ORGANIZATION_FIELD_ALIASES)
 # Render-warnings sidecar record for an entry dropped as a header row: WARN
 # when stage 4 extracted any field for it (a membership may have been lost),
 # INFO when it extracted none, which is what a real source header row looks
@@ -373,15 +383,6 @@ def _brackets_balanced(text: str) -> bool:
                for opener, closer in _BRACKET_PAIRS)
 
 
-def _first_field(fields: dict, aliases: tuple[str, ...]) -> str:
-    """The first non-empty value `fields` holds under any of `aliases`."""
-    for key in aliases:
-        value = str(fields.get(key) or '').strip()
-        if value:
-            return value
-    return ''
-
-
 def _structured_dates(fields: dict) -> str:
     """The entry's own `start_date`/`end_date` as one raw range string.
 
@@ -542,9 +543,11 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
         organization = rest
 
     # A structured field beats the scan for the value it names -- and only for
-    # that value.
-    membership_type = _first_field(fields, _MEMBERSHIP_TYPE_FIELD_ALIASES) or membership_type
-    organization = _first_field(fields, _ORGANIZATION_FIELD_ALIASES) or organization
+    # that value. The schema's own `organization` is empty here (it is why the
+    # fallback runs), so the first name holding the organization is an
+    # off-schema one.
+    membership_type = membership_cell_value(fields, MEMBERSHIP_TYPE_FIELDS) or membership_type
+    organization = membership_cell_value(fields, MEMBERSHIP_ORGANIZATION_FIELDS) or organization
     dates = dates or _structured_dates(fields)
 
     if not organization:
@@ -584,7 +587,7 @@ def _is_source_header_row(fields: dict, original_text: str) -> bool:
     it puts the word "date" in the organization cell. It stays dropped, and
     `_header_skip_warning` reports it as a WARN.
     """
-    if _first_field(fields, _ORGANIZATION_FIELDS):
+    if membership_cell_value(fields, MEMBERSHIP_ORGANIZATION_FIELDS):
         return False
     return _is_table_header_entry(original_text, _HEADER_KEYWORDS)
 
@@ -614,8 +617,10 @@ def _single_membership_row(fields: dict, original_text: str) -> tuple[str, str, 
     name added to a section mixin is a name that can shadow another mixin's
     (the `_add_table_row` collision).
     """
-    organization = str(fields.get('organization') or '').strip()
-    membership_type = str(fields.get('membership_type') or '').strip()
+    # The schema's own names, first in each precedence: the off-schema ones
+    # are read only by the fallback below (`membership_cell_values`).
+    organization = membership_cell_value(fields, MEMBERSHIP_ORGANIZATION_FIELDS[:1])
+    membership_type = membership_cell_value(fields, MEMBERSHIP_TYPE_FIELDS[:1])
     start_date = str(fields.get('start_date') or '').strip()
     end_date = str(fields.get('end_date') or '').strip()
 
@@ -659,7 +664,7 @@ class MembershipsSection:
             logger.info("Filling Memberships (%s entries)...", len(entries))
 
         # Find the MEMBERSHIPS section
-        memberships_idx = self._find_header_paragraph("PROFESSIONAL ORGANIZATIONS")
+        memberships_idx = self._find_header_paragraph(MEMBERSHIPS_HEADING)
         if memberships_idx is None:
             memberships_idx = self._find_header_paragraph("SOCIETY MEMBERSHIPS")
         if memberships_idx is None:

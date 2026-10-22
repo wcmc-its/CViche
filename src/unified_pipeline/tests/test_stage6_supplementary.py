@@ -69,10 +69,10 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_and_training():
-    assert sorted(sp.SUBPOINT_CODES) == ["B1", "C", "D1", "D2", "D3", "H", "K1", "K2", "K3", "K4",
-                                         "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B", "O",
-                                         "P", "Q1", "Q2", "R"]
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_training_and_memberships():
+    assert sorted(sp.SUBPOINT_CODES) == ["B1", "C", "D1", "D2", "D3", "H", "I", "K1", "K2", "K3",
+                                         "K4", "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B",
+                                         "O", "P", "Q1", "Q2", "R"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -1358,8 +1358,9 @@ def test_plan_offers_no_prose_of_a_training_position_the_pii_pass_withheld():
 
 
 def test_families_joining_after_r_are_offered_after_every_family_before_them():
-    assert sorted(["R", "C", "D1", "B1", "Q2"], key=sp._offer_order) == ["B1", "D1", "Q2", "R", "C"]
-    assert sp._LATER_FAMILIES[0] is sp.POSTDOCTORAL_CODES
+    assert sorted(["I", "R", "C", "D1", "B1", "Q2"], key=sp._offer_order) \
+        == ["B1", "D1", "Q2", "R", "C", "I"]
+    assert sp._LATER_FAMILIES == (sp.POSTDOCTORAL_CODES, sp.MEMBERSHIP_CODES)
 
 
 def test_a_line_a_training_position_and_an_appointment_both_hold_stays_the_appointments():
@@ -1381,6 +1382,346 @@ def test_a_line_a_training_position_and_an_appointment_both_hold_stays_the_appoi
     (alone,) = sp.plan_subpoints({"C": [residency]}, _haystack(), lines, spans,
                                  rows_written=lambda e: [table.rows[0]._tr])
     assert alone.paragraphs == (duty, PROSE)
+
+
+_SOCIETY = "Example Society of Estuarine Ecology"
+_SOCIETY_ROW = [f"Member, {_SOCIETY}", "2009-2014"]
+_OFFICE = "Member, Estuarine Sediment Working Group, 2003-2008"
+
+
+def _membership_rows(*rows):
+    """A line naming the society, then a memberships table, one row of
+    cells per item; and their anchor candidates."""
+    doc = Document()
+    doc.add_paragraph(_SOCIETY)
+    table = doc.add_table(rows=len(rows), cols=2)
+    for row, cells in zip(table.rows, rows, strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    return table, list(sp.anchor_candidates(doc))
+
+
+def _membership(text=f"Member, {_SOCIETY}, 2009-2014\t{PROSE}", **fields):
+    return _entry(text, code="I", **{"organization": _SOCIETY, "membership_type": "Member",
+                                     "start_date": "2009", "end_date": "2014", **fields})
+
+
+def _plan_membership(entry, *rows, record_lines=None):
+    table, lines = _membership_rows(*(rows or (_SOCIETY_ROW,)))
+    return sp.plan_subpoints({"I": [entry]}, _haystack(), lines, {"I": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [table.rows[0]._tr] if e is entry else [],
+                             record_lines=record_lines)
+
+
+def test_plan_places_a_membership_only_under_its_own_row():
+    # A later membership of the same society and type renders first and
+    # holds every distinctive word of the earlier one's row: only its years,
+    # digits, tell them apart, and words alone take the first row.
+    table, lines = _membership_rows([f"Member, {_SOCIETY}", "2015-Present"], _SOCIETY_ROW)
+    entry, spans = _membership(), {"I": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "I"), lines) is lines[1]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({"I": [entry]}, _haystack(), lines, spans,
+                                   rows_written=written([table.rows[1]._tr]))
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+    assert (planned.code, planned.entry_id) == ("I", id(entry))
+    # No row recorded for it, a paragraph outside any table, or no ledger: none.
+    stray = Document().add_paragraph(_SOCIETY)._p
+    for rows_written in (written([]), written([stray]), None):
+        assert sp.plan_subpoints({"I": [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_takes_a_memberships_one_own_row_whatever_its_words():
+    # An acronym's society and a short type hold one distinctive word.
+    entry = _entry(f"Member, ESEE, 2009\t{PROSE}", code="I", organization="ESEE",
+                   membership_type="Member", start_date="2009")
+    table, lines = _membership_rows(["Member, ESEE", "2009"])
+    assert sp.best_anchor(sp._value_tokens(entry, "I"), lines[1:]) is None
+    (planned,) = sp.plan_subpoints({"I": [entry]}, _haystack(), lines, {"I": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+
+
+def test_a_membership_the_writer_wrote_several_rows_for_offers_none():
+    # The writer parsed several memberships out of the entry's line, a row
+    # each (#476): which of them a prose line is about cannot be shown.
+    table, lines = _membership_rows(_SOCIETY_ROW, ["Fellow, Kestrel Academy of Tidal Studies", "2012"])
+    entry, spans = _membership(), {"I": sp.SectionSpan(0, None)}
+    assert sp.plan_subpoints({"I": [entry]}, _haystack(), lines, spans,
+                             rows_written=lambda e: [row._tr for row in table.rows]) == []
+    (planned,) = sp.plan_subpoints({"I": [entry]}, _haystack(), lines, spans,
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1]
+
+
+@pytest.mark.parametrize("fields, cells", [
+    ({}, ("", "")),
+    # The schema names the organization: the schema's two only.
+    ({"organization": " Example Guild ", "membership_type": "Member", "institution": "Kestrel Union",
+      "role": "Chair"}, ("Member", "Example Guild")),
+    ({"organization": "Example Guild", "role": "Chair"}, ("", "Example Guild")),
+    # It does not: the first of each precedence holding text.
+    ({"organization": "  ", "institution": "", "society": "Example Guild", "role": "Chair"},
+     ("Chair", "Example Guild")),
+    ({"membership_type": "Fellow", "fellowship_designation": "Patron", "organization_name": "Guild"},
+     ("Fellow", "Guild")),
+], ids=["none", "schema", "schema_no_type", "off_schema", "schema_type_first"])
+def test_membership_cell_values_follow_the_writers_precedence(fields, cells):
+    assert sp.membership_cell_values(fields) == cells
+
+
+def test_the_membership_row_fields_are_the_writers():
+    # The writer's precedence per cell part, read from here, and the fields
+    # it prints whatever the rest hold.
+    from unified_pipeline.stage6.sections import memberships
+
+    assert sp.MEMBERSHIP_ORGANIZATION_FIELDS == ("organization", "institution", "organization_name",
+                                                 "society")
+    assert sp.MEMBERSHIP_TYPE_FIELDS == ("membership_type", "fellowship_designation", "role")
+    assert sp._MEMBERSHIP_PLAIN_FIELDS == ("end_date", "start_date")
+    assert memberships.MEMBERSHIP_ORGANIZATION_FIELDS is sp.MEMBERSHIP_ORGANIZATION_FIELDS
+    assert memberships.MEMBERSHIP_TYPE_FIELDS is sp.MEMBERSHIP_TYPE_FIELDS
+    assert memberships.membership_cell_value is sp.membership_cell_value
+
+
+@pytest.mark.parametrize("field", ["institution", "organization_name", "society"])
+def test_an_off_schema_organization_counts_only_when_the_schema_names_none(field):
+    # The row prints it when the schema's organization is empty, though
+    # `_RENDERED_FIELDS` cannot list it; beside the schema's it prints nothing.
+    entry = _entry("Member", code="I", **{field: "Estuarine Sediment Geochemistry Guild"})
+    assert {"estuarine", "sediment", "geochemistry"} <= sp._value_tokens(entry, "I")
+    entry["extracted_fields"]["organization"] = "Kestrel Ornithology Union"
+    tokens = sp._value_tokens(entry, "I")
+    assert {"kestrel", "ornithology"} <= tokens and not {"estuarine"} & tokens
+
+
+@pytest.mark.parametrize("field", ["fellowship_designation", "role"])
+def test_an_off_schema_type_counts_only_when_the_row_prints_it(field):
+    entry = _entry("Member", code="I", institution="Kestrel Ornithology Union",
+                   **{field: "Distinguished Founding Patron"})
+    assert {"distinguished", "founding", "patron"} <= sp._value_tokens(entry, "I")
+    # The schema's type comes first ...
+    entry["extracted_fields"]["membership_type"] = "Elected Fellow"
+    tokens = sp._value_tokens(entry, "I")
+    assert {"elected", "fellow"} <= tokens and not {"distinguished"} & tokens
+    # ... and beside the schema's organization only the schema's type prints.
+    del entry["extracted_fields"]["membership_type"]
+    entry["extracted_fields"]["organization"] = "Kestrel Ornithology Union"
+    assert not {"distinguished"} & sp._value_tokens(entry, "I")
+
+
+@pytest.mark.parametrize("line, own, another", [
+    # One sentence listing the membership's society among others (EBYSBC NJIKGI 65's shape).
+    (f"Member of the {_SOCIETY}, the Kestrel Statistical Association, and the Norvale "
+     "Academy of Tidal Studies.", _SOCIETY, True),
+    # A chapter's line fused with another college's fellowship (YUYVIG FCAAUV 30's shape).
+    ("Fellow Kestrel College of Physicians, Theta Chapter, Example Honor Guild 1986",
+     "Theta Chapter, Example Honor Guild", True),
+    # Interleaved columns naming other colleges (EBYSBC TXTATQ 22's shape).
+    ("Elected Fellow of the Kestrel College of Clinical Pharmacy, appointments across Norvale "
+     "University, Osprey College of Critical Care", "Norvale Academies of Practice", True),
+    # Another college of the same place: half its words are the kind and the
+    # place, shared with the membership's own (EBYSBC TXTATQ 22's two colleges).
+    ("Fellow Kestrel College of Physicians, appointed to its ethics council",
+     "Kestrel College of Clinical Pharmacy", True),
+    # #1205 review of I: three words, two of them the kind and the place it
+    # shares with the membership's own. The kind's word is every such
+    # society's, so the name's own words share half.
+    ("Norvale College of Physicians, elected to its ethics and professionalism council",
+     "Norvale College of Cardiology", True),
+    ("Member, Norvale Medical Association", "Norvale Heart Association", True),
+    ("Norvale Society of Hematology", "Norvale Society of Clinical Oncology", True),
+    # A federation, a union, and a kind in the plural are societies too.
+    ("Member, Norvale Federation for Tidal Research and Clinical Investigation", _SOCIETY, True),
+    ("Federation of Kestrel Societies for Experimental Biology", _SOCIETY, True),
+    ("Kestrel Union Against Marsh Erosion", _SOCIETY, True),
+    # Its own society, worded another way: two of its three own words.
+    ("Member, Example Society of Estuarine Ecologists, its northern chapter", _SOCIETY, False),
+    # Its own society by the kind's word alone.
+    ("Chaired the Society's annual meeting and edited its proceedings", _SOCIETY, False),
+    # Its own society, the type run into its name.
+    (f"Fellow {_SOCIETY}; served on its council", _SOCIETY, False),
+    # A committee, working group, task force or chapter of it is its detail.
+    (f"{_OFFICE}; Chair, Northern Chapter; Task Force on Marsh Restoration", _SOCIETY, False),
+    # A word only lowercase, an institute or a university is no society.
+    ("Membership goes beyond induction into an honor society", "Example Honor Guild", False),
+    ("Member of the Cancer Centre of Norvale University, funded by the Kestrel Cancer Institute",
+     "Cancer Centre of Norvale University", False),
+    ("Collegiate and Societal outreach to estuarine communities", _SOCIETY, False),
+    # With no organization to hold, a named society is another's.
+    ("Member of the Kestrel Statistical Association", "", True),
+    (PROSE, "", False),
+], ids=["sentence_list", "chapter_and_college", "interleaved", "same_kind_and_place",
+        "three_words_kind_and_place", "association_of_its_place", "longer_own_name", "federation",
+        "plural", "union", "own_worded_otherwise", "own_by_its_kind", "own_with_type",
+        "own_details", "lowercase", "institute", "word_begins", "no_own_name", "none_named"])
+def test_a_membership_line_naming_another_society(line, own, another):
+    assert sp._names_another_society(line, sp._tokens(own)) is another
+
+
+def test_a_membership_line_naming_another_society_offers_none():
+    listed = (f"Member of the {_SOCIETY}, the Kestrel Statistical Association, and the Norvale "
+              "Academy of Tidal Studies.")
+    entry = _membership(f"{listed}\t{PROSE}")
+    assert sp._own_membership_line(entry) == ""
+    assert _plan_membership(entry) == []
+    # The same prose on a line naming only its own society is offered.
+    assert [p.paragraphs for p in _plan_membership(_membership())] == [(PROSE,)]
+
+
+@pytest.mark.parametrize("line, own, own_type, another", [
+    # An open term's end before the name, and the row's own type after a tab,
+    # are words the name pattern takes in, not the society's.
+    ("2016-Present Society for the Restoration of Tidal Marshes",
+     "Society for the Restoration of Tidal Marshes", "Member", False),
+    ("Norvale Association of Limnologists\tAssociate Member, 2004-2016",
+     "Norvale Association of Limnologists", "Associate Member", False),
+    # Set aside, they hide no other society.
+    ("2015-Present Norvale College of Physicians", "Norvale College of Cardiology", "Member", True),
+    ("Fellow Norvale College of Physicians", "Norvale College of Cardiology", "Fellow", True),
+], ids=["open_term", "own_type_after_a_tab", "open_term_other", "own_type_other"])
+def test_a_named_society_is_read_without_an_open_term_or_the_rows_type(line, own, own_type, another):
+    assert sp._names_another_society(line, sp._tokens(own), sp._tokens(own_type)) is another
+
+
+def test_a_membership_line_holding_its_own_type_after_a_tab_offers_its_prose():
+    own = "Norvale Association of Limnologists"
+    entry = _membership(f"{own}\tAssociate Member, 2004-2016\t{PROSE}", organization=own,
+                        membership_type="Associate Member", start_date="2004", end_date="2016")
+    assert sp._own_membership_line(entry) == entry["text"]
+    assert [p.paragraphs for p in _plan_membership(entry, [f"Associate Member, {own}", "2004-2016"])] \
+        == [(PROSE,)]
+
+
+@pytest.mark.parametrize("kind", ["Society", "Societies", "Association", "Associations", "College",
+                                  "Colleges", "Academy", "Academies", "Federation", "Federations",
+                                  "Union", "Unions"])
+def test_every_kind_of_society_names_another_membership(kind):
+    assert sp._names_another_society(f"Member, Kestrel {kind} of Marsh Science", sp._tokens(_SOCIETY))
+
+
+def test_a_membership_line_naming_another_college_of_its_place_offers_none():
+    """#1205 review of I: the line goes on into another college of the same
+    kind and place. Offered, Reject All would print that membership under
+    this one's row."""
+    own = "Norvale College of Cardiology"
+    other = "Norvale College of Physicians, elected to its ethics and professionalism council"
+    entry = _membership(f"Member, {own}, 2009-2014\t{other}", organization=own)
+    assert sp._own_membership_line(entry) == ""
+    assert _plan_membership(entry, [f"Member, {own}", "2009-2014"]) == []
+
+
+@pytest.mark.parametrize("fields, listed", [
+    # Stage 4 listed memberships under a key the schema does not define, and
+    # fan-out kept the list whole: the row prints the entry's own fields only.
+    ({"memberships": [{"organization": "Kestrel Statistical Association", "start_date": "2001"}]}, True),
+    ({"memberships": [{"society": "Kestrel Statistical Association"}]}, True),
+    # A list of date spans, or of bare strings, names no membership.
+    ({"additional_dates": [{"start_date": "2004", "end_date": "2006"}]}, False),
+    ({"memberships": ["Kestrel Statistical Association"]}, False),
+], ids=["organization", "alias", "date_spans", "strings"])
+def test_a_list_of_memberships_under_a_field_offers_none(fields, listed):
+    entry = _membership(**fields)
+    assert sp._own_membership_line(entry) == ("" if listed else entry["text"])
+    assert [p.paragraphs for p in _plan_membership(entry)] == ([] if listed else [(PROSE,)])
+
+
+@pytest.mark.parametrize("fields", [None, ["Example Society of Estuarine Ecology"], "Member"])
+def test_a_membership_whose_fields_are_not_a_mapping_reads_its_own_line(fields):
+    # It names no organization, so a society its line names is another's.
+    text = f"Member, ESEE\t{PROSE}"
+    entry = {"taxonomy_code": "I", "text": text, "extracted_fields": fields}
+    assert sp._own_membership_line(entry) == text
+    assert sp._own_membership_line(dict(entry, text=f"Member, {_SOCIETY}\t{PROSE}")) == ""
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its own.
+    (["Member line", f"Fellow line, {PROSE}"], 1, f"Fellow line, {PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    (["Member line", PROSE, "Fellow line"], 1, ""),
+    # An earlier record: the line fan-out gave it, whatever it holds.
+    ([f"Member line, {PROSE}", "Fellow line"], 0, f"Member line, {PROSE}\tFellow line"),
+])
+def test_a_membership_reads_its_prose_from_its_own_line(segments, index, read):
+    entry = dict(_degree_record("\t".join(segments), index, 2), taxonomy_code="I")
+    assert sp._prose_text("I", entry, {}) == read
+
+
+@pytest.mark.parametrize("fragment, records, held", [
+    (_OFFICE, [_OFFICE.lower().replace(" ", "  ")], True),
+    # Part of a record line, or a fragment holding one.
+    ("Member, Estuarine Sediment Working Group", [_OFFICE], True),
+    (f"{_OFFICE}. {PROSE}", [_OFFICE], True),
+    (PROSE, [_OFFICE], False),
+    (PROSE, [], False),
+    (PROSE, [""], False),
+], ids=["spacing_and_case", "part", "holds", "other", "no_records", "empty_record"])
+def test_a_fragment_held_by_a_record_line(fragment, records, held):
+    assert sp._held_by_records(fragment, records) is held
+
+
+def test_a_membership_part_the_recovery_reads_as_a_record_is_left_to_it():
+    """A dated office of the society the #221 recovery reads as one of the
+    entry's records: dev re-emits it to the Appendix, and as a sub-point the
+    recovery would read it as rendered, so it would be in the accepted
+    document nowhere. The prose beside it is still offered."""
+    entry = _membership(f"Member, {_SOCIETY}, 2009-2014\t{_OFFICE}\t{PROSE}")
+    assert [p.paragraphs for p in _plan_membership(entry)] == [(_OFFICE, PROSE)]
+    calls = []
+
+    def record_lines(code, e):
+        calls.append((code, e))
+        return [_OFFICE] if e is entry else []
+
+    (planned,) = _plan_membership(entry, record_lines=record_lines)
+    assert planned.paragraphs == (PROSE,)
+    assert calls == [("I", entry)]
+    # A line holding only records offers nothing.
+    only = _membership(f"Member, {_SOCIETY}, 2009-2014\t{_OFFICE}")
+    assert _plan_membership(only, record_lines=lambda code, e: [_OFFICE]) == []
+
+
+def test_only_a_membership_leaves_a_record_line_to_the_recovery():
+    appointment = _appointment()
+    line = _candidate("Associate Professor | Example University | 2010-2015")
+    (planned,) = sp.plan_subpoints({"D1": [appointment]}, _haystack(), [line],
+                                   {"D1": sp.SectionSpan(0, None)},
+                                   record_lines=lambda code, e: [PROSE])
+    assert planned.paragraphs == (PROSE,)
+
+
+def test_plan_offers_no_prose_of_a_membership_the_pii_pass_withheld():
+    entry = _membership()
+    (planned,) = _plan_membership(entry)
+    assert planned.paragraphs == (PROSE,)
+
+    entry["_pii_withheld"] = True
+    assert _plan_membership(entry) == []
+
+
+def test_a_line_a_membership_and_a_service_row_both_hold_stays_the_service_rows():
+    # A society member who also sat on an advisory board names the board's
+    # remit on both lines. The board, a family shipped before I, keeps it;
+    # the membership keeps its other line.
+    remit = "Advised the federal agency on coastal wetland restoration funding priorities"
+    table, lines = _membership_rows(_SOCIETY_ROW)
+    membership = _membership(f"Member, {_SOCIETY}, 2009-2014\t{remit}\t{PROSE}")
+    service = _entry(f"Member, Coastal Advisory Board, 2010\t{remit}", code="Q2",
+                     organization="Coastal Advisory Board", role="Member", start_date="2010")
+    service_line = _candidate("Member | Coastal Advisory Board | 2010", position=5)
+    spans = {"I": sp.SectionSpan(0, 3), "Q2": sp.SectionSpan(5, None)}
+    planned = sp.plan_subpoints({"I": [membership], "Q2": [service]}, _haystack(),
+                                [*lines, service_line], spans,
+                                rows_written=lambda e: [table.rows[0]._tr] if e is membership else [])
+    assert [(p.code, p.paragraphs) for p in planned] == [("Q2", (remit,)), ("I", (PROSE,))]
+    (alone,) = sp.plan_subpoints({"I": [membership]}, _haystack(), lines, spans,
+                                 rows_written=lambda e: [table.rows[0]._tr])
+    assert alone.paragraphs == (remit, PROSE)
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():

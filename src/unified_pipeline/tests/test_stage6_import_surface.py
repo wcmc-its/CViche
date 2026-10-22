@@ -221,7 +221,7 @@ HOME_ONLY_IMPORTS = {
     "unified_pipeline.stage6.render_check": ("record_chunks", "record_pieces",
                                              "record_siblings", "record_twins",
                                              "short_tab_part_words",
-                                             "sibling_record_rendered"),
+                                             "sibling_record_rendered", "_OPEN_TERM_WORDS"),
 }
 
 _RELOCATED_CASES = [
