@@ -105,6 +105,39 @@ DEDUP_FULL_CONTAINMENT_MIN_TOKENS = 5
 # de-fusing the table in stage 2 (#208/#248).
 DEDUP_FUSED_BLOB_RECORD_LINES = 5
 
+# #666 (WZSMUO Q4D): `deduplicate_entries`' containment test divides by the
+# smaller entry's significant words, so a one-word entry is "contained" in
+# every longer entry that shares its word: the journal "Cell" was dropped
+# beside "Cell Reports" (jaccard 0.50, containment 1.00). Stage 4 had
+# extracted no field for "Cell", so `_record_would_be_lost`, which reads the
+# dropped entry's name field, never ran. The kept entry's journal name still
+# tells the two apart: it holds every word of the dropped text and more, so
+# the dropped text is a shorter journal name, not a copy ("Cell" beside "Cell
+# Reports" or "Cancer Cell"). Only an entry this short: a longer text is a
+# row, whose extra words a name need not hold. Only a journal name: a talk
+# title or an organization list is long, and a table cell or a line break
+# cuts it into short fragments that are not records (RLADNC R, NJIKGI Q2 in
+# the corpus gate).
+DEDUP_UNNAMED_SHORT_MAX_WORDS = 2
+_SHORTER_NAME_FIELD = 'journal_name'
+
+
+def _shorter_journal_than_kept(dropped_entry: dict, kept_entry: dict,
+                               code: str | None) -> bool:
+    """True when the dropped entry names no record its section renders
+    (`_record_name`), has at most `DEDUP_UNNAMED_SHORT_MAX_WORDS` significant
+    words, and they are a strict subset of the words of the kept entry's
+    rendered journal name: "Cell" beside a kept "Cell Reports"."""
+    rendered = _RENDERED_FIELDS.get(code or '', frozenset())
+    kept_name = (kept_entry.get('extracted_fields') or {}).get(_SHORTER_NAME_FIELD)
+    if _SHORTER_NAME_FIELD not in rendered or not isinstance(kept_name, str):
+        return False
+    if _record_name(dropped_entry.get('extracted_fields') or {}, rendered) is not None:
+        return False
+    dropped_words = _entry_signature_words(dropped_entry)
+    return (0 < len(dropped_words) <= DEDUP_UNNAMED_SHORT_MAX_WORDS
+            and dropped_words < _significant_words(kept_name))
+
 
 # #666: every text-similarity signal `deduplicate_entries` uses is blind to a
 # date difference, so "Chair, X Committee, 2015-2018" is token-contained in a
@@ -1204,7 +1237,11 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     part number, standalone Roman numeral or lettered series member
     (`_other_series_member`) refuses like a trial phase, and in a teaching or
     talk list a group line between the two entries refuses
-    (`_group_header_between`)."""
+    (`_group_header_between`).
+
+    #666 (WZSMUO): a short unnamed entry whose words are fewer than the kept
+    entry's journal name and all inside it is another journal
+    (`_shorter_journal_than_kept`): "Cell" beside "Cell Reports"."""
     dropped_text = dropped_entry.get('text') or ''
     kept_text = kept_entry.get('text') or ''
     verbatim = _verbatim_contained(dropped_text, kept_text)
@@ -1226,6 +1263,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #666: listed under two group lines, so two records
     if _undated_split_record_absorbs_date(dropped_entry, kept_entry, document):
         return False  # #666: an undated split record does not vouch for a date
+    if _shorter_journal_than_kept(dropped_entry, kept_entry, code):
+        return False  # #666: a shorter journal name is another journal
     if verbatim:
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, True, dropped_ids or set())
