@@ -1686,13 +1686,89 @@ def test_a_membership_part_the_recovery_reads_as_a_record_is_left_to_it():
     assert _plan_membership(only, record_lines=lambda code, e: [_OFFICE]) == []
 
 
-def test_only_a_membership_leaves_a_record_line_to_the_recovery():
+def test_only_a_membership_leaves_an_undated_record_line_to_the_recovery():
+    # PROSE has no date of its own: for an appointment it is duty prose, the
+    # sub-point's (owner decision 2026-10-08), whatever the recovery reads.
     appointment = _appointment()
     line = _candidate("Associate Professor | Example University | 2010-2015")
     (planned,) = sp.plan_subpoints({"D1": [appointment]}, _haystack(), [line],
                                    {"D1": sp.SectionSpan(0, None)},
                                    record_lines=lambda code, e: [PROSE])
     assert planned.paragraphs == (PROSE,)
+
+
+#: A sub-record of the appointment with its own years, and prose beside it.
+_SUB_RECORD = "Director, Example Admissions Committee, 2012-2014"
+
+
+@pytest.mark.parametrize("code", ["D1", "K1", "M2A"])
+def test_every_family_leaves_a_dated_record_line_to_the_recovery(code):
+    """#1205: the #221 recovery re-emits a dated record line of the entry
+    with sub-points off. Offered, the sub-point held it, so the recovery read
+    it as rendered and Accept All lost it."""
+    entry = _entry(f"Associate Professor, Example University, 2010-2015\t{_SUB_RECORD}\t{PROSE}",
+                   code=code, title="Associate Professor", institution="Example University")
+    line = _candidate("Associate Professor | Example University | 2010-2015")
+    spans = {code: sp.SectionSpan(0, None)}
+    calls = []
+
+    def record_lines(c, e):
+        calls.append(c)
+        return ["Associate Professor, Example University, 2010-2015", _SUB_RECORD]
+
+    (offered,) = sp.plan_subpoints({code: [entry]}, _haystack(), [line], spans)
+    assert offered.paragraphs == (_SUB_RECORD, PROSE)
+    (planned,) = sp.plan_subpoints({code: [entry]}, _haystack(), [line], spans,
+                                   record_lines=record_lines)
+    assert planned.paragraphs == (PROSE,) and calls == [code]
+
+
+@pytest.mark.parametrize("line, dated", [
+    (_SUB_RECORD, True),
+    (f"{_SUB_RECORD}.", True),                                    # punctuation after the years
+    ("Research mentor for the example visiting programme (2005 - 2006)", True),
+    ("Fellow of the Example Society of Estuarine Ecology, 1985", True),  # a lone year
+    ("2012-2014 Director, Example Admissions Committee", True),   # date-led
+    (f"2010-2015 Associate Professor, Example University. {PROSE}, {OTHER_PROSE.lower()} "
+     f"and the example programme's accreditation review", True),  # date-led, longer than a record
+    ("July 2010 - present\tAssociate Professor, Example University", True),
+    (f"Main Annex, Example Campus.\t{PROSE}", False),              # a row by its shape alone
+    ("Chaired the example society's 2012 annual meeting and its plenary sessions", False),
+    (f"{PROSE}, {OTHER_PROSE.lower()}, and reviewed every example programme each year "
+     f"of the department's accreditation cycle, 2015", False),     # prose past the record length
+    ("Member | Example Committee on Curriculum | Example University", False),
+], ids=["trailing_range", "trailing_period", "bracketed", "lone_year", "date_led", "date_led_long",
+        "month_led", "undated_row", "year_inside", "over_record_length", "undated_pipe_row"])
+def test_a_record_line_is_dated_by_the_recoverys_own_tests(line, dated):
+    assert sp._dated_record_line(line) is dated
+
+
+_DUTY_ROW = f"Main Annex, Example Campus.\t{PROSE}"
+
+
+@pytest.mark.parametrize("fragment, code, records, left", [
+    (_SUB_RECORD, "D1", [_SUB_RECORD], True),
+    (f"{_SUB_RECORD}, as its first chair", "K1", [_SUB_RECORD], True),  # holds the record
+    (PROSE, "D1", [_DUTY_ROW], False),                                  # part of an undated row
+    (PROSE, "I", [_DUTY_ROW], True),                                    # a membership's: any record
+    (_SUB_RECORD, "D1", [], False),
+    (PROSE, "D1", [_SUB_RECORD], False),
+], ids=["dated_record", "holds_a_dated_record", "duties_row", "membership_row", "no_records",
+        "other_record"])
+def test_a_fragment_left_to_the_recovery(fragment, code, records, left):
+    assert sp._left_to_recovery(fragment, code, records) is left
+
+
+@pytest.mark.parametrize("line, prose, held", [
+    (_DUTY_ROW, [PROSE], True),                    # the duties' own row
+    (PROSE, [OTHER_PROSE, PROSE], True),
+    (f"2010-2015 Associate Professor\t{PROSE}", [PROSE], False),   # a dated record line
+    (_SUB_RECORD, [f"As director of the example admissions committee, {PROSE.lower()}"], False),
+    (_DUTY_ROW, [OTHER_PROSE], False),
+    (_DUTY_ROW, [], False),
+], ids=["duties_row", "the_prose", "dated_line", "repeats_its_words", "other_prose", "no_sub_point"])
+def test_the_recovery_reads_a_sub_point_only_as_an_undated_record_line_it_is_part_of(line, prose, held):
+    assert sp.held_by_subpoint(line, prose) is held
 
 
 def test_plan_offers_no_prose_of_a_membership_the_pii_pass_withheld():

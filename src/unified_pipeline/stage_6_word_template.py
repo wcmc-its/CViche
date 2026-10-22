@@ -1614,11 +1614,14 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # deletion means nothing without track changes, so it also needs
         # emit_track_changes.
         self.supplementary_subpoints = supplementary_subpoints
-        # Each written sub-point with its line, for the #221 recovery (none
-        # for a family whose records stay the recovery's,
-        # `supplementary.RECOVERY_RECORD_CODES`), and the entries it was
-        # written for, which the overflow pass skips.
+        # The appointment-title duties the positions writer wrote as
+        # sub-points, each with its row, which the sub-point pass and the
+        # #221 recovery read as rendered; the paragraphs of the sub-points
+        # the pass wrote, which the recovery reads only as an undated record
+        # line they are part of (`supplementary.held_by_subpoint`); and the
+        # entries either was written for, which the overflow pass skips.
         self._subpoint_lines: list[str] = []
+        self._subpoint_prose: list[str] = []
         self._subpoint_entry_ids: set[int] = set()
         # Whose each written sub-point is, for the render-warnings sidecar.
         self._subpoint_placements: list[supplementary.SubpointPlacement] = []
@@ -3974,9 +3977,8 @@ Now analyze the text above:"""
         """#1205: tracked-deleted sub-points first, then the content-overflow
         routing, which skips an entry a sub-point now carries, so its prose is
         not re-emitted whole as a blue bullet or into the Appendix. The #221
-        recovery after this reads the sub-points too (`_subpoint_lines`),
-        except those of a family whose records stay its own
-        (`supplementary.RECOVERY_RECORD_CODES`)."""
+        recovery after this reads a sub-point as the undated record line its
+        prose is part of (`_subpoint_prose`), and as no other line."""
         self._add_supplementary_subpoints(entries_by_code)
         self._route_overflow_entries()
 
@@ -3992,10 +3994,12 @@ Now analyze the text above:"""
         text. The row-receipt ledger says which rows each entry wrote: a
         degree's, a leadership role's, a committee's, a talk's, a training
         position's or a membership's prose goes only under its own
-        (`supplementary._own_rows`). A membership's dated office the #221
-        recovery after this reads as one of its records
-        (`recovery_candidates`) is left to that recovery, which reads no
-        membership sub-point (`supplementary.RECOVERY_RECORD_CODES`)."""
+        (`supplementary._own_rows`). A dated record line the #221 recovery
+        after this reads as one of the entry's records (`recovery_candidates`)
+        is left to that recovery, and so is any of a membership's
+        (`supplementary._left_to_recovery`); the recovery reads a written
+        sub-point's paragraphs (`_subpoint_prose`) only as an undated record
+        line they are part of."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         haystack = supplementary.rendered_haystack(
@@ -4011,11 +4015,10 @@ Now analyze the text above:"""
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:
+            self._subpoint_prose.extend(subpoint.paragraphs)
             subpoint = subpoint._replace(paragraphs=tuple(
                 self._sanitize_run_text(text) for text in subpoint.paragraphs))
             supplementary.write_subpoint(subpoint, revision)
-            if subpoint.code not in supplementary.RECOVERY_RECORD_CODES:
-                self._subpoint_lines.append(subpoint.as_rendered_line())
             self._subpoint_entry_ids.add(subpoint.entry_id)
             self._subpoint_placements.append(supplementary.SubpointPlacement(
                 subpoint.element_idx_start, subpoint.code, subpoint.paragraphs))
@@ -4222,7 +4225,7 @@ Now analyze the text above:"""
         lets the A-orphan recovery recognise the owner's own running header
         (#1221).
         """
-        # #1205: a sub-point is the entry's prose, written under it.
+        # #1205: an appointment title's duties, written under its row.
         out_lines = self._rendered_output_lines() + self._subpoint_lines
         haystack = "\x00".join(_squash(line) for line in out_lines)
 
@@ -4276,6 +4279,8 @@ Now analyze the text above:"""
                             # Rendered (possibly reformatted), or too short to
                             # verify either way — never re-insert.
                             continue
+                        if supplementary.held_by_subpoint(line, self._subpoint_prose):
+                            continue  # #1205: its duties, now a sub-point under its row
                         if line in tab_parts and segment_held_by_fields(line, fields):
                             continue  # a tab part of the record stage 4 extracted (#1243)
                         if _tab_part_recovered(line, part_token_sets):

@@ -25,16 +25,20 @@ Where it goes, by what the entry's rendered line is:
 Only a fragment `_record_rendered` verifies absent is written, never one
 that is merely reformatted, so a section that already prints its entry's
 text gets nothing twice. A fragment that opens with a date range is a
-record, not prose, and is left to `_recover_unrendered_records`.
+record, not prose, and is left to `_recover_unrendered_records`. So is a
+fragment that is, holds or is part of a record line that recovery reads
+with a date of its own (`_left_to_recovery`): an office, a sub-role, a
+committee or another appointment, which the recovery re-emits with
+sub-points off and so re-emits with them on.
 
 The pass runs BEFORE the content-overflow routing and that recovery. The
-overflow pass skips an entry that has a sub-point, and the recovery reads
-each sub-point with its line (`SubPoint.as_rendered_line`), so an entry whose
-prose is now a sub-point is not also re-emitted whole -- as a blue overflow
-bullet or into the Appendix (owner decision 2026-10-08: duty prose goes under
-the appointment, not to the Appendix). A family whose records stay the
-recovery's (`RECOVERY_RECORD_CODES`) is the exception: the recovery reads
-none of its sub-points, so none of them changes a line it re-emits.
+overflow pass skips an entry that has a sub-point, and the recovery reads a
+sub-point as the undated record line its prose is part of
+(`held_by_subpoint`), so an entry whose prose is now a sub-point is not also
+re-emitted whole -- as a blue overflow bullet or into the Appendix (owner
+decision 2026-10-08: duty prose goes under the appointment, not to the
+Appendix). The recovery reads a sub-point as no other line: prose repeating
+a dated record's words does not stand for that record.
 
 The duties #1641 splits off an appointment title are written by the
 positions writer itself, as a deleted row under the appointment
@@ -89,6 +93,11 @@ from docx.text.paragraph import Paragraph
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
+)
+from unified_pipeline.core.text_norm import (
+    _edge_lone_year,
+    _is_dated_record_part,
+    edge_date_range,
 )
 
 from .dedup import _is_sibling_of
@@ -289,9 +298,9 @@ POSTDOCTORAL_CODES = frozenset({'C'})
 #: records offers only its own segment, and a line holding several dated
 #: records, or naming another society, offers nothing, nor does an entry
 #: stage 4 listed memberships under. The entry's records the #221 recovery
-#: reads, a dated office among them, stay the recovery's
-#: (`RECOVERY_RECORD_CODES`): dev re-emits such an office to the Appendix,
-#: and the sub-points must not stop it. The section is
+#: reads stay the recovery's, dated or not (`RECOVERY_RECORD_CODES`): dev
+#: re-emits a dated office to the Appendix, and the sub-points must not stop
+#: it. The section is
 #: found by the heading its writer looks up (the generator's
 #: `_SUBPOINT_SECTION_HEADERS`): `_get_wcm_section_header` names none for I.
 #: A family joining after C yields a fragment a family before it is offered
@@ -317,17 +326,18 @@ SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_COD
 #: the appointment after it (D1) can hold one duty line, each on its own
 #: line (YUYVIG LTTYWI 76 and 80): the appointment keeps it, as before C.
 _LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES)
-#: The families whose records stay the #221 recovery's: a membership's
-#: dated offices ("Chair, <name> Committee, <years>"), each a record the
-#: recovery re-emits to the Appendix when no row prints it. A fragment
-#: holding, or held by, one of them is not offered (`plan_subpoints`'
-#: `record_lines`), so Reject All does not print it twice. And the recovery
-#: reads none of these families' sub-points as rendered (the generator
-#: leaves them out of `_subpoint_lines`). Prose naming an office's committee
-#: holds every word of the office's line, and `_record_rendered`'s token
-#: overlap read it as the office rendered: the office was then in neither
-#: the accepted nor the rejected document. So no membership sub-point
-#: changes a line the recovery re-emits.
+#: The families every record line of which stays the #221 recovery's,
+#: dated or not (`_left_to_recovery`): a membership's offices ("Chair,
+#: <name> Committee, <years>"), each a record the recovery re-emits to the
+#: Appendix when no row prints it. A fragment that is, holds or is part of
+#: one of them is not offered, so Reject All does not print it twice. Every
+#: other family leaves the recovery its dated record lines only
+#: (`_dated_record_line`): an undated one is a tab or pipe row of duty or
+#: descriptive prose, which stays the entry's sub-point (owner decision
+#: 2026-10-08). The recovery reads a sub-point as no record line but an
+#: undated one its prose is part of (`held_by_subpoint`), and a
+#: membership's prose is part of none. So no membership sub-point changes a
+#: line the recovery re-emits.
 RECOVERY_RECORD_CODES = MEMBERSHIP_CODES
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
@@ -545,9 +555,9 @@ _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 RowsWritten = Callable[[Mapping], Iterable[BaseOxmlElement]]
 #: The record lines the #221 recovery (`_recover_unrendered_records`) looks
 #: for in an entry of a code, and re-emits when the document holds none of
-#: them (`sections.appendix.recovery_candidates`). Read for the families
-#: whose records stay the recovery's (`RECOVERY_RECORD_CODES`): a
-#: membership's dated offices are those lines.
+#: them (`sections.appendix.recovery_candidates`). Read for every family: a
+#: fragment that is, holds or is part of one the recovery keeps
+#: (`_left_to_recovery`) is not offered.
 RecordLines = Callable[[str, Mapping], Sequence[str]]
 
 
@@ -607,14 +617,6 @@ class SubPoint(NamedTuple):
     entry_id: int
     code: str
     element_idx_start: object
-
-    def as_rendered_line(self) -> str:
-        """The entry as a reader who rejects the deletion sees it: its line,
-        then its prose. `_recover_unrendered_records` reads this, so a record
-        whose prose is now a sub-point is not also sent to the Appendix. The
-        recovery reads none for a family whose records stay its own
-        (`RECOVERY_RECORD_CODES`)."""
-        return ' '.join((self.anchor.text, *self.paragraphs))
 
 
 def subpoints_enabled(value: object) -> bool:
@@ -1129,9 +1131,11 @@ def _own_training_line(entry: Mapping) -> str:
       `_POSTDOC_RECORD_FIELDS`): the writer prints the entry's own fields
       only;
     - it holds a year outside the span the row prints
-      (`_dates_another_position`). The #221 recovery reads a sub-point line
-      as rendered, so that position would be in the accepted document
-      nowhere, and not recovered either (#1205 comment 6275741663)."""
+      (`_dates_another_position`): that position would print as this
+      one's prose, under this one's row, on Reject All. A record line of it
+      the #221 recovery reads with a date of its own is the recovery's in
+      any case (`_left_to_recovery`, #1205 comment 6275741663); this also
+      keeps out a line of it the recovery reads as no record."""
     fields = entry.get('extracted_fields')
     fields = fields if isinstance(fields, Mapping) else {}
     own = _own_record_line(entry)
@@ -1198,6 +1202,46 @@ def _held_by_records(fragment: str, records: Collection[str]) -> bool:
     haystack)."""
     squashed = _squash(fragment)
     return any(record and (record in squashed or squashed in record) for record in map(_squash, records))
+
+
+def _dated_record_line(line: str) -> bool:
+    """Whether a record line the #221 recovery reads (`RecordLines`) has a
+    date of its own, by the recovery's own tests: a date opens it
+    (`_RECORD_DATE_PREFIX_RE`, as `render_check._record_lines` reads a
+    line), or it is a record's length, words beside its date, with a date
+    range or a lone year at its start or end (as `tab_record_segments` reads
+    a tab part). An office, a sub-role, a committee, another appointment. A
+    row the recovery reads by its shape alone (`_looks_like_record`: a tab
+    or pipe line over 60 characters) has none -- an appointment's duties on
+    a line of their own -- and nor has a line no date opens that is longer
+    than a record (`DATED_SEGMENT_MAX_CHARS`), whatever year it ends on."""
+    return bool(_RECORD_DATE_PREFIX_RE.match(line)) or (
+        _is_dated_record_part(line)
+        and (edge_date_range(line) is not None or _edge_lone_year(line) is not None))
+
+
+def _left_to_recovery(fragment: str, code: str, records: Collection[str]) -> bool:
+    """Whether `fragment` is, holds or is part of one of the entry's record
+    lines (`records`, `_held_by_records`) that stays the #221 recovery's:
+    in every family one dated by the recovery's own tests
+    (`_dated_record_line`), and for a membership any
+    (`RECOVERY_RECORD_CODES`). The recovery re-emits such a line when no row
+    prints it, with sub-points off as on, so offered it would print twice
+    on Reject All."""
+    if code not in RECOVERY_RECORD_CODES:
+        records = [record for record in records if _dated_record_line(record)]
+    return _held_by_records(fragment, records)
+
+
+def held_by_subpoint(line: str, prose: Collection[str]) -> bool:
+    """Whether the #221 recovery reads the record line `line` as rendered by
+    a written sub-point (`prose`, its paragraphs): `line` has no date of its
+    own (`_dated_record_line`) and holds, or is part of, one of them -- the
+    appointment's duties as their own row, now under the appointment (owner
+    decision 2026-10-08). A dated record line is the recovery's
+    (`_left_to_recovery`): no sub-point holds it, and prose repeating its
+    words does not stand for it."""
+    return not _dated_record_line(line) and _held_by_records(line, prose)
 
 
 def _prose_text(code: str, entry: Mapping,
@@ -1298,10 +1342,11 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     listed positions under its fields or its line holds a year outside the
     span its row prints (`_own_training_line`). A membership's is read as a
     committee's is, and none is offered when its line names another society
-    or stage 4 listed memberships under its fields (`_own_membership_line`);
-    a fragment holding, or held by, one of the entry's records the #221
-    recovery reads (`record_lines`) is left to that recovery
-    (`RECOVERY_RECORD_CODES`).
+    or stage 4 listed memberships under its fields (`_own_membership_line`).
+    In every family a fragment that is, holds or is part of one of the
+    entry's records the #221 recovery reads (`record_lines`) with a date of
+    its own, and for a membership any of them, is left to that recovery
+    (`_left_to_recovery`).
 
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
@@ -1316,9 +1361,9 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
         in_section = _section_candidates(code, candidates, spans)
         for entry in entries_by_code[code]:
             text = _prose_text(code, entry, entries_by_code)
-            records = record_lines(code, entry) if record_lines and code in RECOVERY_RECORD_CODES else ()
+            records = record_lines(code, entry) if record_lines else ()
             fragments = [f for f in unrendered_prose(entry, code, haystack, text)
-                         if f not in offered and not _held_by_records(f, records)]
+                         if f not in offered and not _left_to_recovery(f, code, records)]
             if not fragments or _withholds_prose(entry):
                 continue
             anchor_tokens = _value_tokens(entry, code) or (
@@ -1521,8 +1566,8 @@ def write_row_subpoint(row: BaseOxmlElement, texts: tuple[str, ...],
                        revision: Revision) -> str:
     """A deleted row spanning the table after `row`, for a writer that already
     holds its entry's row: the duties #1641 splits off an appointment title.
-    Returns the entry as a reader who rejects the deletion sees it, the line
-    `SubPoint.as_rendered_line` gives for a planned sub-point."""
+    Returns the entry as a reader who rejects the deletion sees it: the
+    row's cells, then the duties."""
     _insert_row_after(row, texts, revision)
     cells = (''.join(t.text or '' for t in tc.iter(qn('w:t'))) for tc in row.iter(qn('w:tc')))
     return ' '.join((*(' '.join(cell.split()) for cell in cells if cell.strip()), *texts))

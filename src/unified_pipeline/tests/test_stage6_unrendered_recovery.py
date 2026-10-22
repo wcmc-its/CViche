@@ -2445,7 +2445,9 @@ def test_duty_prose_is_a_deleted_row_under_its_appointment():
         t.text for t in above.iter(qn("w:t")))
     assert "".join(t.text for t in rows[0].iter(qn("w:delText"))) == _DUTY_PROSE
     assert gen.stats["supplementary_subpoints"] == 1
-    assert gen._subpoint_lines and gen._subpoint_lines[0].endswith(_DUTY_PROSE)
+    # The recovery reads the prose, not the sub-point's line: it stands
+    # only for the undated record line it is part of.
+    assert gen._subpoint_prose == [_DUTY_PROSE] and gen._subpoint_lines == []
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"supplementary_subpoints": True, "emit_track_changes": False}])
@@ -6217,6 +6219,251 @@ def test_accept_all_of_an_office_beside_its_prose_is_the_flag_off_document(offic
     row.getparent().remove(row)
     assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
     assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+#: #1205, every sub-point family: an entry whose line holds its own record,
+#: then a sub-record of the entry with its own years (inside the span its row
+#: prints), then prose repeating the sub-record's words. Invented names.
+#: `own` and `sub` end in their years; `own_led` and `sub_led` open with them.
+_SUB_RECORD_FAMILIES = {
+    "K1": dict(
+        code="K1", idx=40,
+        fields={"course_title": "Introduction to Estuarine Biology", "role": "Course Director",
+                "institution": "Example University", "course_code": "BIOL 210",
+                "start_date": "2010", "end_date": "2018"},
+        own="Course Director, Introduction to Estuarine Biology (BIOL 210), Example University, 2010-2018",
+        own_led=("2010-2018 Course Director, Introduction to Estuarine Biology (BIOL 210), "
+                 "Example University"),
+        sub="Module Leader, Sediment Transport Laboratory Sessions, 2012-2014",
+        sub_led="2012-2014 Module Leader, Sediment Transport Laboratory Sessions",
+        prose=("As module leader for the sediment transport laboratory sessions, "
+               "redesigned the field sampling exercises")),
+    "M2A": dict(
+        code="M2A", idx=52,
+        fields={"title": ("Sediment Budgets and Nutrient Retention of Restored Tidal Marshes "
+                          "in Northern Estuaries"),
+                "agency": "Example Foundation", "pi_role": "Principal Investigator",
+                "start_date": "2018", "end_date": "2026"},
+        own=("Sediment Budgets and Nutrient Retention of Restored Tidal Marshes in Northern "
+             "Estuaries, Example Foundation, Principal Investigator, 2018-2026"),
+        own_led=("2018-2026 Sediment Budgets and Nutrient Retention of Restored Tidal Marshes in "
+                 "Northern Estuaries, Example Foundation, Principal Investigator"),
+        sub="Chair, Restoration Substudy Steering Committee, 2019-2021",
+        sub_led="2019-2021 Chair, Restoration Substudy Steering Committee",
+        prose=("As chair of the restoration substudy steering committee, coordinated the field "
+               "teams across three marshes")),
+    "D1": dict(
+        code="D1", idx=30,
+        fields={"title": "Associate Professor", "department": "Department of Estuarine Science",
+                "institution": "Example University", "start_date": "2010", "end_date": "2020"},
+        own="Associate Professor, Department of Estuarine Science, Example University, 2010-2020",
+        own_led="2010-2020 Associate Professor, Department of Estuarine Science, Example University",
+        sub="Director, Graduate Admissions Committee, 2014-2017",
+        sub_led="2014-2017 Director, Graduate Admissions Committee",
+        prose=("As director of the graduate admissions committee, redesigned the interview "
+               "process for applicants")),
+    "Q1": dict(
+        code="Q1", idx=60,
+        fields={"role": "President", "organization": "Example Society of Estuarine Ecology",
+                "start_date": "2015", "end_date": "2017"},
+        own="President, Example Society of Estuarine Ecology, 2015-2017",
+        own_led="2015-2017 President, Example Society of Estuarine Ecology",
+        sub="Chair, Annual Meeting Program Committee, 2016-2017",
+        sub_led="2016-2017 Chair, Annual Meeting Program Committee",
+        prose=("As chair of the annual meeting program committee, organized the plenary "
+               "sessions on marsh restoration")),
+    "Q2": dict(
+        code="Q2", idx=61,
+        fields={"role": "Member", "committee_name": "Scientific Advisory Board",
+                "organization": "Example Estuarine Foundation", "start_date": "2012", "end_date": "2018"},
+        own="Member, Scientific Advisory Board, Example Estuarine Foundation, 2012-2018",
+        own_led="2012-2018 Member, Scientific Advisory Board, Example Estuarine Foundation",
+        sub="Chair, Grants Review Subcommittee, 2014-2016",
+        sub_led="2014-2016 Chair, Grants Review Subcommittee",
+        prose="As chair of the grants review subcommittee, led the evaluation of seed grant proposals"),
+    "H": dict(
+        code="H", idx=70,
+        fields={"award_name": "Early Career Fellowship",
+                "granting_body": "Example Foundation for Estuarine Science", "date": "2011-2014"},
+        own="Early Career Fellowship, Example Foundation for Estuarine Science, 2011-2014",
+        own_led="2011-2014 Early Career Fellowship, Example Foundation for Estuarine Science",
+        sub="Cohort Representative, Fellows Advisory Council, 2012-2013",
+        sub_led="2012-2013 Cohort Representative, Fellows Advisory Council",
+        prose=("As cohort representative on the fellows advisory council, organized the annual "
+               "fellows retreat")),
+    "N3A": dict(
+        code="N3A", idx=82,
+        fields={"mentee_name": "Orrin Feldspar", "mentee_level": "Postdoctoral Fellow",
+                "research_focus": ("sediment transport modelling in restored tidal marsh channels "
+                                   "and creeks"),
+                "start_date": "2019"},
+        own=("Orrin Feldspar, Postdoctoral Fellow, sediment transport modelling in restored tidal "
+             "marsh channels and creeks, 2019-present"),
+        own_led=("2019-present Orrin Feldspar, Postdoctoral Fellow, sediment transport modelling in "
+                 "restored tidal marsh channels and creeks"),
+        sub="Laboratory Safety Officer, Estuarine Ecology Laboratory, 2020-2021",
+        sub_led="2020-2021 Laboratory Safety Officer, Estuarine Ecology Laboratory",
+        prose=("As laboratory safety officer for the estuarine ecology laboratory, trained incoming "
+               "students on field safety")),
+    "N3B": dict(
+        code="N3B", idx=83,
+        fields={"mentee_name": "Pella Quartzmoor", "mentee_level": "PhD Student",
+                "start_date": "2012", "end_date": "2017",
+                "thesis_title": ("Nutrient Cycling and Denitrification Rates in Brackish Coastal "
+                                 "Lagoons under Seasonal Hypoxia")},
+        own=("Pella Quartzmoor, PhD Student, Nutrient Cycling and Denitrification Rates in Brackish "
+             "Coastal Lagoons under Seasonal Hypoxia, 2012-2017"),
+        own_led=("2012-2017 Pella Quartzmoor, PhD Student, Nutrient Cycling and Denitrification Rates "
+                 "in Brackish Coastal Lagoons under Seasonal Hypoxia"),
+        sub="Teaching Assistant Coordinator, Marine Biology Program, 2014-2015",
+        sub_led="2014-2015 Teaching Assistant Coordinator, Marine Biology Program",
+        prose=("As teaching assistant coordinator for the marine biology program, scheduled the "
+               "laboratory sections")),
+    "B1": dict(
+        code="B1", idx=10,
+        fields={"degree": "PhD", "discipline": "Estuarine Ecology", "institution": "Example University",
+                "year": "2006"},
+        own="PhD, Estuarine Ecology, Example University, 2001-2006",
+        own_led="2001-2006 PhD, Estuarine Ecology, Example University",
+        sub="Graduate Student Representative, Faculty Search Committee, 2004-2005",
+        sub_led="2004-2005 Graduate Student Representative, Faculty Search Committee",
+        prose=("As graduate student representative on the faculty search committee, interviewed "
+               "candidates")),
+    "O": dict(
+        code="O", idx=90,
+        fields={"leadership_role": "Director", "institution": "Example Estuarine Research Center",
+                "start_date": "2006", "end_date": "2012"},
+        own="Director, Example Estuarine Research Center, 2006-2012",
+        own_led="2006-2012 Director, Example Estuarine Research Center",
+        sub="Chair, Field Station Steering Committee, 2008-2010",
+        sub_led="2008-2010 Chair, Field Station Steering Committee",
+        prose="As chair of the field station steering committee, set the station's research priorities"),
+    "R": dict(
+        code="R", idx=101,
+        fields={"title": "Sediment Budgets of Restored Tidal Marshes",
+                "event_name": "Example Estuarine Institute Lectures", "location": "Example City",
+                "role": "Invited Lecturer", "date": "2014; 2016"},
+        own=("Sediment Budgets of Restored Tidal Marshes, Example Estuarine Institute Lectures, "
+             "Example City, 2014-2016"),
+        own_led=("2014-2016 Sediment Budgets of Restored Tidal Marshes, Example Estuarine Institute "
+                 "Lectures, Example City"),
+        sub="Series Organizer, Visiting Scholars Committee, 2015-2016",
+        sub_led="2015-2016 Series Organizer, Visiting Scholars Committee",
+        prose=("As series organizer for the visiting scholars committee, recruited speakers for "
+               "the lectures")),
+    "C": dict(
+        code="C", idx=20,
+        fields={"training_type": "Postdoctoral Fellow", "institution": "Example University Hospital",
+                "start_date": "2006", "end_date": "2009"},
+        own="Postdoctoral Fellow, Example University Hospital, 2006-2009",
+        own_led="2006-2009 Postdoctoral Fellow, Example University Hospital",
+        sub="Chief Resident, Education Committee, 2007-2008",
+        sub_led="2007-2008 Chief Resident, Education Committee",
+        prose=("As chief resident on the education committee, developed the residency's teaching "
+               "curriculum")),
+}
+#: The two line shapes in which sub-points on lost the sub-record: tab parts
+#: ending in their years, where the sub-point offered the sub-record itself;
+#: and date-led tab parts, where the prose repeating its words read as the
+#: sub-record rendered. B1, C, H and O lost it in the first shape only: their
+#: own rules (`_own_record_line`, the honors writer's rows) offer nothing in
+#: the second. P lost it in neither (`_own_committee_line`), I since #1991.
+_TRAILING_YEARS, _DATE_LED = "tab_trailing_years", "tab_date_led"
+_SUB_RECORD_CASES = [*((name, _TRAILING_YEARS) for name in _SUB_RECORD_FAMILIES),
+                     *((name, _DATE_LED) for name in ("K1", "M2A", "D1", "Q1", "Q2", "N3A", "N3B", "R"))]
+
+
+def _sub_record_entry(name, shape):
+    """The family's entry in `shape`, its sub-record and its prose."""
+    family = _SUB_RECORD_FAMILIES[name]
+    own, sub = (family["own"], family["sub"]) if shape == _TRAILING_YEARS else (
+        family["own_led"], family["sub_led"])
+    entry = {"element_idx_start": family["idx"], "taxonomy_code": family["code"],
+             "text": "\t".join((own, sub, family["prose"])), "extracted_fields": dict(family["fields"])}
+    return entry, sub, family["prose"]
+
+
+def _accepted_and_deleted(tmp_path, monkeypatch, entry, flag, uid):
+    """Through `run_stage6`: the document's accepted text (`w:t`), its
+    deleted text (`w:delText`, what Reject All adds) and its sidecar's
+    sub-point placements."""
+    doc, placements = _stage6_render(tmp_path / str(flag), monkeypatch, [copy.deepcopy(entry)],
+                                     uid=uid, supplementary_subpoints=flag)
+    body = doc.element.body
+    return ("".join(t.text or "" for t in body.iter(qn("w:t"))),
+            "".join(t.text or "" for t in body.iter(qn("w:delText"))), placements)
+
+
+@pytest.mark.parametrize("name, shape", _SUB_RECORD_CASES,
+                         ids=[f"{name}-{shape}" for name, shape in _SUB_RECORD_CASES])
+def test_accept_all_keeps_a_dated_sub_record_in_every_family(tmp_path, monkeypatch, name, shape):
+    """#1205, every family: the #221 recovery re-emits the sub-record with
+    sub-points off. With them on, the sub-point offered it (its own years
+    at its end) or its prose repeated its words, and the recovery read it as
+    rendered: after Accept All it was in the document nowhere. It is now the
+    recovery's (`_left_to_recovery`, `held_by_subpoint`): Accept All is the
+    flag-off document, Reject All prints it once, and the prose is the
+    sub-point."""
+    entry, sub, prose = _sub_record_entry(name, shape)
+    accepted_off, _deleted_off, _ = _accepted_and_deleted(tmp_path, monkeypatch, entry, False, "T1205F")
+    accepted, deleted, placements = _accepted_and_deleted(tmp_path, monkeypatch, entry, True, "T1205F")
+
+    assert accepted_off.count(sub) == 1
+    assert accepted == accepted_off
+    assert sub not in deleted
+    assert placements == [[prose]]
+
+
+#: A dated sub-record of the appointment whose words its duties repeat
+#: (`_DUTY_PROSE`: "departmental curriculum committee").
+_DUTY_SUB_RECORD = "2014-2016 Chair, Departmental Curriculum Committee"
+
+
+def _duty_appointment_with(sub_record):
+    """`_duty_appointment` (SQMWHM 29's shape: the duties a tab row of their
+    own, with no date), with `sub_record` as a line before the duties."""
+    entry = _duty_appointment()
+    if sub_record:
+        head, duties = entry["text"].split("\n")
+        entry["text"] = "\n".join((head, sub_record, duties))
+    return entry
+
+
+@pytest.mark.parametrize("sub_record", [None, _DUTY_SUB_RECORD], ids=["duties", "and_a_dated_sub_record"])
+def test_appointment_duties_stay_its_sub_point_beside_a_dated_sub_record(tmp_path, monkeypatch,
+                                                                         sub_record):
+    """Owner decision 2026-10-08: an appointment's duties are its
+    tracked-deleted sub-point, not a recovered line. The #221 recovery reads
+    their row (a tab line with no date of its own) as rendered by the
+    sub-point (`held_by_subpoint`), so Accept All drops the copy it re-emits
+    with sub-points off, as decided (SQMWHM 29), and Reject All prints the
+    duties once. A dated sub-record beside them is the recovery's in both,
+    though the duties repeat its words."""
+    entry = _duty_appointment_with(sub_record)
+    accepted_off, deleted_off, _ = _accepted_and_deleted(tmp_path, monkeypatch, entry, False, "T1205D")
+    accepted, deleted, placements = _accepted_and_deleted(tmp_path, monkeypatch, entry, True, "T1205D")
+
+    assert placements == [[_DUTY_PROSE]] and deleted == _DUTY_PROSE
+    assert deleted_off == "" and accepted_off.count(_DUTY_PROSE) == 1
+    assert _DUTY_PROSE not in accepted
+    if sub_record:
+        assert accepted.count(sub_record) == accepted_off.count(sub_record) == 1
+
+
+def test_title_duties_stay_a_sub_point_through_run_stage6(tmp_path, monkeypatch):
+    """#1641's title duties, which the positions writer makes the
+    appointment's sub-point (owner decision 2026-10-09: DYLJXC 661/668),
+    are unchanged: Accept All is the flag-off document without its
+    continuation row of the duties, Reject All prints them once, and the
+    text's own statement of them is not offered again."""
+    entry = _title_duty_appointment()
+    accepted_off, deleted_off, _ = _accepted_and_deleted(tmp_path, monkeypatch, entry, False, "T1205T")
+    accepted, deleted, placements = _accepted_and_deleted(tmp_path, monkeypatch, entry, True, "T1205T")
+
+    assert deleted_off == "" and len(placements) == 1
+    (duties,) = placements[0]
+    assert duties.endswith(_TITLE_DUTIES) and deleted == duties
+    assert accepted == accepted_off.replace(duties, "", 1) != accepted_off
 
 
 def test_the_membership_span_starts_at_the_heading_its_writer_looks_up():
