@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
     _GROUP_HEADER_RE,
+    DEDUP_UNNAMED_SHORT_MAX_WORDS,
     SPLIT_SIBLING_METRIC,
     _author_name_sets,
     _bare_occasion_apart,
@@ -51,6 +52,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _record_name,
     _row_residue,
     _series_marks,
+    _shorter_journal_than_kept,
     _split_record_family,
     _standalone_numerals,
     _title_only_fragment,
@@ -1178,6 +1180,76 @@ def test_bare_short_name_inside_a_longer_bare_name_is_kept():
     assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is False
     assert deduplicate_entries([kept, short], code="Q4D",
                                document=[kept, short]) == [kept, short]
+
+
+# #666 (WZSMUO Q4D): a short entry stage 4 extracted no field for.
+
+def _bare(text: str) -> dict:
+    return {"taxonomy_code": "Q4D", "text": text, "extracted_fields": {}}
+
+
+@pytest.mark.parametrize("short_text,kept_name", [
+    ("Widgets", "Widgets Reports"),  # containment 1.00, jaccard 0.50
+    ("Widgets Letters", "Widgets Gizmo Letters"),  # verbatim-free, jaccard 0.67
+    ("Widgets", "Widgets: A Gizmo Journal"),
+])
+def test_an_unnamed_short_entry_inside_a_longer_kept_name_is_kept(short_text, kept_name):
+    kept, short = _journal(kept_name), _bare(short_text)
+    decisions = []
+    assert deduplicate_entries([kept, short], code="Q4D", document=[kept, short],
+                               decisions=decisions) == [kept, short]
+    assert decisions == []
+
+
+def test_an_unnamed_short_exact_copy_still_drops():
+    kept, copy = _journal("Widgets"), _bare("Widgets")
+    assert deduplicate_entries([kept, copy], code="Q4D",
+                               document=[kept, copy]) == [kept]
+
+
+def test_an_unnamed_short_entry_beside_a_kept_entry_with_no_name_still_drops():
+    # A label fragment beside a longer unnamed line: no name tells them apart.
+    kept, short = _bare("Widgets Reports"), _bare("Widgets")
+    assert deduplicate_entries([kept, short], code="Q4D",
+                               document=[kept, short]) == [kept]
+
+
+def test_an_unnamed_short_entry_beside_a_kept_name_that_is_no_journal_still_drops():
+    # A table cell cut a talk title into fragments; they are not records.
+    kept = _entry("R", "Widget Angiography:\tInvited Speaker\tand Gizmo Detection\tSprocket Disease 2015",
+                  title="Widget Angiography: Applications to Gizmo Detection and "
+                        "Sprocket Disease")
+    assert not _kept_both("R", _entry("R", "Sprocket Disease"), kept)
+    # A bare listing of the society a longer row names.
+    kept = _entry("I", "Fellow, Acme Society, 2010-present", organization="Acme Society",
+                  start_date="2010", membership_type="Fellow")
+    assert not _kept_both("I", _entry("I", "Acme Society", note="bare"), kept)
+
+
+@pytest.mark.parametrize("dropped,kept_name,shorter", [
+    ({"text": "Widgets"}, "Widgets Reports", True),
+    ({"text": "Widgets Letters"}, "Widgets Gizmo Letters", True),
+    # One word over the cap: a row, whose extra words a name need not hold.
+    ({"text": "Widgets Gizmo Letters"}, "Widgets Gizmo Letters Quarterly",
+     DEDUP_UNNAMED_SHORT_MAX_WORDS >= 3),
+    ({"text": "Widgets"}, "Widgets", False),  # same name
+    ({"text": "Widgets", "extracted_fields": {"journal_name": "Widgets"}},
+     "Widgets Reports", False),  # named: `_record_would_be_lost` judges it
+    ({"text": "Gizmo"}, "Widgets Reports", False),  # not a subset
+])
+def test_shorter_journal_than_kept(dropped, kept_name, shorter):
+    kept = {"extracted_fields": {"journal_name": kept_name}}
+    assert _shorter_journal_than_kept(dropped, kept, "Q4D") is shorter
+
+
+def test_shorter_journal_than_kept_reads_only_a_rendered_journal_name():
+    dropped = {"text": "Widgets"}
+    assert _shorter_journal_than_kept(
+        dropped, {"extracted_fields": {"title": "Widgets Reports"}}, "R") is False
+    assert _shorter_journal_than_kept(
+        dropped, {"extracted_fields": {"organization": "Widgets Society"}}, "Q2") is False
+    assert _shorter_journal_than_kept(
+        dropped, {"extracted_fields": {"journal_name": "Widgets Reports"}}, None) is False
 
 
 @pytest.mark.parametrize("kept_name", [
