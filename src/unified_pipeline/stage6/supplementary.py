@@ -34,11 +34,11 @@ office, a sub-role, a committee or another appointment
 
 The pass runs BEFORE the content-overflow routing and that recovery. The
 overflow pass skips an entry that has a sub-point, and the recovery reads a
-sub-point as a record line of the entry's own that its prose is part of
-(`held_by_subpoint`), so an entry whose prose is now a sub-point is not also
-re-emitted whole -- as a blue overflow bullet or into the Appendix (owner
-decision 2026-10-08: duty prose goes under the appointment, not to the
-Appendix). The recovery reads a sub-point as no sub-record: prose repeating
+sub-point as a record line, of any entry, that is no sub-record and that
+its prose is part of (`held_by_subpoint`), so an entry whose prose is now
+a sub-point is not also re-emitted whole -- as a blue overflow bullet or
+into the Appendix (owner decision 2026-10-08: duty prose goes under the
+appointment, not to the Appendix). The recovery reads a sub-point as no sub-record: prose repeating
 a dated record's words does not stand for that record.
 
 The duties #1641 splits off an appointment title are written by the
@@ -336,8 +336,8 @@ _LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES)
 #: duty or descriptive prose, which stays its sub-point (owner decision
 #: 2026-10-08).
 #: The recovery reads a sub-point as no sub-record (`held_by_subpoint`), and
-#: a membership's prose is part of no record line. So no membership
-#: sub-point changes a line the recovery re-emits.
+#: a membership's prose is part of no record line of its own. So no
+#: membership sub-point changes a line of its own the recovery re-emits.
 RECOVERY_RECORD_CODES = MEMBERSHIP_CODES
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
@@ -564,15 +564,6 @@ class RecordLine(NamedTuple):
     text: str
     lost: bool
     sub_record: bool
-
-
-class WrittenProse(NamedTuple):
-    """A written sub-point's paragraphs, with the text they were read from:
-    its entry's text as the #221 recovery reads its record lines out of it
-    (`sections.appendix.recovery_text`), squashed (`_squash`). The recovery
-    reads a sub-point only for a line of that text (`held_by_subpoint`)."""
-    source: str
-    paragraphs: tuple[str, ...]
 
 
 #: The record lines the #221 recovery (`_recover_unrendered_records`) looks
@@ -1270,17 +1261,16 @@ def _left_to_recovery(fragment: str, code: str, records: Sequence[RecordLine]) -
     return _held_by_records(fragment, kept)
 
 
-def held_by_subpoint(line: str, written: Collection[WrittenProse]) -> bool:
+def held_by_subpoint(line: str, prose: Collection[str]) -> bool:
     """Whether the #221 recovery reads the record line `line`, which is no
     record of its own (`is_sub_record`), as rendered by a written sub-point:
-    `line` is a line of the text the sub-point was read from
-    (`WrittenProse.source`) and holds, or is part of, one of its paragraphs
-    -- the appointment's duties as their own row, or beside its own dates,
-    now under the appointment (owner decision 2026-10-08). Another entry's
-    sub-point does not stand for it."""
-    squashed = _squash(line)
-    return any(squashed in prose.source and _held_by_records(line, prose.paragraphs)
-               for prose in written)
+    `line` holds, or is part of, one of the paragraphs of any sub-point
+    written (`prose`) -- the appointment's duties as their own row, or
+    beside its own dates, now under the appointment (owner decision
+    2026-10-08). The line may be any entry's: read only for the sub-point's
+    own entry, another entry's row holding the duties was re-emitted with
+    them, and Reject All printed them twice."""
+    return _held_by_records(line, prose)
 
 
 def _prose_text(code: str, entry: Mapping,

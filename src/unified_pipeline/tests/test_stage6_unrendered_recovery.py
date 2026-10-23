@@ -2445,12 +2445,10 @@ def test_duty_prose_is_a_deleted_row_under_its_appointment():
         t.text for t in above.iter(qn("w:t")))
     assert "".join(t.text for t in rows[0].iter(qn("w:delText"))) == _DUTY_PROSE
     assert gen.stats["supplementary_subpoints"] == 1
-    # The recovery reads the prose with its entry's text, not the
-    # sub-point's line: it stands only for a line of that entry's it is
-    # part of.
-    (written,) = gen._subpoint_prose
-    assert written.paragraphs == (_DUTY_PROSE,) and gen._subpoint_lines == []
-    assert written.source == _squash(_duty_appointment()["text"])
+    # The recovery reads the prose, not the sub-point's line: it stands
+    # for a line, of any entry, that is no record of its own and that it
+    # is part of.
+    assert gen._subpoint_prose == [_DUTY_PROSE] and gen._subpoint_lines == []
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"supplementary_subpoints": True, "emit_track_changes": False}])
@@ -2488,14 +2486,12 @@ def test_the_recovery_reads_no_sub_point_as_a_record_of_its_own():
     verdict before the overflow pass, which the recovery's own can differ
     from; read as rendered by the sub-point, the record would be in neither
     document."""
-    from unified_pipeline.stage6.supplementary import WrittenProse
-
     entry = _duty_appointment_with(_DUTY_SUB_RECORD)
     recovered = []
     for prose in ((), ("Chair, Departmental Curriculum Committee",)):
         gen = _generator(supplementary_subpoints=True)
         gen._fill_positions({"D1": [entry]})
-        gen._subpoint_prose = [WrittenProse(_squash(entry["text"]), prose)]
+        gen._subpoint_prose = list(prose)
         gen._recover_unrendered_records({"D1": [entry]})
         recovered.append(gen.stats["unrendered_records_recovered"])
     assert recovered[0] == recovered[1] == 2
@@ -6492,6 +6488,34 @@ def test_appointment_duties_stay_its_sub_point_beside_a_dated_sub_record(tmp_pat
         assert accepted.count(sub_record) == accepted_off.count(sub_record) == 1
 
 
+_TIDAL_DUTIES = ("Coordinated the tidal flats sampling programme and trained visiting field technicians",
+                 "Maintained the shared sediment core archive and catalogued every seasonal survey")
+
+
+def test_every_paragraph_of_every_sub_point_stands_for_its_duty_row(tmp_path, monkeypatch):
+    """#1205: the recovery reads each paragraph of each written sub-point
+    (`_subpoint_prose`, `held_by_subpoint`). Two appointments in SQMWHM
+    29's shape, the second with two duty rows: every duty row is read as
+    rendered by its paragraph, so each duty prints once with sub-points off,
+    not after Accept All, and once on Reject All."""
+    second = {"element_idx_start": 31, "taxonomy_code": "D1", "hierarchy": ["PROFESSIONAL EXPERIENCE"],
+              "text": ("July 2012 - present\tAdjunct Professor, Department of Tidal Example Science, "
+                       f"Example College\nNorth Annex, ZQ.\t{_TIDAL_DUTIES[0]}\nSouth Annex, ZQ.\t"
+                       f"{_TIDAL_DUTIES[1]}"),
+              "extracted_fields": {"title": "Adjunct Professor",
+                                   "institution": "Department of Tidal Example Science, Example College",
+                                   "start_date": "2012-07", "end_date": "present"}}
+    first = _duty_appointment()
+    accepted_off, deleted_off, _ = _accepted_and_deleted(tmp_path, monkeypatch, second, False, "T1205E",
+                                                         first)
+    accepted, deleted, placements = _accepted_and_deleted(tmp_path, monkeypatch, second, True, "T1205E",
+                                                          first)
+
+    assert placements == [[_DUTY_PROSE], list(_TIDAL_DUTIES)] and deleted_off == ""
+    for duty in (_DUTY_PROSE, *_TIDAL_DUTIES):
+        assert accepted_off.count(duty) == 1 and duty not in accepted and deleted.count(duty) == 1
+
+
 def test_title_duties_stay_a_sub_point_through_run_stage6(tmp_path, monkeypatch):
     """#1641's title duties, which the positions writer makes the
     appointment's sub-point (owner decision 2026-10-09: DYLJXC 661/668),
@@ -6630,28 +6654,33 @@ _ROW_HOLDING_THE_DUTIES = {
 
 
 @pytest.mark.parametrize("first", [True, False], ids=["read_first", "read_last"])
-def test_another_entrys_row_holding_the_duties_is_not_read_as_their_sub_point(tmp_path, monkeypatch,
+def test_another_entrys_row_holding_the_duties_leaves_them_once_on_reject_all(tmp_path, monkeypatch,
                                                                               first):
-    """#1205 review: the recovery read any line holding a sub-point's prose
-    as rendered by it. Another entry's row holding the duties, read before
-    the appointment, was then in neither document, though the recovery
-    re-emits it with sub-points off. Only a line of the sub-point's own
-    entry is read so (`WrittenProse.source`); that line vouches as its
-    re-emitted copy does with sub-points off, so a row read after it is
-    judged as it is with sub-points off."""
+    """#1205: the recovery reads a written sub-point for a line of any entry
+    that is no record of its own and that the prose is part of
+    (`held_by_subpoint`). Another entry's row holding the duties, read
+    before the appointment or after it, is read so, and the duties are the
+    owner decision's (2026-10-08): flag off prints them once, Accept All
+    drops them, and Reject All prints them exactly once. Read only for the
+    sub-point's own entry, the row read first was re-emitted with them, and
+    Reject All printed them twice."""
     other, appointment = _ROW_HOLDING_THE_DUTIES, _duty_appointment()
     entry, before = (appointment, other) if first else (other, appointment)
-    accepted_off, _, _ = _accepted_and_deleted(tmp_path, monkeypatch, entry, False, "T1205X", before)
+    accepted_off, deleted_off, _ = _accepted_and_deleted(tmp_path, monkeypatch, entry, False, "T1205X",
+                                                         before)
     accepted, deleted, placements = _accepted_and_deleted(tmp_path, monkeypatch, entry, True, "T1205X",
                                                           before)
+    rejected = accepted + deleted
 
     assert placements == [[_DUTY_PROSE]] and deleted == _DUTY_PROSE
-    row = "Advisory Panel Steering Group"
-    assert accepted.count(row) == accepted_off.count(row) == (1 if first else 0)
-    if first:
-        assert accepted == accepted_off
-    else:
-        assert accepted_off.count(_DUTY_PROSE) == 1 and _DUTY_PROSE not in accepted
+    assert deleted_off == "" and accepted_off.count(_DUTY_PROSE) == 1
+    assert _DUTY_PROSE not in accepted and rejected.count(_DUTY_PROSE) == 1
+    # Nothing of the row prints twice on Reject All. Its other cells are not
+    # pinned: read first, Accept All lacks them as on dev, a pre-existing
+    # loss (a row that holds the offered prose plus cells the page prints
+    # nowhere), filed separately.
+    for cell in ("Advisory Panel Steering Group", "Regional Water Authority"):
+        assert rejected.count(cell) <= 1
 
 
 def test_the_membership_span_starts_at_the_heading_its_writer_looks_up():

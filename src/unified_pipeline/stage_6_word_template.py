@@ -1729,12 +1729,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # The appointment-title duties the positions writer wrote as
         # sub-points, each with its row, which the sub-point pass and the
         # #221 recovery read as rendered; the paragraphs of the sub-points
-        # the pass wrote, each with its entry's text, which the recovery
-        # reads only as a line of that text that is no record of its own
-        # and that they are part of (`supplementary.held_by_subpoint`); and
-        # the entries either was written for, which the overflow pass skips.
+        # the pass wrote, which the recovery reads only as a record line, of
+        # any entry, that is no record of its own and that they are part of
+        # (`supplementary.held_by_subpoint`); and the entries either was
+        # written for, which the overflow pass skips.
         self._subpoint_lines: list[str] = []
-        self._subpoint_prose: list[supplementary.WrittenProse] = []
+        self._subpoint_prose: list[str] = []
         self._subpoint_entry_ids: set[int] = set()
         # Whose each written sub-point is, for the render-warnings sidecar.
         self._subpoint_placements: list[supplementary.SubpointPlacement] = []
@@ -4090,7 +4090,7 @@ Now analyze the text above:"""
         """#1205: tracked-deleted sub-points first, then the content-overflow
         routing, which skips an entry a sub-point now carries, so its prose is
         not re-emitted whole as a blue bullet or into the Appendix. The #221
-        recovery after this reads a sub-point as a line of its entry's that
+        recovery after this reads a sub-point as a line, of any entry, that
         is no record of its own and that its prose is part of
         (`_subpoint_prose`), and as no other line."""
         self._add_supplementary_subpoints(entries_by_code)
@@ -4113,8 +4113,8 @@ Now analyze the text above:"""
         its verdict on the document so far) is left to that recovery, and so
         is any record line of a membership's
         (`supplementary._left_to_recovery`); the recovery reads a written
-        sub-point's paragraphs (`_subpoint_prose`) only as a line of its
-        entry's that is no record of its own and that they are part of."""
+        sub-point's paragraphs (`_subpoint_prose`) only as a line, of any
+        entry, that is no record of its own and that they are part of."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         out_lines = self._rendered_output_lines() + self._subpoint_lines
@@ -4129,12 +4129,10 @@ Now analyze the text above:"""
                                                functools.partial(
                                                    _record_line_verdicts,
                                                    _recovery_view(out_lines, entries_by_code)))
-        entries = {id(entry): entry for group in entries_by_code.values() for entry in group}
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:
-            self._subpoint_prose.append(supplementary.WrittenProse(
-                _squash(recovery_text(entries[subpoint.entry_id])), subpoint.paragraphs))
+            self._subpoint_prose.extend(subpoint.paragraphs)
             subpoint = subpoint._replace(paragraphs=tuple(
                 self._sanitize_run_text(text) for text in subpoint.paragraphs))
             supplementary.write_subpoint(subpoint, revision)
@@ -4369,10 +4367,10 @@ Now analyze the text above:"""
                             # The same record, recovered earlier as a tab part
                             # (this line may be a tab part or a plain line).
                             continue
-                        # #1205: a line of the entry's own that its sub-point
-                        # holds (its duties, now under its row) is not
-                        # re-emitted, and vouches below as its re-emitted copy
-                        # does with sub-points off.
+                        # #1205: a line, no record of its own, that holds or is
+                        # part of any written sub-point's prose (duties, now
+                        # under their row) is not re-emitted, and vouches below
+                        # as its re-emitted copy does with sub-points off.
                         if (supplementary.is_sub_record(line, records.tab_parts, entry)
                                 or not supplementary.held_by_subpoint(line, self._subpoint_prose)):
                             inserted = self._insert_reconsidered_segment(

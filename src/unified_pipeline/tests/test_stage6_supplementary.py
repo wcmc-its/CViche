@@ -1790,18 +1790,24 @@ def test_a_fragment_left_to_the_recovery(fragment, code, records, left):
     assert sp._left_to_recovery(fragment, code, records) is left
 
 
-_SOURCE = sp._squash(f"Associate Professor\n{_DUTY_ROW}")
+#: Another entry's row holding the same prose among cells of its own.
+_OTHER_ENTRYS_ROW = f"Example Advisory Panel | {PROSE} | Example Water Authority"
 
 
-@pytest.mark.parametrize("line, written, held", [
-    (_DUTY_ROW, [sp.WrittenProse(_SOURCE, (PROSE,))], True),        # the duties' own row
-    (PROSE, [sp.WrittenProse(sp._squash(PROSE), (OTHER_PROSE, PROSE))], True),
-    (_DUTY_ROW, [sp.WrittenProse(sp._squash(f"Other\t{PROSE}"), (PROSE,))], False),  # another entry's
-    (_DUTY_ROW, [sp.WrittenProse(_SOURCE, (OTHER_PROSE,))], False),
+@pytest.mark.parametrize("line, prose, held", [
+    (_DUTY_ROW, [PROSE], True),             # the duties' own row
+    (PROSE, [OTHER_PROSE, PROSE], True),
+    (PROSE, [PROSE, OTHER_PROSE], True),
+    (_OTHER_ENTRYS_ROW, [PROSE], True),     # another entry's row, read document-wide
+    (_DUTY_ROW, [OTHER_PROSE], False),
     (_DUTY_ROW, [], False),
-], ids=["duties_row", "the_prose", "another_entrys_sub_point", "other_prose", "no_sub_point"])
-def test_the_recovery_reads_a_sub_point_only_for_a_line_of_its_own_entry_it_is_part_of(line, written, held):
-    assert sp.held_by_subpoint(line, written) is held
+], ids=["duties_row", "the_prose_last", "the_prose_first", "another_entrys_row", "other_prose", "no_sub_point"])
+def test_the_recovery_reads_a_sub_point_for_any_entrys_line_it_is_part_of(line, prose, held):
+    """#1205: read only for the sub-point's own entry, another entry's row
+    holding the duties was re-emitted with them, and Reject All printed them
+    twice. A sub-record is the caller's to keep out (`is_sub_record`;
+    `test_the_recovery_reads_no_sub_point_as_a_record_of_its_own`)."""
+    assert sp.held_by_subpoint(line, prose) is held
 
 
 def test_plan_offers_no_prose_of_a_membership_the_pii_pass_withheld():
