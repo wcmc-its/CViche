@@ -48,6 +48,8 @@ CITATION = "12. Quill AB, Marsh CD. Lanternfish vision under pressure. J Example
 SECOND = "14. Quill AB, Reed EF. The squid's lenses and light. J Example Biol. 2021;6:3-8."
 ENRICHED = "13. Quill AB. A tracked insertion only enrichment adds. J Example Biol. 2020;5:2-3."
 TEACHING = "Tobacco Cessation Lecturer (PHRM 827) 4 hrs, 156 students"
+#: source_line_coverage's group title in the box (#2002).
+SLC_TITLE = "Lines from your CV that CViche couldn't place (often present in another form)"
 APPENDIX_LINES = ("1. Volunteer, Example Food Bank, 2015", "2. Marathon finisher, 2018")
 
 
@@ -317,28 +319,35 @@ def test_a_single_diverted_entry_reads_in_the_singular(tmp_path):
         "1 entry meant for this section is in the Appendix: move any that belong here."]
 
 
-def test_a_diversion_with_no_heading_to_sit_on_is_a_note(tmp_path):
-    """#1639: a diversion whose section has no heading in this document, or
-    that names no section, is listed in the box rather than vanishing."""
+def test_a_diversion_with_no_heading_to_sit_on_is_left_to_the_run_page(tmp_path):
+    """#2002 (reversing #1639's note): a diversion whose section has no
+    heading in this document, or that names no section, is a stage-6 builder
+    warning, so it is not in the box; the run page lists it."""
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("stage6_render_warnings", "stage 6 self-check: K1: 2 entries diverted to the "
                  "Appendix — declined by the renderer"),  # no Didactic Teaching heading
         _finding("stage6_render_warnings", "stage 6 self-check: 1 entry diverted to the "
                  "Appendix — no section named")))
-    assert n == 2 and _comments(out) == []
-    assert _notes(out) == [f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_NOTE, "• Didactic Teaching",
-                           f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_UNPLACED_NOTE]
+    assert n == 0 and _comments(out) == [] and _notes(out) == []
 
 
-def test_a_less_certain_finding_with_nothing_to_name_is_still_a_note(tmp_path):
-    """#1639: off the text, the box is the only place the copy says it."""
+def test_a_builder_warning_no_comment_places_is_not_a_note(tmp_path):
+    """#2002: a stage-6 builder warning whose quote is not on the page and
+    whose section has no heading stays on the run page, even when its row
+    is unmeasured (so the gate would put it on the text)."""
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding(
+        "stage6_render_warnings", "stage 6 self-check: K1 (Didactic Teaching): Content appears "
+        "combined with semicolons instead of separate bullets", ["Squid optics outreach; marine biology open day"])))
+    assert n == 0 and _comments(out) == [] and _notes(out) == []
+
+
+def test_a_less_certain_finding_with_nothing_to_name_is_not_a_note(tmp_path):
+    """#2002 (reversing #1639): off the text, it is the run page's alone."""
     rows = {("llm_fallback_served", None): LintPrecision("llm_fallback_served", 0, 3, "M1")}
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model")),
         rows=rows)
-    assert n == 1 and _comments(out) == []
-    assert _notes(out) == [f"{rc._note_title('llm_fallback_served')} (1)",
-                           f"{_flag('llm_fallback_served')} {rc.LESS_CERTAIN_NOTE}"]
+    assert n == 0 and _comments(out) == [] and _notes(out) == []
 
 
 _GATE_ROWS = {
@@ -350,23 +359,48 @@ _GATE_ROWS = {
 }
 
 
-def test_a_finding_right_less_than_half_the_time_is_a_note_not_a_comment(tmp_path):
+def test_a_finding_right_less_than_half_the_time_is_neither_a_comment_nor_a_note(tmp_path):
     """#1589's gate: below 50% hand-checked precision, nothing sits on the
-    text; the finding is listed in the box, saying why, and quoting it."""
+    text. #2002: nor is it in the box; the run page's Diagnostics lists it."""
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("pipe_leaks", "1 numbered citation(s) fusing venue-date patterns", [f"[bibliography] {SECOND}"]),
         _finding("duplicate_records", "1 duplicated record(s)", [f"block 7 repeats at 8: {CITATION[:90]}"])),
         rows=_GATE_ROWS)
-    assert n == 2
+    assert n == 1
     assert _comments(out) == [(_flag("duplicate_records"), CITATION)]
-    assert _notes(out) == [f"{LINT_COPY['pipe_leaks'].title} (1)",
-                           f"{_flag('pipe_leaks')} {rc.LESS_CERTAIN_NOTE}", f'\u2022 "[bibliography] {SECOND}"']
+    assert _notes(out) == []
 
 
-def test_a_less_certain_diversion_is_a_note_naming_its_section(tmp_path):
+def test_a_less_certain_diversion_is_neither_a_comment_nor_a_note(tmp_path):
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(_DIVERSIONS[0]), rows=_GATE_ROWS)
-    assert n == 1 and _comments(out) == []
-    assert _notes(out)[1:] == [f"{rc.DIVERSION_NOTE} {rc.LESS_CERTAIN_NOTE}", "\u2022 Past Research Funding"]
+    assert n == 0 and _comments(out) == [] and _notes(out) == []
+
+
+def test_the_box_lists_coverage_and_near_duplicates_but_not_less_certain_or_builder_notes(tmp_path):
+    """#2002: of PPMTJH's and WZSMUO's box notes, only the source-line and
+    near-duplicate groups held true findings. Less certain findings (here a
+    date_cell_shape row at 1 of 4) and stage-6 builder warnings stay on the
+    run page; the other two groups are listed as before."""
+    rows = {("date_cell_shape", None): LintPrecision("date_cell_shape", 1, 4, "YUY-HO"),
+            ("stage6_render_warnings", "semicolon_fused_bullets"):
+                LintPrecision("stage6_render_warnings", 0, 2, "M1", "semicolon_fused_bullets")}
+    lost = "Visiting lecturer in comparative squid anatomy, Example Polytechnic"
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("date_cell_shape", "entry 40 (K1): date cell reads '2014 2014'", ["Squid seminar, 2014 2014"]),
+        _finding("stage6_render_warnings", "stage 6 self-check: K1 (Didactic Teaching): Content "
+                 "appears combined with semicolons instead of separate bullets", ["Squid optics outreach; marine biology open day"]),
+        _finding("source_line_coverage", "entry 31: 1 source line(s) with under 50% of their word pairs "
+                 "anywhere in the output, Appendix included (lowest 0%)", [lost], severity="INFO"),
+        _finding("dedup_drops", "1 dedup drop(s)", [
+            "K1 (jaccard=1.00, 89% covered by kept): dropped 'Squid Optics Seminar' "
+            "vs kept 'Squid Optics Seminar 2'"])),
+        rows=rows)
+    assert n == 2 and _comments(out) == []
+    assert _notes(out) == [
+        f"{SLC_TITLE} (1)",
+        _flag("source_line_coverage"), f'\u2022 "{lost}"',
+        f"{rc.DEDUP_TITLE} (1)", rc.DEDUP_INSTRUCTION, "\u2022 Didactic Teaching",
+        'Removed: "Squid Optics Seminar"', 'Kept: "Squid Optics Seminar 2"']
 
 
 def test_a_less_certain_appendix_code_diversion_is_not_a_note_either(tmp_path):
@@ -474,7 +508,7 @@ def test_a_source_line_coverage_finding_is_one_review_note_per_line_though_info(
         _finding("source_line_coverage", "entry 31: 2 source line(s) with under 50% of their word pairs "
                  "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")))
     assert n == 2 and _comments(out) == []
-    assert _notes(out) == ["Text from your CV that may be missing (2)", _flag("source_line_coverage"),
+    assert _notes(out) == [f"{SLC_TITLE} (2)", _flag("source_line_coverage"),
                            *(f'• "{line}"' for line in lost)]
 
 
@@ -488,7 +522,7 @@ def test_a_source_line_coverage_finding_below_the_bar_is_still_its_notes(tmp_pat
         _finding("source_line_coverage", "entry 31: 1 source line(s) with under 50% of their word pairs "
                  "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")), rows=rows)
     assert n == 1 and _comments(out) == []
-    assert _notes(out) == ["Text from your CV that may be missing (1)", _flag("source_line_coverage"),
+    assert _notes(out) == [f"{SLC_TITLE} (1)", _flag("source_line_coverage"),
                            f'• "{lost[0]}"']
 
 
@@ -598,7 +632,7 @@ def test_source_line_coverage_notes_are_capped_per_document(tmp_path):
                 for i in range(20)]
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(*findings))
     assert n == rc.MAX_FLAGS_PER_LINT
-    assert _notes(out)[0] == f"Text from your CV that may be missing ({rc.MAX_FLAGS_PER_LINT})"
+    assert _notes(out)[0] == f"{SLC_TITLE} ({rc.MAX_FLAGS_PER_LINT})"
 
 
 # --- #1591: a certain fix as a tracked change ---------------------------------
