@@ -49,7 +49,7 @@ SECOND = "14. Quill AB, Reed EF. The squid's lenses and light. J Example Biol. 2
 ENRICHED = "13. Quill AB. A tracked insertion only enrichment adds. J Example Biol. 2020;5:2-3."
 TEACHING = "Tobacco Cessation Lecturer (PHRM 827) 4 hrs, 156 students"
 #: source_line_coverage's group title in the box (#2002).
-SLC_TITLE = "Lines from your CV that CViche couldn't place (often present in another form)"
+SLC_TITLE = "Lines from your CV that CViche couldn't place, often present in another form"
 APPENDIX_LINES = ("1. Volunteer, Example Food Bank, 2015", "2. Marathon finisher, 2018")
 
 
@@ -319,16 +319,17 @@ def test_a_single_diverted_entry_reads_in_the_singular(tmp_path):
         "1 entry meant for this section is in the Appendix: move any that belong here."]
 
 
-def test_a_diversion_with_no_heading_to_sit_on_is_left_to_the_run_page(tmp_path):
-    """#2002 (reversing #1639's note): a diversion whose section has no
-    heading in this document, or that names no section, is a stage-6 builder
-    warning, so it is not in the box; the run page lists it."""
+def test_a_diversion_with_no_heading_to_sit_on_is_a_note(tmp_path):
+    """#1639, kept by #2002: a diversion whose section has no heading in this
+    document, or that names no section, is listed in the box rather than vanishing."""
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("stage6_render_warnings", "stage 6 self-check: K1: 2 entries diverted to the "
                  "Appendix — declined by the renderer"),  # no Didactic Teaching heading
         _finding("stage6_render_warnings", "stage 6 self-check: 1 entry diverted to the "
                  "Appendix — no section named")))
-    assert n == 0 and _comments(out) == [] and _notes(out) == []
+    assert n == 2 and _comments(out) == []
+    assert _notes(out) == [f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_NOTE, "• Didactic Teaching",
+                           f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_UNPLACED_NOTE]
 
 
 def test_a_builder_warning_no_comment_places_is_not_a_note(tmp_path):

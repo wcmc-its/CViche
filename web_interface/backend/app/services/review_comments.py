@@ -14,7 +14,8 @@ Precision gate (#1589): a finding is marked on the text only when its lint
 (`precision.shown_in_place`). A less certain finding is left out of the
 copy, so a false alarm never sits on correct text; it stays on the admin run
 page's Diagnostics tab (#2002), as do stage 6's builder warnings
-(stage6_render_warnings) that no heading comment places.
+(stage6_render_warnings) that no heading comment places, except an Appendix
+diversion, which is a note when it has no heading to sit on (#1639).
 
 Every run's copy is written, even with nothing to flag: the notes always close
 with what CViche does not check, since a quiet doctor is not a clean document.
@@ -231,8 +232,8 @@ OWNER_PI_ROLE_FIX = "PI"
 _OWNER_PI_ROLE_TOKEN = f"({ROLE_SHAPE_OWNER_PI_ROLE_EMPTY},"
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete",
-               "source_line_coverage": ("Lines from your CV that CViche couldn't place "
-                                        "(often present in another form)")}
+               "source_line_coverage": ("Lines from your CV that CViche couldn't place, "
+                                        "often present in another form")}
 #: A review-copy-only lint whose quotes are source text the page does not hold.
 MISSING_SOURCE_LINT = "source_line_coverage"
 #: An Appendix diversion, on the heading of the section it was meant for.
@@ -240,6 +241,12 @@ MISSING_SOURCE_LINT = "source_line_coverage"
 DIVERSION_FLAG = "{count} meant for this section {verb} in the Appendix: move any that belong here."
 #: What every diversion comment ends with, whatever its count.
 _DIVERSION_FLAG_TAIL = DIVERSION_FLAG.split("{verb}", 1)[1]
+#: The same, as a review note naming the section, under its own group title
+#: (the run page's "Document builder warnings" is internal wording).
+DIVERSION_TITLE = "Entries placed in the Appendix"
+DIVERSION_NOTE = "Entries meant for this section are in the Appendix: move any that belong there."
+#: The same, for a diversion naming no section of this document.
+DIVERSION_UNPLACED_NOTE = "Some entries are in the Appendix: move any that belong in a section."
 #: The review notes' last group, on every copy: what the doctor cannot see,
 #: one item per BLIND cell of doctor/COVERAGE.md (`blind_spots()`, #1588).
 NOT_CHECKED_TITLE = "What CViche does not check"
@@ -252,8 +259,7 @@ PROTECTED_DATA_LINT = "protected_data_in_output"
 _PROTECTED_WHERE_RE = re.compile(r"(?:\((?P<category>[^)]+)\)|(?P<bare>a bare date)) found in "
                                  r"(?:the )?(?P<section>.+?)(?: block)?(?:\s+--|$)")
 #: The lint stage 6's Appendix diversions and other builder warnings arrive
-#: under (lint_stage6_warnings). Never a review note (#2002): a comment on a
-#: heading, or the run page only.
+#: under (lint_stage6_warnings). Only a diversion is ever a review note (#2002).
 DIVERSION_LINT = "stage6_render_warnings"
 #: Lints whose every quoted item is its own problem, each flagged where it is.
 EACH_ITEM_LINTS = frozenset({
@@ -484,6 +490,13 @@ def _note_title(lint: str) -> str:
     return NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
 
 
+def _diversion_note(lint: str, inst: DoctorFindingInstance) -> Note:
+    """An Appendix diversion as a review note naming its section; one naming
+    no section says only that entries are in the Appendix."""
+    item = _note_item(lint, inst)
+    return Note(DIVERSION_TITLE, DIVERSION_NOTE if item else DIVERSION_UNPLACED_NOTE, item)
+
+
 def _diversion_code(lint: str, inst: DoctorFindingInstance) -> str | None:
     """The section code a stage-6 Appendix diversion names ("" when it names
     none); None when the finding is not a diversion."""
@@ -515,7 +528,7 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
     near-duplicate is always a note, since what it removed is not on the page.
     A finding the precision gate keeps off the text, and a stage-6 builder
     warning no comment places, go nowhere in the copy: the run page lists them
-    (#2002). A blank mentee field is a comment on its cell of ``tables`` (the
+    (#2002). An Appendix diversion with no heading is still a note (#1639). A blank mentee field is a comment on its cell of ``tables`` (the
     document's), or nothing."""
     lint, inst = finding["lint"], _instance(finding)
     if lint == "dedup_drops":
@@ -529,8 +542,9 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
         return [], []  # less certain: the run page's Diagnostics only (#2002)
     if lint == MENTEE_FIELD_LINT:
         return _mentee_field_flags(finding, tables), []
-    if diverted_from is not None:  # no heading to sit on: the run page only (#2002)
-        return _diversion(diverted_from, inst, surfaces[0]), []
+    if diverted_from is not None:  # no heading to sit on: a note, never nothing
+        flags = _diversion(diverted_from, inst, surfaces[0])
+        return (flags, []) if flags else ([], [_diversion_note(lint, inst)])
     label = REVIEW_FLAGS.get(lint, inst.detail)
     flags = _item_flags(lint, inst, label, surfaces)
     if flags or lint in REVIEW_COPY_ONLY_LINTS:  # a possibility, so only on the citation itself
