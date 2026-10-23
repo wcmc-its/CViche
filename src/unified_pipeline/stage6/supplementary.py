@@ -612,7 +612,7 @@ _OWN_TITLE_MIN_SHARE = 0.5
 #: nurses", "$4M") is held only by a line that prints it.
 _LINE_WORD_RE = re.compile(r'\w+')
 
-_XML_SPACE ='{http://www.w3.org/XML/1998/namespace}space'
+_XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
 #: The elements a section writer recorded for an entry, by identity
 #: (`RowReceiptLedger.elements_for`): its rows, or its first cells'
