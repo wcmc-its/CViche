@@ -11,8 +11,11 @@ heading. The clean document is left as it is; this writes a copy beside it.
 
 Precision gate (#1589): a finding is marked on the text only when its lint
 (or message shape) is right at least half the time by doctor/PRECISION.md
-(`precision.shown_in_place`). A less certain finding is a review note, so a
-false alarm never sits on correct text.
+(`precision.shown_in_place`). A less certain finding is left out of the
+copy, so a false alarm never sits on correct text; it stays on the admin run
+page's Diagnostics tab (#2002), as do stage 6's builder warnings
+(stage6_render_warnings) that no heading comment places, except an Appendix
+diversion, which is a note when it has no heading to sit on (#1639).
 
 Every run's copy is written, even with nothing to flag: the notes always close
 with what CViche does not check, since a quiet doctor is not a clean document.
@@ -229,11 +232,10 @@ OWNER_PI_ROLE_FIX = "PI"
 _OWNER_PI_ROLE_TOKEN = f"({ROLE_SHAPE_OWNER_PI_ROLE_EMPTY},"
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete",
-               "source_line_coverage": "Text from your CV that may be missing"}
+               "source_line_coverage": ("Lines from your CV that CViche couldn't place, "
+                                        "often present in another form")}
 #: A review-copy-only lint whose quotes are source text the page does not hold.
 MISSING_SOURCE_LINT = "source_line_coverage"
-#: Said after a finding the precision gate kept off the text (#1589).
-LESS_CERTAIN_NOTE = "This check is often wrong, so it is listed here, not marked in the text."
 #: An Appendix diversion, on the heading of the section it was meant for.
 #: The count is the run page's; the Appendix group headings say where each came from.
 DIVERSION_FLAG = "{count} meant for this section {verb} in the Appendix: move any that belong here."
@@ -256,7 +258,8 @@ PROTECTED_DATA_LINT = "protected_data_in_output"
 #: Also "a bare date found in the Personal Data block".
 _PROTECTED_WHERE_RE = re.compile(r"(?:\((?P<category>[^)]+)\)|(?P<bare>a bare date)) found in "
                                  r"(?:the )?(?P<section>.+?)(?: block)?(?:\s+--|$)")
-#: The lint stage 6's Appendix diversions arrive under (lint_stage6_warnings).
+#: The lint stage 6's Appendix diversions and other builder warnings arrive
+#: under (lint_stage6_warnings). Only a diversion is ever a review note (#2002).
 DIVERSION_LINT = "stage6_render_warnings"
 #: Lints whose every quoted item is its own problem, each flagged where it is.
 EACH_ITEM_LINTS = frozenset({
@@ -487,25 +490,11 @@ def _note_title(lint: str) -> str:
     return NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
 
 
-def _less_certain(lint: str, inst: DoctorFindingInstance) -> list[Note]:
-    """A finding the precision gate keeps off the text, as a review note: its
-    run-page title, its flag and why it is here. A possibility (a
-    REVIEW_COPY_ONLY_LINTS lint) is never a note. A finding with no section
-    or quote to name is still listed, without an item: off the text, the box
-    is the only place the copy says it."""
-    if lint in REVIEW_COPY_ONLY_LINTS:
-        return []
-    if _diversion_code(lint, inst) is not None:
-        return [_diversion_note(lint, inst, f" {LESS_CERTAIN_NOTE}")]
-    return [Note(_note_title(lint), f"{REVIEW_FLAGS.get(lint, inst.detail)} {LESS_CERTAIN_NOTE}",
-                 _note_item(lint, inst))]
-
-
-def _diversion_note(lint: str, inst: DoctorFindingInstance, suffix: str = "") -> Note:
+def _diversion_note(lint: str, inst: DoctorFindingInstance) -> Note:
     """An Appendix diversion as a review note naming its section; one naming
     no section says only that entries are in the Appendix."""
     item = _note_item(lint, inst)
-    return Note(DIVERSION_TITLE, f"{DIVERSION_NOTE if item else DIVERSION_UNPLACED_NOTE}{suffix}", item)
+    return Note(DIVERSION_TITLE, DIVERSION_NOTE if item else DIVERSION_UNPLACED_NOTE, item)
 
 
 def _diversion_code(lint: str, inst: DoctorFindingInstance) -> str | None:
@@ -536,9 +525,11 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
            tables: Sequence[Table] = ()) -> tuple[list[Flag], list[Note]]:
     """Where one finding goes: a comment on its quoted text; else on its
     section's heading; else a review note saying what and where it was. A
-    near-duplicate is always a note, since what it removed is not on the page,
-    and so is a finding the precision gate keeps off the text. A blank mentee
-    field is a comment on its cell of ``tables`` (the document's), or nothing."""
+    near-duplicate is always a note, since what it removed is not on the page.
+    A finding the precision gate keeps off the text, and a stage-6 builder
+    warning no comment places, go nowhere in the copy: the run page lists them
+    (#2002). An Appendix diversion with no heading is still a note (#1639). A blank mentee field is a comment on its cell of ``tables`` (the
+    document's), or nothing."""
     lint, inst = finding["lint"], _instance(finding)
     if lint == "dedup_drops":
         return [], _dedup_notes(inst)
@@ -548,7 +539,7 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
     if diverted_from == _APPENDIX_CODE:  # stage 6's Appendix note explains these
         return [], []
     if not shown_in_place(lint, str(finding.get("message") or ""), rows):
-        return [], _less_certain(lint, inst)
+        return [], []  # less certain: the run page's Diagnostics only (#2002)
     if lint == MENTEE_FIELD_LINT:
         return _mentee_field_flags(finding, tables), []
     if diverted_from is not None:  # no heading to sit on: a note, never nothing
@@ -562,7 +553,8 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
     if heading is not None:
         return [Flag(heading, None, label)], []
     item = _note_item(lint, inst)
-    if item is None:  # nothing to point the submitter at: it stays on the run page
+    # Nothing to point the submitter at, or a builder warning (#2002): it stays on the run page.
+    if item is None or lint == DIVERSION_LINT:
         return [], []
     return [], [Note(_note_title(lint), label, item)]
 
