@@ -1179,6 +1179,69 @@ def _is_cv_owner(pi_name: str, owner_name: str) -> bool:
     return bool(_surname_parts(pi_name) & _surname_parts(owner_name))
 
 
+# A role a grant heading gives the owner on every grant under it: "Principal
+# Investigator on Grants", "Grant History (Principal Investigator)", "Clinical
+# Trials ... (Role PI)", "Contracts (Site Principal Investigator)", "Grants and
+# Contracts as Co-Investigator", "B. Co-Investigator". Stage 4 reads each
+# grant's own line, so the heading's role rendered nowhere: 163 grant tables on
+# 12 of 207 labelled runs had both the PI and role cells empty under such a
+# heading (XNWSZN 25 of 43, #1403). Bare "Investigator" is not taken: it is a
+# grant type in "Investigator Initiated".
+_HEADING_ROLE = (r"(?:site[\s-]+)?(?:(?:co|sub)[\s-]*)?princip(?:al|le)[\s-]+investigator"
+                 r"|(?:site[\s-]+)?co[\s-]*investigator"
+                 r"|(?:site[\s-]+)?(?:(?:co|sub)[\s-]*)?p\.?i\.?"
+                 r"|mentor")
+_ROLE_BOUNDED = r"(?<![\w-])(?:{})(?![\w-])"
+# Where a heading states the role: leading it ("A. Principal Investigator of
+# Grants: Past"), after "as" at its end, or alone in parentheses.
+_HEADING_ROLE_RE = re.compile(
+    r"^(?:[a-z0-9]{1,4}[.)]\s*)?(" + _ROLE_BOUNDED.format(_HEADING_ROLE)
+    + r")(?=\s+(?:on|of|for|in)\b|\s*[:(]|\s*$)"
+    r"|\bas\s+(?:an?\s+|the\s+)?(" + _ROLE_BOUNDED.format(_HEADING_ROLE) + r")\s*(?=[:(),]|$)"
+    r"|\(\s*(?:role:?\s*)?(" + _ROLE_BOUNDED.format(_HEADING_ROLE) + r")\s*\)",
+    re.IGNORECASE)
+# Every role word a heading can name. A heading naming two ("as PI, Site PI,
+# Co-PI, or Director", "As sponsor or primary mentor", "in role other than PI
+# or Co-I") gives no one role.
+_ANY_ROLE_RE = re.compile(_ROLE_BOUNDED.format(
+    _HEADING_ROLE + r"|co-?i|investigator|sponsor|director|advisor|collaborator|consultant"),
+    re.IGNORECASE)
+
+
+def heading_role(hierarchy: list[str]) -> str:
+    """The role the nearest role-naming heading gives the owner, or ''.
+
+    '' when that heading names more than one role or states none where
+    `_HEADING_ROLE_RE` looks. Spelled one way: "PRINCIPLE INVESTIGATOR" and
+    "Co-investigator" render "Principal Investigator" and "Co-Investigator".
+    """
+    for heading in reversed(hierarchy):
+        roles = _ANY_ROLE_RE.findall(heading)
+        if not roles:
+            continue
+        match = _HEADING_ROLE_RE.search(heading.strip())
+        if len(roles) != 1 or not match:
+            return ''
+        phrase = next(group for group in match.groups() if group)
+        text = re.sub(r'\bp\W*i\b', 'pi', phrase.lower().replace('principle', 'principal'))
+        words = re.split(r'[\s.-]+', text.strip(' .'))
+        return ''.join(('PI' if w == 'pi' else w.capitalize()) + ('-' if w in ('co', 'sub') else ' ')
+                       for w in words).strip()
+    return ''
+
+
+def resolve_role_and_pi(fields: GrantFields, raw_text: str, role: str | None, owner_name: str,
+                        entry: dict | None) -> tuple[str | None, str | None]:
+    """The grant's role and PI. With no role, the heading's (`heading_role`),
+    unless it makes the owner the PI of a grant that names someone else."""
+    pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
+    stated = '' if role or not entry else heading_role(entry.get('hierarchy') or [])
+    if stated and (not pi_name or _is_cv_owner(pi_name, owner_name)
+                   or not _role_names_owner_as_pi(stated)):
+        return stated, resolve_pi_name(fields, raw_text, stated, owner_name)
+    return role, pi_name
+
+
 def resolve_pi_name(
     fields: GrantFields, raw_text: str, role: str | None, owner_name: str
 ) -> str | None:
@@ -1971,7 +2034,7 @@ class ResearchSupportSection:
                 role = ''
 
         raw_text = entry.get('text', '') if entry else ''
-        pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
+        role, pi_name = resolve_role_and_pi(fields, raw_text, role, owner_name, entry)
 
         cost_rows = _format_grant_costs(annual_direct_costs, total_funding, code)
 

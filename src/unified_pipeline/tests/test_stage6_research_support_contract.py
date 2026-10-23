@@ -71,6 +71,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     grant_end_year,
     grant_has_ended,
     grant_id_tokens,
+    heading_role,
     is_role_effort_header,
     lacks_funding_signal,
     match_effort_for_title,
@@ -674,6 +675,89 @@ def test_null_role_with_a_cv_owner_does_not_crash():
         {'title': 'Null Role Project', 'agency': 'NIH', 'role': None},
         'M2A', owner_name='Ada Testowner')
     assert _cells(table)['Name of Principal Investigator:'] == ''
+
+
+# --- #1403: the role a grant heading states -------------------------------------
+
+@pytest.mark.parametrize('hierarchy, role', [
+    (['GRANT SUPPORT', 'Principal Investigator on Grants'], 'Principal Investigator'),
+    (['PRINCIPAL INVESTIGATOR OF GRANTS: PAST'], 'Principal Investigator'),
+    (['A. Principal Investigator'], 'Principal Investigator'),
+    (['As Principle Investigator'], 'Principal Investigator'),
+    (['Grant History (principal Investigator)'], 'Principal Investigator'),
+    (['Clinical Trials Funded by Industry (Role PI)(cont’d)'], 'PI'),
+    (['Externally-Funded Projects as PI'], 'PI'),
+    (['Contracts (Site Principal Investigator)'], 'Site Principal Investigator'),
+    (['Contracts (Site Co-Investigator)'], 'Site Co-Investigator'),
+    (['GRANTS AND CONTRACTS AS CO-INVESTIGATOR'], 'Co-Investigator'),
+    (['B. Co-Investigator'], 'Co-Investigator'),
+    (['CO-PRINCIPAL INVESTIGATOR OF GRANTS: PRESENT'], 'Co-Principal Investigator'),
+    (['Grants as Mentor'], 'Mentor'),
+    (['Principal Investigator', 'Industry Sponsored Trials'], 'Principal Investigator'),
+    (['GRANTS AND CONTRACTS AS PI, SITE PI, CO-PI, or Director'], ''),
+    (['As sponsor or primary mentor'], ''),
+    (['Co-Investigator (Sponsor: Industry)'], ''),
+    (['Principal Investigator (Co-I 2001-2004)'], ''),
+    (['Projects in role other than PI or Co-I'], ''),
+    (['Research Grants (Investigator initiated)'], ''),
+    (['Grant Support as Investigator'], ''),
+    (['Primary Clinical Investigator'], ''),
+    (['FUNDING SOURCES FOR SPONSORED RESEARCH'], ''),
+    (['Pilot Grants'], ''),
+    (['Principal Investigator', 'Grants as PI or Co-I'], ''),
+    ([], ''),
+])
+def test_heading_role(hierarchy, role):
+    """The nearest heading naming a role gives it, only where it names one."""
+    assert heading_role(hierarchy) == role
+
+
+def _heading_grant(heading, **fields):
+    return {**_entry('M2B', title='Heading Role Project', agency='NIH', start_date='2001',
+                     end_date='2004', **fields),
+            'hierarchy': ['GRANT SUPPORT', heading]}
+
+
+def _heading_grant_cells(entry):
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2B': [entry]},
+                               cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
+                               as_of=TEST_AS_OF)
+    return _cells(_tables_under(gen, COMPLETED)[0])
+
+
+def test_a_pi_heading_fills_the_role_and_the_owner_as_pi():
+    """XNWSZN: under "Principal Investigator on Grants" both cells rendered empty."""
+    cells = _heading_grant_cells(_heading_grant('Principal Investigator on Grants'))
+    assert cells['Your role:'] == 'Principal Investigator'
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
+
+
+def test_a_co_investigator_heading_keeps_the_named_pi():
+    cells = _heading_grant_cells(_heading_grant('As Co-Investigator', pi_name='Jane Smith'))
+    assert cells['Your role:'] == 'Co-Investigator'
+    assert cells['Name of Principal Investigator:'] == 'Jane Smith'
+
+
+def test_a_pi_heading_fills_the_role_beside_the_owner_named_as_pi():
+    cells = _heading_grant_cells(_heading_grant('Principal Investigator', pi_name='A. Testowner'))
+    assert cells['Your role:'] == 'Principal Investigator'
+    assert cells['Name of Principal Investigator:'] == 'A. Testowner'
+
+
+def test_a_pi_heading_gives_no_role_beside_another_pi():
+    """A grant naming someone else as PI under a PI heading is left for the owner."""
+    cells = _heading_grant_cells(_heading_grant('Principal Investigator on Grants',
+                                                pi_name='Jane Smith'))
+    assert cells['Your role:'] == ''
+    assert cells['Name of Principal Investigator:'] == 'Jane Smith'
+
+
+def test_a_stated_role_beats_the_heading():
+    cells = _heading_grant_cells(_heading_grant('Principal Investigator on Grants',
+                                                pi_role='Co-Investigator'))
+    assert cells['Your role:'] == 'Co-Investigator'
+    assert cells['Name of Principal Investigator:'] == ''
 
 
 # --- item 7: PI extraction from a pipe-delimited source row ---------------------
