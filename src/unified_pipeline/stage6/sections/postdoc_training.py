@@ -65,7 +65,7 @@ from ..supplementary import (
     POSTDOC_DATE_FIELDS,
     POSTDOC_FIELD_OF_STUDY_FIELDS,
     POSTDOC_TYPE_FIELDS,
-    training_cell_value,
+    first_field_value,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,14 +175,14 @@ def _normalize_training_entry(
     # `supplementary`'s, so the #1205 sub-point pass counts what this row
     # prints and no other alias (`_value_tokens`).
     training_type = _join_if_list(
-        training_cell_value(fields, POSTDOC_TYPE_FIELDS)
+        first_field_value(fields, POSTDOC_TYPE_FIELDS)
         or DEFAULT_TRAINING_TYPES.get(taxonomy_code, FALLBACK_TRAINING_TYPE))
     # Replace tabs with comma-space for cleaner display
     if '\t' in training_type:
         training_type = ', '.join(part.strip()
                                   for part in training_type.split('\t')
                                   if part.strip())
-    field_of_study = _join_if_list(training_cell_value(fields, POSTDOC_FIELD_OF_STUDY_FIELDS))
+    field_of_study = _join_if_list(first_field_value(fields, POSTDOC_FIELD_OF_STUDY_FIELDS))
     if field_of_study and field_of_study.casefold() not in training_type.casefold():
         training_type = (f"{training_type}, {field_of_study}"
                          if training_type else field_of_study)

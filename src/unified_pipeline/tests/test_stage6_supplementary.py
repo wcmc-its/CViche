@@ -1236,7 +1236,7 @@ def test_the_training_row_fields_are_the_writers_cells_and_its_other_fields():
     assert postdoc_training.POSTDOC_TYPE_FIELDS is sp.POSTDOC_TYPE_FIELDS
     assert postdoc_training.POSTDOC_FIELD_OF_STUDY_FIELDS is sp.POSTDOC_FIELD_OF_STUDY_FIELDS
     assert postdoc_training.POSTDOC_DATE_FIELDS is sp.POSTDOC_DATE_FIELDS
-    assert postdoc_training.training_cell_value is sp.training_cell_value
+    assert postdoc_training.first_field_value is sp.first_field_value
     assert sp.FALLBACK_LOCATION_FIELD is institution.FALLBACK_LOCATION_FIELD
 
 
@@ -1246,13 +1246,13 @@ def test_a_training_cell_counts_only_the_alias_it_prints(cell):
     # are not the row's, so a fragment restating them is not held back.
     printed, shadowed = cell
     entry = _training(**{printed: "Estuarine Geochemistry", shadowed: "Saltmarsh Restoration Track"})
-    assert sp.training_cell_value(entry["extracted_fields"], cell) == "Estuarine Geochemistry"
+    assert sp.first_field_value(entry["extracted_fields"], cell) == "Estuarine Geochemistry"
     tokens = sp._value_tokens(entry, "C")
     assert {"estuarine", "geochemistry"} <= tokens and not {"saltmarsh", "restoration"} & tokens
     entry["extracted_fields"][printed] = ""
-    assert sp.training_cell_value(entry["extracted_fields"], cell) == "Saltmarsh Restoration Track"
+    assert sp.first_field_value(entry["extracted_fields"], cell) == "Saltmarsh Restoration Track"
     assert {"saltmarsh", "restoration"} <= sp._value_tokens(entry, "C")
-    assert sp.training_cell_value({}, cell) is None
+    assert sp.first_field_value({}, cell) is None
 
 
 @pytest.mark.parametrize("segments, index, read", [
@@ -2029,6 +2029,60 @@ def test_a_line_a_clinical_leadership_role_and_an_institutional_role_both_hold_s
     (alone,) = sp.plan_subpoints({"L3": [clinical]}, _haystack(), lines, spans,
                                  rows_written=lambda e: owned.get(id(e), []))
     assert alone.paragraphs == (PROSE, OTHER_PROSE)
+
+
+_SENTENCE_TAIL = "supervised across the regional wound clinics and satellite programmes."
+
+
+def test_a_clinical_leadership_fragment_opening_in_lower_case_is_not_offered():
+    # The tail of a sentence whose start is in a part holding the line's
+    # names (a PDF's two columns read across, YUYVIG RLADNC 524): alone it
+    # reads as nothing. Capitalised, the same words are offered, and another
+    # family's tail is offered as before.
+    entry = _clinical_role(f"{_CLINICAL_LINE}\t{PROSE}.\t{_SENTENCE_TAIL}")
+    assert [p.paragraphs for p in _plan_clinical_role(entry)] == [(f"{PROSE}.",)]
+    capitalised = _SENTENCE_TAIL.capitalize()
+    entry = _clinical_role(f"{_CLINICAL_LINE}\t{PROSE}.\t{capitalised}")
+    assert [p.paragraphs for p in _plan_clinical_role(entry)] == [(f"{PROSE}.", capitalised)]
+    table, lines = _role_rows([_ROLE, "Norvale University", "2008-2012"])
+    institutional = _leadership_role(f"2008-2012\t{_ROLE}, Norvale University\t{_SENTENCE_TAIL}")
+    (planned,) = sp.plan_subpoints({"O": [institutional]}, _haystack(), lines, {"O": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.paragraphs == (_SENTENCE_TAIL,)
+
+
+def _clinical_subpoint(*paragraphs, code="L3"):
+    """A clinical leadership role's planned sub-point under its line."""
+    _paragraphs, (line,) = _clinical_lines(_CLINICAL_LINE)
+    return sp.SubPoint(line, paragraphs, 0, code, 1482)
+
+
+@pytest.mark.parametrize("part, held", [
+    (OTHER_PROSE, True),                                   # a paragraph of the sub-point
+    (_CLINICAL_LINE, True),                                # the role's line
+    ("Norvale General Hospital, 2010 - 2015", True),       # every word of it the line's
+    ("Budget: $4M", False),                                # too short to be offered
+    ("Staff:", False),                                     # a label
+    ("12 nurses", False),                                  # a count the line does not print
+    ("Norvale General Hospital, 2009-2016", False),        # years the line does not print
+    ("2013: opened the limb salvage clinic", False),       # a date-led line
+    ("Department of Surgery, Norvale General Hospital", False),  # a unit the line does not print
+])
+def test_a_clinical_leadership_sub_point_stands_for_its_overflow_only_holding_every_part(part, held):
+    # The content overflow writes the role's whole text in place of its
+    # line and skips an entry with a sub-point: a part neither holds would
+    # be in neither document (#1205 review).
+    subpoint = _clinical_subpoint(PROSE, OTHER_PROSE)
+    text = f"{_CLINICAL_LINE}\t{PROSE}\t{part}"
+    assert sp.yields_to_overflow(subpoint, text) is not held
+    # A paragraph the planner refolded from parts the source broke apart, and
+    # a source table's row, its cells joined with pipes.
+    assert not sp.yields_to_overflow(_clinical_subpoint(f"{PROSE} {OTHER_PROSE}"),
+                                     f"{_CLINICAL_LINE}\t{PROSE}\n{OTHER_PROSE}")
+    assert not sp.yields_to_overflow(subpoint, f"{_CLINICAL_LINE} | {PROSE} | {OTHER_PROSE}")
+    # No overflow for the entry, or another family's sub-point: it stands.
+    assert not sp.yields_to_overflow(subpoint, None)
+    assert not sp.yields_to_overflow(subpoint._replace(code="D1"), text)
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():

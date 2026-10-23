@@ -4089,7 +4089,9 @@ Now analyze the text above:"""
     def _place_unrendered_prose(self, entries_by_code: dict[str, list[dict]]) -> None:
         """#1205: tracked-deleted sub-points first, then the content-overflow
         routing, which skips an entry a sub-point now carries, so its prose is
-        not re-emitted whole as a blue bullet or into the Appendix. The #221
+        not re-emitted whole as a blue bullet or into the Appendix (a clinical
+        leadership role has a sub-point there only when it holds every part
+        the overflow would write, `supplementary.yields_to_overflow`). The #221
         recovery after this reads a sub-point as a line, of any entry, that
         is no record of its own and that its prose is part of
         (`_subpoint_prose`), and as no other line."""
@@ -4115,7 +4117,11 @@ Now analyze the text above:"""
         left to that recovery, and so is any record line of a membership's
         (`supplementary._left_to_recovery`); the recovery reads a written
         sub-point's paragraphs (`_subpoint_prose`) only as a line, of any
-        entry, that is no record of its own and that they are part of."""
+        entry, that is no record of its own and that they are part of. A
+        clinical leadership role the content overflow takes gets its
+        sub-point only when it and the role's line hold every part of the
+        overflow's text (`supplementary.yields_to_overflow`); otherwise the
+        overflow is written, as with sub-points off."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         out_lines = self._rendered_output_lines() + self._subpoint_lines
@@ -4130,6 +4136,9 @@ Now analyze the text above:"""
                                                functools.partial(
                                                    _record_line_verdicts,
                                                    _recovery_view(out_lines, entries_by_code)))
+        overflow_texts = {id(entry): entry.get('text') for entry, _para, _code in self._overflow_entries}
+        planned = [subpoint for subpoint in planned
+                   if not supplementary.yields_to_overflow(subpoint, overflow_texts.get(subpoint.entry_id))]
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:

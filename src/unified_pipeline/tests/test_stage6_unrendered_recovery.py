@@ -5524,7 +5524,7 @@ _SHADOWED_ALIAS = "Saltmarsh restoration and estuarine sediment track"
                                                ("field_of_study", "specialty")])
 def test_a_line_restating_the_alias_its_row_does_not_print_is_offered(printed, shadowed):
     """A cell prints the first of its aliases holding a value
-    (`training_cell_value`). The other one's words are in no line of the
+    (`first_field_value`). The other one's words are in no line of the
     document, so a line restating it is the position's prose, not its row."""
     entry = _training(prose=_SHADOWED_ALIAS, **{printed: "Example Geochemistry",
                                                  shadowed: _SHADOWED_ALIAS})
@@ -7586,23 +7586,64 @@ def test_a_role_the_record_dedup_drops_as_an_affiliates_twin_gets_no_second_sub_
     assert [p.element_idx_start for p in gen._subpoint_placements] == [1482]
 
 
-def test_a_low_coverage_role_with_a_sub_point_is_not_also_sent_whole_to_the_appendix():
-    """The content-overflow pass skips an entry whose prose is a sub-point
-    (owner decision 2026-10-08: a role's description goes under its line,
-    not to the Appendix). It reads the entry the line's comment hook
-    recorded, which is the entry stage 6 grouped."""
-    long_prose = "\t".join(f"{_CLINICAL_PROSE}, block {n} of the service plan" for n in range(9))
-    entry = _clinical_role(prose=long_prose)
+def _low_coverage_role(*parts):
+    """A role whose line stage 4 covered at 10%: the content overflow takes
+    it, and with sub-points off writes its whole text as blue text in the
+    section, in place of the role's line."""
+    entry = _clinical_role(prose="\t".join(parts))
     entry["extraction_coverage"] = {"extraction_coverage_percent": 10.0}
-    assert len(entry["text"]) > 1000
-    gen = _generator(supplementary_subpoints=True)
+    return entry
+
+
+def _render_low_coverage_role(entry, **kwargs):
+    gen = _generator(**kwargs)
     gen._fill_clinical_practice({"L3": [entry]})
+    # The entry the line's comment hook queued is the one stage 6 grouped.
     assert [queued for queued, _para, _code in gen._overflow_entries] == [entry]
     assert gen._overflow_entries[0][0] is entry
     gen._place_unrendered_prose({"L3": [entry]})
+    return gen
 
-    assert len(_subpoint_paragraphs(gen)) == 9
+
+def test_a_low_coverage_role_whose_sub_point_holds_all_its_prose_keeps_its_line():
+    """The sub-point and the role's line hold every part of the role's text,
+    so the overflow pass skips the entry (`yields_to_overflow`): the line
+    stays, and the prose is the sub-point only, not also blue overflow text
+    in the line's place."""
+    blocks = [f"{_CLINICAL_PROSE}, block {n} of the service plan" for n in range(9)]
+    gen = _render_low_coverage_role(_low_coverage_role(*blocks), supplementary_subpoints=True)
+
+    paragraphs = _subpoint_paragraphs(gen)
+    assert [_paragraph_text(p) for p in paragraphs] == blocks
+    assert _paragraph_text(paragraphs[0].getprevious()) == _CLINICAL_LINE
+    assert gen.stats["overflow_bullets_added"] == 0
+    assert not any(_CLINICAL_PROSE in text for text in _texts_of(gen.doc.element.body))
     assert gen._appendix_pending == []
+
+
+@pytest.mark.parametrize("parts", [
+    ("Budget: $4M",),                            # too short to be offered
+    ("Staff:", "12 nurses"),                     # a label and a count
+    ("2013: opened the limb salvage clinic",),   # a date-led line
+    ("Department of Surgery, Norvale General Hospital",),  # a unit the line does not print
+], ids=["short", "label", "date_led", "unprinted_unit"])
+def test_a_low_coverage_role_with_a_part_no_sub_point_holds_keeps_its_overflow(parts):
+    """#1205 review: the planner offers the long prose but not these parts.
+    With the overflow skipped for the sub-point, they were in neither Accept
+    All nor Reject All. The role gets no sub-point, and the render is the
+    one with sub-points off: the overflow writes every part in the section."""
+    prose = (_CLINICAL_PROSE, "Recruited four wound care nurses and launched the limb "
+             "preservation clinic for veterans with the affiliated medical center")
+    entry = _low_coverage_role(prose[0], *parts, prose[1])
+    on = _render_low_coverage_role(entry, supplementary_subpoints=True)
+    off = _render_low_coverage_role(copy.deepcopy(entry), supplementary_subpoints=False)
+
+    assert _subpoint_paragraphs(on) == [] and on._subpoint_placements == []
+    assert on.stats["overflow_bullets_added"] == 1
+    texts = _texts_of(on.doc.element.body)
+    assert all(part in texts for part in (*prose, *parts))
+    assert etree.tostring(on.doc.element.body, method="c14n") \
+        == etree.tostring(off.doc.element.body, method="c14n")
 
 
 def test_the_doctor_matches_a_clinical_leadership_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):

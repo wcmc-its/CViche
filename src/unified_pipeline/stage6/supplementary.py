@@ -33,7 +33,9 @@ office, a sub-role, a committee or another appointment
 (`_left_to_recovery`).
 
 The pass runs BEFORE the content-overflow routing and that recovery. The
-overflow pass skips an entry that has a sub-point, and the recovery reads a
+overflow pass skips an entry that has a sub-point (a clinical leadership
+role, whose overflow replaces its line in the section, has one only when it
+and the line hold every part of the overflow, `yields_to_overflow`), and the recovery reads a
 sub-point as a record line, of any entry, that is no sub-record and that
 its prose is part of (`held_by_subpoint`), so an entry whose prose is now
 a sub-point is not also re-emitted whole -- as a blue overflow bullet or
@@ -328,9 +330,19 @@ MEMBERSHIP_CODES = frozenset({'I'})
 #: segment of the line, and a line holding several dated records offers none
 #: (`_own_record_line`). A role's description is the class of an
 #: appointment's duties (owner decision 2026-10-08): a tracked deletion
-#: under its line, not an Appendix line, nor the overflow text that took a
-#: low-coverage role's line's place (the overflow pass skips an entry with a
-#: sub-point). The section is the one the code's heading lookup names
+#: under its line, not an Appendix line. Unlike an appointment's, a
+#: low-coverage role's content overflow is not sent to the Appendix: it
+#: replaces the role's line, in the section, with the role's whole source
+#: text. So a role's sub-point is written in its place only when the
+#: sub-point and the line hold every part of that text
+#: (`yields_to_overflow`). Otherwise the overflow is written, as with
+#: sub-points off, and the role gets no sub-point. A part the planner does
+#: not offer (a short one, a label, a date-led line, one restating a field
+#: the line does not print) would otherwise be in neither document (#1205
+#: review). A fragment opening in lower case is not offered: a sentence's
+#: tail whose start is in a part holding the side column's names, which reads
+#: as nothing alone (`_is_sentence_tail`; YUYVIG RLADNC 524, a PDF's two
+#: columns read across). The section is the one the code's heading lookup names
 #: (`_get_wcm_section_header`), the heading the writer looks up. A family
 #: joining after I yields a fragment a family before it is offered
 #: (`_LATER_FAMILIES`). An entry rerouted to another code before rendering
@@ -502,7 +514,7 @@ _PRESENTATION_ROW_FIELDS = tuple(
 #: from, each in its one precedence: its type (the schema's, then stage 4's
 #: off-schema name, then the code's default) and the field of study it adds
 #: (stage 4's off-schema name, then the schema's). The cell prints the first
-#: of each that holds a value and no other (`training_cell_value`), which
+#: of each that holds a value and no other (`first_field_value`), which
 #: the writer reads and `_value_tokens` counts.
 POSTDOC_TYPE_FIELDS = ('training_type', 'title')
 POSTDOC_FIELD_OF_STUDY_FIELDS = ('field_of_study', 'specialty')
@@ -594,8 +606,13 @@ _QUOTED_TITLE_MIN_TOKENS = 3
 #: talk's own title or meeting is that title, punctuated or typed
 #: differently; another talk's title shares little more than a topic word.
 _OWN_TITLE_MIN_SHARE = 0.5
+#: A word as a content-overflow part is read against the clinical leadership
+#: line it would replace (`_carries_overflow`): any run of letters or
+#: digits, short ones included, so a part's count, budget or year ("12
+#: nurses", "$4M") is held only by a line that prints it.
+_LINE_WORD_RE = re.compile(r'\w+')
 
-_XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
+_XML_SPACE ='{http://www.w3.org/XML/1998/namespace}space'
 
 #: The elements a section writer recorded for an entry, by identity
 #: (`RowReceiptLedger.elements_for`): its rows, or its first cells'
@@ -767,21 +784,20 @@ class _Haystack(NamedTuple):
     line_tokens: list[set[str]]
 
 
-def training_cell_value(fields: Mapping, names: Sequence[str]) -> object:
-    """What a training row's cell prints of its aliases `names`
-    (`POSTDOC_TYPE_FIELDS`, `POSTDOC_FIELD_OF_STUDY_FIELDS`; a clinical
-    leadership role's line reads its two the same way,
-    `clinical_leadership_cell_values`): the value of the first that holds
-    one, None when none does."""
+def first_field_value(fields: Mapping, names: Sequence[str]) -> object:
+    """The value of the first of `names` that holds one in `fields`, None
+    when none does: what a cell or a line prints of a field's aliases -- a
+    training row's (`POSTDOC_TYPE_FIELDS`, `POSTDOC_FIELD_OF_STUDY_FIELDS`),
+    a clinical leadership role's line's (`clinical_leadership_cell_values`)."""
     return next((fields[name] for name in names if fields.get(name)), None)
 
 
 def _training_row_values(fields: Mapping) -> list[object]:
     """The values a training position's row prints: of each aliased cell
-    only the alias it prints (`training_cell_value`), so a fragment restating
+    only the alias it prints (`first_field_value`), so a fragment restating
     one it does not print is not taken for the row, then the fields it
     prints whatever the rest hold (`_POSTDOC_PLAIN_FIELDS`)."""
-    return [*(training_cell_value(fields, names)
+    return [*(first_field_value(fields, names)
               for names in (POSTDOC_TYPE_FIELDS, POSTDOC_FIELD_OF_STUDY_FIELDS)),
             *(fields.get(name) for name in _POSTDOC_PLAIN_FIELDS)]
 
@@ -821,9 +837,9 @@ def clinical_leadership_cell_values(fields: Mapping) -> tuple[object, object]:
     """(role, institution): what a clinical leadership role's line prints of
     stage 4's fields, the first of each precedence that holds a value
     (`CLINICAL_LEADERSHIP_ROLE_FIELDS`, `CLINICAL_LEADERSHIP_INSTITUTION_FIELDS`,
-    read by `training_cell_value`), None when none does."""
-    return (training_cell_value(fields, CLINICAL_LEADERSHIP_ROLE_FIELDS),
-            training_cell_value(fields, CLINICAL_LEADERSHIP_INSTITUTION_FIELDS))
+    read by `first_field_value`), None when none does."""
+    return (first_field_value(fields, CLINICAL_LEADERSHIP_ROLE_FIELDS),
+            first_field_value(fields, CLINICAL_LEADERSHIP_INSTITUTION_FIELDS))
 
 
 def _clinical_leadership_row_values(fields: Mapping) -> list[object]:
@@ -1113,6 +1129,15 @@ def _own_lines(entry: Mapping, candidates: list[AnchorCandidate],
     return [c for c in candidates
             if any(c is row for row in rows)
             or any(c.paragraph._p is paragraph for paragraph in paragraphs)]
+
+
+def _is_sentence_tail(fragment: str) -> bool:
+    """Whether a clinical leadership role's fragment opens in lower case:
+    the rest of a sentence whose start is in a part that is not offered
+    because it holds the line's names. A PDF's two columns read across put
+    the role, unit and years into the prose's lines, and the tail alone
+    reads as nothing (YUYVIG RLADNC 524)."""
+    return fragment[:1].islower()
 
 
 def _talk_records(line: str) -> int:
@@ -1486,7 +1511,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
         in_section = _section_candidates(code, candidates, spans)
         for entry in entries_by_code[code]:
             text = _prose_text(code, entry, entries_by_code)
-            fragments = [f for f in unrendered_prose(entry, code, haystack, text) if f not in offered]
+            fragments = [f for f in unrendered_prose(entry, code, haystack, text)
+                         if f not in offered and not (code in CLINICAL_LEADERSHIP_CODES and _is_sentence_tail(f))]
             records = record_lines(code, entry) if fragments and record_lines else ()
             fragments = [f for f in fragments if not _left_to_recovery(f, code, records)]
             if not fragments or _withholds_prose(entry):
@@ -1503,6 +1529,33 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
             planned.append(SubPoint(anchor, tuple(fragments), id(entry), code,
                                     entry.get('element_idx_start')))
     return planned
+
+
+def _carries_overflow(subpoint: SubPoint, text: str | None) -> bool:
+    """Whether `subpoint` and the line it goes under hold every part
+    (`_split_fragments`) of `text`: each part is a piece of one of the
+    sub-point's paragraphs, read without spacing or case (`_squash`), or
+    every word of it is one the line prints (`_LINE_WORD_RE`)."""
+    line_words = set(_LINE_WORD_RE.findall(subpoint.anchor.text.lower()))
+    paragraphs = [_squash(paragraph) for paragraph in subpoint.paragraphs]
+    return all(any(_squash(part) in paragraph for paragraph in paragraphs)
+               or set(_LINE_WORD_RE.findall(part.lower())) <= line_words
+               for part in _split_fragments(text))
+
+
+def yields_to_overflow(subpoint: SubPoint, overflow_text: str | None) -> bool:
+    """Whether `subpoint` is left unwritten for the content overflow: a
+    clinical leadership role's that, with the role's line, does not hold
+    every part of the text the overflow writes for its entry
+    (`overflow_text`, the entry's whole source text; None, nothing to hold,
+    when the overflow does not take the entry; `_carries_overflow`). The
+    overflow writes that text in the section in place of the role's line and
+    skips an entry with a sub-point, so a part the planner does not offer
+    would be in neither document (#1205 review). Another family's sub-point
+    stands for its entry's overflow as before: a table row's goes to the
+    Appendix, which the owner decision of 2026-10-08 replaces with the
+    sub-point."""
+    return subpoint.code in CLINICAL_LEADERSHIP_CODES and not _carries_overflow(subpoint, overflow_text)
 
 
 def rendered_haystack(lines: list[str], doc: Document) -> _Haystack:
