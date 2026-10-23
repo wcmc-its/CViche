@@ -14,9 +14,9 @@ is. Reject the deletion to keep it; accept all changes to get the template.
 
 Where it goes, by what the entry's rendered line is:
 
-- a body paragraph (a teaching entry): a paragraph after it, one list level
-  deeper, whose run AND paragraph mark are deleted, so accepting leaves no
-  empty bullet;
+- a body paragraph (a teaching entry, a clinical leadership role): a
+  paragraph after it, one list level deeper, whose run AND paragraph mark
+  are deleted, so accepting leaves no empty bullet;
 - a table row (an appointment, a grant table, a service row): a row
   spanning the table, marked as a deleted row, after the entry's row -- or,
   for a label/value table holding one grant or one mentee, at the table's
@@ -70,7 +70,8 @@ then R invited presentations (the audience, the session and its
 co-presenters, what the owner organized), then C postdoctoral training (the
 mentor, advisor or program director, the research topic, the duties), then
 I professional memberships (the offices and sub-roles held within the
-society, what the membership entailed). The
+society, what the membership entailed), then L3 clinical leadership (what a
+director's, chief's or head's role oversaw, built or achieved). The
 decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
@@ -306,23 +307,56 @@ POSTDOCTORAL_CODES = frozenset({'C'})
 #: nothing, and F2 is not offered: its heading lookup finds the title block,
 #: not its section); one rerouted into I follows this one.
 MEMBERSHIP_CODES = frozenset({'I'})
+#: Clinical leadership roles -- a director, a chief, a head of a service,
+#: clinic, laboratory or programme: what the role oversaw beyond its fields
+#: -- its services and units, its staff and volumes, the programmes it built
+#: or led, what it achieved. The clinical-practice section writes each L3
+#: entry as one line, "Role, Unit, Institution, Dates", without a bullet
+#: (the WCM template ships no table under the heading), or as a row of a
+#: "Title | Institution/Location | Dates" table a template ships there
+#: (`_clinical_header_match`), so a sub-point is a deleted paragraph one
+#: indent step under the role's line, or a deleted row under its row. The
+#: line prints stage 4's off-schema role and institution names when the
+#: schema's are empty (`clinical_leadership_cell_values`), which a line
+#: mostly restating is not offered for. Only the line the writer recorded
+#: for that entry can anchor it (`_own_lines`, the row-receipt ledger: the
+#: comment hook records the line's paragraph, the table writer its row),
+#: taken with no word test: roles of one hospital, or held under one title,
+#: share their lines' words, and the section's L1 and L2 lines sit beside
+#: them. An entry the section wrote no line for (a dedup loser, a structural
+#: label) gets none. The last of stage 4's records offers only its own
+#: segment of the line, and a line holding several dated records offers none
+#: (`_own_record_line`). A role's description is the class of an
+#: appointment's duties (owner decision 2026-10-08): a tracked deletion
+#: under its line, not an Appendix line, nor the overflow text that took a
+#: low-coverage role's line's place (the overflow pass skips an entry with a
+#: sub-point). The section is the one the code's heading lookup names
+#: (`_get_wcm_section_header`), the heading the writer looks up. A family
+#: joining after I yields a fragment a family before it is offered
+#: (`_LATER_FAMILIES`). An entry rerouted to another code before rendering
+#: is grouped under that code and follows its rule (an excluded code offers
+#: nothing, and F2 is not offered: its heading lookup finds the title block,
+#: not its section); one rerouted into L3 (a split hospital record titled as
+#: a leadership role, #1731) follows this one.
+CLINICAL_LEADERSHIP_CODES = frozenset({'L3'})
 #: The families whose writer records each entry's rows in the row-receipt
-#: ledger, and whose prose goes only under one of those rows (`_anchor_scope`).
+#: ledger (for a clinical leadership role written as a line, its line's
+#: paragraph), and whose prose goes only under one of those (`_anchor_scope`).
 _OWN_ROW_CODES = (EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES | PRESENTATION_CODES
-                  | POSTDOCTORAL_CODES | MEMBERSHIP_CODES)
+                  | POSTDOCTORAL_CODES | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES)
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
                   | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES
                   | ADMINISTRATIVE_CODES | PRESENTATION_CODES | POSTDOCTORAL_CODES
-                  | MEMBERSHIP_CODES)
+                  | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES)
 #: The families that joined after R, in the order they joined. Each is
 #: offered after every family before it (`_offer_order`): a fragment two
 #: entries carry is offered once, to the first, so a family joining later
 #: never takes one a family before it is offered. Both a residency (C) and
 #: the appointment after it (D1) can hold one duty line, each on its own
 #: line (YUYVIG LTTYWI 76 and 80): the appointment keeps it, as before C.
-_LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES)
+_LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES, CLINICAL_LEADERSHIP_CODES)
 #: The families every record line of which stays the #221 recovery's,
 #: dated or not, read as lost or not (`_left_to_recovery`): a membership's
 #: offices ("Chair, <name> Committee, <years>"), each a record the recovery
@@ -503,6 +537,21 @@ MEMBERSHIP_TYPE_FIELDS = ('membership_type', 'fellowship_designation', 'role')
 #: Organization cell, the dates.
 _MEMBERSHIP_PLAIN_FIELDS = tuple(sorted(_RENDERED_FIELDS['I'] - {*MEMBERSHIP_ORGANIZATION_FIELDS,
                                                                  *MEMBERSHIP_TYPE_FIELDS}))
+#: The fields the clinical-practice writer reads a leadership role's line
+#: from, each in its one precedence: the role (stage 4's off-schema `role`,
+#: then the schema's, then `title`) and the institution (the schema's, then
+#: `organization`). The line prints the first of each that holds a value
+#: (`clinical_leadership_cell_values`), which the writer reads and
+#: `_value_tokens` counts. The description or programme the table form adds
+#: is not counted: the line form, the one the WCM template takes, prints
+#: neither, so a fragment restating one is the role's prose there, and in
+#: the table form the document holds it (`_record_rendered`).
+CLINICAL_LEADERSHIP_ROLE_FIELDS = ('role', 'leadership_role', 'title')
+CLINICAL_LEADERSHIP_INSTITUTION_FIELDS = ('institution', 'organization')
+#: The other fields the line prints: L3's rendered fields outside the role
+#: and the institution, the unit it names and the dates.
+_CLINICAL_LEADERSHIP_PLAIN_FIELDS = tuple(sorted(
+    _RENDERED_FIELDS['L3'] - {*CLINICAL_LEADERSHIP_ROLE_FIELDS, *CLINICAL_LEADERSHIP_INSTITUTION_FIELDS}))
 #: The kinds of body a membership is held in, capitalised as a name is
 #: ("American Statistical Association", "Society of Example Studies",
 #: "Federation of Example Societies", "Union for Example Studies"), each
@@ -550,8 +599,8 @@ _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
 #: The elements a section writer recorded for an entry, by identity
 #: (`RowReceiptLedger.elements_for`): its rows, or its first cells'
-#: paragraphs. Read for the families that anchor only on those
-#: (`_OWN_ROW_CODES`).
+#: paragraphs, or a body paragraph (a clinical leadership role's line). Read
+#: for the families that anchor only on those (`_OWN_ROW_CODES`).
 RowsWritten = Callable[[Mapping], Iterable[BaseOxmlElement]]
 
 
@@ -720,8 +769,10 @@ class _Haystack(NamedTuple):
 
 def training_cell_value(fields: Mapping, names: Sequence[str]) -> object:
     """What a training row's cell prints of its aliases `names`
-    (`POSTDOC_TYPE_FIELDS`, `POSTDOC_FIELD_OF_STUDY_FIELDS`): the value of the
-    first that holds one, None when none does."""
+    (`POSTDOC_TYPE_FIELDS`, `POSTDOC_FIELD_OF_STUDY_FIELDS`; a clinical
+    leadership role's line reads its two the same way,
+    `clinical_leadership_cell_values`): the value of the first that holds
+    one, None when none does."""
     return next((fields[name] for name in names if fields.get(name)), None)
 
 
@@ -766,14 +817,33 @@ def _membership_row_values(fields: Mapping) -> list[object]:
     return [*membership_cell_values(fields), *(fields.get(name) for name in _MEMBERSHIP_PLAIN_FIELDS)]
 
 
+def clinical_leadership_cell_values(fields: Mapping) -> tuple[object, object]:
+    """(role, institution): what a clinical leadership role's line prints of
+    stage 4's fields, the first of each precedence that holds a value
+    (`CLINICAL_LEADERSHIP_ROLE_FIELDS`, `CLINICAL_LEADERSHIP_INSTITUTION_FIELDS`,
+    read by `training_cell_value`), None when none does."""
+    return (training_cell_value(fields, CLINICAL_LEADERSHIP_ROLE_FIELDS),
+            training_cell_value(fields, CLINICAL_LEADERSHIP_INSTITUTION_FIELDS))
+
+
+def _clinical_leadership_row_values(fields: Mapping) -> list[object]:
+    """The values a clinical leadership role's line prints: of the role and
+    the institution only the name it prints (`clinical_leadership_cell_values`),
+    so a fragment restating one it does not print is not taken for the line,
+    then the unit and the dates (`_CLINICAL_LEADERSHIP_PLAIN_FIELDS`)."""
+    return [*clinical_leadership_cell_values(fields),
+            *(fields.get(name) for name in _CLINICAL_LEADERSHIP_PLAIN_FIELDS)]
+
+
 def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
     (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
     leadership role `_LEADERSHIP_ROW_FIELDS`, for a committee
     `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`; for
-    a training position or a membership, what its row prints,
-    `_training_row_values`, `_membership_row_values`), or of every scalar
-    field for a code rendered from its text."""
+    a training position, a membership or a clinical leadership role, what
+    its row prints, `_training_row_values`, `_membership_row_values`,
+    `_clinical_leadership_row_values`), or of every scalar field for a code
+    rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return set()
@@ -790,6 +860,8 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
         values = _training_row_values(fields)
     elif code in MEMBERSHIP_CODES:
         values = _membership_row_values(fields)
+    elif code in CLINICAL_LEADERSHIP_CODES:
+        values = _clinical_leadership_row_values(fields)
     else:
         values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
@@ -1023,6 +1095,24 @@ def _one_own_row(entry: Mapping, candidates: list[AnchorCandidate],
     is about cannot be shown."""
     rows = _own_rows(entry, candidates, rows_written)
     return rows if len(rows) == 1 else []
+
+
+def _own_lines(entry: Mapping, candidates: list[AnchorCandidate],
+               rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """A clinical leadership role's own lines: the candidates that are a
+    body paragraph its writer recorded for `entry` (the comment hook records
+    the first paragraph of the role's line), or a row it recorded (a
+    table's, `_own_rows`). None when it recorded neither, or with no
+    ledger: roles of one hospital, or held under one title, share their
+    lines' words, the section's L1 and L2 lines sit beside them, and a role
+    the section skipped (a dedup loser, a structural label) has no line."""
+    if rows_written is None:
+        return []
+    paragraphs = [element for element in rows_written(entry) if _row_of(element) is None]
+    rows = _own_rows(entry, candidates, rows_written)
+    return [c for c in candidates
+            if any(c is row for row in rows)
+            or any(c.paragraph._p is paragraph for paragraph in paragraphs)]
 
 
 def _talk_records(line: str) -> int:
@@ -1305,6 +1395,8 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
         return _one_own_row(entry, in_section, rows_written)
     if code in PRESENTATION_CODES or code in POSTDOCTORAL_CODES:
         return _own_rows(entry, in_section, rows_written)
+    if code in CLINICAL_LEADERSHIP_CODES:
+        return _own_lines(entry, in_section, rows_written)
     return in_section
 
 
@@ -1312,7 +1404,8 @@ def _pick_anchor(code: str, entry_tokens: set[str],
                  scope: list[AnchorCandidate]) -> AnchorCandidate | None:
     """The line of `scope` the entry's prose goes under. A degree's, a
     leadership role's, a committee's, a talk's, a training position's or a
-    membership's one own row (`_own_rows`) is taken as it is: the writer's
+    membership's one own row (`_own_rows`), or a clinical leadership role's
+    one own line (`_own_lines`), is taken as it is: the writer's
     record already says whose it is, and a short row ("PhD", "Kell
     University", "2010"; a "Dean" of an acronym) holds too few distinctive
     words for `best_anchor`, as does a degree's row whose stage-5b
@@ -1372,6 +1465,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     span its row prints (`_own_training_line`). A membership's is read as a
     committee's is, and none is offered when its line names another society
     or stage 4 listed memberships under its fields (`_own_membership_line`).
+    A clinical leadership role's is read as a degree's is, and its line must
+    be the paragraph or row its writer recorded for it (`_own_lines`).
     In every family a fragment that is, holds or is part of one of the
     entry's records the #221 recovery reads (`record_lines`) that is a record
     of its own beside the entry's and that the recovery re-emits, and for a

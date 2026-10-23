@@ -69,10 +69,10 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_training_and_memberships():
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_training_memberships_and_clinical_leadership():
     assert sorted(sp.SUBPOINT_CODES) == ["B1", "C", "D1", "D2", "D3", "H", "I", "K1", "K2", "K3",
-                                         "K4", "K5", "M2A", "M2B", "M2C", "M2D", "N3A", "N3B",
-                                         "O", "P", "Q1", "Q2", "R"]
+                                         "K4", "K5", "L3", "M2A", "M2B", "M2C", "M2D", "N3A",
+                                         "N3B", "O", "P", "Q1", "Q2", "R"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -1358,9 +1358,10 @@ def test_plan_offers_no_prose_of_a_training_position_the_pii_pass_withheld():
 
 
 def test_families_joining_after_r_are_offered_after_every_family_before_them():
-    assert sorted(["I", "R", "C", "D1", "B1", "Q2"], key=sp._offer_order) \
-        == ["B1", "D1", "Q2", "R", "C", "I"]
-    assert sp._LATER_FAMILIES == (sp.POSTDOCTORAL_CODES, sp.MEMBERSHIP_CODES)
+    assert sorted(["L3", "I", "R", "C", "D1", "B1", "Q2", "K1", "M2A"], key=sp._offer_order) \
+        == ["B1", "D1", "K1", "M2A", "Q2", "R", "C", "I", "L3"]
+    assert sp._LATER_FAMILIES == (sp.POSTDOCTORAL_CODES, sp.MEMBERSHIP_CODES,
+                                  sp.CLINICAL_LEADERSHIP_CODES)
 
 
 def test_a_line_a_training_position_and_an_appointment_both_hold_stays_the_appointments():
@@ -1837,6 +1838,197 @@ def test_a_line_a_membership_and_a_service_row_both_hold_stays_the_service_rows(
     (alone,) = sp.plan_subpoints({"I": [membership]}, _haystack(), lines, spans,
                                  rows_written=lambda e: [table.rows[0]._tr])
     assert alone.paragraphs == (remit, PROSE)
+
+
+_CLINICAL_ROLE = "Director, Example Wound Care Program"
+_CLINICAL_LINE = f"{_CLINICAL_ROLE}, Norvale General Hospital, 2010-2015"
+_LATER_CLINICAL_LINE = f"{_CLINICAL_ROLE}, Norvale General Hospital, 2016-Present"
+
+
+def _clinical_lines(*texts):
+    """The clinical-practice section's lines as its writer leaves them, one
+    body paragraph per role; and their anchor candidates."""
+    doc = Document()
+    paragraphs = [doc.add_paragraph(text) for text in texts]
+    return paragraphs, list(sp.anchor_candidates(doc))
+
+
+def _clinical_role(text=f"{_CLINICAL_LINE}\t{PROSE}", **fields):
+    return _entry(text, code="L3", **{"leadership_role": _CLINICAL_ROLE,
+                                      "institution": "Norvale General Hospital",
+                                      "start_date": "2010", "end_date": "2015", **fields})
+
+
+def _plan_clinical_role(entry, *texts, record_lines=None):
+    paragraphs, lines = _clinical_lines(*(texts or (_CLINICAL_LINE,)))
+    return sp.plan_subpoints({"L3": [entry]}, _haystack(), lines, {"L3": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [paragraphs[0]._p] if e is entry else [],
+                             record_lines=record_lines)
+
+
+def test_plan_places_a_clinical_leadership_role_only_under_its_own_line():
+    # The same role at the same hospital from 2016 renders first and holds
+    # every distinctive word of the earlier one's line: only the years,
+    # digits, tell them apart, and words alone take the first line.
+    paragraphs, lines = _clinical_lines(_LATER_CLINICAL_LINE, _CLINICAL_LINE)
+    entry, spans = _clinical_role(), {"L3": sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, "L3"), lines) is lines[0]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({"L3": [entry]}, _haystack(), lines, spans,
+                                   rows_written=written([paragraphs[1]._p]))
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+    assert (planned.code, planned.entry_id) == ("L3", id(entry))
+    # Nothing recorded for it, a paragraph no candidate is, or no ledger: none.
+    stray = Document().add_paragraph(_CLINICAL_LINE)._p
+    for rows_written in (written([]), written([stray]), None):
+        assert sp.plan_subpoints({"L3": [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_places_a_clinical_leadership_role_under_its_own_table_row():
+    # The table form, a "Title | Institution/Location | Dates" table a
+    # template ships under the heading: the row the writer recorded takes
+    # the prose, not the later role's row of the same words.
+    table, lines = _training_rows(["2016-Present", _CLINICAL_ROLE, "Norvale General Hospital"],
+                                  ["2010-2015", _CLINICAL_ROLE, "Norvale General Hospital"])
+    entry = _clinical_role()
+    assert sp.best_anchor(sp._value_tokens(entry, "L3"), lines) is lines[1]
+    (planned,) = sp.plan_subpoints({"L3": [entry]}, _haystack(), lines, {"L3": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[1]._tr] if e is entry else [])
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+
+
+def test_plan_takes_a_clinical_leadership_roles_one_own_line_whatever_its_words():
+    # A role and a hospital of acronyms hold no distinctive word.
+    entry = _entry(f"MD, NGH, 2010\t{PROSE}", code="L3", leadership_role="MD",
+                   institution="NGH", start_date="2010")
+    paragraphs, lines = _clinical_lines("Example clinical practice line", "MD, NGH, 2010")
+    assert sp.best_anchor(sp._value_tokens(entry, "L3"), lines) is None
+    (planned,) = sp.plan_subpoints({"L3": [entry]}, _haystack(), lines, {"L3": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [paragraphs[1]._p])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+
+
+@pytest.mark.parametrize("field", ["role", "title", "organization"])
+def test_a_clinical_leadership_lines_fallback_fields_count_as_its_rendered_values(field):
+    # The line prints them when the schema's role or institution is empty,
+    # though `_RENDERED_FIELDS` cannot list them. Another code's are its own.
+    entry = _entry("Example role", code="L3", **{field: "Estuarine Sediment Geochemistry"})
+    assert {"estuarine", "sediment", "geochemistry"} <= sp._value_tokens(entry, "L3")
+    assert not {"estuarine"} & sp._value_tokens(dict(entry, taxonomy_code="H"), "H")
+
+
+def test_the_clinical_leadership_line_fields_are_the_writers():
+    # The writer's precedence per name, read from here, and the fields it
+    # prints whatever the rest hold: L3's rendered fields outside the two.
+    from unified_pipeline.stage6.sections import clinical_practice
+
+    assert sp.CLINICAL_LEADERSHIP_ROLE_FIELDS == ("role", "leadership_role", "title")
+    assert sp.CLINICAL_LEADERSHIP_INSTITUTION_FIELDS == ("institution", "organization")
+    assert sp._CLINICAL_LEADERSHIP_PLAIN_FIELDS == ("end_date", "start_date", "unit_program")
+    assert clinical_practice.clinical_leadership_cell_values is sp.clinical_leadership_cell_values
+
+
+@pytest.mark.parametrize("names", [sp.CLINICAL_LEADERSHIP_ROLE_FIELDS,
+                                   sp.CLINICAL_LEADERSHIP_INSTITUTION_FIELDS], ids=["role", "institution"])
+def test_a_clinical_leadership_name_counts_only_the_alias_it_prints(names):
+    # The line prints the first alias holding a value; the other one's words
+    # are not the line's, so a fragment restating them is not held back.
+    printed, shadowed = names[:2]
+    entry = _clinical_role(**{printed: "Estuarine Geochemistry", shadowed: "Saltmarsh Restoration Track"})
+    tokens = sp._value_tokens(entry, "L3")
+    assert {"estuarine", "geochemistry"} <= tokens and not {"saltmarsh", "restoration"} & tokens
+    entry["extracted_fields"][printed] = ""
+    assert {"saltmarsh", "restoration"} <= sp._value_tokens(entry, "L3")
+    assert sp.clinical_leadership_cell_values({}) == (None, None)
+
+
+@pytest.mark.parametrize("field", ["description", "program"])
+def test_a_description_the_table_form_adds_is_offered_as_the_roles_prose(field):
+    # The line form, the one the WCM template takes, prints neither: a
+    # fragment restating one is the role's prose. The table form prints it,
+    # and the document then holds it (`_record_rendered`).
+    entry = _clinical_role(**{field: PROSE})
+    assert not sp._tokens(PROSE) & sp._value_tokens(entry, "L3")
+    assert [p.paragraphs for p in _plan_clinical_role(entry)] == [(PROSE,)]
+    assert sp.unrendered_prose(entry, "L3", _haystack(f"2010-2015 {_CLINICAL_ROLE} {PROSE}")) == []
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its own.
+    (["Chief line", f"Director line, {PROSE}"], 1, f"Director line, {PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    (["Chief line", PROSE, "Director line"], 1, ""),
+    # An earlier record: the line fan-out gave it, whatever it holds.
+    ([f"Chief line, {PROSE}", "Director line"], 0, f"Chief line, {PROSE}\tDirector line"),
+])
+def test_a_clinical_leadership_role_reads_its_prose_from_its_own_line(segments, index, read):
+    entry = dict(_degree_record("\t".join(segments), index, 2), taxonomy_code="L3")
+    assert sp._prose_text("L3", entry, {}) == read
+
+
+def test_a_clinical_leadership_line_holding_several_dated_records_offers_none():
+    # Two roles on one line, each opening with its dates and followed by its
+    # prose; stage 4 returned the first. Which one a prose line is about
+    # cannot be told.
+    own = _clinical_role(f"2010-2015 {_CLINICAL_ROLE}, Norvale General Hospital\t{PROSE}")
+    assert [p.paragraphs for p in _plan_clinical_role(own)] == [(PROSE,)]
+    two = _clinical_role(f"2010-2015 {_CLINICAL_ROLE}, Norvale General Hospital\t{PROSE}\t"
+                         f"2016-2020 Chief, Example Limb Preservation Service\t{OTHER_PROSE}")
+    assert sp._own_record_line(two) == ""
+    assert _plan_clinical_role(two) == []
+
+
+def test_a_clinical_leadership_role_leaves_a_dated_record_line_to_the_recovery():
+    # #2010's rule, every family's: a record of its own beside the role's,
+    # which the #221 recovery re-emits, stays the recovery's. One it reads
+    # as rendered, and a line that is no record of its own (the role's
+    # description, owner decision 2026-10-08), stay the sub-point.
+    sub_record = "Chair, Limb Salvage Quality Committee, 2012-2014"
+    entry = _clinical_role(f"{_CLINICAL_LINE}\t{sub_record}\t{PROSE}")
+    (offered,) = _plan_clinical_role(entry)
+    assert offered.paragraphs == (sub_record, PROSE)
+    (planned,) = _plan_clinical_role(entry, record_lines=lambda code, e: [
+        sp.RecordLine(_CLINICAL_LINE, False, False), sp.RecordLine(sub_record, True, True)])
+    assert planned.paragraphs == (PROSE,)
+    (kept,) = _plan_clinical_role(entry, record_lines=lambda code, e: [
+        sp.RecordLine(sub_record, False, True), sp.RecordLine(PROSE, True, False)])
+    assert kept.paragraphs == (sub_record, PROSE)
+
+
+def test_plan_offers_no_prose_of_a_clinical_leadership_role_the_pii_pass_withheld():
+    entry = _clinical_role()
+    (planned,) = _plan_clinical_role(entry)
+    assert planned.paragraphs == (PROSE,)
+
+    entry["_pii_withheld"] = True
+    assert _plan_clinical_role(entry) == []
+
+
+def test_a_line_a_clinical_leadership_role_and_an_institutional_role_both_hold_stays_the_institutional_roles():
+    # A CV can list one directorship both under institutional leadership (O)
+    # and under clinical leadership (L3), each with the same line of what it
+    # oversaw. The institutional role, a family shipped before L3, keeps it;
+    # the clinical role keeps its other line, and alone it offers both.
+    doc = Document()
+    clinical_line = doc.add_paragraph(_CLINICAL_LINE)
+    table = doc.add_table(rows=1, cols=3)
+    for cell, text in zip(table.rows[0].cells, [_ROLE, "Norvale University", "2008-2012"], strict=True):
+        cell.text = text
+    lines = list(sp.anchor_candidates(doc))
+    clinical = _clinical_role(f"{_CLINICAL_LINE}\t{PROSE}\t{OTHER_PROSE}")
+    institutional = _leadership_role()
+    owned = {id(clinical): [clinical_line._p], id(institutional): [table.rows[0]._tr]}
+    spans = {"L3": sp.SectionSpan(0, 1), "O": sp.SectionSpan(1, None)}
+    planned = sp.plan_subpoints({"L3": [clinical], "O": [institutional]}, _haystack(), lines, spans,
+                                rows_written=lambda e: owned.get(id(e), []))
+    assert [(p.code, p.paragraphs) for p in planned] == [("O", (PROSE,)), ("L3", (OTHER_PROSE,))]
+    (alone,) = sp.plan_subpoints({"L3": [clinical]}, _haystack(), lines, spans,
+                                 rows_written=lambda e: owned.get(id(e), []))
+    assert alone.paragraphs == (PROSE, OTHER_PROSE)
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():
