@@ -129,8 +129,19 @@ function SubmissionCard({ feedback, sectionNames }: { feedback: FeedbackDetail; 
   )
 }
 
-/** Read-only feedback on a run: every submission, newest first. Shown once the viewer has reviewed it. */
-export default function FeedbackSummary({ runId, sections }: { runId: string; sections: WcmSection[] }) {
+/** Read-only feedback on a run: every submission, newest first. Shown to the run's owner, admins and
+ *  staff: in place of the form once the viewer has reviewed the run, and before that under the form
+ *  (or on its own for staff, who can't review a run that isn't theirs). With *hideWhenEmpty* it
+ *  renders nothing until a submission has loaded, so a run nobody has reviewed shows no empty card. */
+export default function FeedbackSummary({
+  runId,
+  sections,
+  hideWhenEmpty = false,
+}: {
+  runId: string
+  sections: WcmSection[]
+  hideWhenEmpty?: boolean
+}) {
   const sectionNames = new Map(sections.map((s) => [s.section_id, s.section_name]))
   // Admin or staff: both open the dashboard's Feedback tab.
   const canOpenAllFeedback = useCanViewAllRuns()
@@ -147,6 +158,8 @@ export default function FeedbackSummary({ runId, sections }: { runId: string; se
       })
     return () => { cancelled = true }
   }, [runId])
+
+  if (hideWhenEmpty && !error && !submissions?.length) return null
 
   return (
     <section className={CARD} aria-label="Feedback">

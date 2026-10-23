@@ -12,12 +12,16 @@ vi.mock('../api/runs', () => ({
   restartRun: vi.fn(), retryStep: vi.fn(), startRun: vi.fn(),
 }))
 // Mutable per test: the viewer's role and the run the page shows.
-const view = vi.hoisted(() => ({ canViewAllRuns: false, runStatus: null as unknown }))
+const view = vi.hoisted(() => ({ canViewAllRuns: false, canAct: false, runStatus: null as unknown }))
 vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => ({ user: null }),
   useCanSeeCost: () => false,
   useCanViewAllRuns: () => view.canViewAllRuns,
-  canActOnRun: () => false,
+  canActOnRun: () => view.canAct,
+}))
+// FeedbackForm.test.tsx covers what the feedback card shows; here, only who gets it.
+vi.mock('./FeedbackForm', () => ({
+  default: ({ readOnly }: { readOnly?: boolean }) => <div>{readOnly ? 'Feedback read-only' : 'Feedback form'}</div>,
 }))
 // The doctor cards load their own data (RunQualityPanel.test.tsx covers them).
 vi.mock('./RunQualityPanel', () => ({
@@ -46,7 +50,7 @@ vi.mock('../hooks/usePipelineRun', () => ({
   }),
 }))
 
-afterEach(() => { cleanup(); vi.resetAllMocks(); view.canViewAllRuns = false; view.runStatus = RUN_STATUS })
+afterEach(() => { cleanup(); vi.resetAllMocks(); view.canViewAllRuns = false; view.canAct = false; view.runStatus = RUN_STATUS })
 
 describe('PipelineViewer "Original file"', () => {
   it('shows a refused download in the page ErrorBanner', async () => {
@@ -129,6 +133,30 @@ describe('PipelineViewer on a finished run (#1589)', () => {
       window.history.replaceState(null, '', '#')
       vi.useRealTimers()
     }
+  })
+
+  it.each([
+    ['an admin', true, true, 'Feedback form'],
+    ['the owner', true, false, 'Feedback form'],
+    ['staff on a run that is not theirs', false, true, 'Feedback read-only'],
+  ])('gives %s the feedback card', (_who, canAct, staff, shown) => {
+    view.canAct = canAct
+    view.canViewAllRuns = staff
+    view.runStatus = FINISHED
+    render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+    expect(screen.getByText(shown)).toBeTruthy()
+  })
+
+  it('shows no feedback card to a viewer who can neither act nor view all runs, nor before the run finishes', () => {
+    view.runStatus = FINISHED
+    render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+    expect(screen.queryByText(/^Feedback /)).toBeNull()
+    cleanup()
+    view.canAct = true
+    view.canViewAllRuns = true
+    view.runStatus = RUN_STATUS
+    render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+    expect(screen.queryByText(/^Feedback /)).toBeNull()
   })
 
   it('offers no upload before the run has a finished document', () => {

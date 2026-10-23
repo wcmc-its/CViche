@@ -553,9 +553,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         {/* Below the step details, so "Pipeline details" opens them under the header, not past the score. */}
         {isComplete && (canViewAllRuns ? <RunQualitySections runId={runId} /> : <OwnerFixList runId={runId} />)}
 
-        {isComplete && canAct && (
-          <section id="feedback-section">
-            <FeedbackForm runId={runId} />
+        {/* Staff who can't act on the run still see its feedback, read-only. */}
+        {isComplete && (canAct || canViewAllRuns) && (
+          <section id="feedback-section" className="flex flex-col gap-[18px]">
+            <FeedbackForm runId={runId} readOnly={!canAct} />
           </section>
         )}
       </div>
