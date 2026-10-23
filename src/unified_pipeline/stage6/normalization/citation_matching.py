@@ -30,6 +30,8 @@ The owner restore reads author names, which `authors.py` owns, so this
 module imports that one and nothing else in the package.
 """
 import re
+import unicodedata
+from collections import Counter
 
 from .authors import (
     _join_spaced_initials,
@@ -117,10 +119,17 @@ def _word_in(token: str, text: str) -> bool:
 #: comma or parenthesis must sit directly before "ed". Nor is an all-caps
 #: abbreviation in parentheses, "Emergency department (ED) care".
 _EDITORS_CLAUSE_RE = re.compile(
-    r"\b(?i:in):\s(?:(?!\.\s).)+?"
+    r"\b(?i:in):\s(?P<names>(?:(?!\.\s).)+?)"
     r"(?:,\s*|\s*\((?!EDS?\)|EDITORS?\)))(?i:eds?\b|editors?\b)")
 #: What separates two people in a stage-4 editors value.
 _EDITOR_SEPARATOR_RE = re.compile(r"\s*(?:[;,&]|\band\b)\s*")
+#: One person in 5d's editors clause, in Vancouver shape: a surname, then
+#: one to three capital initials closing the name ("Diler RS", "van Gogh V",
+#: "Garcia-Lopez M"). Anything else in the clause ("Maria Garcia", a title
+#: word such as "Price of Care") names no editor the person-wise test trusts.
+_VANCOUVER_PERSON_RE = re.compile(r"(?P<surname>\S.*?)\s+[A-Z]{1,3}")
+#: A word of a stage-4 editor's name; hyphenated surnames stay one word.
+_NAME_TOKEN_RE = re.compile(r"[^\W\d_](?:[\w'-]*\w)?")
 #: A book trailer with no publisher: the year (and pages) alone after a
 #: sentence break, closing the citation -- "Welcome to parenting. 2010." The
 #: publisher goes in front of it, as Vancouver and `_book_trailer_parts`
@@ -140,10 +149,17 @@ _IN_CLAUSE_RE = re.compile(r"(?:^|(?<=\. ))In: ")
 def _editors_referenced(editors: str, citation: str) -> bool:
     """True when the citation already names these editors.
 
-    By the token test, or by person: 5d wrote an editors clause and every
-    person in stage 4's value has a word inside that clause. Half is not
-    enough: with two of four people printed, the other two would be named
-    nowhere, where base appends the whole value.
+    By the token test, or by person: 5d wrote an editors clause and each
+    person in stage 4's value has a person of their own in it, one to one,
+    whose Vancouver surname ("Diler" of "Diler RS") equals the stage-4
+    person's last word, accents and case aside. Half is not enough: with two
+    of four people printed, the other two would be named nowhere, where base
+    appends the whole value. Nor is any one shared word: a particle ("van
+    Gogh V" for "Ludwig van Beethoven"), half a hyphenated surname
+    ("Garcia-Lopez M" for "Ana Maria Lopez"), one "Smith J" for two Smiths,
+    or a title word in the clause ("Price of Care") each named an editor
+    printed nowhere (fix-forward of #1972). Anything short of the one-to-one
+    match falls back to base, which appends the value.
     Stage 4 often spells out names 5d abbreviated ("Rasim Somer Diler" for
     "Diler RS": one token in three), so the token test alone read them as
     absent and printed them a second time after the year: 6 of the 16
@@ -160,8 +176,29 @@ def _editors_referenced(editors: str, citation: str) -> bool:
     if not clause:
         return False
     people = [p for p in _EDITOR_SEPARATOR_RE.split(editors) if _significant_tokens(p)]
-    return bool(people) and all(
-        any(_word_in(t, clause.group()) for t in _significant_tokens(p)) for p in people)
+    wanted = Counter(_stage4_surname(p) for p in people)
+    return bool(people) and not wanted - _clause_surnames(clause.group('names'))
+
+
+def _stage4_surname(person: str) -> str:
+    """The folded last word of one stage-4 editor ("Rasim Somer Diler" ->
+    "diler"), or '' when it has none, which no clause surname equals."""
+    words = _NAME_TOKEN_RE.findall(person)
+    return _fold_surname(words[-1]) if words else ''
+
+
+def _fold_surname(surname: str) -> str:
+    """`surname` casefolded with its accents dropped; spaces and hyphens
+    kept, so "Garcia-Lopez" is not "Lopez" and "van Gogh" is not "Gogh"."""
+    decomposed = unicodedata.normalize("NFKD", surname)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
+
+
+def _clause_surnames(names: str) -> Counter[str]:
+    """The folded surname of each Vancouver-shaped person in 5d's editors
+    clause, counted, so two stage-4 Smiths need two "Smith X" in it."""
+    people = (_VANCOUVER_PERSON_RE.fullmatch(p) for p in _EDITOR_SEPARATOR_RE.split(names))
+    return Counter(_fold_surname(m.group('surname')) for m in people if m)
 
 
 def _with_editors(citation: str, editors: str) -> str:
