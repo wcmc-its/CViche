@@ -20,6 +20,8 @@ import {
 
 interface FeedbackFormProps {
   runId: string
+  /** Staff viewing a run they can't act on: no form, only the run's feedback (when there is any). */
+  readOnly?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +183,7 @@ function ChoiceRow<T extends string | boolean>({
 // Main component
 // ---------------------------------------------------------------------------
 
-export default function FeedbackForm({ runId }: FeedbackFormProps) {
+export default function FeedbackForm({ runId, readOnly = false }: FeedbackFormProps) {
   const [formData, setFormData] = useState<FeedbackFormData>(INITIAL_FORM_DATA)
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -361,6 +363,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
   // ---- render: loading state ----
 
   if (loading) {
+    if (readOnly) return null
     return (
       <div className={CARD}>
         <div className="flex items-center justify-center py-12">
@@ -374,11 +377,16 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
   if (existingFeedback || submitted) return <FeedbackSummary runId={runId} sections={wcmSections} />
 
+  // ---- render: others' feedback, shown before the viewer reviews (#1196 hid it) ----
+
+  const othersFeedback = <FeedbackSummary runId={runId} sections={wcmSections} hideWhenEmpty />
+  if (readOnly) return othersFeedback
+
   // ---- render: form ----
 
   // A <section>, not a <form>: Enter in a text box must not submit a
   // half-finished review.
-  return (
+  const form = (
     <section className={CARD} aria-label="Review this output">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h2 className="text-[17px] font-semibold text-gray-900">Review this output</h2>
@@ -605,5 +613,13 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
         </button>
       </div>
     </section>
+  )
+
+  // The form first: the viewer's own review is the ask, others' answers are below it.
+  return (
+    <>
+      {form}
+      {othersFeedback}
+    </>
   )
 }

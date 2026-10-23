@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import FeedbackForm from './FeedbackForm'
 import { getFeedback, getRunFeedbackAll, submitFeedback } from '../api/feedback'
 import type { FeedbackDetail } from '../types'
@@ -51,7 +51,7 @@ const LABELS = [
 
 beforeEach(() => {
   vi.mocked(getFeedback).mockResolvedValue({ feedback: null, run_context: { wcm_sections: [] } })
-  vi.mocked(getRunFeedbackAll).mockResolvedValue([SUBMISSION])
+  vi.mocked(getRunFeedbackAll).mockResolvedValue([])
   vi.mocked(submitFeedback).mockResolvedValue({ status: 201 } as Response)
 })
 
@@ -128,6 +128,7 @@ describe('FeedbackForm summary', () => {
       feedback: SUBMISSION,
       run_context: { wcm_sections: [{ section_id: 'B1', section_name: 'Appointments' }] },
     } as unknown as Awaited<ReturnType<typeof getFeedback>>)
+    vi.mocked(getRunFeedbackAll).mockResolvedValue([SUBMISSION])
     render(<FeedbackForm runId="run-1" />)
     expect(await screen.findByText('Jane Testperson')).toBeTruthy()
     expect(screen.getByText('B1: Appointments')).toBeTruthy()
@@ -137,6 +138,7 @@ describe('FeedbackForm summary', () => {
 
   it('replaces the form with the summary after a submit', async () => {
     await renderForm()
+    vi.mocked(getRunFeedbackAll).mockResolvedValue([SUBMISSION])
     const pick = (name: string, group: string) =>
       fireEvent.click(within(screen.getByRole('radiogroup', { name: group })).getByRole('radio', { name }))
     pick('Department administrator', 'Your role')
@@ -147,6 +149,52 @@ describe('FeedbackForm summary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit review' }))
     expect(await screen.findByText('Jane Testperson')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Submit review' })).toBeNull()
+    expect(screen.getAllByRole('region', { name: 'Feedback' })).toHaveLength(1)
+  })
+})
+
+// Paul's call 2026-10-23 reverses #1196: the owner, admins and staff see
+// other reviewers' feedback before reviewing the run themselves.
+describe('FeedbackForm with others\' feedback, before the viewer reviews', () => {
+  it('shows the form first and the other submissions under it', async () => {
+    vi.mocked(getRunFeedbackAll).mockResolvedValue([SUBMISSION])
+    await renderForm()
+    const others = await screen.findByRole('region', { name: 'Feedback' })
+    expect(within(others).getByText('Jane Testperson')).toBeTruthy()
+    const form = screen.getByRole('region', { name: 'Review this output' })
+    expect(form.compareDocumentPosition(others) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Submit review' })).toBeTruthy()
+  })
+
+  it('shows no empty Feedback card under the form when nobody has reviewed the run', async () => {
+    await renderForm()
+    await waitFor(() => expect(getRunFeedbackAll).toHaveBeenCalledWith('run-1'))
+    expect(screen.queryByRole('region', { name: 'Feedback' })).toBeNull()
+    expect(screen.queryByLabelText('Loading feedback')).toBeNull()
+  })
+
+  it('read-only (staff on a run that is not theirs): the submissions, no form', async () => {
+    vi.mocked(getRunFeedbackAll).mockResolvedValue([SUBMISSION])
+    render(<FeedbackForm runId="run-1" readOnly />)
+    const others = await screen.findByRole('region', { name: 'Feedback' })
+    expect(within(others).getByText('Jane Testperson')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Review this output' })).toBeNull()
+  })
+
+  it('read-only with zero submissions renders nothing at all', async () => {
+    const { container } = render(<FeedbackForm runId="run-1" readOnly />)
+    expect(container.innerHTML).toBe('') // no loading card either
+    await waitFor(() => expect(getRunFeedbackAll).toHaveBeenCalledWith('run-1'))
+    await act(async () => {})
+    expect(container.innerHTML).toBe('')
+  })
+
+  it('still reports a failed load rather than hiding it', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(getRunFeedbackAll).mockRejectedValue(new Error('boom'))
+    render(<FeedbackForm runId="run-1" readOnly />)
+    expect((await screen.findByRole('region', { name: 'Feedback' })).textContent).toContain('Unable to load the feedback')
+    quiet.mockRestore()
   })
 })
 
