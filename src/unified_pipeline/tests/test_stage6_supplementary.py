@@ -2190,11 +2190,17 @@ def test_the_editorial_board_row_fields_are_the_writers():
     # The writer reads the role and the organization's precedence from here.
     from unified_pipeline.stage6.sections import service
 
-    assert set(service.EDITORIAL_BOARD_CODES) == sp.EDITORIAL_BOARD_SUBPOINT_CODES
+    assert service.EDITORIAL_BOARD_CODES is sp.EDITORIAL_BOARD_SUBPOINT_CODES
+    assert sp.EDITORIAL_BOARD_SUBPOINT_CODES == {"Q4B", "Q4C"}
     assert service.SECTION_EDITOR_CODE in sp.EDITORIAL_BOARD_SUBPOINT_CODES
     assert sp.OTHER_SERVICE_ORGANIZATION_FIELDS == ("organization", "committee_name", "agency")
     assert service.OTHER_SERVICE_ORGANIZATION_FIELDS is sp.OTHER_SERVICE_ORGANIZATION_FIELDS
     assert service.editorial_board_role is sp.editorial_board_role
+    # The words a generic seat restates hold the heading of the table the
+    # writer fills, the first it looks up.
+    for code in sp.EDITORIAL_BOARD_SUBPOINT_CODES:
+        heading = service.OTHER_SERVICE_SECTION_ROUTING[code][1][0]
+        assert sp._tokens(heading) <= sp._EDITORIAL_BOARD_HEADING_WORDS, heading
 
 
 @pytest.mark.parametrize("code", ["Q4B", "Q4C"])
@@ -2230,14 +2236,47 @@ def test_a_line_restating_an_editorial_board_row_with_the_role_it_prints_is_not_
     assert sp.unrendered_prose(read, "Q4C", _haystack()) == []
 
 
-def test_a_line_restating_an_editorial_board_row_with_a_role_it_does_not_print_is_offered():
+@pytest.mark.parametrize("line, journal", [
+    (f"Honorary Member, Editorial Advisory Board, {_JOURNAL}, 2012-2016", _JOURNAL),
+    # One word beyond the heading's is the kind of board or the seat's standing.
+    ("Member, Editorial Advisory Board, Marsh Hydrology, 2012-2016", "Marsh Hydrology"),
+    ("Editorial Board inaugural member, JESS, 2012-2016", "JESS"),
+], ids=["honorary", "advisory", "inaugural"])
+def test_a_line_restating_an_editorial_board_row_with_a_role_it_does_not_print_is_offered(line, journal):
     """A Q4C row prints no role when stage 4 names none and the writer reads
     none from the line. The role is the kind of board and the seat's
-    standing, which no cell holds: the line is offered as written."""
-    line = f"Honorary Member, Editorial Advisory Board, {_JOURNAL}, 2012-2016"
-    entry = _entry(line, code="Q4C", journal_name=_JOURNAL, start_date="2012", end_date="2016")
+    standing, which no cell or heading holds: the line is offered as
+    written."""
+    entry = _entry(line, code="Q4C", journal_name=journal, start_date="2012", end_date="2016")
     assert sp.editorial_board_role(entry["extracted_fields"], line) == ""
-    assert [p.paragraphs for p in _plan_board_seat(entry, [_JOURNAL, "2012-2016"])] == [(line,)]
+    assert [p.paragraphs for p in _plan_board_seat(entry, [journal, "2012-2016"])] == [(line,)]
+
+
+@pytest.mark.parametrize("code", ["Q4B", "Q4C"])
+@pytest.mark.parametrize("line, journal, start, end", [
+    # An acronym journal holds no distinctive word, and a two-word one two
+    # of the line's five: neither line mostly holds the row's values.
+    ("Editorial Board Member, JESS, 2015-present", "JESS", "2015", "present"),
+    ("Member, Editorial Board, Marsh Hydrology, 2010-2014", "Marsh Hydrology", "2010", "2014"),
+    ("Editorial Board Membership: Member, Marsh Hydrology, 2010-2014", "Marsh Hydrology", "2010", "2014"),
+], ids=["acronym", "two_words", "every_heading_word"])
+def test_a_line_restating_an_editorial_board_row_with_only_its_headings_words_is_not_offered(
+        line, journal, start, end, code):
+    """A generic seat names only the words of the Editorial Board
+    Membership heading the row sits under, and the row prints no role: the
+    line says what the row and its heading say, and Reject All would print
+    the journal and the years twice with nothing added."""
+    entry = _entry(line, code=code, journal_name=journal, start_date=start, end_date=end)
+    assert sp.prose_fragments(line) == [line]
+    assert sp.editorial_board_role(entry["extracted_fields"], line) == ""
+    assert not sp._holds_field_values(line, sp._value_tokens(entry, code))
+    assert sp.unrendered_prose(entry, code, _haystack()) == []
+    assert _plan_board_seat(entry, [journal, f"{start}-{end}"]) == []
+    # The seat's prose on a segment of its own is still offered, and under
+    # another code's heading the line is not the row's.
+    entry["text"] = f"{line}\t{PROSE}"
+    assert sp.unrendered_prose(entry, code, _haystack()) == [PROSE]
+    assert sp.unrendered_prose(entry, "Q4A", _haystack()) == [line, PROSE]
 
 
 @pytest.mark.parametrize("segments, index, read", [

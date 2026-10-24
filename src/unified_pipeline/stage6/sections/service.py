@@ -44,6 +44,7 @@ from ..parsing import _ORPHAN_DATE, _UNDATED_ACTIVITY, _orphaned_dates_line_up
 from ..parsing.dates import YEAR_LIST, YEAR_OR_OPEN_SPAN, YEAR_OR_SPAN
 from ..sorting import sort_entries_reverse_chronological
 from ..supplementary import (
+    EDITORIAL_BOARD_SUBPOINT_CODES,
     OTHER_SERVICE_ORGANIZATION_FIELDS,
     editorial_board_role,
     first_field_value,
@@ -58,7 +59,7 @@ BOARD_SERVICE_CODE = 'Q2'               # Service on Boards and/or Committees
 JOURNAL_REVIEWING_CODE = 'Q4D'          # Journal / ad hoc reviewing
 LEADERSHIP_TAXONOMY_CODE = 'Q1'         # Leadership in Extramural Organizations
 GRANT_REVIEWING_CODE = 'Q3'             # Grant Reviewing / Study Sections
-EDITORIAL_BOARD_CODES = ('Q4B', 'Q4C')  # Editorial Board Membership roles
+EDITORIAL_BOARD_CODES = EDITORIAL_BOARD_SUBPOINT_CODES  # Editorial Board Membership roles (Q4B, Q4C)
 SECTION_EDITOR_CODE = 'Q4B'             # the one code whose schema has `section`
 _SECTION_SEPARATOR = ' - '              # journal, then the section or special issue
 

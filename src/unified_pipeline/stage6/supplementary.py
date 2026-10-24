@@ -366,17 +366,21 @@ CLINICAL_LEADERSHIP_CODES = frozenset({'L3'})
 #: writer reads from the entry's text (`editorial_board_role`), and the
 #: first organization of `OTHER_SERVICE_ORGANIZATION_FIELDS`, off-schema
 #: names `_RENDERED_FIELDS` cannot list; a line mostly restating them is not
-#: offered. A line restating the row with a role the row does not print is
-#: offered as written: the Q4C schema has no role, and that role says what
-#: kind of board it was (an advisory, a review board) or the seat's standing
-#: (honorary, inaugural, invited), which no cell or heading holds. Only the
-#: one row the writer recorded for that entry can anchor it (`_own_rows`,
-#: the row-receipt ledger, taken with no word test): two seats on one
-#: journal's board, or one title held on several, share their rows' words,
-#: and an acronym journal holds too few. An entry the section wrote no row
-#: for (a dedup loser, a template naming neither Editorial Board Membership
-#: nor Editorial Activities) gets none. The last of stage 4's records offers only its own segment of
-#: the line, and a line holding several dated records offers none
+#: offered. Nor is one whose other words are only the table heading's, a
+#: generic seat the row prints no role for ("Editorial Board Member,
+#: <journal>, <years>"; `_restates_row`): Reject All would print the row
+#: twice and add nothing. A line restating the row with any other role the
+#: row does not print is offered as written: the Q4C schema has no role,
+#: and that role says what kind of board it was (an advisory, a review
+#: board) or the seat's standing (honorary, inaugural, invited), which no
+#: cell or heading holds. Only the one row the writer recorded for that
+#: entry can anchor it (`_own_rows`, the row-receipt ledger, taken with no
+#: word test): two seats on one journal's board, or one title held on
+#: several, share their rows' words, and an acronym journal holds too few.
+#: An entry the section wrote no row for (a dedup loser, a template naming
+#: neither Editorial Board Membership nor Editorial Activities) gets none.
+#: The last of stage 4's records offers only its own segment of the line,
+#: and a line holding several dated records offers none
 #: (`_own_record_line`). No entry of these codes reaches the content
 #: overflow: the writer records its row itself, not through the comment
 #: hook that collects the overflow. Journal reviewing (Q4D) stays excluded,
@@ -388,8 +392,10 @@ CLINICAL_LEADERSHIP_CODES = frozenset({'L3'})
 #: before it is offered (`_LATER_FAMILIES`). An entry rerouted to another
 #: code before rendering is grouped under that code and follows its rule (an
 #: excluded code offers nothing, and F2 is not offered: its heading lookup
-#: finds the title block, not its section); one rerouted into Q4B or Q4C
-#: follows this one.
+#: finds the title block, not its section). None is rerouted into Q4B or
+#: Q4C: `TAXONOMY_TO_SECTION` names no section for Q4A-Q4D, so no reroute
+#: targets one. The Other Service writer reads these codes from here as
+#: its editorial board rows' (`service.EDITORIAL_BOARD_CODES`).
 EDITORIAL_BOARD_SUBPOINT_CODES = frozenset({'Q4B', 'Q4C'})
 #: The families whose writer records each entry's rows in the row-receipt
 #: ledger (for a clinical leadership role written as a line, its line's
@@ -625,6 +631,13 @@ _EDITORIAL_ROLE_CELL_RE = re.compile(
 #: The roles that writer reads from anywhere in such a line, in order, when
 #: no cell holds one; matched as written, case and all.
 _EDITORIAL_LINE_ROLES = ('Associate Editor', 'Guest Editor')
+#: The words of the Editorial Board Membership table's heading, which every
+#: one of its rows sits under, and the member a seat on that board is. They
+#: name a generic seat ("Editorial Board Member", "Member, Editorial
+#: Board"), which a row printing no role needs no cell to say: a line whose
+#: words beyond the row's are only these restates the row under its heading
+#: (`_restates_row`).
+_EDITORIAL_BOARD_HEADING_WORDS = frozenset({'editorial', 'board', 'member', 'membership'})
 #: The kinds of body a membership is held in, capitalised as a name is
 #: ("American Statistical Association", "Society of Example Studies",
 #: "Federation of Example Societies", "Union for Example Studies"), each
@@ -980,14 +993,26 @@ def _holds_field_values(fragment: str, value_tokens: set[str]) -> bool:
     return len(tokens & value_tokens) >= SUBPOINT_FIELD_TOKEN_MAX_SHARE * len(tokens)
 
 
+def _restates_row(fragment: str, code: str, value_tokens: set[str]) -> bool:
+    """Whether `fragment` is the entry's row reformatted: it mostly holds
+    the values the row prints (`_holds_field_values`), or, for an editorial
+    board membership, its other words are only its table heading's
+    (`_EDITORIAL_BOARD_HEADING_WORDS`), "Editorial Board Member, <journal>,
+    <years>" under a row printing the journal and the years. Reject All
+    would print the row twice, and the second adds nothing."""
+    return _holds_field_values(fragment, value_tokens) or (
+        code in EDITORIAL_BOARD_SUBPOINT_CODES
+        and _tokens(fragment) - value_tokens <= _EDITORIAL_BOARD_HEADING_WORDS)
+
+
 def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack,
                      text: str | None = None) -> list[str]:
-    """The prose fragments of `text` (by default the entry's own) that hold
-    none of the entry's rendered field values and that the document provably
-    does not contain."""
+    """The prose fragments of `text` (by default the entry's own) that do
+    not restate the entry's row (`_restates_row`) and that the document
+    provably does not contain."""
     value_tokens = _value_tokens(entry, code)
     return [fragment for fragment in prose_fragments(entry.get('text') or '' if text is None else text)
-            if not _holds_field_values(fragment, value_tokens)
+            if not _restates_row(fragment, code, value_tokens)
             and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
 
 

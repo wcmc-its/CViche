@@ -7969,6 +7969,32 @@ def test_a_line_restating_the_row_with_a_role_it_does_not_print_is_offered():
     assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
 
 
+def test_a_line_restating_the_row_with_only_its_headings_words_is_not_offered():
+    """A generic seat ("Editorial Board Member", "Member, Editorial Board")
+    names only the words of the Editorial Board Membership heading its row
+    sits under. A Q4C row printing no role there says the same, so the line
+    is not offered: Reject All would print the journal and the years twice
+    and add nothing. An acronym journal, or one of two words, holds too few
+    of the line's words for the share test. A seat with a word of its own
+    beyond the heading's is still offered."""
+    lines = {201: "Editorial Board Member, JESS, 2015-present",
+             205: "Member, Editorial Board, Marsh Hydrology, 2010-2014",
+             203: "Editorial Advisory Board, Kestrel Ecology, 2021-"}
+    entries = [_board_member(idx=201, journal="JESS", start="2015", end="present", prose=None),
+               _board_member(idx=205, journal="Marsh Hydrology", start="2010", end="2014", prose=None),
+               _board_member(idx=203, journal="Kestrel Ecology", start="2021", end=None, prose=None)]
+    for entry in entries:
+        entry["text"] = lines[entry["element_idx_start"]]
+    gen = _render_editorial_boards(entries, supplementary_subpoints=True)
+
+    rows = _row_texts(gen.doc.element.body)
+    assert ["JESS", "2015-Present"] in rows and ["Marsh Hydrology", "2010-2014"] in rows
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious()) == ["Kestrel Ecology", "2021-Present"]
+    assert _deleted_texts(gen) == lines[203]
+    assert [p.element_idx_start for p in gen._subpoint_placements] == [203]
+
+
 def _editorial_template_generator(columns, **kwargs):
     """A template whose Editorial Board Membership table has `columns`
     cells: three or more print the role, the journal and the dates each in
