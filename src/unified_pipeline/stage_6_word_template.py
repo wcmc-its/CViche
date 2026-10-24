@@ -4109,13 +4109,13 @@ Now analyze the text above:"""
         haystack, so the same duties are not planned again from the entry's
         text. The row-receipt ledger says which rows each entry wrote: a
         degree's, a leadership role's, a committee's, a talk's, a training
-        position's or a membership's prose goes only under its own
-        (`supplementary._own_rows`), and a clinical leadership role's under
-        its own line (`supplementary._own_lines`). A record of its own
-        beside the entry's that the #221 recovery after this re-emits
-        (`_record_line_verdicts`, its verdict on the document so far) is
-        left to that recovery, and so is any record line of a membership's
-        (`supplementary._left_to_recovery`); the recovery reads a written
+        position's, a membership's or an editorial board membership's prose
+        goes only under its own (`supplementary._own_rows`), and a clinical
+        leadership role's under its own line (`supplementary._own_lines`). A
+        record of its own beside the entry's that the #221 recovery after
+        this re-emits (`_record_line_verdicts`, its verdict on the document
+        so far) is left to that recovery, and so is any record line of a
+        membership's (`supplementary._left_to_recovery`); the recovery reads a written
         sub-point's paragraphs (`_subpoint_prose`) only as a line, of any
         entry, that is no record of its own and that they are part of. A
         clinical leadership role the content overflow takes gets its

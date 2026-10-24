@@ -43,6 +43,11 @@ from ..normalization import (
 from ..parsing import _ORPHAN_DATE, _UNDATED_ACTIVITY, _orphaned_dates_line_up
 from ..parsing.dates import YEAR_LIST, YEAR_OR_OPEN_SPAN, YEAR_OR_SPAN
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import (
+    OTHER_SERVICE_ORGANIZATION_FIELDS,
+    editorial_board_role,
+    first_field_value,
+)
 
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.render_check import entry_lines
@@ -758,9 +763,7 @@ def _journal_or_organization_text(fields: dict, taxonomy_code: str) -> str:
     Q4B/Q4C a populated organization no longer hides `journal_name`: both
     render via `_join_names` without containment collapse (#471). Every
     other code, and an editorial row with only one of the two, is unchanged."""
-    organization = (fields.get('organization', '') or
-                    fields.get('committee_name', '') or
-                    fields.get('agency', ''))
+    organization = first_field_value(fields, OTHER_SERVICE_ORGANIZATION_FIELDS)
     journal = _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
     if organization and taxonomy_code in EDITORIAL_BOARD_CODES:
         # #471: on an editorial row `organization` (often a publisher or
@@ -794,8 +797,7 @@ def _role_dedupe_text(fields: dict, taxonomy_code: str, organization: str) -> st
     AND the organization, which the old chain never did. Check the
     organization chain alone there, as before."""
     if taxonomy_code in EDITORIAL_BOARD_CODES and fields.get('journal_name'):
-        chain = (fields.get('organization') or fields.get('committee_name') or
-                 fields.get('agency') or '')
+        chain = first_field_value(fields, OTHER_SERVICE_ORGANIZATION_FIELDS) or ''
         return _cell_text(chain) or organization
     return organization
 
@@ -1379,7 +1381,11 @@ class ServiceSection:
                     fields = entry.get('extracted_fields', {}) or {}
                     taxonomy_code = entry.get('taxonomy_code', 'Q4')
 
-                    role = _cell_text(fields.get('role', ''))
+                    # An editorial board row's role is the one `_value_tokens` counts:
+                    # stage 4's, else one its line names (`editorial_board_role`).
+                    role = (editorial_board_role(fields, entry.get('text', ''))
+                            if taxonomy_code in EDITORIAL_BOARD_CODES
+                            else _cell_text(fields.get('role', '')))
                     organization = _other_service_organization_text(fields, taxonomy_code)
 
                     # Q3 carries the study-section name in 'panel_name'.
@@ -1397,31 +1403,6 @@ class ServiceSection:
 
                     dates = _other_service_dates_text(fields, taxonomy_code,
                                                       entry.get('text', ''))
-
-                    # For Q4B/Q4C entries, try to parse role from raw text if missing
-                    if not role and taxonomy_code in EDITORIAL_BOARD_CODES:
-                        raw_text = entry.get('text', '')
-                        # Pattern: "date | role | journal" or "role | journal"
-                        # Match various editor/board roles
-                        role_match = re.search(
-                            r'\|\s*((?:Associate|Guest|Deputy|Senior|Managing|Executive|Review|Reviewing)\s*'
-                            r'(?:Editor|editorial\s*board\s*member)|Editorial\s*(?:Board|board)\s*(?:Member|member)?)\s*\|',
-                            raw_text, re.IGNORECASE
-                        )
-                        if role_match:
-                            role = role_match.group(1).strip()
-                        elif 'Editor' in raw_text or 'editor' in raw_text or 'Editorial' in raw_text:
-                            # Try to extract role another way - check specific patterns
-                            if 'Associate Editor' in raw_text:
-                                role = 'Associate Editor'
-                            elif 'Guest Editor' in raw_text:
-                                role = 'Guest Editor'
-                            elif 'Review editorial board member' in raw_text.lower():
-                                role = 'Review Editorial Board Member'
-                            elif 'Editorial board member' in raw_text.lower():
-                                role = 'Editorial Board Member'
-                            elif 'Editorial board' in raw_text.lower():
-                                role = 'Editorial Board'
 
                     if not organization:
                         # Parse from raw text as fallback, but strip date prefix

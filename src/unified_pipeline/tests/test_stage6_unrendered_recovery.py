@@ -6409,6 +6409,25 @@ _SUB_RECORD_FAMILIES = {
         sub_led="2012-2014 Chair, Limb Salvage Quality Committee",
         prose=("As chair of the limb salvage quality committee, set the clinic's amputation "
                "review standards")),
+    "Q4B": dict(
+        code="Q4B", idx=41,
+        fields={"role": "Associate Editor", "journal_name": "Journal of Estuarine Sediment Studies",
+                "start_date": "2012", "end_date": "2018"},
+        own="Associate Editor, Journal of Estuarine Sediment Studies, 2012-2018",
+        own_led="2012-2018 Associate Editor, Journal of Estuarine Sediment Studies",
+        sub="Guest Editor, Special Issue on Marsh Hydrology, 2014-2015",
+        sub_led="2014-2015 Guest Editor, Special Issue on Marsh Hydrology",
+        prose=("As guest editor of the special issue on marsh hydrology, recruited its twelve "
+               "invited reviews")),
+    "Q4C": dict(
+        code="Q4C", idx=42,
+        fields={"journal_name": "Kestrel Review of Tidal Ecology", "start_date": "2010", "end_date": "2020"},
+        own="Kestrel Review of Tidal Ecology, 2010-2020",
+        own_led="2010-2020 Kestrel Review of Tidal Ecology",
+        sub="Chair, Early Career Reviewers Committee, 2015-2017",
+        sub_led="2015-2017 Chair, Early Career Reviewers Committee",
+        prose=("As chair of the early career reviewers committee, mentored the journal's new "
+               "referees")),
 }
 #: The two line shapes in which sub-points on lost the sub-record: tab parts
 #: ending in their years, where the sub-point offered the sub-record itself;
@@ -6416,8 +6435,8 @@ _SUB_RECORD_FAMILIES = {
 #: sub-record rendered. B1, C, H and O lost it in the first shape only: their
 #: own rules (`_own_record_line`, the honors writer's rows) offer nothing in
 #: the second. P lost it in neither (`_own_committee_line`), I since #1991.
-#: L3, which joined after #2010, is pinned in the first shape: its own rule
-#: (`_own_record_line`) offers nothing in the second.
+#: L3, Q4B and Q4C, which joined after #2010, are pinned in the first shape:
+#: their own rule (`_own_record_line`) offers nothing in the second.
 _TRAILING_YEARS, _DATE_LED = "tab_trailing_years", "tab_date_led"
 _SUB_RECORD_CASES = [*((name, _TRAILING_YEARS) for name in _SUB_RECORD_FAMILIES),
                      *((name, _DATE_LED) for name in ("K1", "M2A", "D1", "Q1", "Q2", "N3A", "N3B", "R"))]
@@ -7683,6 +7702,645 @@ def test_clinical_leadership_prose_holding_protected_data_is_not_offered_through
 
     doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
                                      [protect(_clinical_role(), _CLINICAL_PROSE)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+# --- #1205: Q4B/Q4C editorial board memberships, the next code family --------
+# The service section's Other Service writer writes every Q4B and Q4C entry
+# as a row of the Editorial Board Membership table, "Board / Organization Name
+# | Dates", the role and the journal joined in its first cell. So the prose is
+# a deleted row under the seat's own row, the one the writer recorded for
+# that entry (the row-receipt ledger).
+
+_EDITORIAL_PROSE = ("Edited the special issue on sediment budgets of restored tidal marshes "
+                    "and recruited its invited reviews")
+_EDITORIAL_JOURNAL = "Journal of Estuarine Sediment Studies"
+_EDITORIAL_SEAT = "Associate Editor"
+
+
+def _board_seat(idx=104, code="Q4B", role=_EDITORIAL_SEAT, journal=_EDITORIAL_JOURNAL, start="2012",
+                end="2016", prose=_EDITORIAL_PROSE, **fields):
+    """A seat whose source line goes on past its role, journal and years into
+    the special issue it edited, as EBYSBC QITQWH 196's did. A later seat on
+    the same journal shares every distinctive word of its row: only the
+    years, digits, tell them apart. A value passed as None is in neither the
+    line nor the fields."""
+    named = {"journal_name": journal, "role": role, "start_date": start, "end_date": end}
+    dates = "-".join(value for value in (start, end) if value)
+    line = ", ".join(value for value in (role, journal, dates) if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _later_board_seat(code="Q4B", role=_EDITORIAL_SEAT):
+    """The same journal's seat from 2017, with no prose: it renders first,
+    reverse chronologically."""
+    return _board_seat(idx=98, code=code, role=role, start="2017", end="present", prose="")
+
+
+def _board_member(idx=104, **kwargs):
+    """A Q4C seat: its schema names the journal and the years, no role."""
+    return _board_seat(idx=idx, code="Q4C", role=None, **kwargs)
+
+
+def _render_editorial_boards(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = {}
+    for entry in entries:
+        grouped.setdefault(entry["taxonomy_code"], []).append(entry)
+    gen._fill_service(grouped)
+    gen._add_supplementary_subpoints(grouped)
+    return gen
+
+
+def _board_seat_table_row():
+    """The same seat read from a source table: stage 2 joins the row's cells
+    with pipes, and its position names the row ("41.3")."""
+    entry = _board_seat()
+    entry["element_idx_start"] = "41.3"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+_SEAT_ROW = [f"{_EDITORIAL_SEAT}, {_EDITORIAL_JOURNAL}", "2012-2016"]
+_MEMBER_ROW = [_EDITORIAL_JOURNAL, "2012-2016"]
+_EDITORIAL_HEADER = "Board / Organization NameDates (yyyy-yyyy)"
+
+
+@pytest.mark.parametrize("entry, cells, code", [(_board_seat, _SEAT_ROW, "Q4B"),
+                                                (_board_seat_table_row, _SEAT_ROW, "Q4B"),
+                                                (_board_member, _MEMBER_ROW, "Q4C")],
+                         ids=["Q4B", "Q4B_table_row", "Q4C"])
+def test_editorial_board_prose_is_a_deleted_row_under_the_seats_row(entry, cells, code):
+    gen = _render_editorial_boards([entry()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious()) == cells
+    assert _table_header(row) == _EDITORIAL_HEADER
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _EDITORIAL_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "2"
+    assert gen.stats["supplementary_subpoints"] == 1
+    (placement,) = gen._subpoint_placements
+    assert (placement.element_idx_start, placement.code) == (entry()["element_idx_start"], code)
+
+
+def test_a_seats_several_prose_lines_are_one_row_of_paragraphs_in_source_order():
+    lines = (_EDITORIAL_PROSE, "Handled the manuscripts on coastal hydrology for the journal's methods section")
+    gen = _render_editorial_boards([_board_seat(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious()) == _SEAT_ROW
+    assert ["".join(t.text for t in p.iter(qn("w:delText"))) for p in row.iter(qn("w:p"))] == list(lines)
+
+
+@pytest.mark.parametrize("make", [_board_seat, _board_member], ids=["Q4B", "Q4C"])
+def test_editorial_board_prose_goes_under_its_own_row_among_seats_on_one_journal(make):
+    """The later seat renders first and holds every distinctive word of the
+    earlier one's row, so words alone put the earlier one's prose under the
+    later row. Only the row the writer recorded for the earlier entry takes
+    it."""
+    from unified_pipeline.stage6 import supplementary
+
+    code = make()["taxonomy_code"]
+    later = make(idx=98, start="2017", end="present", prose="")
+    gen = _render_editorial_boards([later, make()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious())[1] == "2012-2016"
+    assert _row_texts_of(row.getprevious().getprevious())[1] == "2017-Present"
+    # Words alone would have taken the later seat's row.
+    lines = list(supplementary.anchor_candidates(_render_editorial_boards(
+        [make(idx=98, start="2017", end="present", prose=""), make()], supplementary_subpoints=False).doc))
+    rows = [line for line in lines if _EDITORIAL_JOURNAL in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(make(), code), rows) is rows[0]
+    assert rows[0].text.endswith("2017-Present")
+
+
+def test_seats_on_one_journal_each_take_their_own_prose():
+    later_prose = "Chaired the journal's reviewer training workshops for early career scientists"
+    later = _board_seat(idx=98, start="2017", end="present", prose=later_prose)
+    gen = _render_editorial_boards([later, _board_seat()], supplementary_subpoints=True)
+
+    by_text = {"".join(t.text for t in row.iter(qn("w:delText"))): row for row in _subpoint_rows(gen)}
+    assert set(by_text) == {later_prose, _EDITORIAL_PROSE}
+    assert _row_texts_of(by_text[later_prose].getprevious())[1] == "2017-Present"
+    assert _row_texts_of(by_text[_EDITORIAL_PROSE].getprevious()) == _SEAT_ROW
+    assert [(p.element_idx_start, p.paragraphs) for p in gen._subpoint_placements] \
+        == [(98, (later_prose,)), (104, (_EDITORIAL_PROSE,))]
+
+
+@pytest.mark.parametrize("entries", [lambda: [_later_board_seat(), _board_seat()],
+                                     lambda: [_board_member(idx=98, start="2017", end="present", prose=""),
+                                              _board_member(),
+                                              _board_seat(idx=110, start="2009", end="2011", prose=_GUEST_PROSE)]],
+                         ids=["Q4B", "Q4C_and_Q4B"])
+def test_editorial_board_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it(entries):
+    off = _render_editorial_boards(entries(), supplementary_subpoints=False)
+    on = _render_editorial_boards(entries(), supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _EDITORIAL_PROSE in rejected
+    assert _EDITORIAL_PROSE not in "".join(_texts_of(off.doc.element.body))
+    assert len(_subpoint_rows(on)) == len(entries()) - 1
+    accepted = _accept_all(on)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(accepted) == _texts_of(off.doc.element.body)
+    assert _row_texts(accepted) == _row_texts(off.doc.element.body)
+    assert etree.tostring(accepted, method="c14n") == etree.tostring(off.doc.element.body, method="c14n")
+
+
+def test_a_short_seats_prose_goes_under_its_own_row():
+    """An acronym journal and a short role hold one distinctive word, too few
+    for the word test: the writer's record says the one row is the entry's
+    own (`_pick_anchor`)."""
+    gen = _render_editorial_boards([_board_seat(role="Editor", journal="JESS")], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious()) == ["Editor, JESS", "2012-2016"]
+    assert _deleted_texts(gen) == _EDITORIAL_PROSE
+
+
+def _seat_named_by_its_prose():
+    """The prose is the journal stage 4 extracted."""
+    return _board_seat(journal=_EDITORIAL_PROSE, prose=None)
+
+
+def _seat_titled_by_its_prose():
+    """The prose is the role stage 4 extracted, which the cell prefixes."""
+    return _board_seat(role=_EDITORIAL_PROSE)
+
+
+def _seat_whose_section_is_its_prose():
+    """The prose is the Q4B section stage 4 extracted, which the cell adds
+    after the journal."""
+    return _board_seat(section=_EDITORIAL_PROSE)
+
+
+@pytest.mark.parametrize("entry", [_seat_named_by_its_prose, _seat_titled_by_its_prose,
+                                   _seat_whose_section_is_its_prose])
+def test_editorial_board_prose_already_in_its_row_is_not_offered_again(entry):
+    """The row prints it (`_record_rendered`), so it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_editorial_boards([entry()], supplementary_subpoints=True)
+    assert _EDITORIAL_PROSE in "".join(_row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "Q4B", haystack) == []
+
+
+def _seat_with_only(code, field, marker):
+    """An entry holding `field` alone, its text a line no field holds."""
+    entry = _board_seat(code=code, role=None, journal=None, start=None, end=None, prose="")
+    entry["extracted_fields"] = {field: marker}
+    entry["text"] = "Example editorial line"
+    return entry
+
+
+@pytest.mark.parametrize("code", ["Q4B", "Q4C"])
+def test_every_editorial_board_row_field_the_pass_counts_is_printed_in_the_row(code):
+    """The off-schema names among the fields `_value_tokens` counts for an
+    editorial board row (`_RENDERED_FIELDS` marks schema fields only): each
+    one, alone on an entry, is counted and reaches the row."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    off_schema = [name for name in ("role", *supplementary.OTHER_SERVICE_ORGANIZATION_FIELDS)
+                  if name not in _RENDERED_FIELDS[code]]
+    assert off_schema == (["organization", "committee_name", "agency"] if code == "Q4B"
+                          else ["role", "organization", "committee_name", "agency"])
+    for field in off_schema:
+        marker = f"Zq{field}Z"
+        entry = _seat_with_only(code, field, marker)
+        assert supplementary._tokens(marker) <= supplementary._value_tokens(entry, code), field
+        gen = _render_editorial_boards([entry], supplementary_subpoints=True)
+        assert any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr"))), field
+
+
+@pytest.mark.parametrize("code", ["Q4B", "Q4C"])
+def test_every_field_an_editorial_board_row_prints_is_one_the_pass_counts(code):
+    """The other direction: a field the row prints that `_value_tokens` does
+    not count would offer a fragment restating the row. The names are the
+    fields of the codes the section writes beside them (Q1-Q4D), of a
+    membership, and the writer's own, each alone on an entry, and beside the
+    schema's journal and role."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    names = set().union(*(_RENDERED_FIELDS[c] for c in ("Q1", "Q2", "Q3", "Q4", "Q4A", "Q4B", "Q4C", "Q4D", "I")),
+                        supplementary.OTHER_SERVICE_ORGANIZATION_FIELDS,
+                        {"title", "name", "publisher", "organization_name", "institution", "panel_name"})
+    for field in sorted(names):
+        marker = f"Zq{field}Z"
+        for entry in (_seat_with_only(code, field, marker),
+                      _board_seat(code=code, prose="", **{field: marker})):
+            gen = _render_editorial_boards([entry], supplementary_subpoints=True)
+            printed = any(marker in _row_text(tr) for tr in gen.doc.element.body.iter(qn("w:tr")))
+            counted = supplementary._tokens(marker) <= supplementary._value_tokens(entry, code)
+            assert not printed or counted, field
+
+
+def test_a_line_restating_the_row_with_a_role_it_does_not_print_is_offered():
+    """A Q4C row prints no role when stage 4 names none and the writer reads
+    none from the line. The role says what kind of board it was and the
+    seat's standing, which no cell holds: the line is offered as the CV
+    wrote it. A role the row prints is the row's: a line restating it with
+    that role is not offered."""
+    line = f"Honorary Member, Editorial Advisory Board, {_EDITORIAL_JOURNAL}, 2012-2016"
+    entry = _board_member(prose=None)
+    entry["text"] = line
+    gen = _render_editorial_boards([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious()) == _MEMBER_ROW
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == line
+    shown = _board_seat(code="Q4C", role="Honorary Member, Editorial Advisory Board", prose=None)
+    assert shown["text"] == line
+    gen = _render_editorial_boards([shown], supplementary_subpoints=True)
+    assert [f"Honorary Member, Editorial Advisory Board, {_EDITORIAL_JOURNAL}", "2012-2016"] \
+        in _row_texts(gen.doc.element.body)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _editorial_template_generator(columns, **kwargs):
+    """A template whose Editorial Board Membership table has `columns`
+    cells: three or more print the role, the journal and the dates each in
+    its own; one prints "<journal> (<dates>)"."""
+    doc = Document()
+    doc.add_paragraph("EXTRAMURAL PROFESSIONAL RESPONSIBILITIES")
+    doc.add_paragraph("Editorial Board Membership")
+    table = doc.add_table(rows=1, cols=columns)
+    for cell, text in zip(table.rows[0].cells, ("Role", "Journal", "Dates", "Notes")[:columns], strict=True):
+        cell.text = text
+    run = doc.add_paragraph().add_run("INVITATIONS TO SPEAK/PRESENT")
+    run.bold = run.underline = True
+    gen = _generator(**kwargs)
+    gen.doc = doc  # its paragraphs are the template's (`_find_template_label`)
+    return gen, table
+
+
+@pytest.mark.parametrize("columns, cells", [
+    (3, [_EDITORIAL_SEAT, _EDITORIAL_JOURNAL, "2012-2016"]),
+    (4, [_EDITORIAL_SEAT, _EDITORIAL_JOURNAL, "2012-2016", ""]),
+    (1, [f"{_EDITORIAL_JOURNAL} (2012-2016)"]),
+], ids=["three_columns", "four_columns", "one_column"])
+def test_editorial_board_prose_goes_under_its_own_row_whatever_the_tables_columns(columns, cells):
+    """The writer prints the row's cells by the table's width; the prose is a
+    deleted row spanning the table under the seat's own row, and Accept All
+    is the flag-off render."""
+    def render(flag):
+        gen, table = _editorial_template_generator(columns, supplementary_subpoints=flag)
+        entries = [_later_board_seat(), _board_seat()]
+        gen._fill_service({"Q4B": entries})
+        gen._add_supplementary_subpoints({"Q4B": entries})
+        return gen, table
+
+    on, table = render(True)
+    (row,) = _subpoint_rows(on)
+    assert row.getparent() is table._tbl
+    assert _row_texts_of(row.getprevious()) == cells
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == str(columns)
+    off, _ = render(False)
+    accepted = _accept_all(on)
+    assert _row_texts(accepted) == _row_texts(off.doc.element.body)
+    assert etree.tostring(accepted, method="c14n") == etree.tostring(off.doc.element.body, method="c14n")
+
+
+def test_an_editorial_board_seat_the_section_writes_no_row_for_gets_no_sub_point():
+    """An entry no row was written for has no row of its own: its prose goes
+    under no other line of the document, though the other seat's row holds
+    every distinctive word of its line."""
+    skipped, later = _board_seat(), _later_board_seat()
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_service({"Q4B": [later]})
+    gen._add_supplementary_subpoints({"Q4B": [later, skipped]})
+
+    assert gen._row_receipts.elements_for(skipped) == []
+    assert gen._row_receipts.elements_for(later)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_template_with_no_editorial_board_label_places_no_editorial_board_prose():
+    """Without the label the writer finds no table and writes no row; the
+    EXTRAMURAL span is there, and the prose goes under no other line."""
+    gen, _table = _editorial_template_generator(2, supplementary_subpoints=True)
+    for paragraph in gen.doc.paragraphs:
+        if paragraph.text == "Editorial Board Membership":
+            paragraph.text = "Other Roles"
+    entries = [_board_seat()]
+    gen._fill_service({"Q4B": entries})
+    gen._add_supplementary_subpoints({"Q4B": entries})
+
+    assert "Q4B" in gen._subpoint_section_spans()
+    assert gen._row_receipts.elements_for(entries[0]) == []
+    assert _deleted_texts(gen) == ""
+
+
+def test_the_editorial_board_span_is_the_extramural_section():
+    """The code's heading lookup names the EXTRAMURAL section ('Q' prefix),
+    which holds the Editorial Board Membership table, and the lookup is
+    unchanged for the reconsider pass and the #221 recovery."""
+    gen = _render_editorial_boards([_board_seat()], supplementary_subpoints=True)
+    span = gen._subpoint_section_spans()["Q4B"]
+    heading = gen.doc.element.body[span.start]
+    assert "".join(t.text or "" for t in heading.iter(qn("w:t"))).startswith("EXTRAMURAL PROFESSIONAL")
+    (row,) = _subpoint_rows(gen)
+    assert span.start < list(gen.doc.element.body).index(row.getparent()) < span.end
+    assert gen._subpoint_section_spans()["Q4C"] == span
+    assert WCMTemplateGenerator._get_wcm_section_header("Q4B") == "EXTRAMURAL PROFESSIONAL"
+
+
+def _journal_reviewing_template_generator(**kwargs):
+    """A template whose Editorial Board Membership label has no table of its
+    own: the next table after it is Journal Reviewing's."""
+    doc = Document()
+    doc.add_paragraph("EXTRAMURAL PROFESSIONAL RESPONSIBILITIES")
+    doc.add_paragraph("Editorial Board Membership")
+    doc.add_paragraph("Journal Reviewing/Ad hoc Reviewing")
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text, table.rows[0].cells[1].text = "Journal / Organization Name", "Dates"
+    gen = _generator(**kwargs)
+    gen.doc = doc
+    return gen, table
+
+
+def test_an_editorial_board_row_in_the_journal_reviewing_table_gets_no_sub_point():
+    """Q4D is excluded, and so is every row of the table its writer fills,
+    whatever code the entry written there carries: a seat the writer
+    appends to that table gets none, and its prose goes under no other
+    line."""
+    gen, table = _journal_reviewing_template_generator(supplementary_subpoints=True)
+    reviewing = {"element_idx_start": 120, "taxonomy_code": "Q4D", "text": "Kestrel Tidal Review, 2015",
+                 "extracted_fields": {"journal_name": "Kestrel Tidal Review", "start_date": "2015"}}
+    seat = _board_member()
+    grouped = {"Q4D": [reviewing], "Q4C": [seat]}
+    gen._fill_service(grouped)
+    gen._add_supplementary_subpoints(grouped)
+
+    (own,) = gen._row_receipts.elements_for(seat)
+    assert own.getparent() is table._tbl and table._tbl in gen._subpoint_excluded_tables
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def _render_grouped_editorial_boards(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_service(grouped)
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def _board_line(text, *seats):
+    """One source line stage 4 returned as a record per (role, journal,
+    start), the entry's own fields being the last record's. Fan-out gives
+    every earlier record a line of its own and the last one the whole line."""
+    records = [{"role": role, "journal_name": journal, "start_date": start} for role, journal, start in seats]
+    return {"element_idx_start": 663, "taxonomy_code": "Q4B", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_GUEST_SEAT = ("Guest Editor", "Kestrel Tidal Review", "2014")
+_ASSOCIATE_SEAT = (_EDITORIAL_SEAT, "Kestrel Marsh Letters", "2012")
+_GUEST_LINE = "Guest Editor, Kestrel Tidal Review, 2014"
+_ASSOCIATE_LINE = f"{_EDITORIAL_SEAT}, Kestrel Marsh Letters, 2012"
+_GUEST_PROSE = "Ran the review's special issue on mangrove carbon storage and wrote its editorial"
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own seat.
+    ([f"{_GUEST_LINE}. {_GUEST_PROSE}", _ASSOCIATE_LINE],
+     [("Guest Editor, Kestrel Tidal Review", f"{_GUEST_LINE}. {_GUEST_PROSE}")]),
+    ([_GUEST_LINE, f"{_ASSOCIATE_LINE}. {_EDITORIAL_PROSE}"],
+     [(f"{_EDITORIAL_SEAT}, Kestrel Marsh Letters", f"{_ASSOCIATE_LINE}. {_EDITORIAL_PROSE}")]),
+    # They do not: which seat the prose is about cannot be told, so neither takes it.
+    ([_GUEST_LINE, _EDITORIAL_PROSE, _ASSOCIATE_LINE], []),
+])
+def test_prose_on_a_line_of_several_seats_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the seat's line as well as its prose brings the role, journal and
+    year along, and Reject All prints them a second time, under the row that
+    holds them (the shape every family has; #1205, 2026-10-09)."""
+    entry = _board_line("\t".join(segments), _GUEST_SEAT, _ASSOCIATE_SEAT)
+    gen, grouped = _render_grouped_editorial_boards([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["Q4B"][-1] and len(grouped["Q4B"]) == 2
+    assert [(_row_texts_of(row.getprevious())[0],
+             "".join(t.text for t in row.iter(qn("w:delText")))) for row in _subpoint_rows(gen)] \
+        == offered
+
+
+def test_a_seats_line_opening_with_its_rows_first_cell_is_read_as_its_row():
+    """A line that opens with the first cell's whole text, role and journal,
+    holds the row's own text verbatim (`_record_rendered`'s first
+    `RENDER_PIECE_WINDOW` characters), and the whole line reads as rendered:
+    none of it is offered, its prose included, as for a talk. A line opening
+    otherwise is offered whole, as the CV wrote it."""
+    cell_first = f"{_EDITORIAL_SEAT}, {_EDITORIAL_JOURNAL}, 2012-2016. {_EDITORIAL_PROSE}"
+    society_first = f"Appointed by the society, {cell_first}"
+    for line, offered in ((cell_first, ""), (society_first, society_first)):
+        entry = _board_seat(prose=None)
+        entry["text"] = line
+        gen = _render_editorial_boards([entry], supplementary_subpoints=True)
+        assert _deleted_texts(gen) == offered
+
+
+def test_generic_list_fan_out_children_of_seats_offer_nothing_their_fields_do_not_hold():
+    """Fan-out splits a record list stage 4 filed under a key the schema does
+    not define only when the fields hold every word of the text, and each
+    child's text is then the line built from its fields: nothing is prose.
+    With prose in the text the list is not split, and the entry renders its
+    own fields."""
+    records = [{"role": role, "journal_name": journal, "start_date": start}
+               for role, journal, start in (_GUEST_SEAT, _ASSOCIATE_SEAT)]
+    for text, children in ((f"{_GUEST_LINE}\t{_ASSOCIATE_LINE}", 2),
+                           (f"{_GUEST_LINE}\t{_ASSOCIATE_LINE}\t{_EDITORIAL_PROSE}", 1)):
+        entry = {"element_idx_start": 664, "taxonomy_code": "Q4B", "text": text,
+                 "extracted_fields": {"seats": copy.deepcopy(records)}}
+        gen, grouped = _render_grouped_editorial_boards([entry], supplementary_subpoints=True)
+        assert len(grouped["Q4B"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["Q4B"])
+        if children == 2:
+            assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("N1", "MENTORING PROGRAMS"), ("S0", "BIBLIOGRAPHY")])
+def test_a_seat_rerouted_out_of_q4c_to_an_excluded_code_gets_no_sub_point(code, heading):
+    """N1 and S0 are excluded: a seat rendered as either is that code's
+    record, so neither the seat row of the same journal nor any other
+    carries its prose."""
+    later = _board_member(idx=98, start="2017", end="present", prose="")
+    gen, grouped = _render_grouped_editorial_boards([later, _rerouted(_board_member(), code, heading)],
+                                                    supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[code]] == [104]
+    assert [e["element_idx_start"] for e in grouped["Q4C"]] == [98]
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("F2", "Board Certification"),
+                                           ("I", "PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS"),
+                                           ("C", "POSTDOCTORAL TRAINING")])
+def test_a_refused_reroute_keeps_the_editorial_board_rule(code, heading):
+    """A seat rerouted to F2, whose span the heading lookup does not find,
+    or to I or C keeps its Q4C code: their renderers write no journal
+    (`_cross_family_refusal`). It renders as a Q4C row and its prose is a
+    deleted row under that row."""
+    gen, grouped = _render_grouped_editorial_boards([_rerouted(_board_member(), code, heading)],
+                                                    supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["Q4C"]] == [104]
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious()) == _MEMBER_ROW
+
+
+@pytest.mark.parametrize("code", ["K5", "P"])
+def test_no_reroute_leads_into_an_editorial_board_code(code):
+    """Stage 6 moves no entry into Q4B or Q4C: `TAXONOMY_TO_SECTION` names no
+    section for Q4A-Q4D, so a hierarchy-mismatch reroute never targets one,
+    not even a record whose fields fit it (K5 renders its text, so nothing
+    would be lost), and records no decision; the service section reroutes Q2
+    only to Q3 and Q4D. The entry keeps its code and its rule, and no
+    editorial board row is written for it."""
+    from unified_pipeline.stage_6_word_template import TAXONOMY_TO_SECTION
+
+    assert not {"Q4A", "Q4B", "Q4C", "Q4D"} & set(TAXONOMY_TO_SECTION)
+    entry = _rerouted(_board_seat(code=code, role=None), "Q4C", "Editorial Board Membership")
+    gen, grouped = _render_grouped_editorial_boards([entry], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[code]] == [104] and "Q4C" not in grouped
+    assert "taxonomy_code_original" not in entry
+    assert not [w for w in gen._section_failures if w.get("check") == "hierarchy_mismatch_reroute"]
+    assert _row_texts(gen.doc.element.body).count(_MEMBER_ROW) == 0
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_seat_rerouted_out_to_board_certification_gets_no_sub_point():
+    """F2 is not offered (its heading lookup finds the title block). A Q4C
+    entry whose only field stage 4 filled is a certifying board, under the
+    Board Certification heading, renders as F2: it is that code's record,
+    and no editorial board row carries its prose."""
+    entry = _board_seat(code="Q4C", role=None, journal=None, start=None, end=None)
+    entry["extracted_fields"] = {"certifying_board": "Example Board of Estuarine Medicine"}
+    gen, grouped = _render_grouped_editorial_boards(
+        [_rerouted(entry, "F2", "Board Certification")], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["F2"]] == [104] and "Q4C" not in grouped
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_seat_stage_3b_pinned_to_journal_reviewing_gets_no_sub_point():
+    """Stage 3b's reviewer pin (#1413) recodes an unsure, role-less Q4C after
+    a reviewer lead-in to Q4D, keeping the model's code in `pre_pin_code`:
+    it renders as a Journal Reviewing row, which is excluded."""
+    entry = dict(_board_member(), taxonomy_code="Q4D", pre_pin_code="Q4C")
+    gen = _render_editorial_boards([entry], supplementary_subpoints=True)
+
+    (own,) = gen._row_receipts.elements_for(entry)
+    assert any(own.getparent() is table for table in gen._subpoint_excluded_tables)
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_an_editorial_board_seat_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass touched the entry. What is left can still describe
+    what was withheld, so none of it is offered."""
+    withheld = _board_seat()
+    withheld["_pii_withheld"] = True
+    gen = _render_editorial_boards([_later_board_seat(), withheld], supplementary_subpoints=True)
+
+    assert any(_row_texts_of(tr) == _SEAT_ROW for tr in gen.doc.element.body.iter(qn("w:tr")))
+    assert _subpoint_rows(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_an_editorial_board_seat_dedup_drops_offers_its_prose_once_under_the_kept_row():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no row, so its
+    prose goes only under the row of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_board_seat(idx=104), _board_seat(idx=105)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["Q4B"]) == 2 and len(kept["Q4B"]) == 1
+    gen._fill_service(kept)
+    gen._add_supplementary_subpoints(before)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_texts_of(row.getprevious()) == _SEAT_ROW
+    assert _deleted_texts(gen) == _EDITORIAL_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["Q4B"][0]["element_idx_start"]
+
+
+def test_a_low_coverage_seat_never_reaches_the_content_overflow():
+    """The content overflow collects an entry through the comment hook,
+    which the Other Service writer does not call: a seat whose coverage and
+    length qualify (`is_overflow_candidate`) is not queued, so its sub-point
+    stands for nothing the overflow would write, and Accept All is the
+    flag-off render."""
+    from unified_pipeline.stage_6_word_template import is_overflow_candidate
+
+    blocks = "\t".join(f"{_EDITORIAL_PROSE}, part {n} of the issue's plan" for n in range(9))
+
+    def render(flag):
+        entry = _board_seat(prose=blocks)
+        entry["extraction_coverage"] = {"extraction_coverage_percent": 5.0}
+        gen = _generator(supplementary_subpoints=flag)
+        gen._fill_service({"Q4B": [entry]})
+        assert is_overflow_candidate(entry) and gen._overflow_entries == []
+        gen._place_unrendered_prose({"Q4B": [entry]})
+        return gen
+
+    on, off = render(True), render(False)
+    (row,) = _subpoint_rows(on)
+    assert len(list(row.iter(qn("w:p")))) == 9
+    assert on.stats["overflow_bullets_added"] == off.stats["overflow_bullets_added"] == 0
+    accepted = _accept_all(on)
+    assert etree.tostring(accepted, method="c14n") == etree.tostring(off.doc.element.body, method="c14n")
+
+
+def test_the_doctor_matches_an_editorial_board_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier seat's sub-point
+    under its own index and Q4B, and the doctor's per-entry match counts it
+    for that entry, not for the later seat that shares its words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+
+    doc, placements = _stage6_render(tmp_path, monkeypatch, [_later_board_seat(), _board_seat()],
+                                     uid="T1205Q")
+    assert placements == [[_EDITORIAL_PROSE]]
+    sidecar = json.loads((tmp_path / "T1205Q_render_warnings.json").read_text())
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    assert [(p["element_idx_start"], p["code"]) for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(104, "Q4B")]
+    subpoints = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_EDITORIAL_PROSE, subpoints, element_idx=104)
+    assert not offered_as_subpoint(_EDITORIAL_PROSE, subpoints, element_idx=98)
+
+
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_editorial_board_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, protect, value):
+    """The PII pass drops a field named for protected data and marks the
+    entry withheld; no scope withholds a phone number in the middle of a
+    line (#1205 review of O). The same seat without them still has its
+    sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [_board_seat()])
+    assert placements == [[_EDITORIAL_PROSE]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
+                                     [protect(_board_seat(), _EDITORIAL_PROSE)])
     assert placements == []
     assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
 

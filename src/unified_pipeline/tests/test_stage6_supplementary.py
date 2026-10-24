@@ -69,10 +69,10 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_training_memberships_and_clinical_leadership():
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_training_memberships_clinical_leadership_and_editorial_boards():
     assert sorted(sp.SUBPOINT_CODES) == ["B1", "C", "D1", "D2", "D3", "H", "I", "K1", "K2", "K3",
                                          "K4", "K5", "L3", "M2A", "M2B", "M2C", "M2D", "N3A",
-                                         "N3B", "O", "P", "Q1", "Q2", "R"]
+                                         "N3B", "O", "P", "Q1", "Q2", "Q4B", "Q4C", "R"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -1358,10 +1358,11 @@ def test_plan_offers_no_prose_of_a_training_position_the_pii_pass_withheld():
 
 
 def test_families_joining_after_r_are_offered_after_every_family_before_them():
-    assert sorted(["L3", "I", "R", "C", "D1", "B1", "Q2", "K1", "M2A"], key=sp._offer_order) \
-        == ["B1", "D1", "K1", "M2A", "Q2", "R", "C", "I", "L3"]
+    # Q4B and Q4C sort before R by name; they joined after L3.
+    assert sorted(["Q4C", "L3", "I", "R", "Q4B", "C", "D1", "B1", "Q2", "K1", "M2A"], key=sp._offer_order) \
+        == ["B1", "D1", "K1", "M2A", "Q2", "R", "C", "I", "L3", "Q4B", "Q4C"]
     assert sp._LATER_FAMILIES == (sp.POSTDOCTORAL_CODES, sp.MEMBERSHIP_CODES,
-                                  sp.CLINICAL_LEADERSHIP_CODES)
+                                  sp.CLINICAL_LEADERSHIP_CODES, sp.EDITORIAL_BOARD_SUBPOINT_CODES)
 
 
 def test_a_line_a_training_position_and_an_appointment_both_hold_stays_the_appointments():
@@ -2083,6 +2084,232 @@ def test_a_clinical_leadership_sub_point_stands_for_its_overflow_only_holding_ev
     # No overflow for the entry, or another family's sub-point: it stands.
     assert not sp.yields_to_overflow(subpoint, None)
     assert not sp.yields_to_overflow(subpoint._replace(code="D1"), text)
+
+
+_JOURNAL = "Journal of Estuarine Sediment Studies"
+_SEAT = "Associate Editor"
+_SEAT_ROW = [f"{_SEAT}, {_JOURNAL}", "2012-2016"]
+
+
+def _board_rows(*rows):
+    """A line naming the journal, then an Editorial Board Membership table
+    ("Board / Organization Name | Dates"), one row of cells per item; and
+    their anchor candidates."""
+    doc = Document()
+    doc.add_paragraph(f"Reviewer for the {_JOURNAL}")
+    table = doc.add_table(rows=len(rows), cols=2)
+    for row, cells in zip(table.rows, rows, strict=True):
+        for cell, text in zip(row.cells, cells, strict=True):
+            cell.text = text
+    return table, list(sp.anchor_candidates(doc))
+
+
+def _board_seat(text=f"{_SEAT}, {_JOURNAL}, 2012-2016\t{PROSE}", code="Q4B", **fields):
+    return _entry(text, code=code, **{"journal_name": _JOURNAL, "role": _SEAT,
+                                      "start_date": "2012", "end_date": "2016", **fields})
+
+
+def _plan_board_seat(entry, *rows, record_lines=None):
+    table, lines = _board_rows(*(rows or (_SEAT_ROW,)))
+    code = entry["taxonomy_code"]
+    return sp.plan_subpoints({code: [entry]}, _haystack(), lines, {code: sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [table.rows[0]._tr] if e is entry else [],
+                             record_lines=record_lines)
+
+
+@pytest.mark.parametrize("code", ["Q4B", "Q4C"])
+def test_plan_places_an_editorial_board_seat_only_under_its_own_row(code):
+    # A later seat on the same journal's board renders first and holds every
+    # distinctive word of the earlier one's row: only the years, digits,
+    # tell them apart, and words alone take the first row.
+    table, lines = _board_rows([f"{_SEAT}, {_JOURNAL}", "2017-Present"], _SEAT_ROW)
+    entry, spans = _board_seat(code=code), {code: sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, code), lines) is lines[1]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({code: [entry]}, _haystack(), lines, spans,
+                                   rows_written=written([table.rows[1]._tr]))
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+    assert (planned.code, planned.entry_id) == (code, id(entry))
+    # No row recorded for it, a paragraph outside any table, or no ledger: none.
+    stray = Document().add_paragraph(_JOURNAL)._p
+    for rows_written in (written([]), written([stray]), None):
+        assert sp.plan_subpoints({code: [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_takes_an_editorial_board_seats_one_own_row_whatever_its_words():
+    # An acronym journal and a short role hold one distinctive word.
+    entry = _entry(f"Editor, JESS, 2012\t{PROSE}", code="Q4B", journal_name="JESS", role="Editor",
+                   start_date="2012")
+    table, lines = _board_rows(["Editor, JESS", "2012"])
+    assert sp.best_anchor(sp._value_tokens(entry, "Q4B"), lines[1:]) is None
+    (planned,) = sp.plan_subpoints({"Q4B": [entry]}, _haystack(), lines, {"Q4B": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1] and planned.paragraphs == (PROSE,)
+
+
+@pytest.mark.parametrize("fields, text, role", [
+    # Stage 4's role, whatever the line says.
+    ({"role": "Section Editor"}, f"{_SEAT}, {_JOURNAL}", "Section Editor"),
+    # A role the line writes as a cell of its own, between pipes.
+    ({}, f"2012 | {_SEAT} | {_JOURNAL}", _SEAT),
+    ({}, f"2012 | Editorial Board Member | {_JOURNAL}", "Editorial Board Member"),
+    ({}, f"2012 | editorial board | {_JOURNAL}", "editorial board"),
+    # One of the writer's line roles, as written, in the writer's order.
+    ({}, f"Guest Editor, special issue of the {_JOURNAL}", "Guest Editor"),
+    ({}, f"Guest Editor and {_SEAT}, {_JOURNAL}", _SEAT),
+    # Any other wording names none: the row prints no role.
+    ({}, f"Member, Editorial Advisory Board, {_JOURNAL}", ""),
+    ({}, f"Editorial board member, {_JOURNAL}", ""),
+    ({}, f"associate editor, {_JOURNAL}", ""),
+    ({"role": ""}, _JOURNAL, ""),
+    # A role stage 4 returned as a list reads as the cell prints it; a null one names none.
+    ({"role": [_SEAT, "Guest Editor"]}, _JOURNAL, f"{_SEAT}; Guest Editor"),
+    ({"role": None}, f"Guest Editor, special issue of the {_JOURNAL}", "Guest Editor"),
+], ids=["stage4", "cell", "cell_member", "cell_lower", "line_role", "first_line_role",
+        "advisory", "lower_case_board", "lower_case_role", "none", "list", "null"])
+def test_an_editorial_board_rows_role_is_stage_4s_or_the_one_its_line_names(fields, text, role):
+    assert sp.editorial_board_role(fields, text) == role
+
+
+def test_an_editorial_board_seat_with_several_recorded_rows_is_read_by_words():
+    # The writer records one row per seat. Were two recorded for one entry,
+    # its words would choose between them, as for a talk or a training
+    # position, rather than none being taken.
+    table, lines = _board_rows(["Guest Editor, Kestrel Tidal Review", "2014"], _SEAT_ROW)
+    entry = _board_seat()
+    (planned,) = sp.plan_subpoints({"Q4B": [entry]}, _haystack(), lines, {"Q4B": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [row._tr for row in table.rows])
+    assert planned.anchor is lines[2] and planned.paragraphs == (PROSE,)
+
+
+def test_the_editorial_board_row_fields_are_the_writers():
+    # The writer reads the role and the organization's precedence from here.
+    from unified_pipeline.stage6.sections import service
+
+    assert set(service.EDITORIAL_BOARD_CODES) == sp.EDITORIAL_BOARD_SUBPOINT_CODES
+    assert service.SECTION_EDITOR_CODE in sp.EDITORIAL_BOARD_SUBPOINT_CODES
+    assert sp.OTHER_SERVICE_ORGANIZATION_FIELDS == ("organization", "committee_name", "agency")
+    assert service.OTHER_SERVICE_ORGANIZATION_FIELDS is sp.OTHER_SERVICE_ORGANIZATION_FIELDS
+    assert service.editorial_board_role is sp.editorial_board_role
+
+
+@pytest.mark.parametrize("code", ["Q4B", "Q4C"])
+def test_an_editorial_board_rows_role_and_organization_count_as_its_rendered_values(code):
+    # The row prints them, though `_RENDERED_FIELDS` cannot list Q4C's role
+    # or either code's organization.
+    entry = _entry("Example line", code=code, role="Statistical Consultant Editor",
+                   organization="Norvale Marine Press", committee_name="Estuarine Committee")
+    tokens = sp._value_tokens(entry, code)
+    assert {"statistical", "consultant", "norvale", "marine", "press"} <= tokens
+    # Only the first organization of the writer's precedence prints.
+    assert not {"estuarine", "committee"} & tokens
+    del entry["extracted_fields"]["organization"]
+    assert {"estuarine", "committee"} <= sp._value_tokens(entry, code)
+    # The role the writer reads from the line counts when stage 4 names none.
+    entry = _entry(f"2012 | {_SEAT} | {_JOURNAL}", code=code, journal_name=_JOURNAL)
+    assert {"associate", "editor"} <= sp._value_tokens(entry, code)
+    # Another code's line names no editorial role.
+    assert not {"associate"} & sp._value_tokens(dict(entry, taxonomy_code="Q4D"), "Q4D")
+
+
+def test_a_line_restating_an_editorial_board_row_with_the_role_it_prints_is_not_offered():
+    """The row prints the role stage 4 names, or the one the writer reads
+    from the line: a line restating the row with that role is the row
+    reformatted, and Reject All would print it twice."""
+    line = f"Member, Editorial Advisory Board, {_JOURNAL}, 2012-2016"
+    shown = _entry(line, code="Q4C", journal_name=_JOURNAL, role="Member, Editorial Advisory Board",
+                   start_date="2012", end_date="2016")
+    assert sp.unrendered_prose(shown, "Q4C", _haystack()) == []
+    read = _entry(f"{_SEAT}, {_JOURNAL}, 2012-2016", code="Q4C", journal_name=_JOURNAL,
+                  start_date="2012", end_date="2016")
+    assert sp.editorial_board_role(read["extracted_fields"], read["text"]) == _SEAT
+    assert sp.unrendered_prose(read, "Q4C", _haystack()) == []
+
+
+def test_a_line_restating_an_editorial_board_row_with_a_role_it_does_not_print_is_offered():
+    """A Q4C row prints no role when stage 4 names none and the writer reads
+    none from the line. The role is the kind of board and the seat's
+    standing, which no cell holds: the line is offered as written."""
+    line = f"Honorary Member, Editorial Advisory Board, {_JOURNAL}, 2012-2016"
+    entry = _entry(line, code="Q4C", journal_name=_JOURNAL, start_date="2012", end_date="2016")
+    assert sp.editorial_board_role(entry["extracted_fields"], line) == ""
+    assert [p.paragraphs for p in _plan_board_seat(entry, [_JOURNAL, "2012-2016"])] == [(line,)]
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its own.
+    (["Board line", f"Editor line, {PROSE}"], 1, f"Editor line, {PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    (["Board line", PROSE, "Editor line"], 1, ""),
+    # An earlier record: the line fan-out gave it, whatever it holds.
+    ([f"Board line, {PROSE}", "Editor line"], 0, f"Board line, {PROSE}\tEditor line"),
+])
+def test_an_editorial_board_seat_reads_its_prose_from_its_own_line(segments, index, read):
+    for code in ("Q4B", "Q4C"):
+        entry = dict(_degree_record("\t".join(segments), index, 2), taxonomy_code=code)
+        assert sp._prose_text(code, entry, {}) == read
+
+
+def test_an_editorial_board_line_holding_several_dated_records_offers_none():
+    # Two seats on one line, each opening with its dates and followed by its
+    # prose; stage 4 returned the first. Which one a prose line is about
+    # cannot be told.
+    own = _board_seat(f"2012-2016 {_SEAT}, {_JOURNAL}\t{PROSE}")
+    assert [p.paragraphs for p in _plan_board_seat(own)] == [(PROSE,)]
+    two = _board_seat(f"2012-2016 {_SEAT}, {_JOURNAL}\t{PROSE}\t"
+                      f"2017-2020 Guest Editor, Kestrel Tidal Review\t{OTHER_PROSE}")
+    assert sp._own_record_line(two) == ""
+    assert _plan_board_seat(two) == []
+
+
+def test_an_editorial_board_seat_leaves_a_dated_record_line_to_the_recovery():
+    # #2010's rule, every family's: a record of its own beside the seat's,
+    # which the #221 recovery re-emits, stays the recovery's. One it reads
+    # as rendered, and a line that is no record of its own (the seat's
+    # duties, owner decision 2026-10-08), stay the sub-point.
+    sub_record = "Guest Editor, Special Issue on Marsh Hydrology, 2014"
+    entry = _board_seat(f"{_SEAT}, {_JOURNAL}, 2012-2016\t{sub_record}\t{PROSE}")
+    (offered,) = _plan_board_seat(entry)
+    assert offered.paragraphs == (sub_record, PROSE)
+    (planned,) = _plan_board_seat(entry, record_lines=lambda code, e: [
+        sp.RecordLine(f"{_SEAT}, {_JOURNAL}, 2012-2016", False, False), sp.RecordLine(sub_record, True, True)])
+    assert planned.paragraphs == (PROSE,)
+    (kept,) = _plan_board_seat(entry, record_lines=lambda code, e: [
+        sp.RecordLine(sub_record, False, True), sp.RecordLine(PROSE, True, False)])
+    assert kept.paragraphs == (sub_record, PROSE)
+
+
+def test_plan_offers_no_prose_of_an_editorial_board_seat_the_pii_pass_withheld():
+    entry = _board_seat()
+    (planned,) = _plan_board_seat(entry)
+    assert planned.paragraphs == (PROSE,)
+
+    entry["_pii_withheld"] = True
+    assert _plan_board_seat(entry) == []
+
+
+def test_a_line_a_talk_and_an_editorial_board_seat_both_hold_stays_the_talks():
+    # A guest editor who also lectured on the special issue's theme names it
+    # on both lines. The talk, a family shipped before Q4B and named after
+    # it, keeps it; the seat keeps its other line, and alone it offers both.
+    theme = "Introduced the special issue's theme of sediment budgets in restored tidal marshes"
+    seat_table, seat_lines = _board_rows(_SEAT_ROW)
+    talk_table, talk_lines = _talk_rows(_TALK_ROW)
+    seat = _board_seat(f"{_SEAT}, {_JOURNAL}, 2012-2016\t{theme}\t{PROSE}")
+    talk = _talk(f"{_TALK}, Example Grand Rounds, Norvale University, 2016\t{theme}")
+    lines = [*seat_lines, *(line._replace(position=line.position + 5) for line in talk_lines)]
+    owned = {id(seat): [seat_table.rows[0]._tr], id(talk): [talk_table.rows[0]._tr]}
+    spans = {"Q4B": sp.SectionSpan(0, 3), "R": sp.SectionSpan(5, None)}
+    planned = sp.plan_subpoints({"Q4B": [seat], "R": [talk]}, _haystack(), lines, spans,
+                                rows_written=lambda e: owned.get(id(e), []))
+    assert [(p.code, p.paragraphs) for p in planned] == [("R", (theme,)), ("Q4B", (PROSE,))]
+    (alone,) = sp.plan_subpoints({"Q4B": [seat]}, _haystack(), lines, spans,
+                                 rows_written=lambda e: owned.get(id(e), []))
+    assert alone.paragraphs == (theme, PROSE)
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():
