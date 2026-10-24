@@ -34,6 +34,7 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
+from lxml import etree  # noqa: E402
 
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
@@ -5523,7 +5524,7 @@ _SHADOWED_ALIAS = "Saltmarsh restoration and estuarine sediment track"
                                                ("field_of_study", "specialty")])
 def test_a_line_restating_the_alias_its_row_does_not_print_is_offered(printed, shadowed):
     """A cell prints the first of its aliases holding a value
-    (`training_cell_value`). The other one's words are in no line of the
+    (`first_field_value`). The other one's words are in no line of the
     document, so a line restating it is the position's prose, not its row."""
     entry = _training(prose=_SHADOWED_ALIAS, **{printed: "Example Geochemistry",
                                                  shadowed: _SHADOWED_ALIAS})
@@ -6398,6 +6399,16 @@ _SUB_RECORD_FAMILIES = {
         sub_led="2007-2008 Chief Resident, Education Committee",
         prose=("As chief resident on the education committee, developed the residency's teaching "
                "curriculum")),
+    "L3": dict(
+        code="L3", idx=1482,
+        fields={"leadership_role": "Director, Example Wound Care Program",
+                "institution": "Example Estuarine Hospital", "start_date": "2010", "end_date": "2018"},
+        own="Director, Example Wound Care Program, Example Estuarine Hospital, 2010-2018",
+        own_led="2010-2018 Director, Example Wound Care Program, Example Estuarine Hospital",
+        sub="Chair, Limb Salvage Quality Committee, 2012-2014",
+        sub_led="2012-2014 Chair, Limb Salvage Quality Committee",
+        prose=("As chair of the limb salvage quality committee, set the clinic's amputation "
+               "review standards")),
 }
 #: The two line shapes in which sub-points on lost the sub-record: tab parts
 #: ending in their years, where the sub-point offered the sub-record itself;
@@ -6405,6 +6416,8 @@ _SUB_RECORD_FAMILIES = {
 #: sub-record rendered. B1, C, H and O lost it in the first shape only: their
 #: own rules (`_own_record_line`, the honors writer's rows) offer nothing in
 #: the second. P lost it in neither (`_own_committee_line`), I since #1991.
+#: L3, which joined after #2010, is pinned in the first shape: its own rule
+#: (`_own_record_line`) offers nothing in the second.
 _TRAILING_YEARS, _DATE_LED = "tab_trailing_years", "tab_date_led"
 _SUB_RECORD_CASES = [*((name, _TRAILING_YEARS) for name in _SUB_RECORD_FAMILIES),
                      *((name, _DATE_LED) for name in ("K1", "M2A", "D1", "Q1", "Q2", "N3A", "N3B", "R"))]
@@ -6908,6 +6921,768 @@ def test_membership_prose_holding_protected_data_is_not_offered_through_the_pii_
 
     doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
                                      [protect(_membership(), _MEMBERSHIP_PROSE)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+# --- #1205: L3 clinical leadership, the next code family ---------------------
+# The clinical-practice section writes every L3 entry as a line of its own,
+# "Role, Institution, Dates", with no bullet: the WCM template ships no table
+# under the heading. So the prose is a deleted paragraph one indent step
+# under the role's own line, the one paragraph the writer recorded for that
+# entry (the row-receipt ledger). A template shipping a clinical table there
+# gets a deleted row under the role's own row.
+
+_CLINICAL_PROSE = ("Oversaw a twelve-bed inpatient unit and its outpatient clinic, and built "
+                   "the regional referral network for community physicians")
+_CLINICAL_ROLE = "Director, Example Wound Care Program"
+_CLINICAL_SITE = "Norvale General Hospital"
+
+
+def _clinical_role(idx=1482, name=_CLINICAL_ROLE, site=_CLINICAL_SITE, start="2010", end="2015",
+                   prose=_CLINICAL_PROSE, code="L3", **fields):
+    """A clinical leadership role whose source line goes on past its title,
+    hospital and years into what the role oversaw, as YUYVIG SQMWHM 1482's
+    did. A later role of the same title at the same hospital shares every
+    distinctive word of its line: only the years, digits, tell them apart.
+    A value passed as None is in neither the line nor the fields."""
+    named = {"leadership_role": name, "institution": site, "start_date": start, "end_date": end}
+    dates = "-".join(value for value in (start, end) if value)
+    line = ", ".join(value for value in (name, site, dates) if value)
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": line + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {key: value for key, value in {**named, **fields}.items()
+                             if value is not None},
+    }
+
+
+def _later_clinical_role(name=_CLINICAL_ROLE):
+    """The same hospital's role from 2016, with no prose: it renders first,
+    reverse chronologically."""
+    return _clinical_role(idx=1478, name=name, start="2016", end="present", prose="")
+
+
+def _render_clinical_roles(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_clinical_practice({"L3": entries})
+    gen._add_supplementary_subpoints({"L3": entries})
+    return gen
+
+
+def _clinical_role_table_row():
+    """The same role read from a source table: stage 2 joins the row's cells
+    with pipes, and its position names the row ("41.2")."""
+    entry = _clinical_role()
+    entry["element_idx_start"] = "41.2"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010-2015"
+_LATER_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2016-Present"
+
+
+def _subpoint_paragraphs(gen):
+    """The body paragraphs the sub-point pass wrote, in document order."""
+    from unified_pipeline.stage6 import supplementary
+
+    return [p for p in gen.doc.element.body.iterchildren(qn("w:p")) if supplementary._is_subpoint(p)]
+
+
+def _paragraph_text(p):
+    return "".join(t.text or "" for t in p.iter(qn("w:t"), qn("w:delText")))
+
+
+def _left_indent(p):
+    return p.find(f"{qn('w:pPr')}/{qn('w:ind')}").get(qn("w:left"))
+
+
+def _accept_all(gen):
+    """Word's Accept All on the sub-points: each deleted paragraph (its mark
+    and run deleted) goes, and each deleted row goes."""
+    for element in [*_subpoint_paragraphs(gen), *_subpoint_rows(gen)]:
+        element.getparent().remove(element)
+    return gen.doc.element.body
+
+
+@pytest.mark.parametrize("entry", [_clinical_role, _clinical_role_table_row])
+def test_clinical_leadership_prose_is_a_deleted_paragraph_under_the_role_line(entry):
+    gen = _render_clinical_roles([entry()], supplementary_subpoints=True)
+
+    (para,) = _subpoint_paragraphs(gen)
+    above = para.getprevious()
+    assert _paragraph_text(above) == _CLINICAL_LINE
+    assert "".join(t.text for t in para.iter(qn("w:delText"))) == _CLINICAL_PROSE
+    assert list(para.iter(qn("w:t"))) == []
+    assert para.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
+    # Unbulleted, one indent step under the role's line (#1943).
+    assert para.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
+    assert _left_indent(above) == str(plain_entry_left_twips(0))
+    assert _left_indent(para) == str(plain_entry_left_twips(1))
+    span = gen._subpoint_section_spans()["L3"]
+    assert span.start < list(gen.doc.element.body).index(para) < span.end
+    assert gen.stats["supplementary_subpoints"] == 1
+    (placement,) = gen._subpoint_placements
+    assert (placement.element_idx_start, placement.code) == (entry()["element_idx_start"], "L3")
+
+
+def test_a_roles_several_prose_lines_are_paragraphs_in_source_order():
+    lines = (_CLINICAL_PROSE, "Recruited four wound care nurses and launched the limb preservation clinic")
+    gen = _render_clinical_roles([_clinical_role(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    paragraphs = _subpoint_paragraphs(gen)
+    assert [_paragraph_text(p) for p in paragraphs] == list(lines)
+    assert _paragraph_text(paragraphs[0].getprevious()) == _CLINICAL_LINE
+    assert paragraphs[1].getprevious() is paragraphs[0]
+
+
+@pytest.mark.parametrize("later", [
+    # One title held twice at one hospital: the lines differ in their years only.
+    _CLINICAL_ROLE,
+    # A later role holding every word of this one's title.
+    f"{_CLINICAL_ROLE} and Example Limb Preservation Service",
+])
+def test_clinical_leadership_prose_goes_under_its_own_line_among_roles_of_one_hospital(later):
+    """The later role renders first and holds every distinctive word of the
+    earlier one's line, so words alone put the earlier one's prose under the
+    later line. Only the line the writer recorded for the earlier entry
+    takes it."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_clinical_roles([_later_clinical_role(later), _clinical_role()], supplementary_subpoints=True)
+
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para.getprevious()) == _CLINICAL_LINE
+    assert _paragraph_text(para.getprevious().getprevious()) == f"{later}, {_CLINICAL_SITE}, 2016-Present"
+    # Words alone would have taken the later role's line.
+    lines = list(supplementary.anchor_candidates(_render_clinical_roles(
+        [_later_clinical_role(later), _clinical_role()], supplementary_subpoints=False).doc))
+    roles = [line for line in lines if line.text.endswith(("2015", "Present"))]
+    assert supplementary.best_anchor(supplementary._value_tokens(_clinical_role(), "L3"), roles) is roles[0]
+    assert roles[0].text.startswith(later) and roles[0].text.endswith("Present")
+
+
+def test_roles_at_one_hospital_each_take_their_own_prose():
+    later_prose = ("Ran the weekly limb salvage conference and the hospital's hyperbaric "
+                   "oxygen therapy service")
+    later = _clinical_role(idx=1478, start="2016", end="present", prose=later_prose)
+    gen = _render_clinical_roles([later, _clinical_role()], supplementary_subpoints=True)
+
+    by_text = {_paragraph_text(p): p for p in _subpoint_paragraphs(gen)}
+    assert set(by_text) == {later_prose, _CLINICAL_PROSE}
+    assert _paragraph_text(by_text[later_prose].getprevious()) == _LATER_CLINICAL_LINE
+    assert _paragraph_text(by_text[_CLINICAL_PROSE].getprevious()) == _CLINICAL_LINE
+    assert [(p.element_idx_start, p.paragraphs) for p in gen._subpoint_placements] \
+        == [(1478, (later_prose,)), (1482, (_CLINICAL_PROSE,))]
+
+
+def test_clinical_leadership_prose_goes_under_its_own_line_not_a_clinical_practice_line():
+    """The section's L1 lines sit above the L3 ones: an attending post at the
+    same programme holds every distinctive word of the role's line, and
+    words alone take it. The role's own line takes the prose."""
+    practice = {"element_idx_start": 1401, "taxonomy_code": "L1",
+                "text": f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, attending wound care sessions",
+                "extracted_fields": {}}
+    grouped = {"L1": [practice], "L3": [_clinical_role()]}
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_clinical_practice(grouped)
+    gen._add_supplementary_subpoints(grouped)
+
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para.getprevious()) == _CLINICAL_LINE
+    # Words alone would have taken the practice line, which renders first.
+    from unified_pipeline.stage6 import supplementary
+
+    lines = [line for line in supplementary.anchor_candidates(gen.doc) if _CLINICAL_SITE in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(_clinical_role(), "L3"), lines) is lines[0]
+    assert lines[0].text.endswith("sessions")
+
+
+def test_clinical_leadership_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_clinical_roles([_later_clinical_role(), _clinical_role()], supplementary_subpoints=False)
+    on = _render_clinical_roles([_later_clinical_role(), _clinical_role()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _CLINICAL_PROSE in rejected
+    assert _CLINICAL_PROSE not in "".join(_texts_of(off.doc.element.body))
+    assert len(_subpoint_paragraphs(on)) == 1 and _subpoint_rows(on) == []
+    accepted = _accept_all(on)
+    # Empty paragraphs and every table row, cell by cell, included; and the
+    # markup itself, so no paragraph's properties moved.
+    assert _texts_of(accepted) == _texts_of(off.doc.element.body)
+    assert _row_texts(accepted) == _row_texts(off.doc.element.body)
+    assert etree.tostring(accepted, method="c14n") == etree.tostring(off.doc.element.body, method="c14n")
+
+
+def test_a_short_roles_prose_goes_under_its_own_line():
+    """A role and a hospital of acronyms hold no distinctive word, too few
+    for the word test: the writer's record says the one line is the entry's
+    own (`_pick_anchor`)."""
+    gen = _render_clinical_roles([_clinical_role(name="MD", site="NGH")], supplementary_subpoints=True)
+
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para.getprevious()) == "MD, NGH, 2010-2015"
+    assert _deleted_texts(gen) == _CLINICAL_PROSE
+
+
+def _role_titled_by_its_prose():
+    """The prose is the role stage 4 extracted."""
+    return _clinical_role(name=_CLINICAL_PROSE, prose=None)
+
+
+def _role_with_no_role():
+    """No role: the line is titled from the entry's text, and the parts after
+    the first print as its detail lines."""
+    return _clinical_role(name=None)
+
+
+@pytest.mark.parametrize("entry", [_role_titled_by_its_prose, _role_with_no_role])
+def test_clinical_leadership_prose_already_in_its_line_is_not_offered_again(entry):
+    """The line prints it (`_record_rendered`), so it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_clinical_roles([entry()], supplementary_subpoints=True)
+    assert _CLINICAL_PROSE in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "L3", haystack) == []
+
+
+def _role_with_only(field, marker):
+    entry = _clinical_role(name=None, site=None, start=None, end=None, prose="")
+    entry["extracted_fields"] = {field: marker}
+    entry["text"] = "Example clinical leadership role"
+    return entry
+
+
+def test_every_clinical_leadership_line_field_the_pass_counts_is_printed_in_the_line():
+    """The off-schema names among the fields `_value_tokens` counts for a
+    clinical leadership role (`_RENDERED_FIELDS` marks schema fields only):
+    each one, alone on an entry, is counted and reaches the line."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    off_schema = [name for name in (*supplementary.CLINICAL_LEADERSHIP_ROLE_FIELDS,
+                                    *supplementary.CLINICAL_LEADERSHIP_INSTITUTION_FIELDS,
+                                    *supplementary._CLINICAL_LEADERSHIP_PLAIN_FIELDS)
+                  if name not in _RENDERED_FIELDS["L3"]]
+    assert off_schema == ["role", "title", "organization"]
+    for field in off_schema:
+        marker = f"Zq{field}Z"
+        entry = _role_with_only(field, marker)
+        assert supplementary._tokens(marker) <= supplementary._value_tokens(entry, "L3"), field
+        gen = _render_clinical_roles([entry], supplementary_subpoints=True)
+        assert any(marker in text for text in _texts_of(gen.doc.element.body)), field
+
+
+def test_every_field_the_clinical_leadership_line_prints_is_one_the_pass_counts():
+    """The other direction: a field the line prints that `_value_tokens`
+    does not count would offer a fragment restating the line. The names are
+    the fields of the code an entry is rerouted into L3 from (D2), of the
+    codes stage 3b confuses with it (O, D1, D3, Q1, K3), the schema's
+    optional ones and the writer's own, each alone on an entry."""
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+
+    names = set().union(*(_RENDERED_FIELDS[code] for code in ("D2", "O", "D1", "D3", "Q1", "K3")
+                          if code in _RENDERED_FIELDS),
+                        supplementary.CLINICAL_LEADERSHIP_ROLE_FIELDS,
+                        supplementary.CLINICAL_LEADERSHIP_INSTITUTION_FIELDS,
+                        {"description", "program", "scope", "narrative", "position", "department"})
+    for field in sorted(names):
+        marker = f"Zq{field}Z"
+        entry = _role_with_only(field, marker)
+        gen = _render_clinical_roles([entry], supplementary_subpoints=True)
+        printed = any(marker in text for text in _texts_of(gen.doc.element.body))
+        counted = supplementary._tokens(marker) <= supplementary._value_tokens(entry, "L3")
+        assert not printed or counted, field
+
+
+_SHADOWED_NAME = "Saltmarsh restoration and estuarine sediment track"
+
+
+@pytest.mark.parametrize("printed, shadowed", [("role", "leadership_role"),
+                                               ("institution", "organization")])
+def test_a_line_restating_the_name_its_line_does_not_print_is_offered(printed, shadowed):
+    """The line prints the first of its aliases holding a value
+    (`clinical_leadership_cell_values`). The other one's words are in no
+    line of the document, so a line restating it is the role's prose."""
+    entry = _clinical_role(prose=_SHADOWED_NAME, **{printed: "Example Geochemistry",
+                                                    shadowed: _SHADOWED_NAME})
+    gen = _render_clinical_roles([entry], supplementary_subpoints=True)
+
+    (para,) = _subpoint_paragraphs(gen)
+    assert "Example Geochemistry" in _paragraph_text(para.getprevious())
+    assert _SHADOWED_NAME not in _paragraph_text(para.getprevious())
+    assert _paragraph_text(para) == _SHADOWED_NAME
+
+
+def _clinical_table_generator(**kwargs):
+    """A template that ships a "Title | Institution/Location | Dates" table
+    under the heading: the section writes each role as a row of it
+    (`_clinical_header_match`)."""
+    gen = _generator(**kwargs)
+    gen.doc = Document()
+    gen.doc.add_paragraph().add_run("Clinical Leadership").bold = True
+    table = gen.doc.add_table(rows=1, cols=3)
+    for cell, text in zip(table.rows[0].cells, ("Title", "Institution/Location", "Dates (yyyy)"),
+                          strict=True):
+        cell.text = text
+    gen.doc.add_paragraph("M. RESEARCH")
+    return gen, table
+
+
+def _render_clinical_table(entries, **kwargs):
+    gen, table = _clinical_table_generator(**kwargs)
+    gen._fill_clinical_practice({"L3": entries})
+    gen._add_supplementary_subpoints({"L3": entries})
+    return gen, table
+
+
+def test_clinical_leadership_prose_in_a_clinical_table_is_a_deleted_row_under_the_roles_own_row():
+    """The table form: the writer records each role's row, so the prose is a
+    deleted row under the role's own row, not under the later role's row of
+    the same words, and the row spans the table."""
+    gen, table = _render_clinical_table([_later_clinical_role(), _clinical_role()],
+                                        supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert row.getparent() is table._tbl
+    assert _row_texts_of(row.getprevious()) == ["2010-2015", _CLINICAL_ROLE, _CLINICAL_SITE]
+    assert _row_texts_of(row.getprevious().getprevious())[0] == "2016-Present"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _CLINICAL_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "3"
+    (placement,) = gen._subpoint_placements
+    assert (placement.element_idx_start, placement.code) == (1482, "L3")
+
+
+def test_clinical_table_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off, _ = _render_clinical_table([_later_clinical_role(), _clinical_role()], supplementary_subpoints=False)
+    on, _ = _render_clinical_table([_later_clinical_role(), _clinical_role()], supplementary_subpoints=True)
+
+    assert _CLINICAL_PROSE in _deleted_texts(on)
+    assert len(_subpoint_rows(on)) == 1 and _subpoint_paragraphs(on) == []
+    accepted = _accept_all(on)
+    assert _texts_of(accepted) == _texts_of(off.doc.element.body)
+    assert _row_texts(accepted) == _row_texts(off.doc.element.body)
+    assert etree.tostring(accepted, method="c14n") == etree.tostring(off.doc.element.body, method="c14n")
+
+
+@pytest.mark.parametrize("field", ["description", "program"])
+def test_a_description_the_table_prints_is_not_offered_and_the_line_form_offers_it(field):
+    """The table form prints a role's description or programme in its third
+    cell, so a line restating it is in the document. The line form prints
+    neither: the same line is the role's prose, under its line."""
+    gen, _table = _render_clinical_table([_clinical_role(**{field: _CLINICAL_PROSE})],
+                                         supplementary_subpoints=True)
+    assert any(_CLINICAL_PROSE in "".join(cells) for cells in _row_texts(gen.doc.element.body))
+    assert _deleted_texts(gen) == ""
+
+    gen = _render_clinical_roles([_clinical_role(**{field: _CLINICAL_PROSE})], supplementary_subpoints=True)
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para) == _CLINICAL_PROSE
+
+
+def _roles_each_opening_with_their_dates():
+    """A directorship and the chief's post after it on one line, each opening
+    with its years and followed by its prose; stage 4 returned the first.
+    Which one a prose line is about cannot be told."""
+    return _clinical_role(prose=None) | {
+        "text": (f"2010-2015 {_CLINICAL_ROLE}, {_CLINICAL_SITE}\t{_CLINICAL_PROSE}\t"
+                 "2016-2020 Chief, Example Limb Preservation Service, Kestrel Institute\t"
+                 "Ran the weekly limb salvage conference and the hyperbaric oxygen service")}
+
+
+def _a_role_then_the_next_dated_at_its_end():
+    """A directorship, then on the same line the chief's post after it, its
+    years ending its part; stage 4 returned the directorship."""
+    return _clinical_role(prose=None) | {
+        "text": (f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010-2015\t"
+                 "Chief, Example Limb Preservation Service, Kestrel Institute, 2016-2020")}
+
+
+def _a_role_then_the_next_dated_in_months():
+    """The same, the chief's post dated in months."""
+    return _clinical_role(prose=None) | {
+        "text": (f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010-2015\t"
+                 "Chief, Example Limb Preservation Service, Kestrel Institute, July 2016 - June 2020")}
+
+
+@pytest.mark.parametrize("roles", [_roles_each_opening_with_their_dates,
+                                   _a_role_then_the_next_dated_at_its_end,
+                                   _a_role_then_the_next_dated_in_months])
+def test_a_line_of_several_dated_roles_keeps_accept_all_the_flag_off_document(roles):
+    """#1205 comment 6275741663 and #2010: another role on the role's line is
+    never left in neither document. Opening with its years, the line offers
+    nothing (`_own_record_line`); dated as a tab part the #221 recovery
+    re-emits, it is the recovery's (`_left_to_recovery`). Either way the
+    recovery re-emits with sub-points on what it re-emits with them off, and
+    Accept All is the flag-off document."""
+    def recovered(flag):
+        entry = roles()
+        gen = _render_clinical_roles([entry], supplementary_subpoints=flag)
+        assert len(gen._row_receipts.elements_for(entry)) == 1
+        gen._recover_unrendered_records({"L3": [entry]})
+        return gen
+
+    on, off = recovered(True), recovered(False)
+    assert on.stats["unrendered_records_recovered"] == off.stats["unrendered_records_recovered"] == 1
+    assert on._subpoint_placements == [] and "Limb Preservation" not in _deleted_texts(on)
+    accepted = _accept_all(on)
+    assert _texts_of(accepted) == _texts_of(off.doc.element.body)
+
+
+def test_a_role_the_section_writes_no_line_for_gets_no_sub_point():
+    """An entry no line was written for -- one the section skipped -- has no
+    line of its own: its prose goes under no other line of the document,
+    though the other role's line holds every distinctive word of its line."""
+    skipped, later = _clinical_role(), _later_clinical_role()
+    gen = _generator(supplementary_subpoints=True)
+    gen._fill_clinical_practice({"L3": [later]})
+    gen._add_supplementary_subpoints({"L3": [later, skipped]})
+
+    assert gen._row_receipts.elements_for(skipped) == []
+    assert gen._row_receipts.elements_for(later)
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_structural_label_the_section_skips_gets_no_sub_point():
+    """The writer skips a source heading stage 3b coded L3
+    (`_is_structural_label`): it writes no line, so none of its words go
+    under the role line that shares them."""
+    label = {"element_idx_start": 1470, "taxonomy_code": "L3",
+             "extracted_fields": {"leadership_role": None, "institution": None},
+             "text": "CLINICAL LEADERSHIP POSITIONS HELD AT NORVALE GENERAL HOSPITAL"}
+    gen = _render_clinical_roles([label, _later_clinical_role()], supplementary_subpoints=True)
+
+    assert gen._row_receipts.elements_for(label) == []
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_the_clinical_leadership_span_starts_at_the_heading_its_writer_looks_up():
+    """The span starts at the heading the writer looks the section up by,
+    the one the code's heading lookup names, and holds the role's line and
+    its sub-point."""
+    gen = _render_clinical_roles([_clinical_role()], supplementary_subpoints=True)
+    span = gen._subpoint_section_spans()["L3"]
+    heading = gen.doc.element.body[span.start]
+    assert _paragraph_text(heading).strip() == WCMTemplateGenerator._get_wcm_section_header("L3") \
+        == "Clinical Leadership"
+    (para,) = _subpoint_paragraphs(gen)
+    assert span.start < list(gen.doc.element.body).index(para) < span.end
+
+
+def test_a_template_with_no_clinical_leadership_heading_places_no_clinical_leadership_prose():
+    """Without the heading neither the writer nor the span finds the
+    section: no line is written, and the prose goes under no other line."""
+    gen = _generator(supplementary_subpoints=True)
+    gen.doc = Document()
+    gen.doc.add_paragraph("A. PERSONAL DATA")
+    entry = _clinical_role()
+    gen._fill_clinical_practice({"L3": [entry]})
+    gen._add_supplementary_subpoints({"L3": [entry]})
+
+    assert "L3" not in gen._subpoint_section_spans()
+    assert _deleted_texts(gen) == ""
+
+
+def _render_grouped_clinical_roles(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_clinical_practice(grouped)
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def _clinical_role_line(text, *roles):
+    """One source line stage 4 returned as a record per (role, hospital,
+    start), the entry's own fields being the last record's. Fan-out gives
+    every earlier record a line of its own and the last one the whole line."""
+    records = [{"leadership_role": role, "institution": site, "start_date": start}
+               for role, site, start in roles]
+    return {"element_idx_start": 663, "taxonomy_code": "L3", "text": text,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+_CLINICAL_CHIEF = ("Chief, Example Limb Preservation Service", "Kestrel Institute", "2007")
+_CLINICAL_DIRECTOR = (_CLINICAL_ROLE, _CLINICAL_SITE, "2010")
+_CLINICAL_CHIEF_LINE = "Chief, Example Limb Preservation Service, Kestrel Institute, 2007"
+_CLINICAL_DIRECTOR_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010"
+_CLINICAL_CHIEF_PROSE = ("Ran the weekly limb salvage conference, the hyperbaric oxygen service and its "
+                "wound outcomes registry")
+
+
+@pytest.mark.parametrize("segments, offered", [
+    # The segments pair with the records: the prose goes under its own role.
+    ([f"Founding {_CLINICAL_CHIEF_LINE}. {_CLINICAL_CHIEF_PROSE}", _CLINICAL_DIRECTOR_LINE],
+     [(_CLINICAL_CHIEF_LINE, f"Founding {_CLINICAL_CHIEF_LINE}. {_CLINICAL_CHIEF_PROSE}")]),
+    ([_CLINICAL_CHIEF_LINE, f"{_CLINICAL_PROSE} (interim, {_CLINICAL_DIRECTOR_LINE})"],
+     [(_CLINICAL_DIRECTOR_LINE, f"{_CLINICAL_PROSE} (interim, {_CLINICAL_DIRECTOR_LINE})")]),
+    # They do not: which role the prose is about cannot be told, so neither takes it.
+    ([_CLINICAL_CHIEF_LINE, _CLINICAL_PROSE, _CLINICAL_DIRECTOR_LINE], []),
+])
+def test_prose_on_a_line_of_several_clinical_roles_goes_under_its_own_or_none(segments, offered):
+    """A sub-point is the whole tab segment, as the CV wrote it: one that
+    holds the role's line as well as its prose brings the role, hospital and
+    year along, and Reject All prints them a second time, under the line
+    that holds them (the shape every family has; #1205, 2026-10-09)."""
+    entry = _clinical_role_line("\t".join(segments), _CLINICAL_CHIEF, _CLINICAL_DIRECTOR)
+    gen, grouped = _render_grouped_clinical_roles([entry], supplementary_subpoints=True)
+
+    assert LAST_STAGE4_RECORD in grouped["L3"][-1] and len(grouped["L3"]) == 2
+    assert [(_paragraph_text(p.getprevious()), _paragraph_text(p)) for p in _subpoint_paragraphs(gen)] \
+        == offered
+
+
+def test_prose_opening_with_the_roles_line_as_it_prints_reads_as_rendered():
+    """A residual, every family's `_record_rendered` rule: a fragment whose
+    opening stretch prints verbatim reads as rendered. The line form prints
+    a role as "Role, Institution, Dates", the order a CV often writes it in,
+    so prose sharing its segment with the line as it prints is not offered:
+    it is in neither document, with sub-points on as off (dev)."""
+    entry = _clinical_role(prose=None)
+    entry["text"] = f"{_CLINICAL_LINE}. {_CLINICAL_PROSE}"
+    on = _render_clinical_roles([entry], supplementary_subpoints=True)
+    off = _render_clinical_roles([copy.deepcopy(entry)], supplementary_subpoints=False)
+
+    assert _deleted_texts(on) == "" and _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+    assert _CLINICAL_PROSE not in "".join(_texts_of(off.doc.element.body))
+
+
+def test_generic_list_fan_out_children_of_roles_offer_nothing_their_fields_do_not_hold():
+    """Fan-out splits a record list stage 4 filed under a key the schema does
+    not define only when the fields hold every word of the text, and each
+    child's text is then the line built from its fields: nothing is prose.
+    With prose in the text the list is not split, and the entry renders its
+    own fields."""
+    records = [{"leadership_role": role, "institution": site, "start_date": start}
+               for role, site, start in (_CLINICAL_CHIEF, _CLINICAL_DIRECTOR)]
+    for text, children in ((f"{_CLINICAL_CHIEF_LINE}\t{_CLINICAL_DIRECTOR_LINE}", 2),
+                           (f"{_CLINICAL_CHIEF_LINE}\t{_CLINICAL_DIRECTOR_LINE}\t{_CLINICAL_PROSE}", 1)):
+        entry = {"element_idx_start": 664, "taxonomy_code": "L3", "text": text,
+                 "extracted_fields": {"roles": copy.deepcopy(records)}}
+        gen, grouped = _render_grouped_clinical_roles([entry], supplementary_subpoints=True)
+        assert len(grouped["L3"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["L3"])
+        if children == 2:
+            assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("N1", "MENTORING PROGRAMS"), ("S0", "BIBLIOGRAPHY")])
+def test_a_role_rerouted_out_of_l3_to_an_excluded_code_gets_no_sub_point(code, heading):
+    """N1 and S0 are excluded: a role rendered as either is that code's
+    record, so neither the role line of the same hospital nor any other
+    carries its prose."""
+    gen, grouped = _render_grouped_clinical_roles(
+        [_later_clinical_role(), _rerouted(_clinical_role(), code, heading)], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[code]] == [1482]
+    assert [e["element_idx_start"] for e in grouped["L3"]] == [1478]
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("F2", "Board Certification"),
+                                           ("C", "POSTDOCTORAL TRAINING")])
+def test_a_refused_reroute_keeps_the_clinical_leadership_rule(code, heading):
+    """A role rerouted to F2, whose span the heading lookup does not find,
+    or to C keeps its L3 code: their renderers would drop its role
+    (`_cross_family_refusal`). It renders as an L3 line and its prose is a
+    deleted paragraph under that line."""
+    gen, grouped = _render_grouped_clinical_roles([_rerouted(_clinical_role(), code, heading)],
+                                                  supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["L3"]] == [1482]
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para.getprevious()) == _CLINICAL_LINE
+
+
+def _hospital_paragraph_with_a_directorship():
+    """A hospital-employment paragraph stage 3b coded D2, which stage 4 split
+    into an attending post and a directorship, the directorship's segment
+    going on into what it oversaw (#1731, TJDPJE's shape)."""
+    attending = {"title": "Attending Physician", "institution": _CLINICAL_SITE, "start_date": "2008"}
+    director = {"title": _CLINICAL_ROLE, "institution": _CLINICAL_SITE, "start_date": "2010"}
+    return {"element_idx_start": 46, "taxonomy_code": "D2",
+            "text": (f"Attending Physician, {_CLINICAL_SITE}, 2008\t"
+                     f"{_CLINICAL_PROSE} ({_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010)"),
+            "extracted_fields": {**director, STAGE4_RECORDS_KEY: [attending, director]}}
+
+
+def test_a_record_rerouted_into_l3_follows_the_clinical_leadership_rule():
+    """A split D2 record whose title opens with a leadership title renders
+    under Clinical Leadership (#1731): its prose is a deleted paragraph under
+    its L3 line, recorded as L3. The attending post stays D2."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_hospital_paragraph_with_a_directorship()])
+    gen._fill_positions(grouped)
+    gen._fill_clinical_practice(grouped)
+    gen._add_supplementary_subpoints(grouped)
+
+    (role,) = grouped["L3"]
+    assert role["taxonomy_code_original"] == "D2" and [e["extracted_fields"]["title"]
+                                                       for e in grouped["D2"]] == ["Attending Physician"]
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para.getprevious()).startswith(f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010")
+    assert _CLINICAL_PROSE in _paragraph_text(para)
+    (placement,) = gen._subpoint_placements
+    assert placement.code == "L3"
+
+
+def test_a_role_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass touched the entry. What is left can still describe
+    what was withheld, so none of it is offered."""
+    withheld = _clinical_role()
+    withheld["_pii_withheld"] = True
+    gen = _render_clinical_roles([_later_clinical_role(), withheld], supplementary_subpoints=True)
+
+    assert _CLINICAL_LINE in _texts_of(gen.doc.element.body)
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+
+
+def test_a_role_dedup_drops_offers_its_prose_once_under_the_kept_line():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no line, so its
+    prose goes only under the line of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_clinical_role(idx=1482), _clinical_role(idx=1483)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["L3"]) == 2 and len(kept["L3"]) == 1
+    gen._fill_clinical_practice(kept)
+    gen._add_supplementary_subpoints(before)
+
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para.getprevious()) == _CLINICAL_LINE
+    assert _deleted_texts(gen) == _CLINICAL_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["L3"][0]["element_idx_start"]
+
+
+@pytest.mark.parametrize("twin_prose", [_CLINICAL_PROSE,
+                                        "Chaired the hospital's limb salvage quality review panel"],
+                         ids=["same_prose", "other_prose"])
+def test_a_role_the_record_dedup_drops_as_an_affiliates_twin_gets_no_second_sub_point(twin_prose):
+    """`record_dedup._same_leadership` (EQGGRB-07's shape): one role and unit
+    in one span at a hospital and its university is one record, and the
+    sparser copy is dropped. It wrote no line, so it gets no sub-point of
+    its own: the kept copy's prose is written once, under the kept line."""
+    unit = "Example Wound Care Program"
+    kept_role = _clinical_role(unit_program=unit)
+    twin = _clinical_role(idx=1490, site="Norvale University", prose=twin_prose)
+    twin["extracted_fields"]["unit_program"] = unit
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([kept_role, twin])
+    kept, before, decisions = gen._dedup_grouped_entries(grouped)
+    assert [e["element_idx_start"] for e in kept["L3"]] == [1482]
+    assert any(d["metric"].endswith("leadership_affiliate") for d in decisions)
+    gen._fill_clinical_practice(kept)
+    gen._add_supplementary_subpoints(before)
+
+    assert gen._row_receipts.elements_for(before["L3"][1]) == []
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para) == _CLINICAL_PROSE
+    assert [p.element_idx_start for p in gen._subpoint_placements] == [1482]
+
+
+def _low_coverage_role(*parts):
+    """A role whose line stage 4 covered at 10%: the content overflow takes
+    it, and with sub-points off writes its whole text as blue text in the
+    section, in place of the role's line."""
+    entry = _clinical_role(prose="\t".join(parts))
+    entry["extraction_coverage"] = {"extraction_coverage_percent": 10.0}
+    return entry
+
+
+def _render_low_coverage_role(entry, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_clinical_practice({"L3": [entry]})
+    # The entry the line's comment hook queued is the one stage 6 grouped.
+    assert [queued for queued, _para, _code in gen._overflow_entries] == [entry]
+    assert gen._overflow_entries[0][0] is entry
+    gen._place_unrendered_prose({"L3": [entry]})
+    return gen
+
+
+def test_a_low_coverage_role_whose_sub_point_holds_all_its_prose_keeps_its_line():
+    """The sub-point and the role's line hold every part of the role's text,
+    so the overflow pass skips the entry (`yields_to_overflow`): the line
+    stays, and the prose is the sub-point only, not also blue overflow text
+    in the line's place."""
+    blocks = [f"{_CLINICAL_PROSE}, block {n} of the service plan" for n in range(9)]
+    gen = _render_low_coverage_role(_low_coverage_role(*blocks), supplementary_subpoints=True)
+
+    paragraphs = _subpoint_paragraphs(gen)
+    assert [_paragraph_text(p) for p in paragraphs] == blocks
+    assert _paragraph_text(paragraphs[0].getprevious()) == _CLINICAL_LINE
+    assert gen.stats["overflow_bullets_added"] == 0
+    assert not any(_CLINICAL_PROSE in text for text in _texts_of(gen.doc.element.body))
+    assert gen._appendix_pending == []
+
+
+@pytest.mark.parametrize("parts", [
+    ("Budget: $4M",),                            # too short to be offered
+    ("Staff:", "12 nurses"),                     # a label and a count
+    ("2013: opened the limb salvage clinic",),   # a date-led line
+    ("Department of Surgery, Norvale General Hospital",),  # a unit the line does not print
+], ids=["short", "label", "date_led", "unprinted_unit"])
+def test_a_low_coverage_role_with_a_part_no_sub_point_holds_keeps_its_overflow(parts):
+    """#1205 review: the planner offers the long prose but not these parts.
+    With the overflow skipped for the sub-point, they were in neither Accept
+    All nor Reject All. The role gets no sub-point, and the render is the
+    one with sub-points off: the overflow writes every part in the section."""
+    prose = (_CLINICAL_PROSE, "Recruited four wound care nurses and launched the limb "
+             "preservation clinic for veterans with the affiliated medical center")
+    entry = _low_coverage_role(prose[0], *parts, prose[1])
+    on = _render_low_coverage_role(entry, supplementary_subpoints=True)
+    off = _render_low_coverage_role(copy.deepcopy(entry), supplementary_subpoints=False)
+
+    assert _subpoint_paragraphs(on) == [] and on._subpoint_placements == []
+    assert on.stats["overflow_bullets_added"] == 1
+    texts = _texts_of(on.doc.element.body)
+    assert all(part in texts for part in (*prose, *parts))
+    assert etree.tostring(on.doc.element.body, method="c14n") \
+        == etree.tostring(off.doc.element.body, method="c14n")
+
+
+def test_the_doctor_matches_a_clinical_leadership_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier role's sub-point
+    under its own index and L3, and the doctor's per-entry match counts it
+    for that entry, not for the later role that shares its words."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+
+    doc, placements = _stage6_render(tmp_path, monkeypatch, [_later_clinical_role(), _clinical_role()],
+                                     uid="T1205L")
+    assert placements == [[_CLINICAL_PROSE]]
+    sidecar = json.loads((tmp_path / "T1205L_render_warnings.json").read_text())
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    assert [(p["element_idx_start"], p["code"]) for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(1482, "L3")]
+    subpoints = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_CLINICAL_PROSE, subpoints, element_idx=1482)
+    assert not offered_as_subpoint(_CLINICAL_PROSE, subpoints, element_idx=1478)
+
+
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_clinical_leadership_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, protect, value):
+    """The PII pass drops a field named for protected data and marks the
+    entry withheld; no scope withholds a phone number in the middle of a
+    line (#1205 review of O). The same role without them still has its
+    sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [_clinical_role()])
+    assert placements == [[_CLINICAL_PROSE]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
+                                     [protect(_clinical_role(), _CLINICAL_PROSE)])
     assert placements == []
     assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
 

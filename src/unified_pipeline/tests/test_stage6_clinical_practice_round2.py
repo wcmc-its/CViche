@@ -596,6 +596,65 @@ class TestBareStartYearStaysBare1699:
         assert rows == [("Camp Physician", "Lakeside Camp", "1997")]
 
 
+
+class TestClinicalLeadershipLines:
+    """#1205: the L3 writer records each role's line against its entry in the
+    row-receipt ledger, so a sub-point goes only under the role's own line,
+    and it reads the role and institution names in the precedence the
+    sub-point pass counts (`supplementary.clinical_leadership_cell_values`)."""
+
+    _HEADER = ("Title", "Institution/Location", "Dates (yyyy)")
+
+    @staticmethod
+    def _role(start, **fields):
+        return {"text": f"Director, Example Wound Care Program, Norvale General Hospital, {start}",
+                "extracted_fields": {"leadership_role": "Director, Example Wound Care Program",
+                                     "institution": "Norvale General Hospital", "start_date": start,
+                                     **fields}}
+
+    def test_the_table_form_records_each_row_against_its_own_entry(self):
+        gen, table = _fake_doc_with_table("Clinical Leadership", self._HEADER)
+        earlier, later = self._role("2010"), self._role("2016")
+        gen._fill_clinical_practice({"L3": [earlier, later]})
+
+        # Reverse chronological: the later role's row comes first.
+        assert [r.cells[0].text for r in table.rows[1:]] == ["2016", "2010"]
+        assert gen._row_receipts.elements_for(later) == [table.rows[1]._tr]
+        assert gen._row_receipts.elements_for(earlier) == [table.rows[2]._tr]
+
+    def test_the_line_form_records_each_roles_line_against_its_own_entry(self):
+        gen = _generator()
+        earlier, later = self._role("2010"), self._role("2016")
+        gen._fill_clinical_practice({"L3": [earlier, later]})
+
+        by_element = {p._p: p.text for p in gen.doc.paragraphs}
+        assert [by_element[e] for e in gen._row_receipts.elements_for(earlier)] == [
+            "Director, Example Wound Care Program, Norvale General Hospital, 2010"]
+        assert [by_element[e] for e in gen._row_receipts.elements_for(later)] == [
+            "Director, Example Wound Care Program, Norvale General Hospital, 2016"]
+
+    def test_the_writer_reads_the_names_in_the_precedence_the_sub_point_pass_counts(self):
+        from unified_pipeline.stage6 import supplementary
+        from unified_pipeline.stage6.sections import clinical_practice
+
+        assert clinical_practice.clinical_leadership_cell_values is supplementary.clinical_leadership_cell_values
+        # The off-schema role first, then the schema's, then a title; the
+        # schema's institution, then an organization.
+        for fields, line in [
+            ({"role": "Chief", "leadership_role": "Director", "title": "Head",
+              "institution": "Acme Hospital", "organization": "Acme Health"}, "Chief, Acme Hospital"),
+            ({"leadership_role": "Director", "title": "Head", "organization": "Acme Health"},
+             "Director, Acme Health"),
+            ({"title": "Head"}, "Head"),
+        ]:
+            gen = _generator()
+            gen._fill_clinical_practice({"L3": [{"text": "Example role", "extracted_fields": fields}]})
+            assert line in [p.text for p in gen.doc.paragraphs], fields
+        gen, table = _fake_doc_with_table("Clinical Leadership", self._HEADER)
+        gen._fill_clinical_practice({"L3": [{"text": "Example role", "extracted_fields": {
+            "role": "Chief", "leadership_role": "Director", "organization": "Acme Health"}}]})
+        assert [c.text for c in table.rows[1].cells] == ["", "Chief", "Acme Health"]
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

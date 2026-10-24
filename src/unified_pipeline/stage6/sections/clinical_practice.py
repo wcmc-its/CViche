@@ -101,6 +101,7 @@ from ..formatting import (
 from ..normalization import _committee_cell_text
 from ..parsing import _is_structural_label, _refold_shattered
 from ..sorting import sort_entries_reverse_chronological
+from ..supplementary import clinical_leadership_cell_values
 
 logger = logging.getLogger(__name__)
 
@@ -558,6 +559,11 @@ class ClinicalPracticeSection:
         `_fill_clinical_practice_l1` and the module docstring for why this
         subsection's bullet-fallback text construction is fundamentally
         different from L1/L2's (deliberate, not accidental).
+
+        Each role's line is recorded against its entry in the row-receipt
+        ledger, the line form's first paragraph by the comment hook and the
+        table form's row here, so a #1205 sub-point goes only under the
+        role's own line (`supplementary._own_lines`).
         """
         if not l3_entries:
             return
@@ -592,10 +598,12 @@ class ClinicalPracticeSection:
 
                     # Normalize at extraction (#625 review) so a non-string
                     # field is clean before any string concatenation below.
-                    role = _committee_cell_text(
-                        fields.get('role') or fields.get('leadership_role') or fields.get('title') or '')
-                    institution = _committee_cell_text(
-                        fields.get('institution') or fields.get('organization') or '')
+                    # The role and institution precedences are defined once
+                    # (`clinical_leadership_cell_values`), so the line and the
+                    # #1205 sub-point pass cannot drift apart.
+                    role_value, institution_value = clinical_leadership_cell_values(fields)
+                    role = _committee_cell_text(role_value or '')
+                    institution = _committee_cell_text(institution_value or '')
                     description = _committee_cell_text(fields.get('description') or fields.get('program') or '')
                     unit_program = _committee_cell_text(fields.get('unit_program'))
                     start_date = fields.get('start_date') or ''
@@ -610,12 +618,13 @@ class ClinicalPracticeSection:
 
                     if role:
                         # Typical leadership table: Year(s) | Role | Description
-                        self._add_clinical_table_row(
+                        row = self._add_clinical_table_row(
                             table,
                             three_col=[dates, role, f"{institution}. {description}".strip('. ') if institution or description else ''],
                             two_col=[dates, f"{role} - {institution}" if institution else role],
                             one_col=[f"{dates}: {role}" if dates else role],
                         )
+                        self._row_receipts.wrote(row._tr, entry)  # the role's own row (#534, #1205)
                         self.stats['entries_inserted'] += 1
             else:
                 # No valid table found — insert as bullet points
@@ -632,10 +641,9 @@ class ClinicalPracticeSection:
                     # Normalize at extraction (#625 review): this text feeds
                     # a bullet paragraph, not a table cell, but the same
                     # non-string-field hazard applies to the f-string below.
-                    role = _committee_cell_text(
-                        fields.get('role') or fields.get('leadership_role') or fields.get('title') or '')
-                    institution = _committee_cell_text(
-                        fields.get('institution') or fields.get('organization') or '')
+                    role_value, institution_value = clinical_leadership_cell_values(fields)
+                    role = _committee_cell_text(role_value or '')
+                    institution = _committee_cell_text(institution_value or '')
                     start_date = fields.get('start_date') or ''
                     end_date = fields.get('end_date') or ''
                     dates = format_date_range(start_date, end_date, 'L3', original_text) or ''
