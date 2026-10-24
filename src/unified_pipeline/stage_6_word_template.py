@@ -4115,9 +4115,10 @@ Now analyze the text above:"""
         record of its own beside the entry's that the #221 recovery after
         this re-emits (`_record_line_verdicts`, its verdict on the document
         so far) is left to that recovery, and so is any record line of a
-        membership's (`supplementary._left_to_recovery`); the recovery reads a written
-        sub-point's paragraphs (`_subpoint_prose`) only as a line, of any
-        entry, that is no record of its own and that they are part of. A
+        membership's (`supplementary._left_to_recovery`); the recovery reads
+        a written sub-point's paragraphs (`_subpoint_prose`) only as a
+        line, of any entry, that is no record of its own and that they are
+        part of. A
         clinical leadership role the content overflow takes gets its
         sub-point only when it and the role's line hold every part of the
         overflow's text (`supplementary.yields_to_overflow`); otherwise the

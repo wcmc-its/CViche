@@ -2191,7 +2191,7 @@ def test_the_editorial_board_row_fields_are_the_writers():
     from unified_pipeline.stage6.sections import service
 
     assert service.EDITORIAL_BOARD_CODES is sp.EDITORIAL_BOARD_SUBPOINT_CODES
-    assert sp.EDITORIAL_BOARD_SUBPOINT_CODES == {"Q4B", "Q4C"}
+    assert set(sp.EDITORIAL_BOARD_SUBPOINT_CODES) == {"Q4B", "Q4C"}
     assert service.SECTION_EDITOR_CODE in sp.EDITORIAL_BOARD_SUBPOINT_CODES
     assert sp.OTHER_SERVICE_ORGANIZATION_FIELDS == ("organization", "committee_name", "agency")
     assert service.OTHER_SERVICE_ORGANIZATION_FIELDS is sp.OTHER_SERVICE_ORGANIZATION_FIELDS
