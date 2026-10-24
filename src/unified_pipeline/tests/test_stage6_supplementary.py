@@ -69,10 +69,13 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_training_memberships_clinical_leadership_and_editorial_boards():
+def test_the_codes_are_teaching_grants_appointments_service_honors_mentees_degrees_leadership_committees_talks_training_memberships_clinical_leadership_editorial_boards_and_publications():
     assert sorted(sp.SUBPOINT_CODES) == ["B1", "C", "D1", "D2", "D3", "H", "I", "K1", "K2", "K3",
                                          "K4", "K5", "L3", "M2A", "M2B", "M2C", "M2D", "N3A",
-                                         "N3B", "O", "P", "Q1", "Q2", "Q4B", "Q4C", "R"]
+                                         "N3B", "O", "P", "Q1", "Q2", "Q4B", "Q4C", "R", "S1", "S2"]
+    assert set(sp.PUBLICATION_SUBPOINT_CODES) == {"S1", "S2"}
+    # S3-S9 share the section and are not offered.
+    assert not sp.SUBPOINT_CODES & {"S0", "S3", "S4", "S5", "S6", "S7", "S8", "S9"}
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
@@ -1358,11 +1361,14 @@ def test_plan_offers_no_prose_of_a_training_position_the_pii_pass_withheld():
 
 
 def test_families_joining_after_r_are_offered_after_every_family_before_them():
-    # Q4B and Q4C sort before R by name; they joined after L3.
-    assert sorted(["Q4C", "L3", "I", "R", "Q4B", "C", "D1", "B1", "Q2", "K1", "M2A"], key=sp._offer_order) \
-        == ["B1", "D1", "K1", "M2A", "Q2", "R", "C", "I", "L3", "Q4B", "Q4C"]
+    # Q4B and Q4C sort before R by name; they joined after L3. S1 and S2,
+    # which joined after Q4B/Q4C, would otherwise come before C.
+    assert sorted(["S2", "Q4C", "L3", "I", "R", "S1", "Q4B", "C", "D1", "B1", "Q2", "K1", "M2A"],
+                  key=sp._offer_order) \
+        == ["B1", "D1", "K1", "M2A", "Q2", "R", "C", "I", "L3", "Q4B", "Q4C", "S1", "S2"]
     assert sp._LATER_FAMILIES == (sp.POSTDOCTORAL_CODES, sp.MEMBERSHIP_CODES,
-                                  sp.CLINICAL_LEADERSHIP_CODES, sp.EDITORIAL_BOARD_SUBPOINT_CODES)
+                                  sp.CLINICAL_LEADERSHIP_CODES, sp.EDITORIAL_BOARD_SUBPOINT_CODES,
+                                  sp.PUBLICATION_SUBPOINT_CODES)
 
 
 def test_a_line_a_training_position_and_an_appointment_both_hold_stays_the_appointments():
@@ -2349,6 +2355,249 @@ def test_a_line_a_talk_and_an_editorial_board_seat_both_hold_stays_the_talks():
     (alone,) = sp.plan_subpoints({"Q4B": [seat]}, _haystack(), lines, spans,
                                  rows_written=lambda e: owned.get(id(e), []))
     assert alone.paragraphs == (theme, PROSE)
+
+
+# --- S1/S2 publications -----------------------------------------------------------
+
+_PAPER_AUTHORS = "Quill AM, Rook BT, Marblegate Q"
+_PAPER_TITLE = "Sediment budgets of restored tidal marshes"
+_PAPER_JOURNAL = "Journal of Estuarine Sediment Studies"
+_PAPER_CITATION = f"{_PAPER_AUTHORS}. {_PAPER_TITLE}. {_PAPER_JOURNAL}. 2014;12(3):45-52."
+_LATER_PAPER_CITATION = (f"{_PAPER_AUTHORS}. {_PAPER_TITLE} after a decade. {_PAPER_JOURNAL}. "
+                         "2018;16(1):1-9.")
+_PAPER_PROSE = "Designed the sampling study, analysed the sediment cores and wrote the manuscript"
+
+
+def _paper(text=f"{_PAPER_CITATION}\t{_PAPER_PROSE}", code="S1", **fields):
+    return _entry(text, code=code, **{"authors": _PAPER_AUTHORS, "title": _PAPER_TITLE,
+                                      "journal": _PAPER_JOURNAL, "year": "2014", "volume": "12",
+                                      "issue": "3", "pages": "45-52", **fields})
+
+
+def _citations(*texts):
+    """The bibliography's citation paragraphs as its writer leaves them, one
+    body paragraph per paper; and their anchor candidates."""
+    doc = Document()
+    paragraphs = [doc.add_paragraph(text) for text in texts]
+    return paragraphs, list(sp.anchor_candidates(doc))
+
+
+def _plan_paper(entry, *texts, record_lines=None):
+    texts = texts or (_PAPER_CITATION,)
+    paragraphs, lines = _citations(*texts)
+    code = entry["taxonomy_code"]
+    return sp.plan_subpoints({code: [entry]}, _haystack(*texts), lines, {code: sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [paragraphs[0]._p] if e is entry else [],
+                             record_lines=record_lines)
+
+
+@pytest.mark.parametrize("code", ["S1", "S2"])
+def test_plan_places_a_publications_prose_only_under_its_own_citation(code):
+    # The same group's later paper in the same journal renders first and
+    # holds every distinctive word of the earlier one's citation: words
+    # alone take the first paragraph.
+    paragraphs, lines = _citations(_LATER_PAPER_CITATION, _PAPER_CITATION)
+    entry, spans = _paper(code=code), {code: sp.SectionSpan(0, None)}
+    assert sp.best_anchor(sp._value_tokens(entry, code), lines) is lines[0]
+
+    def written(recorded):
+        return lambda e: recorded if e is entry else []
+
+    (planned,) = sp.plan_subpoints({code: [entry]}, _haystack(_LATER_PAPER_CITATION, _PAPER_CITATION),
+                                   lines, spans, rows_written=written([paragraphs[1]._p]))
+    assert planned.anchor is lines[1] and planned.paragraphs == (_PAPER_PROSE,)
+    assert (planned.code, planned.entry_id) == (code, id(entry))
+    # Nothing recorded for it (a split, declined or superseded entry, a
+    # dedup loser), a paragraph no candidate is, or no ledger: none.
+    stray = Document().add_paragraph(_PAPER_CITATION)._p
+    for rows_written in (written([]), written([stray]), None):
+        assert sp.plan_subpoints({code: [entry]}, _haystack(), lines, spans,
+                                 rows_written=rows_written) == []
+
+
+def test_plan_takes_a_publications_one_own_citation_whatever_its_words():
+    # A citation of acronyms and initials holds no distinctive word.
+    entry = _entry(f"Quill AM. MRI of JESS. EJSS. 2014;1:2.\t{_PAPER_PROSE}", code="S1",
+                   authors="Quill AM", title="MRI of JESS", journal="EJSS", year="2014")
+    paragraphs, lines = _citations(_LATER_PAPER_CITATION, "Quill AM. MRI of JESS. EJSS. 2014;1:2.")
+    assert sp.best_anchor(sp._value_tokens(entry, "S1"), lines) is None
+    (planned,) = sp.plan_subpoints({"S1": [entry]}, _haystack(), lines, {"S1": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [paragraphs[1]._p])
+    assert planned.anchor is lines[1] and planned.paragraphs == (_PAPER_PROSE,)
+
+
+def _tracked(paragraph, tag, text):
+    """A tracked insertion or deletion of `text` appended to `paragraph`."""
+    change = sp.Revision(0, _DATE).element(tag)
+    run = change.makeelement(qn("w:r"), {})
+    piece = run.makeelement(qn("w:delText" if tag == "w:del" else "w:t"), {})
+    piece.text = text
+    run.append(piece)
+    change.append(run)
+    paragraph._p.append(change)
+    return paragraph
+
+
+def test_a_citation_written_as_a_tracked_change_takes_no_sub_point():
+    # The enrichment writer's fallback shape: the CV's line deleted, then
+    # the citation as plain runs. Reject All gives the line back, prose and
+    # all, so a sub-point would print the prose twice.
+    entry = _paper()
+    paragraphs, lines = _citations(_PAPER_CITATION)
+    _tracked(paragraphs[0], "w:del", entry["text"])
+    assert sp._holds_tracked_change(paragraphs[0]._p)
+    assert sp.plan_subpoints({"S1": [entry]}, _haystack(_PAPER_CITATION), lines, {"S1": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [paragraphs[0]._p]) == []
+    # An insertion beside plain runs: Reject All would drop part of the
+    # citation and keep the prose.
+    paragraphs, lines = _citations(_PAPER_CITATION)
+    _tracked(paragraphs[0], "w:ins", " Erratum in Coastal Studies Review 2015.")
+    assert sp._holds_tracked_change(paragraphs[0]._p)
+    assert sp.plan_subpoints({"S1": [entry]}, _haystack(_PAPER_CITATION), lines, {"S1": sp.SectionSpan(0, None)},
+                             rows_written=lambda e: [paragraphs[0]._p]) == []
+    # An enriched citation, every run inside w:del or w:ins: python-docx
+    # reads no text, so it is no candidate at all.
+    doc = Document()
+    enriched = _tracked(_tracked(doc.add_paragraph(), "w:del", entry["text"]), "w:ins", _PAPER_CITATION)
+    assert sp._holds_tracked_change(enriched._p) and list(sp.anchor_candidates(doc)) == []
+    # A plain citation holds none, and takes the prose.
+    assert not sp._holds_tracked_change(_citations(_PAPER_CITATION)[0][0]._p)
+    assert [p.paragraphs for p in _plan_paper(_paper())] == [(_PAPER_PROSE,)]
+
+
+_FULL_AUTHOR_NAMES = "Annette Marisol Quill, Bertram Tobias Rook, and Quenby Marblegate (2014)."
+
+
+@pytest.mark.parametrize("authors, fragment, offered", [
+    # The author list in full names beside the citation's initials (EBYSBC HFAJCC's shape).
+    (_PAPER_AUTHORS, _FULL_AUTHOR_NAMES, False),
+    (_PAPER_AUTHORS, "Annette M. Quill, Bertram T. Rook, Quenby Marblegate, Cecilia Fenn", False),
+    # Two of its three authors, neither of them the first, is the list too.
+    (_PAPER_AUTHORS, "Bertram Tobias Rook, Quenby Marblegate (2014).", False),
+    # A surname's particles, written in lower case, are a name's.
+    ("van der Berg K, Quill AM", "Katrien Marieke van der Berg and Annette Marisol Quill", False),
+    # Naming two authors in a sentence, or going on into the title, is prose.
+    (_PAPER_AUTHORS, "Designed the cores study with Rook and Marblegate, and wrote the manuscript", True),
+    (_PAPER_AUTHORS, "Annette Quill, Bertram Rook and Quenby Marblegate cored the marshes together", True),
+    # Naming one of several authors is not their list.
+    (_PAPER_AUTHORS, "Bertram Tobias Rook Lecture Award, Example Estuarine Society", True),
+    # A sole author named: the list is that author.
+    ("Quill A", "Annette Marisol Quill, Example Estuarine Laboratory Director", False),
+    # No author field to compare with.
+    (None, _FULL_AUTHOR_NAMES, True),
+])
+def test_a_publications_author_list_in_another_form_is_not_prose(authors, fragment, offered):
+    entry = _paper(f"{_PAPER_CITATION}\t{fragment}", authors=authors)
+    assert sp.unrendered_prose(entry, "S1", _haystack(_PAPER_CITATION)) == ([fragment] if offered else [])
+    # Only a publication's: another family's line naming the same people is its own.
+    other = dict(entry, taxonomy_code="H")
+    assert sp.unrendered_prose(other, "H", _haystack(_PAPER_CITATION)) == [fragment]
+
+
+@pytest.mark.parametrize("heading, offered", [
+    # A heading of the CV's own bibliography stage 2 joined to the entry (EBYSBC HTNNHG 153).
+    ("3. Short Reports, Methods Notes, Letters", False),
+    ("B. Invited Reviews, Editorials and Commentaries", False),
+    ("IV. Peer-Reviewed Original Research Articles:", False),
+    ("(c) Estuarine Research Reports & Coastal Monographs", False),
+    # A word in lower case, a phrase too long, a phrase naming no kind of publication: prose.
+    ("Cited in Estuarine Reviews and Coastal Reports", True),
+    ("Featured Estuarine Sediment Transport Reviews", True),
+    ("Estuarine Science Highlights, Coastal Reports", True),
+])
+def test_a_bibliography_heading_fused_onto_a_publication_is_not_prose(heading, offered):
+    entry = _paper(f"{heading}\t{_PAPER_CITATION}")
+    assert sp.unrendered_prose(entry, "S2", _haystack(_PAPER_CITATION)) == ([heading] if offered else [])
+    # Only a publication's.
+    assert sp.unrendered_prose(dict(entry, taxonomy_code="H"), "H", _haystack(_PAPER_CITATION)) == [heading]
+
+
+_NEXT_PAPER = "22. Fenn CD, Quill AM. Saltmarsh accretion under rising tides. Coastal Studies Review."
+
+
+def test_a_publication_line_holding_several_numbered_citations_offers_none():
+    # The CV's next paper fused into the entry (EBYSBC CYOFWJ 344): its
+    # citation would print as this one's prose, under this one's citation.
+    fused = _paper(f"21. {_PAPER_CITATION}\t{_NEXT_PAPER}\tCoastal Stud Rev 9:101-12, 2005.")
+    assert sp._own_citation_line(fused) == ""
+    assert _plan_paper(fused) == []
+    # One numbered citation, then its prose: offered.
+    (planned,) = _plan_paper(_paper(f"21. {_PAPER_CITATION}\t{_PAPER_PROSE}"))
+    assert planned.paragraphs == (_PAPER_PROSE,)
+    # A numbered list of contributions names no author: not citations.
+    steps = ("1) Designed the sampling study across three restored marshes",
+             "2) Analysed the sediment cores and wrote the manuscript")
+    (planned,) = _plan_paper(_paper("\t".join((_PAPER_CITATION, *steps))))
+    assert planned.paragraphs == steps
+
+
+def test_a_publication_line_restating_its_citation_with_a_note_is_offered_as_written():
+    # The CV's own citation format, with where it was presented: the note is
+    # the paper's prose, and the line is offered as written (#1205 comment
+    # 6282590626, option 1).
+    line = ("Quill, A. M., Rook, B. T. and Marblegate, Q.: Sediment Budgets of Restored Tidal Marshes "
+            "(Presented at the Example Coastal Ecology Congress, Norvale, May 2013; winner of the "
+            "Congress Student Paper Prize and featured in the Congress newsletter)")
+    (planned,) = _plan_paper(_paper(line))
+    assert planned.paragraphs == (line,)
+
+
+@pytest.mark.parametrize("segments, index, read", [
+    # The last of two records, its line's two segments pairing with them: its own.
+    ([_LATER_PAPER_CITATION, f"{_PAPER_CITATION} {_PAPER_PROSE}"], 1, f"{_PAPER_CITATION} {_PAPER_PROSE}"),
+    # The last of two records on a line of three segments: none of it.
+    ([_LATER_PAPER_CITATION, _PAPER_PROSE, _PAPER_CITATION], 1, ""),
+])
+def test_a_publication_reads_its_prose_from_its_own_line(segments, index, read):
+    entry = dict(_degree_record("\t".join(segments), index, 2), taxonomy_code="S1")
+    assert sp._prose_text("S1", entry, {}) == read
+
+
+def test_a_publication_leaves_a_dated_record_line_to_the_recovery():
+    # #2010's rule, every family's: a record of its own beside the paper's,
+    # which the #221 recovery re-emits, stays the recovery's. One it reads
+    # as rendered, and a line that is no record of its own, stay the
+    # sub-point.
+    sub_record = "Featured Article, Example Coastal Society Newsletter, 2015-2016"
+    entry = _paper(f"{_PAPER_CITATION}\t{sub_record}\t{_PAPER_PROSE}")
+    (offered,) = _plan_paper(entry)
+    assert offered.paragraphs == (sub_record, _PAPER_PROSE)
+    (planned,) = _plan_paper(entry, record_lines=lambda code, e: [
+        sp.RecordLine(_PAPER_CITATION, False, False), sp.RecordLine(sub_record, True, True)])
+    assert planned.paragraphs == (_PAPER_PROSE,)
+    (kept,) = _plan_paper(entry, record_lines=lambda code, e: [
+        sp.RecordLine(sub_record, False, True), sp.RecordLine(_PAPER_PROSE, True, False)])
+    assert kept.paragraphs == (sub_record, _PAPER_PROSE)
+
+
+def test_plan_offers_no_prose_of_a_publication_the_pii_pass_withheld():
+    entry = _paper()
+    (planned,) = _plan_paper(entry)
+    assert planned.paragraphs == (_PAPER_PROSE,)
+
+    entry["_pii_withheld"] = True
+    assert _plan_paper(entry) == []
+
+
+def test_a_line_a_training_position_and_a_publication_both_hold_stays_the_training_positions():
+    # A fellow's research project, named under the fellowship and under the
+    # paper it led to. The training position, a family shipped before S1,
+    # keeps it though S1 would sort first; the paper keeps its other line,
+    # and alone it offers both.
+    project = "Research project on saltmarsh accretion rates, supervised by the fellowship programme director"
+    table, training_lines = _training_rows(_RESIDENCY_ROW)
+    paragraphs, paper_lines = _citations(_PAPER_CITATION)
+    training = _training(f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t{project}")
+    paper = _paper(f"{_PAPER_CITATION}\t{project}\t{_PAPER_PROSE}")
+    lines = [*training_lines, *(line._replace(position=line.position + 5) for line in paper_lines)]
+    owned = {id(training): [table.rows[0]._tr], id(paper): [paragraphs[0]._p]}
+    spans = {"C": sp.SectionSpan(0, 3), "S1": sp.SectionSpan(5, None)}
+    planned = sp.plan_subpoints({"S1": [paper], "C": [training]}, _haystack(_PAPER_CITATION), lines, spans,
+                                rows_written=lambda e: owned.get(id(e), []))
+    assert [(p.code, p.paragraphs) for p in planned] == [("C", (project,)), ("S1", (_PAPER_PROSE,))]
+    (alone,) = sp.plan_subpoints({"S1": [paper]}, _haystack(_PAPER_CITATION), lines, spans,
+                                 rows_written=lambda e: owned.get(id(e), []))
+    assert alone.paragraphs == (project, _PAPER_PROSE)
 
 
 def test_only_a_mentee_code_is_placed_over_both_mentee_headings():

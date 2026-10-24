@@ -4110,8 +4110,10 @@ Now analyze the text above:"""
         text. The row-receipt ledger says which rows each entry wrote: a
         degree's, a leadership role's, a committee's, a talk's, a training
         position's, a membership's or an editorial board membership's prose
-        goes only under its own (`supplementary._own_rows`), and a clinical
-        leadership role's under its own line (`supplementary._own_lines`). A
+        goes only under its own (`supplementary._own_rows`), a clinical
+        leadership role's under its own line (`supplementary._own_lines`),
+        and a publication's under its own citation, one not written as a
+        tracked change (`supplementary._own_citation`). A
         record of its own beside the entry's that the #221 recovery after
         this re-emits (`_record_line_verdicts`, its verdict on the document
         so far) is left to that recovery, and so is any record line of a
