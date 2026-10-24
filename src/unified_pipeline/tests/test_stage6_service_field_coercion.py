@@ -1162,6 +1162,46 @@ def test_q4b_section_reaches_the_editorial_board_row(tmp_path):
                           "Special Issue on Gadget Repair")
 
 
+@pytest.mark.parametrize("code, role, text, cell", [
+    # Stage 4's role first; Q4C's schema has none, so it is off-schema there.
+    ("Q4C", "Section Editor", "Associate Editor, Fictional Widget Letters", "Section Editor"),
+    # Else a role its line writes between pipes.
+    ("Q4B", None, "2019 | Deputy Editor | Fictional Widget Letters", "Deputy Editor"),
+    ("Q4C", None, "2019 | Editorial Board Member | Fictional Widget Letters", "Editorial Board Member"),
+    # Else the writer's line roles, as written.
+    ("Q4C", None, "Guest Editor for a Fictional Widget Letters issue", "Guest Editor"),
+    # Any other wording names none, lower-case board phrasings included.
+    ("Q4C", None, "Editorial board member, Fictional Widget Letters", ""),
+    ("Q4C", None, "Member, Editorial Advisory Board, Fictional Widget Letters", ""),
+    # Only an editorial board row reads a role from its line.
+    ("Q4A", None, "2019 | Associate Editor | Fictional Widget Letters", ""),
+], ids=["stage4", "cell", "cell_board_member", "line_role", "lower_case_board", "advisory", "editor_row"])
+def test_an_editorial_board_rows_role_cell_is_the_shared_reader(tmp_path, code, role, text, cell):
+    """The Other Service writer reads an editorial board row's role through
+    `supplementary.editorial_board_role`, which the #1205 sub-point pass
+    counts as printed. The cell is what the writer's inline reading gave."""
+    fields = {"journal_name": "Fictional Widget Letters", "start_date": "2019",
+              **({"role": role} if role else {})}
+    entries = [_entry("A", name="Jane Q. Public, MD"), dict(_entry(code, **fields), text=text)]
+    rows = list(_rows_containing(_render(tmp_path, entries), "Fictional Widget Letters"))
+    assert len(rows) == 1
+    assert rows[0][0] == (f"{cell}, Fictional Widget Letters" if cell else "Fictional Widget Letters")
+
+
+def test_an_editorial_board_rows_dedupe_check_reads_the_organization_chain(tmp_path):
+    """#471: a role phrase inside the journal's title must not drop the
+    journal from the cell. The two-column check reads the organization chain
+    alone, `committee_name` included (`OTHER_SERVICE_ORGANIZATION_FIELDS`)."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q4B", role="Associate Editor", journal_name="Associate Editor Studies Quarterly",
+               committee_name="Fictional Panel", start_date="2019"),
+    ]
+    rows = list(_rows_containing(_render(tmp_path, entries), "Fictional Panel"))
+    assert len(rows) == 1
+    assert rows[0][0] == "Associate Editor, Associate Editor Studies Quarterly, Fictional Panel"
+
+
 # #1445 (EOAHMI recheck): the records of a stage-4 records list fan out into
 # one row each, and the last carries the parent's whole line. A cell its
 # fields leave empty fell back to that line, so it printed the other records.

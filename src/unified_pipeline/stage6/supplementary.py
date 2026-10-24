@@ -73,8 +73,10 @@ co-presenters, what the owner organized), then C postdoctoral training (the
 mentor, advisor or program director, the research topic, the duties), then
 I professional memberships (the offices and sub-roles held within the
 society, what the membership entailed), then L3 clinical leadership (what a
-director's, chief's or head's role oversaw, built or achieved). The
-decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
+director's, chief's or head's role oversaw, built or achieved), then Q4B-Q4C
+editorial board memberships (the section or special issue edited and its
+theme, the board's or the publication's scope, a role the row does not
+print). The decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
 code, so Q4D's exclusion is also applied by where an entry rendered: the
@@ -109,7 +111,7 @@ from .formatting import (
     presentation_date_spans,
 )
 from .formatting.dates import _span_years
-from .normalization import _pii_fragments, _squash
+from .normalization import _cell_text, _pii_fragments, _squash
 from .normalization.pii import _BARE_PHONE_SHAPE
 from .parsing import _looks_like_multiple_records, _refold_shattered
 from .parsing.dates import YEAR
@@ -351,24 +353,72 @@ MEMBERSHIP_CODES = frozenset({'I'})
 #: not its section); one rerouted into L3 (a split hospital record titled as
 #: a leadership role, #1731) follows this one.
 CLINICAL_LEADERSHIP_CODES = frozenset({'L3'})
+#: Editorial board memberships -- a seat as an associate, section or guest
+#: editor (Q4B) or on a journal's editorial board (Q4C): what the seat
+#: involved beyond its fields -- the section or special issue edited and its
+#: theme, the co-editors, the board's or the publication's scope, the
+#: member's duties, a role the row does not print. The service section's
+#: Other Service writer writes each Q4B and Q4C entry as one row of the
+#: template's Editorial Board Membership table, "Board / Organization Name |
+#: Dates" (the role, the journal and its organization, and a Q4B section,
+#: joined in the first cell), so a sub-point is a deleted row under the
+#: seat's row. The row prints the role stage 4 names, or else the one the
+#: writer reads from the entry's text (`editorial_board_role`), and the
+#: first organization of `OTHER_SERVICE_ORGANIZATION_FIELDS`, off-schema
+#: names `_RENDERED_FIELDS` cannot list; a line mostly restating them is not
+#: offered. Nor is one whose other words are only the table heading's, a
+#: generic seat the row prints no role for ("Editorial Board Member,
+#: <journal>, <years>"; `_restates_row`): Reject All would print the row
+#: twice and add nothing. A line restating the row with any other role the
+#: row does not print is offered as written: the Q4C schema has no role,
+#: and that role says what kind of board it was (an advisory, a review
+#: board) or the seat's standing (honorary, inaugural, invited), which no
+#: cell or heading holds. Only the one row the writer recorded for that
+#: entry can anchor it (`_own_rows`, the row-receipt ledger, taken with no
+#: word test): two seats on one journal's board, or one title held on
+#: several, share their rows' words, and an acronym journal holds too few.
+#: An entry the section wrote no row for (a dedup loser, a template naming
+#: neither Editorial Board Membership nor Editorial Activities) gets none.
+#: The last of stage 4's records offers only its own segment of the line,
+#: and a line holding several dated records offers none
+#: (`_own_record_line`). No entry of these codes reaches the content
+#: overflow: the writer records its row itself, not through the comment
+#: hook that collects the overflow. Journal reviewing (Q4D) stays excluded,
+#: and so does any row in the table its writer fills, whatever code the
+#: entry written there carries (`excluded_tables`). Q4 and Q4A share the
+#: section and are not offered. The span is the whole EXTRAMURAL section
+#: (`_get_wcm_section_header`'s 'Q' fallback), which holds every row the
+#: writer writes. A family joining after L3 yields a fragment a family
+#: before it is offered (`_LATER_FAMILIES`). An entry rerouted to another
+#: code before rendering is grouped under that code and follows its rule (an
+#: excluded code offers nothing, and F2 is not offered: its heading lookup
+#: finds the title block, not its section). None is rerouted into Q4B or
+#: Q4C: `TAXONOMY_TO_SECTION` names no section for Q4A-Q4D, so no reroute
+#: targets one. The Other Service writer reads these codes from here as
+#: its editorial board rows' (`service.EDITORIAL_BOARD_CODES`).
+EDITORIAL_BOARD_SUBPOINT_CODES = frozenset({'Q4B', 'Q4C'})
 #: The families whose writer records each entry's rows in the row-receipt
 #: ledger (for a clinical leadership role written as a line, its line's
 #: paragraph), and whose prose goes only under one of those (`_anchor_scope`).
 _OWN_ROW_CODES = (EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES | PRESENTATION_CODES
-                  | POSTDOCTORAL_CODES | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES)
+                  | POSTDOCTORAL_CODES | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES
+                  | EDITORIAL_BOARD_SUBPOINT_CODES)
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
                   | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES
                   | ADMINISTRATIVE_CODES | PRESENTATION_CODES | POSTDOCTORAL_CODES
-                  | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES)
+                  | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES | EDITORIAL_BOARD_SUBPOINT_CODES)
 #: The families that joined after R, in the order they joined. Each is
 #: offered after every family before it (`_offer_order`): a fragment two
 #: entries carry is offered once, to the first, so a family joining later
 #: never takes one a family before it is offered. Both a residency (C) and
 #: the appointment after it (D1) can hold one duty line, each on its own
 #: line (YUYVIG LTTYWI 76 and 80): the appointment keeps it, as before C.
-_LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES, CLINICAL_LEADERSHIP_CODES)
+#: Q4B and Q4C sort before R by name, so without this they would take a
+#: line a talk shares.
+_LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES, CLINICAL_LEADERSHIP_CODES,
+                   EDITORIAL_BOARD_SUBPOINT_CODES)
 #: The families every record line of which stays the #221 recovery's,
 #: dated or not, read as lost or not (`_left_to_recovery`): a membership's
 #: offices ("Chair, <name> Committee, <years>"), each a record the recovery
@@ -564,6 +614,30 @@ CLINICAL_LEADERSHIP_INSTITUTION_FIELDS = ('institution', 'organization')
 #: and the institution, the unit it names and the dates.
 _CLINICAL_LEADERSHIP_PLAIN_FIELDS = tuple(sorted(
     _RENDERED_FIELDS['L3'] - {*CLINICAL_LEADERSHIP_ROLE_FIELDS, *CLINICAL_LEADERSHIP_INSTITUTION_FIELDS}))
+#: The fields the Other Service writer reads a row's organization from, in
+#: its one precedence, the first that holds a value: stage 4's off-schema
+#: names on an editorial board row, whose schema names only the journal,
+#: and Q3's `agency`. The writer reads them from here
+#: (`service._journal_or_organization_text`), and `_value_tokens` counts
+#: the one it prints for Q4B and Q4C.
+OTHER_SERVICE_ORGANIZATION_FIELDS = ('organization', 'committee_name', 'agency')
+#: A role an editorial board line writes as a cell of its own, between pipes
+#: ("<year> | Associate Editor | <journal>"), which the Other Service writer
+#: prints when stage 4 names no role (`editorial_board_role`).
+_EDITORIAL_ROLE_CELL_RE = re.compile(
+    r'\|\s*((?:Associate|Guest|Deputy|Senior|Managing|Executive|Review|Reviewing)\s*'
+    r'(?:Editor|editorial\s*board\s*member)|Editorial\s*(?:Board|board)\s*(?:Member|member)?)\s*\|',
+    re.IGNORECASE)
+#: The roles that writer reads from anywhere in such a line, in order, when
+#: no cell holds one; matched as written, case and all.
+_EDITORIAL_LINE_ROLES = ('Associate Editor', 'Guest Editor')
+#: The words of the Editorial Board Membership table's heading, which every
+#: one of its rows sits under, and the member a seat on that board is. They
+#: name a generic seat ("Editorial Board Member", "Member, Editorial
+#: Board"), which a row printing no role needs no cell to say: a line whose
+#: words beyond the row's are only these restates the row under its heading
+#: (`_restates_row`).
+_EDITORIAL_BOARD_HEADING_WORDS = frozenset({'editorial', 'board', 'member', 'membership'})
 #: The kinds of body a membership is held in, capitalised as a name is
 #: ("American Statistical Association", "Society of Example Studies",
 #: "Federation of Example Societies", "Union for Example Studies"), each
@@ -851,14 +925,42 @@ def _clinical_leadership_row_values(fields: Mapping) -> list[object]:
             *(fields.get(name) for name in _CLINICAL_LEADERSHIP_PLAIN_FIELDS)]
 
 
+def editorial_board_role(fields: Mapping, text: str) -> str:
+    """The role an editorial board row (Q4B, Q4C) prints: stage 4's `role`
+    (off-schema for Q4C, whose schema has none), else the one its line
+    writes in a cell of its own (`_EDITORIAL_ROLE_CELL_RE`), else the first
+    of `_EDITORIAL_LINE_ROLES` it holds, else none. The Other Service writer
+    reads it from here, and `_value_tokens` counts it."""
+    role = _cell_text(fields.get('role', ''))
+    if role:
+        return role
+    cell = _EDITORIAL_ROLE_CELL_RE.search(text)
+    if cell:
+        return cell.group(1).strip()
+    return next((line_role for line_role in _EDITORIAL_LINE_ROLES if line_role in text), '')
+
+
+def _editorial_board_row_values(fields: Mapping, text: str, names: Iterable[str]) -> list[object]:
+    """The values an editorial board row prints: its role
+    (`editorial_board_role`), the organization it joins to the journal (the
+    first of `OTHER_SERVICE_ORGANIZATION_FIELDS` that holds one), and the
+    schema's fields its cells print (`names`: the journal, a Q4B section,
+    the dates). A two-column row whose role opens the organization's text
+    prints the role alone, so counting the organization there errs toward
+    offering less."""
+    return [editorial_board_role(fields, text), first_field_value(fields, OTHER_SERVICE_ORGANIZATION_FIELDS),
+            *(fields.get(name) for name in names)]
+
+
 def _value_tokens(entry: Mapping, code: str) -> set[str]:
     """Distinctive tokens of the entry's field values its section renders
     (`_RENDERED_FIELDS`, and for a degree `_DEGREE_CELL_FIELDS`, for a
     leadership role `_LEADERSHIP_ROW_FIELDS`, for a committee
     `_ADMINISTRATIVE_ROW_FIELDS`, for a talk `_PRESENTATION_ROW_FIELDS`; for
-    a training position, a membership or a clinical leadership role, what
-    its row prints, `_training_row_values`, `_membership_row_values`,
-    `_clinical_leadership_row_values`), or of every scalar field for a code
+    a training position, a membership, a clinical leadership role or an
+    editorial board membership, what its row prints, `_training_row_values`,
+    `_membership_row_values`, `_clinical_leadership_row_values`,
+    `_editorial_board_row_values`), or of every scalar field for a code
     rendered from its text."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
@@ -878,6 +980,8 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
         values = _membership_row_values(fields)
     elif code in CLINICAL_LEADERSHIP_CODES:
         values = _clinical_leadership_row_values(fields)
+    elif code in EDITORIAL_BOARD_SUBPOINT_CODES:
+        values = _editorial_board_row_values(fields, str(entry.get('text') or ''), names)
     else:
         values = [fields.get(name) for name in names]
     return set().union(*(_tokens(str(value)) for value in values
@@ -889,14 +993,26 @@ def _holds_field_values(fragment: str, value_tokens: set[str]) -> bool:
     return len(tokens & value_tokens) >= SUBPOINT_FIELD_TOKEN_MAX_SHARE * len(tokens)
 
 
+def _restates_row(fragment: str, code: str, value_tokens: set[str]) -> bool:
+    """Whether `fragment` is the entry's row reformatted: it mostly holds
+    the values the row prints (`_holds_field_values`), or, for an editorial
+    board membership, its other words are only its table heading's
+    (`_EDITORIAL_BOARD_HEADING_WORDS`), "Editorial Board Member, <journal>,
+    <years>" under a row printing the journal and the years. Reject All
+    would print the row twice, and the second adds nothing."""
+    return _holds_field_values(fragment, value_tokens) or (
+        code in EDITORIAL_BOARD_SUBPOINT_CODES
+        and _tokens(fragment) - value_tokens <= _EDITORIAL_BOARD_HEADING_WORDS)
+
+
 def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack,
                      text: str | None = None) -> list[str]:
-    """The prose fragments of `text` (by default the entry's own) that hold
-    none of the entry's rendered field values and that the document provably
-    does not contain."""
+    """The prose fragments of `text` (by default the entry's own) that do
+    not restate the entry's row (`_restates_row`) and that the document
+    provably does not contain."""
     value_tokens = _value_tokens(entry, code)
     return [fragment for fragment in prose_fragments(entry.get('text') or '' if text is None else text)
-            if not _holds_field_values(fragment, value_tokens)
+            if not _restates_row(fragment, code, value_tokens)
             and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
 
 
@@ -1418,7 +1534,7 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
         return _own_rows(entry, in_section, rows_written)
     if code in ADMINISTRATIVE_CODES or code in MEMBERSHIP_CODES:
         return _one_own_row(entry, in_section, rows_written)
-    if code in PRESENTATION_CODES or code in POSTDOCTORAL_CODES:
+    if code in PRESENTATION_CODES or code in POSTDOCTORAL_CODES or code in EDITORIAL_BOARD_SUBPOINT_CODES:
         return _own_rows(entry, in_section, rows_written)
     if code in CLINICAL_LEADERSHIP_CODES:
         return _own_lines(entry, in_section, rows_written)
@@ -1428,10 +1544,11 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
 def _pick_anchor(code: str, entry_tokens: set[str],
                  scope: list[AnchorCandidate]) -> AnchorCandidate | None:
     """The line of `scope` the entry's prose goes under. A degree's, a
-    leadership role's, a committee's, a talk's, a training position's or a
-    membership's one own row (`_own_rows`), or a clinical leadership role's
-    one own line (`_own_lines`), is taken as it is: the writer's
-    record already says whose it is, and a short row ("PhD", "Kell
+    leadership role's, a committee's, a talk's, a training position's, a
+    membership's or an editorial board membership's one own row
+    (`_own_rows`), or a clinical leadership role's one own line
+    (`_own_lines`), is taken as it is: the writer's record already says
+    whose it is, and a short row ("PhD", "Kell
     University", "2010"; a "Dean" of an acronym) holds too few distinctive
     words for `best_anchor`, as does a degree's row whose stage-5b
     institution name shares few words with the field. Any other scope is
@@ -1491,7 +1608,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     committee's is, and none is offered when its line names another society
     or stage 4 listed memberships under its fields (`_own_membership_line`).
     A clinical leadership role's is read as a degree's is, and its line must
-    be the paragraph or row its writer recorded for it (`_own_lines`).
+    be the paragraph or row its writer recorded for it (`_own_lines`). An
+    editorial board membership's is read as a degree's is too.
     In every family a fragment that is, holds or is part of one of the
     entry's records the #221 recovery reads (`record_lines`) that is a record
     of its own beside the entry's and that the recovery re-emits, and for a
