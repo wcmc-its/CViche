@@ -14,9 +14,11 @@ is. Reject the deletion to keep it; accept all changes to get the template.
 
 Where it goes, by what the entry's rendered line is:
 
-- a body paragraph (a teaching entry, a clinical leadership role): a
-  paragraph after it, one list level deeper, whose run AND paragraph mark
-  are deleted, so accepting leaves no empty bullet;
+- a body paragraph (a teaching entry, a clinical leadership role, a
+  publication's citation): a paragraph after it, one list level or indent
+  step deeper (a citation, neither a list paragraph nor indented, keeps its
+  indent), whose run AND paragraph mark are deleted, so accepting leaves no
+  empty bullet;
 - a table row (an appointment, a grant table, a service row): a row
   spanning the table, marked as a deleted row, after the entry's row -- or,
   for a label/value table holding one grant or one mentee, at the table's
@@ -76,7 +78,9 @@ society, what the membership entailed), then L3 clinical leadership (what a
 director's, chief's or head's role oversaw, built or achieved), then Q4B-Q4C
 editorial board memberships (the section or special issue edited and its
 theme, the board's or the publication's scope, a role the row does not
-print). The decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
+print), then S1-S2 publications (the owner's part in a paper, its findings,
+where it was presented, an award or press coverage for it). The decision's
+exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
 code, so Q4D's exclusion is also applied by where an entry rendered: the
@@ -112,6 +116,13 @@ from .formatting import (
 )
 from .formatting.dates import _span_years
 from .normalization import _cell_text, _pii_fragments, _squash
+from .normalization.owner_alias import (
+    SURNAME_PARTICLES,
+    author_segment,
+    is_initials,
+    name_parts,
+    parse_authors,
+)
 from .normalization.pii import _BARE_PHONE_SHAPE
 from .parsing import _looks_like_multiple_records, _refold_shattered
 from .parsing.dates import YEAR
@@ -397,18 +408,64 @@ CLINICAL_LEADERSHIP_CODES = frozenset({'L3'})
 #: targets one. The Other Service writer reads these codes from here as
 #: its editorial board rows' (`service.EDITORIAL_BOARD_CODES`).
 EDITORIAL_BOARD_SUBPOINT_CODES = frozenset({'Q4B', 'Q4C'})
+#: Peer-reviewed research articles (S1) and reviews and editorials (S2): what
+#: a CV says about a paper beyond its citation -- the owner's role in it or
+#: contribution to it (designed the study, drafted the paper), a summary
+#: of its findings, its significance, where it was presented, an award, a
+#: selection or press coverage for it. The bibliography writer writes each S1
+#: and S2 entry as one citation paragraph under its subsection label
+#: ("Peer-reviewed Research Articles:", "Reviews and Editorials:"), so a
+#: sub-point is a deleted paragraph directly under the citation. Only the
+#: paragraph the writer recorded for that entry can anchor it (`_own_lines`,
+#: the row-receipt ledger: the comment hook records each citation's
+#: paragraph), taken with no word test: papers of one group share their
+#: authors' and journal's words, and an enriched citation sits inside w:ins,
+#: which python-docx's text, and so the word test, cannot read (the
+#: 2026-10-21 re-rank: 21 of 64 placements under another paper, mostly an
+#: abstract by the same authors). An entry the writer recorded no paragraph
+#: for gets none: one it split into several citations (#208), declined as no
+#: citation (#446) or dropped as an in-press duplicate, and a dedup loser.
+#: Nor does a citation written as a tracked change (`_holds_tracked_change`):
+#: an enriched citation deletes the CV's whole line beside PubMed's inserted
+#: one, so Reject All already gives the line back, prose and all, and a
+#: sub-point would print the prose twice; an insertion with no deletion beside
+#: it would leave the prose under the paper before it. Not offered either: a
+#: fragment that is the bibliography's own matter (`_is_bibliography_matter`:
+#: the entry's author list in another form, a heading of the CV's own
+#: bibliography, its author-marker legend), nothing from a line holding
+#: several numbered citations (`_own_citation_line`), and nothing from a line
+#: one of whose fragments is another paper's citation with no list number
+#: (`_cites_another_paper`), which would stand for that paper's record in
+#: the doctor's reading of the document. A line restating the citation
+#: with a note the citation does not print (where it was presented, the
+#: owner's part in it) is offered as written. The last of stage 4's records
+#: offers only its own segment of the line, and a line holding several
+#: dated records offers none (`_own_record_line`). No entry of these codes
+#: reaches the content overflow (`is_overflow_candidate` turns every S code
+#: away), so #2013's neither-document gap cannot arise. The span is the whole
+#: Bibliography (`_get_wcm_section_header`'s 'S' fallback), which holds every
+#: citation the writer writes. S3-S9 share the section and are not offered.
+#: A family joining after Q4B/Q4C yields a fragment a family before it is
+#: offered (`_LATER_FAMILIES`). An entry rerouted to another code before
+#: rendering is grouped under that code and follows its rule (an excluded
+#: code offers nothing, and F2 is not offered: its heading lookup finds the
+#: title block, not its section); one rerouted into S1 or S2 (an abstract
+#: under a peer-reviewed heading) follows this one.
+PUBLICATION_SUBPOINT_CODES = frozenset({'S1', 'S2'})
 #: The families whose writer records each entry's rows in the row-receipt
 #: ledger (for a clinical leadership role written as a line, its line's
-#: paragraph), and whose prose goes only under one of those (`_anchor_scope`).
+#: paragraph; for a publication, its citation's), and whose prose goes only
+#: under one of those (`_anchor_scope`).
 _OWN_ROW_CODES = (EDUCATION_CODES | LEADERSHIP_CODES | ADMINISTRATIVE_CODES | PRESENTATION_CODES
                   | POSTDOCTORAL_CODES | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES
-                  | EDITORIAL_BOARD_SUBPOINT_CODES)
+                  | EDITORIAL_BOARD_SUBPOINT_CODES | PUBLICATION_SUBPOINT_CODES)
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
 SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
                   | HONOR_CODES | MENTEE_CODES | EDUCATION_CODES | LEADERSHIP_CODES
                   | ADMINISTRATIVE_CODES | PRESENTATION_CODES | POSTDOCTORAL_CODES
-                  | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES | EDITORIAL_BOARD_SUBPOINT_CODES)
+                  | MEMBERSHIP_CODES | CLINICAL_LEADERSHIP_CODES | EDITORIAL_BOARD_SUBPOINT_CODES
+                  | PUBLICATION_SUBPOINT_CODES)
 #: The families that joined after R, in the order they joined. Each is
 #: offered after every family before it (`_offer_order`): a fragment two
 #: entries carry is offered once, to the first, so a family joining later
@@ -416,9 +473,10 @@ SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_COD
 #: the appointment after it (D1) can hold one duty line, each on its own
 #: line (YUYVIG LTTYWI 76 and 80): the appointment keeps it, as before C.
 #: Q4B and Q4C sort before R by name, so without this they would take a
-#: line a talk shares.
+#: line a talk shares, and S1 and S2 would be offered before C, I, L3, Q4B
+#: and Q4C.
 _LATER_FAMILIES = (POSTDOCTORAL_CODES, MEMBERSHIP_CODES, CLINICAL_LEADERSHIP_CODES,
-                   EDITORIAL_BOARD_SUBPOINT_CODES)
+                   EDITORIAL_BOARD_SUBPOINT_CODES, PUBLICATION_SUBPOINT_CODES)
 #: The families every record line of which stays the #221 recovery's,
 #: dated or not, read as lost or not (`_left_to_recovery`): a membership's
 #: offices ("Chair, <name> Committee, <years>"), each a record the recovery
@@ -685,13 +743,71 @@ _OWN_TITLE_MIN_SHARE = 0.5
 #: digits, short ones included, so a part's count, budget or year ("12
 #: nurses", "$4M") is held only by a line that prints it.
 _LINE_WORD_RE = re.compile(r'\w+')
+#: A publication's fragment naming this many of the entry's own stage-4
+#: authors (all of them when it has fewer), every word of it written as a
+#: name is (`_is_author_list`), is the entry's author list in another form:
+#: the CV's full given names beside the citation's initials (EBYSBC HFAJCC
+#: 56, 71, 104, 111 and 126, HZGJFM 690). A line naming them in a sentence,
+#: or going on into the title, holds a word in lower case and is offered.
+SUBPOINT_AUTHOR_LIST_MIN_NAMES = 2
+#: A word of a fragment as `_written_as_names` reads its case: letters, with
+#: the apostrophes, periods and hyphens a name or an initial holds.
+_NAME_LIST_WORD_RE = re.compile(r"[^\W\d_][\w'’.-]*")
+#: The words an author list writes in lower case: the joiners before its
+#: last name ("and", "et al.") and a surname's particles ("van", "de la").
+_AUTHOR_LIST_LOWER_WORDS = frozenset({'and', 'et', 'al'}) | SURNAME_PARTICLES
+#: A publication's fragment whose author list (`author_segment`) names this
+#: many people (`parse_authors`) with as many initials, every word of it
+#: written as a name is, opens like a citation (`_opens_with_author_list`).
+SUBPOINT_CITATION_MIN_AUTHORS = 2
+#: A fragment opening like a citation that holds at least this share of the
+#: distinctive words of the entry's own title is the entry's citation again
+#: (`_cites_another_paper`): the CV's own line, offered as written (#1205
+#: comment 6282590626, option 1).
+SUBPOINT_OWN_TITLE_MIN_SHARE = 0.5
+#: A piece of an author-marker legend: a marker and what it stands for
+#: ("† joint first authors", "‡ joint senior authors").
+_MARKER_LEGEND_PIECE_RE = re.compile(r'\s*([*†‡§¶#]+)\s*[=:–-]?\s*[^\W\d_]')
+#: What separates a legend's pieces.
+_MARKER_LEGEND_SEPARATOR_RE = re.compile(r'[;,]')
+#: A legend explains at least this many markers (`_is_marker_legend`); one
+#: marker and its note can be the paper's own ("*co-first author").
+SUBPOINT_LEGEND_MIN_MARKERS = 2
+#: The kinds of publication a CV's bibliography heads a list with, plural as
+#: a heading names them ("Short Reports, Methods Notes, Letters", "Reviews
+#: and Editorials"): a phrase ending in one (`_is_bibliography_heading`).
+_PUBLICATION_KINDS = frozenset({'abstracts', 'articles', 'books', 'chapters', 'commentaries',
+                                'comments', 'editorials', 'letters', 'manuscripts', 'monographs',
+                                'notes', 'papers', 'proceedings', 'publications', 'reports', 'reviews'})
+#: A heading's outline marker ("2.", "(b)", "IV.").
+_HEADING_MARKER_RE = re.compile(r'^\s*\(?(?:\d{1,2}|[A-Za-z]|[IVXivx]{1,4})[.)]\s+')
+#: What separates a heading's phrases.
+_HEADING_SEPARATOR_RE = re.compile(r'\s*(?:[,;&/]|\band\b)\s*')
+#: A heading's phrase is at most this many words ("Peer-Reviewed Original
+#: Research Articles").
+_HEADING_PHRASE_MAX_WORDS = 4
+#: A part of a publication's line that opens with a list number and an
+#: author ("22. Doe JM, ...", "(3) Roe, A. ..."): a numbered citation. Not a
+#: numbered list of what the owner did, whose verb an acronym follows and
+#: then a word in lower case ("1) Designed MRI protocols"); an author's
+#: initials are followed by a comma, a period, the next author or "and" /
+#: "et al.".
+_NUMBERED_CITATION_RE = re.compile(r"^\s*(?:\(\d{1,3}\)|\[\d{1,3}\]|\d{1,3}[.)])\s+"
+                                   r"[^\W\d_][\w'’-]*,?\s+[A-Z]{1,3}\b(?!\s+(?!(?:and|et)\b)[a-z])")
+#: A publication's line holding this many numbered citations
+#: (`_NUMBERED_CITATION_RE`) holds several papers (`_own_citation_line`).
+SUBPOINT_NUMBERED_CITATIONS_MIN = 2
+#: The revision elements a paragraph's runs sit in when stage 6 wrote it as
+#: a tracked change (`_holds_tracked_change`).
+_TRACKED_CHANGE_TAGS = frozenset({qn('w:ins'), qn('w:del')})
 
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
 #: The elements a section writer recorded for an entry, by identity
 #: (`RowReceiptLedger.elements_for`): its rows, or its first cells'
-#: paragraphs, or a body paragraph (a clinical leadership role's line). Read
-#: for the families that anchor only on those (`_OWN_ROW_CODES`).
+#: paragraphs, or a body paragraph (a clinical leadership role's line, a
+#: publication's citation). Read for the families that anchor only on those
+#: (`_OWN_ROW_CODES`).
 RowsWritten = Callable[[Mapping], Iterable[BaseOxmlElement]]
 
 
@@ -1005,15 +1121,149 @@ def _restates_row(fragment: str, code: str, value_tokens: set[str]) -> bool:
         and _tokens(fragment) - value_tokens <= _EDITORIAL_BOARD_HEADING_WORDS)
 
 
+def _author_name_parts(entry: Mapping) -> list[set[str]]:
+    """Each author in the entry's stage-4 `authors` field, as the folded
+    parts of its surname (`parse_authors`, `name_parts`); none when the field
+    is not text."""
+    fields = entry.get('extracted_fields')
+    authors = fields.get('authors') if isinstance(fields, Mapping) else None
+    if not isinstance(authors, str):
+        return []
+    return [parts for author in parse_authors(authors) if (parts := name_parts(author.surname))]
+
+
+def _written_as_names(text: str) -> bool:
+    """Whether every word of `text` is written as a name or an initial is:
+    capitalized, or one of `_AUTHOR_LIST_LOWER_WORDS`."""
+    return not any(word[0].islower() and word.rstrip('.').casefold() not in _AUTHOR_LIST_LOWER_WORDS
+                   for word in _NAME_LIST_WORD_RE.findall(text))
+
+
+def _is_author_list(fragment: str, author_parts: Sequence[set[str]]) -> bool:
+    """Whether a publication's fragment is its author list in another form:
+    written as names (`_written_as_names`), the surnames it lists
+    (`parse_authors`) naming `SUBPOINT_AUTHOR_LIST_MIN_NAMES` of the entry's
+    authors (`author_parts`), or all of them when it has fewer. An author's
+    surname elsewhere in a fragment is not its list's: "Young Investigator
+    Award, Smith Foundation Annual Meeting" lists no "Young K, Smith J".
+    With no authors to name, whose list it is cannot be shown."""
+    if not author_parts or not _written_as_names(fragment):
+        return False
+    named = set().union(*(name_parts(author.surname) for author in parse_authors(fragment)))
+    return sum(1 for parts in author_parts if parts & named) >= min(SUBPOINT_AUTHOR_LIST_MIN_NAMES,
+                                                                     len(author_parts))
+
+
+def _opens_with_author_list(fragment: str) -> bool:
+    """Whether a publication's fragment opens like a citation: its author
+    list (`author_segment`, up to its title or its year) is written as names
+    (`_written_as_names`), names `SUBPOINT_CITATION_MIN_AUTHORS` people
+    (`parse_authors`) and gives as many initials (`is_initials`), as a
+    citation writes its authors ("Fenn CD", "Fenn, C. D.", "C. D. Fenn"). A
+    run of capitalized words naming a prize, a meeting or a society
+    ("Runner-up, Example Prize, Example Surgical Society, 1999"), or a
+    citation's journal and volume on a line of their own, gives none."""
+    authors = author_segment(fragment)
+    initials = sum(map(is_initials, _NAME_LIST_WORD_RE.findall(authors)))
+    return (_written_as_names(authors)
+            and min(len(parse_authors(authors)), initials) >= SUBPOINT_CITATION_MIN_AUTHORS)
+
+
+def _title_tokens(entry: Mapping) -> set[str]:
+    """The distinctive words of the entry's stage-4 `title`; none when the
+    field is not text."""
+    fields = entry.get('extracted_fields')
+    title = fields.get('title') if isinstance(fields, Mapping) else None
+    return _tokens(title) if isinstance(title, str) else set()
+
+
+def _cites_another_paper(fragment: str, entry: Mapping) -> bool:
+    """Whether a publication's fragment is another paper's citation: it opens
+    like one (`_opens_with_author_list`), states a year (`_LINE_YEAR_RE`) and
+    holds less than `SUBPOINT_OWN_TITLE_MIN_SHARE` of the words of the
+    entry's own title (`_title_tokens`): the CV's next paper joined to the
+    entry's line by a tab, a line break or a pipe with no list number, which
+    `_own_citation_line` does not see (#1205 review). The entry's own
+    citation restated holds its title and is offered as written (#1205
+    comment 6282590626, option 1). For an entry with no title, whose
+    citation cannot be told from another, one is read as another's:
+    offered, another paper's citation would stand for that paper's record.
+    Read the same: the first printed line of the entry's own citation, its
+    authors and year, offered because it is written unlike the rendered one
+    while its title runs on to the next line (EBYSBC XWNZWW 606). Not seen:
+    a paper of one author, and another paper written "<authors>: <title>"
+    with a word in lower case before its year, whose author list runs on
+    into the title."""
+    title = _title_tokens(entry)
+    return (_opens_with_author_list(fragment) and bool(_LINE_YEAR_RE.search(fragment))
+            and (not title or len(_tokens(fragment) & title) < SUBPOINT_OWN_TITLE_MIN_SHARE * len(title)))
+
+
+def _is_marker_legend(fragment: str) -> bool:
+    """Whether a publication's fragment is the legend of the bibliography's
+    author markers that stage 2 joined to the entry, "(† joint first
+    authors; ‡ joint senior authors)" (YUYVIG SLYBST 159's shape): every
+    piece a marker and what it stands for (`_MARKER_LEGEND_PIECE_RE`), at
+    least `SUBPOINT_LEGEND_MIN_MARKERS` markers. It is about the whole list,
+    not the paper it is joined to."""
+    text = fragment.strip().strip('()[]')
+    pieces = [piece for piece in _MARKER_LEGEND_SEPARATOR_RE.split(text) if piece.strip()]
+    markers = [match.group(1) for piece in pieces if (match := _MARKER_LEGEND_PIECE_RE.match(piece))]
+    return len(markers) == len(pieces) and len(set(markers)) >= SUBPOINT_LEGEND_MIN_MARKERS
+
+
+def _names_publication_kind(phrase: str) -> bool:
+    """Whether `phrase` is one a bibliography heading lists: at most
+    `_HEADING_PHRASE_MAX_WORDS` capitalized words, the last a kind of
+    publication (`_PUBLICATION_KINDS`)."""
+    words = phrase.split()
+    return (len(words) <= _HEADING_PHRASE_MAX_WORDS and all(word[:1].isupper() for word in words)
+            and words[-1].casefold() in _PUBLICATION_KINDS)
+
+
+def _is_bibliography_heading(fragment: str) -> bool:
+    """Whether a publication's fragment is a heading of the CV's own
+    bibliography that stage 2 joined to the entry: after any outline marker
+    (`_HEADING_MARKER_RE`), phrases each naming a kind of publication
+    (`_names_publication_kind`), "3. Short Reports, Methods Notes, Letters"
+    (EBYSBC HTNNHG 153's shape). A line saying anything of a paper holds a
+    word in lower case, or a phrase that names no kind of publication
+    ("Highlighted in Nature Reviews ...")."""
+    text = _HEADING_MARKER_RE.sub('', fragment).strip().rstrip(':.').strip()
+    phrases = [phrase for phrase in _HEADING_SEPARATOR_RE.split(text) if phrase.strip()]
+    return bool(phrases) and all(map(_names_publication_kind, phrases))
+
+
+def _is_bibliography_matter(fragment: str, author_parts: Sequence[set[str]]) -> bool:
+    """Whether a publication's fragment is the bibliography's own matter, not
+    the paper's prose: the entry's author list in another form
+    (`_is_author_list`), a heading of the CV's bibliography
+    (`_is_bibliography_heading`) or its author-marker legend
+    (`_is_marker_legend`)."""
+    return (_is_author_list(fragment, author_parts) or _is_bibliography_heading(fragment)
+            or _is_marker_legend(fragment))
+
+
 def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack,
                      text: str | None = None) -> list[str]:
     """The prose fragments of `text` (by default the entry's own) that do
-    not restate the entry's row (`_restates_row`) and that the document
-    provably does not contain."""
+    not restate the entry's row (`_restates_row`), that for a publication
+    are not the bibliography's own matter (`_is_bibliography_matter`), and
+    that the document provably does not contain. A publication offers none
+    when one of them is another paper's citation (`_cites_another_paper`):
+    offered, it would print as this paper's prose and stand for the other
+    paper's record, which the doctor would then not report lost, and which
+    paper the line's other prose is about cannot be told."""
     value_tokens = _value_tokens(entry, code)
-    return [fragment for fragment in prose_fragments(entry.get('text') or '' if text is None else text)
-            if not _restates_row(fragment, code, value_tokens)
-            and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
+    publication = code in PUBLICATION_SUBPOINT_CODES
+    authors = _author_name_parts(entry) if publication else []
+    fragments = [fragment for fragment in prose_fragments(entry.get('text') or '' if text is None else text)
+                 if not _restates_row(fragment, code, value_tokens)
+                 and not (publication and _is_bibliography_matter(fragment, authors))
+                 and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
+    if publication and any(_cites_another_paper(fragment, entry) for fragment in fragments):
+        return []
+    return fragments
 
 
 def _in_tables(anchor: AnchorCandidate, tables: Collection[BaseOxmlElement]) -> bool:
@@ -1231,9 +1481,10 @@ def _one_own_row(entry: Mapping, candidates: list[AnchorCandidate],
 
 def _own_lines(entry: Mapping, candidates: list[AnchorCandidate],
                rows_written: RowsWritten | None) -> list[AnchorCandidate]:
-    """A clinical leadership role's own lines: the candidates that are a
-    body paragraph its writer recorded for `entry` (the comment hook records
-    the first paragraph of the role's line), or a row it recorded (a
+    """A clinical leadership role's own lines, or a publication's
+    (`_own_citation`): the candidates that are a body paragraph its writer
+    recorded for `entry` (the comment hook records the first paragraph of
+    the role's line, and each citation's paragraph), or a row it recorded (a
     table's, `_own_rows`). None when it recorded neither, or with no
     ledger: roles of one hospital, or held under one title, share their
     lines' words, the section's L1 and L2 lines sit beside them, and a role
@@ -1245,6 +1496,42 @@ def _own_lines(entry: Mapping, candidates: list[AnchorCandidate],
     return [c for c in candidates
             if any(c is row for row in rows)
             or any(c.paragraph._p is paragraph for paragraph in paragraphs)]
+
+
+def _holds_tracked_change(paragraph: BaseOxmlElement) -> bool:
+    """Whether a paragraph's runs sit in a tracked insertion or deletion
+    (`_TRACKED_CHANGE_TAGS`): an enriched citation's, the CV's line deleted
+    beside PubMed's inserted."""
+    return any(child.tag in _TRACKED_CHANGE_TAGS for child in paragraph)
+
+
+def _own_citation(entry: Mapping, candidates: list[AnchorCandidate],
+                  rows_written: RowsWritten | None) -> list[AnchorCandidate]:
+    """A publication's own citation: the paragraph its writer recorded for
+    it (`_own_lines`), unless written as a tracked change
+    (`_holds_tracked_change`). Reject All then gives back the CV's whole
+    line, which holds every fragment of the entry's text, so a sub-point
+    would print its prose twice; and without the deletion, Reject All would
+    drop the citation and leave the prose under the paper before it. A
+    citation inside w:ins is no candidate in any case: python-docx's text
+    reads none of it."""
+    return [c for c in _own_lines(entry, candidates, rows_written)
+            if not _holds_tracked_change(c.paragraph._p)]
+
+
+def _own_citation_line(entry: Mapping) -> str:
+    """The text a publication's prose is read from (`_own_record_line`), and
+    nothing when its parts hold several numbered citations
+    (`_NUMBERED_CITATION_RE`): the next paper of the CV's list fused into
+    the entry ("21. <authors>. <title> ...\t22. <authors>. <title> ...",
+    EBYSBC CYOFWJ 344), whose citation would print as this one's prose,
+    under this one's citation. Another paper's citation with no list number
+    is read with the fragments the line offers (`unrendered_prose`,
+    `_cites_another_paper`). Not seen: one in the same part as the entry's
+    own."""
+    own = _own_record_line(entry)
+    numbered = sum(bool(_NUMBERED_CITATION_RE.match(part)) for part in _split_fragments(own))
+    return '' if numbered >= SUBPOINT_NUMBERED_CITATIONS_MIN else own
 
 
 def _is_sentence_tail(fragment: str) -> bool:
@@ -1517,6 +1804,8 @@ def _prose_text(code: str, entry: Mapping,
         return _own_training_line(entry)
     if code in MEMBERSHIP_CODES:
         return _own_membership_line(entry)
+    if code in PUBLICATION_SUBPOINT_CODES:
+        return _own_citation_line(entry)
     if code in _OWN_ROW_CODES:
         return _own_record_line(entry)
     return None
@@ -1538,6 +1827,8 @@ def _anchor_scope(code: str, entry: Mapping, in_section: list[AnchorCandidate],
         return _own_rows(entry, in_section, rows_written)
     if code in CLINICAL_LEADERSHIP_CODES:
         return _own_lines(entry, in_section, rows_written)
+    if code in PUBLICATION_SUBPOINT_CODES:
+        return _own_citation(entry, in_section, rows_written)
     return in_section
 
 
@@ -1546,9 +1837,9 @@ def _pick_anchor(code: str, entry_tokens: set[str],
     """The line of `scope` the entry's prose goes under. A degree's, a
     leadership role's, a committee's, a talk's, a training position's, a
     membership's or an editorial board membership's one own row
-    (`_own_rows`), or a clinical leadership role's one own line
-    (`_own_lines`), is taken as it is: the writer's record already says
-    whose it is, and a short row ("PhD", "Kell
+    (`_own_rows`), or a clinical leadership role's or a publication's one
+    own line (`_own_lines`), is taken as it is: the writer's record already
+    says whose it is, and a short row ("PhD", "Kell
     University", "2010"; a "Dean" of an acronym) holds too few distinctive
     words for `best_anchor`, as does a degree's row whose stage-5b
     institution name shares few words with the field. Any other scope is
@@ -1609,7 +1900,12 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     or stage 4 listed memberships under its fields (`_own_membership_line`).
     A clinical leadership role's is read as a degree's is, and its line must
     be the paragraph or row its writer recorded for it (`_own_lines`). An
-    editorial board membership's is read as a degree's is too.
+    editorial board membership's is read as a degree's is too. A
+    publication's is read as a degree's is, and none is offered when its
+    line holds several numbered citations (`_own_citation_line`) or another
+    paper's citation (`unrendered_prose`); its line must be the citation its
+    writer recorded for it, not written as a tracked change
+    (`_own_citation`).
     In every family a fragment that is, holds or is part of one of the
     entry's records the #221 recovery reads (`record_lines`) that is a record
     of its own beside the entry's and that the recovery re-emits, and for a
