@@ -43,6 +43,8 @@ def test_name_parts(name, parts):
     # Comma form: the initials token belongs to the surname before it.
     ("Wende, M. E., Smith, J. A. Title of a paper. J Things. 2020.",
      [("Wende", "M"), ("Smith", "J")]),
+    # Unless that author already has initials: a stray one after it is dropped.
+    ("Wende ME, J., Smith JA" + _TAIL, [("Wende", "M"), ("Smith", "J")]),
     # Given-name-first forms.
     ("Michael E. Wendee, John Smith. Cancer genomics in mice. Nature. 2020.",
      [("Wendee", "M"), ("Smith", "J")]),

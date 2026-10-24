@@ -2481,6 +2481,8 @@ _FULL_AUTHOR_NAMES = "Annette Marisol Quill, Bertram Tobias Rook, and Quenby Mar
     (_PAPER_AUTHORS, "Annette Quill, Bertram Rook and Quenby Marblegate cored the marshes together", True),
     # Naming one of several authors is not their list.
     (_PAPER_AUTHORS, "Bertram Tobias Rook Lecture Award, Example Estuarine Society", True),
+    # Two authors' surnames heading a prize and a meeting are no list's names.
+    (_PAPER_AUTHORS, "Quill Early Career Prize, Rook Foundation Annual Meeting", True),
     # A sole author named: the list is that author.
     ("Quill A", "Annette Marisol Quill, Example Estuarine Laboratory Director", False),
     # No author field to compare with.
@@ -2529,6 +2531,109 @@ def test_a_publication_line_holding_several_numbered_citations_offers_none():
              "2) Analysed the sediment cores and wrote the manuscript")
     (planned,) = _plan_paper(_paper("\t".join((_PAPER_CITATION, *steps))))
     assert planned.paragraphs == steps
+    # Nor does one whose verb an acronym follows, then a word in lower case.
+    steps = ("1) Designed MRI protocols for the sediment cores of three restored marshes",
+             "2) Analysed CT scans of every core and wrote the manuscript")
+    assert not any(map(sp._NUMBERED_CITATION_RE.match, steps))
+    (planned,) = _plan_paper(_paper("\t".join((_PAPER_CITATION, *steps))))
+    assert planned.paragraphs == steps
+    # An author's initials followed by "and" or "et al." still open a citation.
+    assert sp._NUMBERED_CITATION_RE.match("22. Fenn CD and Quill AM. Saltmarsh accretion")
+    assert sp._NUMBERED_CITATION_RE.match("22. Fenn CD et al. Saltmarsh accretion")
+
+
+_OTHER_PAPER = "Fenn CD, Quill AM. Saltmarsh accretion under rising tides. Coastal Studies Review"
+
+
+@pytest.mark.parametrize("separator", ["\t", "\n", " | "], ids=["tab", "newline", "pipe"])
+@pytest.mark.parametrize("locator", [". 2011;9:101-12.", ". 2014;9:101-12.", " 9:101-12, 2011"],
+                         ids=["other_year", "same_year", "trailing_year"])
+def test_a_publication_line_holding_another_papers_citation_offers_none(separator, locator):
+    # The CV's next paper joined to the entry's line with no list number
+    # (#1205 review): offered, its citation would print as this paper's
+    # prose, and the doctor would read that paper as rendered.
+    other = f"{_OTHER_PAPER}{locator}"
+    entry = _paper(f"{_PAPER_CITATION}{separator}{other}")
+    assert sp._own_citation_line(entry) == entry["text"]
+    assert sp._cites_another_paper(" ".join(other.split()), entry)
+    assert sp.unrendered_prose(entry, "S1", _haystack(_PAPER_CITATION), entry["text"]) == []
+    assert _plan_paper(entry) == []
+    # Nor the prose beside it: which paper it is about cannot be told.
+    assert _plan_paper(_paper(f"{_PAPER_CITATION}{separator}{other}{separator}{_PAPER_PROSE}")) == []
+    # Only a publication's: another family's line naming people is its own.
+    other_family = dict(entry, taxonomy_code="H")
+    assert sp.unrendered_prose(other_family, "H", _haystack(_PAPER_CITATION)) == [" ".join(other.split())]
+
+
+def _wrapped_own_citation():
+    """The entry's own citation broken at its printed lines, its authors and
+    year on the first (EBYSBC XWNZWW 606's shape): written unlike the
+    rendered citation, the first line is offered, and reads as a citation
+    whose title is not the entry's."""
+    return _paper("\n".join((
+        "• Quill AM, Rook BT, Marblegate Q, et al. for the Example Marsh Restoration Trial 2014",
+        "(EMRT) Study investigators (Q Marblegate listed as investigator) “Sediment budgets of",
+        f"restored tidal marshes” {_PAPER_JOURNAL} 2014;12:45-52.")))
+
+
+def _untitled_paper():
+    """A paper stage 4 found no title for: whose citation a fragment is
+    cannot be told."""
+    return _paper(f"{_PAPER_CITATION}\t{_OTHER_PAPER}. 2011;9:101-12.", title=None)
+
+
+@pytest.mark.parametrize("make", [_wrapped_own_citation, _untitled_paper], ids=["wrapped_own", "untitled"])
+def test_a_line_whose_citation_cannot_be_told_from_another_papers_offers_none(make):
+    assert _plan_paper(make()) == []
+
+
+@pytest.mark.parametrize("fragment", [
+    # A prize, a meeting or a society written in capitals gives no initials,
+    # or fewer than the people it names.
+    "Runner-up, Example Coastal Prize, Example Estuarine Society Annual Meeting, 2015",
+    "Featured Article, Example Coastal Society Newsletter, 2016",
+    "Rook BT Medal, Example Estuarine Society Annual Meeting, 2015",
+    # Authors named in a sentence: no author list opens it.
+    "Analysed the sediment cores and drafted the methods with Fenn CD, Rook BT, Quill AM, 2015",
+    # Authors with no year: the next printed line of a citation.
+    "Fenn CD, Quill AM. Saltmarsh accretion under rising tides",
+])
+def test_a_publication_fragment_that_is_no_other_papers_citation_is_offered(fragment):
+    entry = _paper(f"{_PAPER_CITATION}\t{fragment}")
+    assert not sp._cites_another_paper(fragment, entry)
+    assert [p.paragraphs for p in _plan_paper(entry)] == [(fragment,)]
+
+
+def test_a_publication_line_restating_its_own_citation_in_another_form_is_offered_as_written():
+    # The CV's own line, list number, author markers and journal abbreviation
+    # and all, then what the owner did: it opens like a citation and holds
+    # the entry's title, so it is the entry's own (#1205 comment 6282590626,
+    # option 1), not another paper's.
+    line = ("39. Quill AM*, Rook BT, Marblegate Q. Sediment Budgets of Restored Tidal Marshes. J Estuar "
+            "Sediment Stud. 2014 Mar;12(3):45-52. *Designed the sampling study, analysed the sediment "
+            "cores, drafted every figure and wrote the manuscript")
+    entry = _paper(line)
+    assert sp._opens_with_author_list(line) and not sp._cites_another_paper(line, entry)
+    assert [p.paragraphs for p in _plan_paper(entry)] == [(line,)]
+
+
+@pytest.mark.parametrize("fragment, offered", [
+    # The legend of the bibliography's author markers (YUYVIG SLYBST 159's shape).
+    ("(† joint first authors; ‡ joint senior authors)", False),
+    ("(† joint first authors; ‡ joint senior authors;)", False),
+    ("* joint first authors, # corresponding author", False),
+    # One marker and its note can be the paper's own.
+    ("*Joint first author with the second author", True),
+    ("*Joint first author with the second author; designed the sampling study", True),
+    ("*Designed the sampling study; *analysed the cores", True),
+    # A note that opens with a marker and goes on: not a legend.
+    ("*Designed the sampling study; † analysed the cores; wrote the manuscript", True),
+])
+def test_an_author_marker_legend_fused_onto_a_publication_is_not_prose(fragment, offered):
+    entry = _paper(f"{_PAPER_CITATION}\t{fragment}")
+    assert sp.unrendered_prose(entry, "S1", _haystack(_PAPER_CITATION)) == ([fragment] if offered else [])
+    # Only a publication's.
+    assert sp.unrendered_prose(dict(entry, taxonomy_code="H"), "H", _haystack(_PAPER_CITATION)) == [fragment]
 
 
 def test_a_publication_line_restating_its_citation_with_a_note_is_offered_as_written():

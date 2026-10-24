@@ -8788,9 +8788,10 @@ def test_fan_out_children_of_a_papers_line_offer_nothing_their_own_segment_does_
     its own segment when the segments pair with the records
     (`_own_record_line`). Prose on a segment of its own pairs with no
     record, so neither child offers it, as which paper it is about cannot
-    be told. The same line kept whole, with no records, offers it: another
-    paper's citation with no list number is not seen
-    (`_own_citation_line`)."""
+    be told. The same line kept whole, with no records, offers it: the
+    later paper, by the same group in the same journal, restates the
+    entry's fields (`_restates_row`) and holds its title, so it reads as the
+    entry's own citation, not another paper's (`_cites_another_paper`)."""
     later = f"{_PAPER_AUTHORS}. {_PAPER_TITLE} after a decade. {_PAPER_JOURNAL}. 2018;16(1):1-9."
     own = f"{_PAPER_AUTHORS}. {_PAPER_TITLE}. {_PAPER_JOURNAL}. 2014;12(3):45-52."
     records = [{"authors": _PAPER_AUTHORS, "title": f"{_PAPER_TITLE} after a decade", "journal": _PAPER_JOURNAL,
@@ -8810,7 +8811,9 @@ def test_the_doctor_matches_a_publication_sub_point_to_its_own_entry_only(tmp_pa
     """Through `run_stage6`: the sidecar records the earlier paper's
     sub-point under its own index and S1, and the doctor's per-entry match
     counts it for that entry, not for the later paper that shares its words.
-    The sub-point sits one indent step under its citation."""
+    The sub-point sits directly under its citation at the citation's own
+    indent, none: Reject All shows it as an unnumbered paragraph level with
+    the citations."""
     from unified_pipeline.doctor.shared import (
         docx_subpoint_lines,
         offered_as_subpoint,
@@ -8830,6 +8833,38 @@ def test_the_doctor_matches_a_publication_sub_point_to_its_own_entry_only(tmp_pa
     assert not offered_as_subpoint(_PAPER_PROSE, subpoints, element_idx=1190)
     (para,) = [p for p in doc.element.body.iterchildren(qn("w:p")) if supplementary._is_subpoint(p)]
     assert _citation_text(para.getprevious()).startswith("2. ")
+    assert para.find(f"{qn('w:pPr')}/{qn('w:ind')}") is None
+    assert para.getprevious().find(f"{qn('w:pPr')}/{qn('w:ind')}") is None
+
+
+_FUSED_PAPER = "Fenn CD, Quill AM. Saltmarsh accretion under rising tides. Coastal Studies Review. 2011;9:101-12."
+
+
+@pytest.mark.parametrize("second, placed", [(_FUSED_PAPER, []), (_PAPER_PROSE, [[_PAPER_PROSE]])],
+                         ids=["another_paper", "own_prose"])
+def test_the_doctor_still_reports_another_paper_fused_onto_a_publications_line(tmp_path, monkeypatch,
+                                                                               second, placed):
+    """Through `run_stage6` (#1205 review): the CV's next paper joined to
+    the entry's line with no list number is no sub-point, so the doctor's
+    `source_line_coverage` reports it missing from the entry with sub-points
+    on as with them off. The paper's own prose in its place is the
+    sub-point, which the doctor reads as there."""
+    from unified_pipeline.doctor.lints.coverage import lint_source_line_coverage
+    from unified_pipeline.doctor.shared import docx_body_blocks
+
+    entry = _publication(prose=second)
+    citation = entry["text"].split("\t")[0]
+
+    def missing(flag):
+        doc, placements = _stage6_render(tmp_path / str(flag), monkeypatch, [copy.deepcopy(entry)],
+                                         supplementary_subpoints=flag)
+        findings = lint_source_line_coverage([citation, second], docx_body_blocks(doc),
+                                             docx_body_blocks(doc, deleted=True),
+                                             stage3b={"entries": [copy.deepcopy(entry)]})
+        return placements, [(f["message"].split(":")[0], f["evidence"]) for f in findings]
+
+    assert missing(False) == ([], [("entry 1200", [second])])
+    assert missing(True) == (placed, [] if placed else [("entry 1200", [second])])
 
 
 # ------------------------------------------- date-led sibling records (#983)

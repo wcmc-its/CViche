@@ -73,7 +73,9 @@ _MARKERS = re.compile(r"[*†‡§¶#^\d]+")
 # "M.E." or "M. E." written as separate words still reads as initials, and so
 # do four capitals ("HJWL") and a hyphenated pair ("H.-T"): never a surname.
 _INITIALS = re.compile(rf"^[A-Z](?:\.?[{_HYPHENS}]?[A-Z]){{0,3}}\.?$")
-_PARTICLES = frozenset((
+# The lower-case words a surname opens with ("van", "de la"); the #1205
+# sub-point pass reads an author list's case by them too.
+SURNAME_PARTICLES = frozenset((
     "van", "von", "der", "den", "de", "la", "le", "da", "di", "del", "della",
     "du", "dos", "das", "do", "bin", "ibn", "al", "el", "ter", "ten", "zu", "st",
 ))
@@ -91,7 +93,7 @@ def name_parts(name: str) -> set[str]:
     """Folded hyphen/space parts of a surname, particles left out unless the
     surname is nothing else ("de la Cruz" -> {cruz}, "Das" -> {das})."""
     parts = [p for p in (fold_name(w) for w in re.split(rf"[\s{_HYPHENS}]+", name)) if len(p) > 1]
-    named = {p for p in parts if p not in _PARTICLES}
+    named = {p for p in parts if p not in SURNAME_PARTICLES}
     return named or set(parts)
 
 
@@ -124,7 +126,9 @@ def author_segment(citation: str) -> str:
     return text[:min(ends)] if ends else text
 
 
-def _is_initials(word: str) -> bool:
+def is_initials(word: str) -> bool:
+    """Whether `word` is an author's initials ("CD", "C.", "H.-T"), as
+    `_INITIALS` reads them."""
     return bool(_INITIALS.match(word))
 
 
@@ -133,7 +137,7 @@ def _author_words(token: str) -> list[str] | None:
     words = _MARKERS.sub("", token).split()
     if not words or len(words) > _MAX_AUTHOR_WORDS:
         return None
-    if any(w[0].islower() and w.lower().strip(".") not in _PARTICLES for w in words):
+    if any(w[0].islower() and w.lower().strip(".") not in SURNAME_PARTICLES for w in words):
         return None
     return words
 
@@ -141,14 +145,14 @@ def _author_words(token: str) -> list[str] | None:
 def _split_author(words: list[str]) -> Author | None:
     """Surname and initial of an author written "Garza Ruiz M", "M. E.
     Wende", "Ana Garza Ruiz" or "Michael E. Wende"."""
-    flags = [_is_initials(w) for w in words]
+    flags = [is_initials(w) for w in words]
     if all(flags):
         return None
     if flags[-1]:
         cut = len(flags) - flags[::-1].index(False)
         return Author(" ".join(words[:cut]), words[cut][0])
     if flags[0]:
-        return Author(" ".join(w for w in words if not _is_initials(w)), words[0][0])
+        return Author(" ".join(w for w in words if not is_initials(w)), words[0][0])
     if len(words) == 1:
         return Author(words[0].strip("."), '')
     last_initial = max((i for i, f in enumerate(flags) if f), default=0)
@@ -161,11 +165,11 @@ def parse_authors(citation: str) -> list[Author]:
     tokens = [_author_words(t) for t in _AUTHOR_SEPARATOR.split(author_segment(citation))]
     authors: list[Author] = []
     for i, words in enumerate(tokens):
-        if words is None or all(_is_initials(w) for w in words):
+        if words is None or all(is_initials(w) for w in words):
             continue
         following = tokens[i + 1] if i + 1 < len(tokens) else None
-        if following and all(_is_initials(w) for w in following) \
-                and not any(_is_initials(w) for w in words):
+        if following and all(is_initials(w) for w in following) \
+                and not any(is_initials(w) for w in words):
             author = Author(" ".join(words), following[0][0])
         else:
             author = _split_author(words)
