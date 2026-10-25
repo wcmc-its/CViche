@@ -1728,11 +1728,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self.supplementary_subpoints = supplementary_subpoints
         # The appointment-title duties the positions writer wrote as
         # sub-points, each with its row, which the sub-point pass and the
-        # #221 recovery read as rendered; the paragraphs of the sub-points
-        # the pass wrote, which the recovery reads only as a record line, of
-        # any entry, that is no record of its own and that they are part of
-        # (`supplementary.held_by_subpoint`); and the entries either was
-        # written for, which the overflow pass skips.
+        # #221 recovery read as rendered; the planned sub-points' lines as
+        # the CV wrote them (`SubPoint.source_lines`), which the recovery
+        # reads only as a record line, of any entry, that is no record of its
+        # own and that they are part of (`supplementary.held_by_subpoint`);
+        # and the entries either was written for, which the overflow skips.
         self._subpoint_lines: list[str] = []
         self._subpoint_prose: list[str] = []
         self._subpoint_entry_ids: set[int] = set()
@@ -4118,13 +4118,17 @@ Now analyze the text above:"""
         this re-emits (`_record_line_verdicts`, its verdict on the document
         so far) is left to that recovery, and so is any record line of a
         membership's (`supplementary._left_to_recovery`); the recovery reads
-        a written sub-point's paragraphs (`_subpoint_prose`) only as a
-        line, of any entry, that is no record of its own and that they are
-        part of. A
+        a planned sub-point's lines as the CV wrote them (`_subpoint_prose`,
+        `SubPoint.source_lines`) only as a line, of any entry, that is no
+        record of its own and that they are part of. A
         clinical leadership role the content overflow takes gets its
         sub-point only when it and the role's line hold every part of the
         overflow's text (`supplementary.yields_to_overflow`); otherwise the
-        overflow is written, as with sub-points off."""
+        overflow is written, as with sub-points off. A line that restates the
+        line it goes under is written as its other words
+        (`supplementary.unrestated`); the recovery and the overflow read it
+        whole, so neither changes, and a sub-point left with no paragraph is
+        written nowhere but still stands for its entry."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         out_lines = self._rendered_output_lines() + self._subpoint_lines
@@ -4145,11 +4149,13 @@ Now analyze the text above:"""
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:
-            self._subpoint_prose.extend(subpoint.paragraphs)
+            self._subpoint_prose.extend(subpoint.source_lines())
+            self._subpoint_entry_ids.add(subpoint.entry_id)
+            if not subpoint.paragraphs:
+                continue  # its every line only restated its anchor, which prints them
             subpoint = subpoint._replace(paragraphs=tuple(
                 self._sanitize_run_text(text) for text in subpoint.paragraphs))
             supplementary.write_subpoint(subpoint, revision)
-            self._subpoint_entry_ids.add(subpoint.entry_id)
             self._subpoint_placements.append(supplementary.SubpointPlacement(
                 subpoint.element_idx_start, subpoint.code, subpoint.paragraphs))
         self._revision_id = revision.next_id

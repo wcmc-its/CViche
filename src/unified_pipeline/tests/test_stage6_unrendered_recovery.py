@@ -20,6 +20,7 @@ import ast
 import copy
 import inspect
 import json
+import re
 import sys
 import textwrap
 import unicodedata
@@ -3110,16 +3111,17 @@ def test_a_mentee_named_only_inside_an_award_title_gets_no_sub_point():
     assert _subpoint_rows(gen) == [] and _MENTEE_PROSE not in _deleted_texts(gen)
 
 
-def test_a_one_segment_mentee_line_is_offered_whole_its_identity_included():
-    """A fragment is a whole tab segment, so a line giving the mentee's name,
-    level and years before its prose is offered as the CV wrote it: Reject
-    All prints those three a second time, beside the table's own rows."""
+def test_a_one_segment_mentee_line_is_offered_without_the_identity_its_table_prints():
+    """A fragment is a whole tab segment, so a line gives the mentee's name,
+    level and years before its prose. The table prints those three, so the
+    sub-point is the prose alone (owner decision 2026-10-25, #1205): Reject
+    All prints them once, in the table's own rows."""
     line = f"Ana Li, Postdoctoral Associate, 2014-2017, {_MENTEE_PROSE}"
     gen = _render_mentoring({"N3B": [dict(_mentee(), text=line)]}, supplementary_subpoints=True)
 
     (row,) = _subpoint_rows(gen)
     assert _mentee_named_by(row) == "Ana Li"
-    assert "".join(t.text for t in row.iter(qn("w:delText"))) == line
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _MENTEE_PROSE
 
 
 def _mentee_line(text, *periods):
@@ -3175,14 +3177,16 @@ def test_one_mentees_two_periods_on_one_line_keep_its_prose():
     """YUYVIG ECXGAT 1479: stage 4 made one record per period of the same
     mentee, so the whole line is that mentee's, and its prose goes once,
     under the first of the two tables. Another line's mentee is no record
-    of this one."""
+    of this one. The name and level that table prints are cut; the periods,
+    the second of which it does not print, stay."""
     line = f"Ana Li, Postdoctoral Associate, 2008-2010 and 2012-2014, {_MENTEE_PROSE}"
     entry = _mentee_line(line, ("Ana Li", "2008", "2010"), ("Ana Li", "2012", "2014"))
     gen, _ = _render_grouped_mentoring([_other_postdoc(), entry], supplementary_subpoints=True)
 
     assert sorted(_mentee_names(gen)) == ["Ana Li", "Ana Li", "Casey Sample"]
     (row,) = _subpoint_rows(gen)
-    assert _mentee_named_by(row) == "Ana Li" and _deleted_texts(gen) == line
+    assert _mentee_named_by(row) == "Ana Li"
+    assert _deleted_texts(gen) == f"2008-2010 and 2012-2014, {_MENTEE_PROSE}"
 
 
 # --- #1205: B1 degrees, the next code family ----------------------------------
@@ -3500,17 +3504,16 @@ _PHD_LINE = f"Ph.D., {_DEGREE_FIELD}, Norvale University, 2005"
 
 @pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own degree.
-    ([f"{_MS_LINE}, {_THESIS}", _PHD_LINE], [("M.S.", f"{_MS_LINE}, {_THESIS}")]),
-    ([_MS_LINE, f"{_PHD_LINE}, {_THESIS}"], [("Ph.D.", f"{_PHD_LINE}, {_THESIS}")]),
+    ([f"{_MS_LINE}, {_THESIS}", _PHD_LINE], [("M.S.", _THESIS)]),
+    ([_MS_LINE, f"{_PHD_LINE}, {_THESIS}"], [("Ph.D.", _THESIS)]),
     # They do not: whose thesis it is cannot be told, so it goes under neither.
     ([_MS_LINE, _THESIS, _PHD_LINE], []),
 ])
 def test_prose_on_a_line_of_several_degrees_goes_under_its_own_or_none(segments, offered):
-    """A sub-point is the whole tab segment, as the CV wrote it: one that
-    holds the degree's line as well as its thesis brings the degree, field,
-    institution and year along, and Reject All prints them a second time,
-    under the row that holds them (`test_a_thesis_on_its_degrees_own_line_
-    brings_the_line_with_it`)."""
+    """A sub-point is read from the whole tab segment: one that holds the
+    degree's line as well as its thesis is written as the thesis alone, as
+    the row prints the degree, field, institution and year
+    (`test_a_thesis_on_its_degrees_own_line_is_written_without_the_line`)."""
     entry = _degree_line("\t".join(segments), ("M.S.", "2001"), ("Ph.D.", "2005"))
     gen, grouped = _render_grouped_education([entry], supplementary_subpoints=True)
 
@@ -3520,13 +3523,13 @@ def test_prose_on_a_line_of_several_degrees_goes_under_its_own_or_none(segments,
         == offered
 
 
-def test_a_thesis_on_its_degrees_own_line_brings_the_line_with_it():
+def test_a_thesis_on_its_degrees_own_line_is_written_without_the_line():
     """A fragment splits only on tabs, line breaks and pipes, so a thesis in
-    the same sentence run as its degree is offered with the degree's line,
-    the shape every family has (#1673's honors, #1935's mentees): Reject All
-    prints the degree, field, institution and year again, under the row
-    that holds them. The CV's line as written is the shape the owner
-    approved (#1205, 2026-10-09)."""
+    the same sentence run as its degree is read with the degree's line, the
+    shape every family has (#1673's honors, #1935's mentees). The row prints
+    the degree, field, institution and year, so the sub-point is the thesis
+    alone (owner decision 2026-10-25, #1205, replacing the as-written shape
+    of 2026-10-09): Reject All prints the line once, the thesis under it."""
     line = f"{_PHD_LINE}. {_THESIS}"
     entry = _degree(idx=17, degree="Ph.D.", year="2005", prose="")
     entry["text"] = line
@@ -3534,7 +3537,7 @@ def test_a_thesis_on_its_degrees_own_line_brings_the_line_with_it():
 
     (row,) = _subpoint_rows(gen)
     assert _row_text(row.getprevious()) == f"Ph.D., {_DEGREE_FIELD}Norvale University2005"
-    assert "".join(t.text for t in row.iter(qn("w:delText"))) == line
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _THESIS
 
 
 def test_the_doctor_matches_a_degree_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
@@ -3835,18 +3838,16 @@ _DIRECTOR_LINE = f"{_ROLE_TITLE}, {_ROLE_INSTITUTION}, 2005-2010"
 
 @pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own role.
-    ([f"{_CHAIR_LINE}. {_ROLE_PROSE}", _DIRECTOR_LINE],
-     [("Chair", f"{_CHAIR_LINE}. {_ROLE_PROSE}")]),
-    ([_CHAIR_LINE, f"{_DIRECTOR_LINE}. {_ROLE_PROSE}"],
-     [("Director", f"{_DIRECTOR_LINE}. {_ROLE_PROSE}")]),
+    ([f"{_CHAIR_LINE}. {_ROLE_PROSE}", _DIRECTOR_LINE], [("Chair", _ROLE_PROSE)]),
+    ([_CHAIR_LINE, f"{_DIRECTOR_LINE}. {_ROLE_PROSE}"], [("Director", _ROLE_PROSE)]),
     # They do not: which role the prose is about cannot be told, so neither takes it.
     ([_CHAIR_LINE, _ROLE_PROSE, _DIRECTOR_LINE], []),
 ])
 def test_prose_on_a_line_of_several_roles_goes_under_its_own_or_none(segments, offered):
-    """A sub-point is the whole tab segment, as the CV wrote it: one that
-    holds the role's line as well as its prose brings the role, institution
-    and dates along, and Reject All prints them a second time, under the
-    row that holds them (the shape every family has; #1205, 2026-10-09)."""
+    """A sub-point is read from the whole tab segment: one that holds the
+    role's line as well as its prose is written as the prose alone, as the
+    row prints the role, institution and dates (owner decision 2026-10-25,
+    #1205)."""
     entry = _role_line("\t".join(segments), _CHAIR, _DIRECTOR)
     gen, grouped = _render_grouped_leadership([entry], supplementary_subpoints=True)
 
@@ -4470,18 +4471,16 @@ _STEERING_LINE = f"Member, {_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}, 2005-201
 @pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own committee.
     ([f"{_ADMISSIONS_LINE}. {_ADMISSIONS_PROSE}", _STEERING_LINE],
-     [("Example Admissions Committee", f"{_ADMISSIONS_LINE}. {_ADMISSIONS_PROSE}")]),
-    ([_ADMISSIONS_LINE, f"{_STEERING_LINE}. {_COMMITTEE_PROSE}"],
-     [(_COMMITTEE_NAME, f"{_STEERING_LINE}. {_COMMITTEE_PROSE}")]),
+     [("Example Admissions Committee", _ADMISSIONS_PROSE)]),
+    ([_ADMISSIONS_LINE, f"{_STEERING_LINE}. {_COMMITTEE_PROSE}"], [(_COMMITTEE_NAME, _COMMITTEE_PROSE)]),
     # They do not: which committee the prose is about cannot be told, so neither takes it.
     ([_ADMISSIONS_LINE, _COMMITTEE_PROSE, _STEERING_LINE], []),
 ])
 def test_prose_on_a_line_of_several_committees_goes_under_its_own_or_none(segments, offered):
-    """A sub-point is the whole tab segment, as the CV wrote it: one that
-    holds the committee's line as well as its prose brings the name,
-    institution, role and years along, and Reject All prints them a second
-    time, under the row that holds them (the shape every family has; #1205,
-    2026-10-09)."""
+    """A sub-point is read from the whole tab segment: one that holds the
+    committee's line as well as its prose is written as the prose alone, as
+    the row prints the name, institution, role and years (owner decision
+    2026-10-25, #1205)."""
     entry = _committee_line("\t".join(segments), _ADMISSIONS, _STEERING)
     gen, grouped = _render_grouped_committees([entry], supplementary_subpoints=True)
 
@@ -4495,11 +4494,11 @@ def test_a_committee_line_opening_with_its_name_cell_is_read_as_its_row():
     """The name cell folds the institution in ("Committee, Institution"), so
     a line that opens with that text holds the row's own text verbatim, and
     `_record_rendered` reads the whole line as rendered: none of it is
-    offered, its prose included. A line opening with the role is offered
-    whole, as the CV wrote it."""
+    offered, its prose included. A line opening with the role is offered,
+    and written as its prose: the row prints the rest."""
     name_first = f"{_COMMITTEE_NAME}, {_COMMITTEE_INSTITUTION}, Member, 2005-2010. {_COMMITTEE_PROSE}"
     role_first = f"{_STEERING_LINE}. {_COMMITTEE_PROSE}"
-    for line, offered in ((name_first, ""), (role_first, role_first)):
+    for line, offered in ((name_first, ""), (role_first, _COMMITTEE_PROSE)):
         entry = _committee(start="2005", end="2010", prose=None)
         entry["text"] = line
         gen = _render_committees([entry], supplementary_subpoints=True)
@@ -5098,17 +5097,17 @@ _ESTUARY_PROSE = ("Opened the morning session on sediment budgets and led a disc
 @pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own talk.
     ([f"{_ESTUARY_LINE}. {_ESTUARY_PROSE}", _WETLAND_LINE],
-     [("Estuary Sediment Transport in Tidal Marshes", f"{_ESTUARY_LINE}. {_ESTUARY_PROSE}")]),
+     [("Estuary Sediment Transport in Tidal Marshes", _ESTUARY_PROSE)]),
     ([_ESTUARY_LINE, f"Invited speaker, {_WETLAND_LINE}. {_TALK_PROSE}"],
-     [(_TALK_TITLE, f"Invited speaker, {_WETLAND_LINE}. {_TALK_PROSE}")]),
+     [(_TALK_TITLE, f"Invited speaker, {_TALK_PROSE}")]),
     # They do not: which talk the prose is about cannot be told, so neither takes it.
     ([_ESTUARY_LINE, _TALK_PROSE, _WETLAND_LINE], []),
 ])
 def test_prose_on_a_line_of_several_talks_goes_under_its_own_or_none(segments, offered):
-    """A sub-point is the whole tab segment, as the CV wrote it: one that
-    holds the talk's line as well as its prose brings the title, venue and
-    year along, and Reject All prints them a second time, under the row that
-    holds them (the shape every family has; #1205, 2026-10-09)."""
+    """A sub-point is read from the whole tab segment: one that holds the
+    talk's line as well as its prose is written without the title, venue
+    and year the row prints (owner decision 2026-10-25, #1205); a role the
+    row does not print, before them, stays."""
     entry = _talk_line("\t".join(segments), _ESTUARY, _WETLAND)
     gen, grouped = _render_grouped_talks([entry], supplementary_subpoints=True)
 
@@ -5126,11 +5125,11 @@ def test_a_talk_line_opening_with_its_title_cell_is_read_as_its_row():
     """A line that opens with the Title cell's whole text holds the row's own
     text verbatim (`_record_rendered`'s first `RENDER_PIECE_WINDOW`
     characters), and the whole line reads as rendered: none of it is offered,
-    its prose included. A line opening with the role is offered whole, as the
-    CV wrote it."""
+    its prose included. A line opening with the role is offered, and written
+    without the title, meeting, venue and year the row prints, inside it."""
     title_first = f"{_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE}, 2016. {_TALK_PROSE}"
     role_first = f"Invited speaker, {title_first}"
-    for line, offered in ((title_first, ""), (role_first, role_first)):
+    for line, offered in ((title_first, ""), (role_first, f"Invited speaker, {_TALK_PROSE}")):
         entry = _talk(prose=None)
         entry["text"] = line
         gen = _render_talks([entry], supplementary_subpoints=True)
@@ -5677,17 +5676,17 @@ _INTERNSHIP_PROSE = ("Rotated through the trauma, burns and vascular services un
 @pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own position.
     ([f"{_INTERNSHIP_LINE}. {_INTERNSHIP_PROSE}", _RESIDENCY_LINE],
-     [("Example Surgical Internship", f"{_INTERNSHIP_LINE}. {_INTERNSHIP_PROSE}")]),
+     [("Example Surgical Internship", _INTERNSHIP_PROSE)]),
     ([_INTERNSHIP_LINE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}"],
-     [(_TRAINING_TYPE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}")]),
+     [(_TRAINING_TYPE, f"Chief resident, {_TRAINING_PROSE}")]),
     # They do not: which position the prose is about cannot be told, so neither takes it.
     ([_INTERNSHIP_LINE, _TRAINING_PROSE, _RESIDENCY_LINE], []),
 ])
 def test_prose_on_a_line_of_several_positions_goes_under_its_own_or_none(segments, offered):
-    """A sub-point is the whole tab segment, as the CV wrote it: one that
-    holds the position's line as well as its prose brings the type, hospital
-    and year along, and Reject All prints them a second time, under the row
-    that holds them (the shape every family has; #1205, 2026-10-09)."""
+    """A sub-point is read from the whole tab segment: one that holds the
+    position's line as well as its prose is written without the type,
+    hospital and year the row prints (owner decision 2026-10-25, #1205); a
+    role the row does not print, before them, stays."""
     entry = _training_line("\t".join(segments), _INTERNSHIP, _RESIDENCY)
     gen, grouped = _render_grouped_training([entry], supplementary_subpoints=True)
 
@@ -6797,17 +6796,17 @@ _FELLOWSHIP_PROSE = "Reviewed the academy's annual awards and judged its student
 @pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own membership.
     ([f"{_FELLOWSHIP_LINE}. {_FELLOWSHIP_PROSE}", _MEMBER_LINE],
-     [("Fellow, Kestrel Academy of Tidal Studies", f"{_FELLOWSHIP_LINE}. {_FELLOWSHIP_PROSE}")]),
+     [("Fellow, Kestrel Academy of Tidal Studies", _FELLOWSHIP_PROSE)]),
     ([_FELLOWSHIP_LINE, f"{_MEMBER_LINE}. {_MEMBERSHIP_PROSE}"],
-     [(f"Member, {_SOCIETY_NAME}", f"{_MEMBER_LINE}. {_MEMBERSHIP_PROSE}")]),
+     [(f"Member, {_SOCIETY_NAME}", _MEMBERSHIP_PROSE)]),
     # They do not: which membership the prose is about cannot be told, so neither takes it.
     ([_FELLOWSHIP_LINE, _MEMBERSHIP_PROSE, _MEMBER_LINE], []),
 ])
 def test_prose_on_a_line_of_several_memberships_goes_under_its_own_or_none(segments, offered):
-    """A sub-point is the whole tab segment, as the CV wrote it: one that
-    holds the membership's line as well as its prose brings the type,
-    society and year along, and Reject All prints them a second time, under
-    the row that holds them (the shape every family has; #1205, 2026-10-09)."""
+    """A sub-point is read from the whole tab segment: one that holds the
+    membership's line as well as its prose is written as the prose alone, as
+    the row prints the type, society and year (owner decision 2026-10-25,
+    #1205)."""
     entry = _membership_line("\t".join(segments), _FELLOWSHIP, _MEMBER)
     gen, grouped = _render_grouped_memberships([entry], supplementary_subpoints=True)
 
@@ -8167,17 +8166,17 @@ _GUEST_PROSE = "Ran the review's special issue on mangrove carbon storage and wr
 @pytest.mark.parametrize("segments, offered", [
     # The segments pair with the records: the prose goes under its own seat.
     ([f"{_GUEST_LINE}. {_GUEST_PROSE}", _ASSOCIATE_LINE],
-     [("Guest Editor, Kestrel Tidal Review", f"{_GUEST_LINE}. {_GUEST_PROSE}")]),
+     [("Guest Editor, Kestrel Tidal Review", _GUEST_PROSE)]),
     ([_GUEST_LINE, f"{_ASSOCIATE_LINE}. {_EDITORIAL_PROSE}"],
-     [(f"{_EDITORIAL_SEAT}, Kestrel Marsh Letters", f"{_ASSOCIATE_LINE}. {_EDITORIAL_PROSE}")]),
+     [(f"{_EDITORIAL_SEAT}, Kestrel Marsh Letters", _EDITORIAL_PROSE)]),
     # They do not: which seat the prose is about cannot be told, so neither takes it.
     ([_GUEST_LINE, _EDITORIAL_PROSE, _ASSOCIATE_LINE], []),
 ])
 def test_prose_on_a_line_of_several_seats_goes_under_its_own_or_none(segments, offered):
-    """A sub-point is the whole tab segment, as the CV wrote it: one that
-    holds the seat's line as well as its prose brings the role, journal and
-    year along, and Reject All prints them a second time, under the row that
-    holds them (the shape every family has; #1205, 2026-10-09)."""
+    """A sub-point is read from the whole tab segment: one that holds the
+    seat's line as well as its prose is written as the prose alone, as the
+    row prints the role, journal and year (owner decision 2026-10-25,
+    #1205)."""
     entry = _board_line("\t".join(segments), _GUEST_SEAT, _ASSOCIATE_SEAT)
     gen, grouped = _render_grouped_editorial_boards([entry], supplementary_subpoints=True)
 
@@ -8192,10 +8191,11 @@ def test_a_seats_line_opening_with_its_rows_first_cell_is_read_as_its_row():
     holds the row's own text verbatim (`_record_rendered`'s first
     `RENDER_PIECE_WINDOW` characters), and the whole line reads as rendered:
     none of it is offered, its prose included, as for a talk. A line opening
-    otherwise is offered whole, as the CV wrote it."""
+    otherwise is offered, and written without the role, journal and years
+    the row prints, inside it."""
     cell_first = f"{_EDITORIAL_SEAT}, {_EDITORIAL_JOURNAL}, 2012-2016. {_EDITORIAL_PROSE}"
     society_first = f"Appointed by the society, {cell_first}"
-    for line, offered in ((cell_first, ""), (society_first, society_first)):
+    for line, offered in ((cell_first, ""), (society_first, f"Appointed by the society, {_EDITORIAL_PROSE}")):
         entry = _board_seat(prose=None)
         entry["text"] = line
         gen = _render_editorial_boards([entry], supplementary_subpoints=True)
@@ -9359,3 +9359,158 @@ def test_a_pii_touched_date_led_mentee_entry_recovers_no_duplicate_lines(tmp_pat
     for token in ("Quimby Farrow", "Marsupial Heart Association"):
         # Once, in the mentee table, on both arms: never recovered again.
         assert sum(token in t for t in texts) == sum(token in t for t in dev_texts) == 1, token
+
+
+# --- #1205: a line restating the line it goes under (owner decision 2026-10-25) ---
+# A fragment that writes its entry's rendered line again and then adds words
+# is written as the added words, under the same line: Reject All prints the
+# line once with the note under it, Accept All is the flag-off render, and
+# the #221 recovery and the content overflow read the line as the CV wrote it.
+
+_DEGREE_HONORS = "summa cum laude, with departmental honors for the thesis on estuarine nitrogen budgets"
+
+
+def _restating_degree(text=f"{_PHD_LINE} ({_DEGREE_HONORS})"):
+    entry = _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+    entry["text"] = text
+    return entry
+
+
+def _reject_all_text(body):
+    """What Reject All shows: the plain runs and every deletion, no insertion."""
+    return "".join(t.text or "" for t in body.iter(qn("w:t"), qn("w:delText"))
+                   if not any(a.tag == qn("w:ins") for a in t.iterancestors()))
+
+
+def test_a_degree_line_restating_its_row_is_written_as_its_honors_under_the_row():
+    gen = _render_education([_restating_degree()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert _row_text(row.getprevious()) == f"Ph.D., {_DEGREE_FIELD}Norvale University2005"
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == f"({_DEGREE_HONORS})"
+    # Reject All prints the row once, the honors under it.
+    rejected = _reject_all_text(gen.doc.element.body)
+    assert rejected.count("Norvale University") == 1 and rejected.count(_DEGREE_FIELD) == 1
+    assert _DEGREE_HONORS in rejected
+    # The placement records what was written; the recovery reads the line whole.
+    (placement,) = gen._subpoint_placements
+    assert placement.paragraphs == (f"({_DEGREE_HONORS})",)
+    assert gen._subpoint_prose == [f"{_PHD_LINE} ({_DEGREE_HONORS})"]
+
+
+@pytest.mark.parametrize("entries", [
+    lambda: [_restating_degree()],
+    # The line inside the fragment, new words on both sides (YUYVIG IZIXVF 13's shape).
+    lambda: [_restating_degree(f"1. Graduate: Ph.D., {_DEGREE_FIELD}, 2005 ({_DEGREE_HONORS})")],
+    lambda: [_doctorate() | {"text": _PHD_LINE}, _degree()],
+], ids=["prefix", "middle", "unrestated"])
+def test_a_restated_line_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it(entries):
+    off = _render_education(entries(), supplementary_subpoints=False)
+    on = _render_education(entries(), supplementary_subpoints=True)
+
+    accepted = _accept_all(on)
+    assert _texts_of(accepted) == _texts_of(off.doc.element.body)
+    assert _row_texts(accepted) == _row_texts(off.doc.element.body)
+    # Reject All holds every word of each line, the row printing the rest.
+    rejected = _render_education(entries(), supplementary_subpoints=True).doc.element.body
+    words = set(re.findall(r"\w+", " ".join(t.text or "" for t in rejected.iter(qn("w:t"), qn("w:delText")))))
+    for line in on._subpoint_prose:
+        assert set(re.findall(r"\w+", line)) <= words
+
+
+def test_the_middle_of_a_line_restating_its_row_is_cut_and_its_lead_kept():
+    gen = _render_education([_restating_degree(f"1. Graduate: Ph.D., {_DEGREE_FIELD}, 2005 ({_DEGREE_HONORS})")],
+                            supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == f"1. Graduate: ({_DEGREE_HONORS})"
+
+
+def test_the_recovery_reads_a_cut_line_whole():
+    """The #221 recovery reads a planned sub-point's lines as the CV wrote
+    them (`SubPoint.source_lines`): a record line equal to the line is held,
+    as with the line written whole, though the paragraph written lacks its
+    middle."""
+    from unified_pipeline.stage6 import supplementary
+
+    line = f"1. Graduate: Ph.D., {_DEGREE_FIELD}, 2005 ({_DEGREE_HONORS})"
+    gen = _render_education([_restating_degree(line)], supplementary_subpoints=True)
+
+    (placement,) = gen._subpoint_placements
+    assert supplementary.held_by_subpoint(line, gen._subpoint_prose)
+    assert not supplementary.held_by_subpoint(line, placement.paragraphs)
+
+
+def test_a_sub_point_with_no_paragraph_is_written_nowhere_and_still_stands_for_its_entry(monkeypatch):
+    """A sub-point whose every line restates its row writes nothing and has
+    no placement, but its entry is still one a sub-point carries, so the
+    overflow pass skips it as before, and the recovery reads its line."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _restating_degree()
+    line = entry["text"]
+
+    def planned(entries_by_code, haystack, candidates, *args, **kwargs):
+        anchor = next(c for c in candidates if c.text.startswith("Ph.D.,"))
+        return [supplementary.SubPoint(anchor, (), id(entry), "B1", 17, (line,))]
+
+    monkeypatch.setattr(supplementary, "plan_subpoints", planned)
+    gen = _render_education([entry], supplementary_subpoints=True)
+    off = _render_education([_restating_degree()], supplementary_subpoints=False)
+
+    assert _subpoint_rows(gen) == [] and gen._subpoint_placements == []
+    assert id(entry) in gen._subpoint_entry_ids and gen._subpoint_prose == [line]
+    assert gen.stats["supplementary_subpoints"] == 0
+    assert _texts_of(gen.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+def test_a_citation_restated_with_its_award_is_written_as_the_award():
+    award = ("Winner of the Example Coastal Society best paper prize, presented at its annual congress "
+             "in Norvale and featured in the society newsletter and on its podcast")
+    line = f"{_PAPER_AUTHORS}: {_PAPER_TITLE}, {_PAPER_JOURNAL} 12(3):45-52, 2014. {award}"
+    entries = lambda: [_later_publication(), _publication() | {"text": line}]  # noqa: E731
+    off = _render_publications(entries(), supplementary_subpoints=False)
+    on = _render_publications(entries(), supplementary_subpoints=True)
+
+    (para,) = _subpoint_paragraphs(on)
+    assert "".join(t.text for t in para.iter(qn("w:delText"))) == award
+    assert _reject_all_text(on.doc.element.body).count(_PAPER_TITLE) == 2  # its citation and the later paper's
+    assert _reject_all_text(on.doc.element.body).count(award) == 1
+    accepted = _accept_all(on)
+    assert _texts_of(accepted) == _texts_of(off.doc.element.body)
+    assert _without_revision_dates(accepted) == _without_revision_dates(off.doc.element.body)
+
+
+def test_an_editorial_board_line_restating_its_row_is_written_as_the_role_it_adds():
+    entry = _board_member(prose="")
+    entry["text"] = (f"{_EDITORIAL_JOURNAL}, Honorary Editorial Board Member, 2012-2016; reviewed the "
+                     "special issue on mangrove carbon storage and judged its early career award")
+    off = _render_editorial_boards([_board_member(prose="") | {"text": entry["text"]}],
+                                   supplementary_subpoints=False)
+    on = _render_editorial_boards([entry], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(on)
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == (
+        "Honorary Editorial Board Member, 2012-2016; reviewed the special issue on mangrove carbon "
+        "storage and judged its early career award")
+    assert _reject_all_text(on.doc.element.body).count(_EDITORIAL_JOURNAL) == 1
+    for tr in _subpoint_rows(on):
+        tr.getparent().remove(tr)
+    assert _row_texts(on.doc.element.body) == _row_texts(off.doc.element.body)
+
+
+def test_run_stage6_writes_a_restated_degree_line_as_its_honors(tmp_path, monkeypatch):
+    """End to end: the sidecar's placement holds what was written, Reject
+    All prints the row once, and Accept All is the flag-off document."""
+    on_doc, placements = _stage6_render(tmp_path / "on", monkeypatch, [_restating_degree()],
+                                        supplementary_subpoints=True)
+    off_doc, _ = _stage6_render(tmp_path / "off", monkeypatch, [_restating_degree()],
+                                supplementary_subpoints=False)
+
+    assert placements == [[f"({_DEGREE_HONORS})"]]
+    assert _reject_all_text(on_doc.element.body).count("Norvale University") == 1
+    for tr in [tr for tr in on_doc.element.body.iter(qn("w:tr"))
+               if (d := tr.find(f"{qn('w:trPr')}/{qn('w:del')}")) is not None
+               and d.get(qn("w:author")) == "CViche: source text with no template field"]:
+        tr.getparent().remove(tr)
+    assert _without_revision_dates(on_doc.element.body) == _without_revision_dates(off_doc.element.body)

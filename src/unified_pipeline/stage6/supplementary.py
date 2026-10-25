@@ -34,6 +34,14 @@ it, a line that recovery reads with a year the entry's fields do not hold
 office, a sub-role, a committee or another appointment
 (`_left_to_recovery`).
 
+A fragment that writes the entry's line again and then adds words -- the
+CV's whole line, a degree with its honors, a citation with the paper's award
+-- is written as the added words alone (`unrestated`, owner decision
+2026-10-25), under the same line, so Reject All prints the line once. Every
+word the cut removes is one the line prints. The overflow and the #221
+recovery read the fragment as the CV wrote it (`SubPoint.lines`), so the cut
+changes nothing in the accepted document.
+
 The pass runs BEFORE the content-overflow routing and that recovery. The
 overflow pass skips an entry that has a sub-point (a clinical leadership
 role, whose overflow replaces its line in the section, has one only when it
@@ -127,6 +135,7 @@ from .normalization.pii import _BARE_PHONE_SHAPE
 from .parsing import _looks_like_multiple_records, _refold_shattered
 from .parsing.dates import YEAR
 from .parsing.text import (
+    _RECORD_DATE,
     _RECORD_DATE_MONTH,
     _RECORD_YEAR,
     DATE_LED_MIN_RECORDS,
@@ -511,6 +520,44 @@ SUBPOINT_ANCHOR_MIN_TOKENS = 2
 #: not prose: it is not offered.
 SUBPOINT_FIELD_TOKEN_MAX_SHARE = 0.5
 
+#: A line that writes its entry's row again and then adds words is written as
+#: the added words alone (owner decision 2026-10-25, option 2 of #1205
+#: comment 6282590626; `unrestated`), so Reject All prints the row once with
+#: the note under it. The restated span is a run of the line's words that the
+#: row prints, each word's letters and digits all the row's (`_LINE_WORD_RE`),
+#: that opens the line or follows a word closing a part of it
+#: (`_CLOSING_MARKS`), and ends where a part closes. It must hold the row's
+#: first this many distinctive words (`_tokens`), after any date the row
+#: opens with (`_LEADING_DATE_RE`): the words naming the record -- the role,
+#: the degree, the award, the course, the mentee, the citation's authors. A
+#: run of the row's words that does not hold them is prose naming a place, a
+#: person or a topic the row also prints, and stays.
+SUBPOINT_RESTATED_OPENING_WORDS = 2
+#: ... and the restatement must not run on past the cut: the line's words
+#: after the span, through one word the row does not print, hold fewer than
+#: this many of the row's distinctive words. A CV's author list joined by an
+#: "and" its citation does not print ("..., Rook, BT, and Marblegate, Q:
+#: <title>") would otherwise lose its first authors and keep the rest.
+SUBPOINT_RESTATEMENT_RUN_ON_WORDS = 2
+#: The marks that close a part of a line, read at a word's end, an apostrophe
+#: or a closing single quote aside (`_TRAILING_QUOTES`): a comma, a stop, a
+#: colon or a semicolon, a closing bracket or double quote, a dash. A span
+#: opens after one, and ends after one or before a word opening a bracket or
+#: a double quote (`_OPENING_MARKS`). A word with no letter or digit (a dash,
+#: a bullet) parts the line on either side of it.
+_CLOSING_MARKS = (',', ';', ':', '.', ')', ']', '-', '–', '—', '”', '"')
+_OPENING_MARKS = ('(', '[', '“', '"')
+_TRAILING_QUOTES = "’'"
+#: The marks trimmed off the words a cut leaves: the separators after a span,
+#: and an opening bracket or a dash before one.
+_MARKS_AFTER_A_CUT = ' \t,;:.)]}-–—|/•●'
+_MARKS_BEFORE_A_CUT = ' \t([{-–—|/•●'
+#: A whitespace-delimited word of a line.
+_WORD_RE = re.compile(r'\S+')
+#: The date a row opens with, which names no record: "2021-2025 - ",
+#: "September 1998 - ", "2015-present - ".
+_LEADING_DATE_RE = re.compile(rf'^\W*{_RECORD_DATE}(?!\w)', re.IGNORECASE)
+
 #: Revision author in Word's review pane, so a reviewer can tell these from
 #: the enrichment and formatter changes and from their own edits.
 SUBPOINT_AUTHOR = 'CViche: source text with no template field'
@@ -880,12 +927,23 @@ class SubPoint(NamedTuple):
     """Prose an entry's render leaves out, and the line it goes under.
     `entry_id` is `id()` of the entry dict, for the overflow pass to skip;
     `code` is the code the entry rendered as and `element_idx_start` its
-    index, for its `SubpointPlacement`."""
+    index, for its `SubpointPlacement`. `paragraphs` are written; `lines`
+    are the entry's lines they were read from, as the CV wrote them, when a
+    line restated the line it goes under (`unrestated`): what the content
+    overflow (`yields_to_overflow`) and the #221 recovery read, as before
+    the restatement was cut (`source_lines`)."""
     anchor: AnchorCandidate
     paragraphs: tuple[str, ...]
     entry_id: int
     code: str
     element_idx_start: object
+    lines: tuple[str, ...] = ()
+
+    def source_lines(self) -> tuple[str, ...]:
+        """The entry's lines as the CV wrote them: `lines`, or with none
+        given, the paragraphs themselves. A paragraph and the line it goes
+        under together hold every word of its line."""
+        return self.lines or self.paragraphs
 
 
 def subpoints_enabled(value: object) -> bool:
@@ -1849,6 +1907,161 @@ def _pick_anchor(code: str, entry_tokens: set[str],
     return best_anchor(entry_tokens, scope)
 
 
+class _LineWord(NamedTuple):
+    """A whitespace-delimited word of a sub-point line (`_line_words`): where
+    it starts and ends in the line, its text, and whether the row it goes
+    under prints it -- True when each of its runs of letters and digits is
+    one the row holds, False when one is not, None for a word with none (a
+    dash, a bullet)."""
+    start: int
+    end: int
+    text: str
+    printed: bool | None
+
+
+def _line_words(line: str, printed: Collection[str]) -> list[_LineWord]:
+    """`line`'s words, each read against `printed`, the row's runs of letters
+    and digits in lower case (`_LineWord`)."""
+    words = []
+    for match in _WORD_RE.finditer(line):
+        runs = _LINE_WORD_RE.findall(match.group().lower())
+        printed_word = all(run in printed for run in runs) if runs else None
+        words.append(_LineWord(match.start(), match.end(), match.group(), printed_word))
+    return words
+
+
+def _closes_part(word: _LineWord) -> bool:
+    """Whether `word` closes a part of its line: it ends in one of
+    `_CLOSING_MARKS`, an apostrophe or closing single quote aside, or it holds
+    no letter or digit."""
+    return word.printed is None or word.text.rstrip(_TRAILING_QUOTES).endswith(_CLOSING_MARKS)
+
+
+def _span_can_end(words: Sequence[_LineWord], k: int) -> bool:
+    """Whether a restated span can end before `words[k]`: at the line's end,
+    after a word closing a part (`_closes_part`), or before a word opening a
+    bracket or a double quote (`_OPENING_MARKS`) or holding no letter or
+    digit."""
+    return (k == len(words) or _closes_part(words[k - 1]) or words[k].printed is None
+            or words[k].text.startswith(_OPENING_MARKS))
+
+
+def _printed_runs(words: Sequence[_LineWord]) -> Iterator[tuple[int, int]]:
+    """Each run of words the row prints or that hold no letter or digit,
+    opening with one the row prints, as [start, end) word indexes."""
+    k = 0
+    while k < len(words):
+        if not words[k].printed:
+            k += 1
+            continue
+        end = k
+        while end < len(words) and words[end].printed is not False:
+            end += 1
+        yield k, end
+        k = end
+
+
+def _held_tokens(words: Sequence[_LineWord]) -> set[str]:
+    """The distinctive words (`_tokens`) that `words` hold: each a word the
+    row prints, so each of them the row's."""
+    return _tokens(' '.join(word.text for word in words))
+
+
+def _restated_span(words: Sequence[_LineWord], opening: set[str]) -> tuple[int, int] | None:
+    """The [start, end) word indexes of the line's restatement of its row:
+    of the runs the row prints (`_printed_runs`) that open the line or follow
+    a word closing a part (`_closes_part`), each cut at its last place after
+    a printed word where a span can end (`_span_can_end`), the first holding
+    the most of the row's distinctive words among those holding its opening
+    words (`opening`, `SUBPOINT_RESTATED_OPENING_WORDS`); None when there is
+    none."""
+    best, best_held = None, 0
+    for start, run_end in _printed_runs(words):
+        if start and not _closes_part(words[start - 1]):
+            continue
+        end = max((k for k in range(start + 1, run_end + 1)
+                   if words[k - 1].printed and _span_can_end(words, k)), default=None)
+        if end is None:
+            continue
+        held = _held_tokens(words[start:end])
+        if opening <= held and len(held) > best_held:
+            best, best_held = (start, end), len(held)
+    return best
+
+
+def _runs_on(words: Sequence[_LineWord], end: int) -> bool:
+    """Whether the restatement goes on past a span ending before `words[end]`:
+    the words after it the row prints, and when one word the row does not
+    print follows them, the run after that one, hold
+    `SUBPOINT_RESTATEMENT_RUN_ON_WORDS` of the row's distinctive words."""
+    k = end
+    while k < len(words) and words[k].printed is not False:
+        k += 1
+    tail = list(words[end:k])
+    if k + 1 < len(words) and words[k + 1].printed is not False:
+        after = k + 1
+        while after < len(words) and words[after].printed is not False:
+            after += 1
+        tail += words[k + 1:after]
+    return len(_held_tokens(tail)) >= SUBPOINT_RESTATEMENT_RUN_ON_WORDS
+
+
+def unrestated(fragment: str, line: str, opening: str | None = None) -> str:
+    """`fragment` without the span that writes `line` -- the row or paragraph
+    it goes under, as both documents print it -- again
+    (`SUBPOINT_RESTATED_OPENING_WORDS`, `_restated_span`): the words after a
+    span opening the fragment, or around one inside it, the marks left at the
+    cut trimmed (`_MARKS_AFTER_A_CUT`, `_MARKS_BEFORE_A_CUT`); '' when no
+    letter or digit is left, so nothing is offered. `opening` is the text
+    the line opens with when that is not its own (a label/value table's
+    first value, `_printed_line`).
+
+    The fragment is returned as written when no span restates the line, when
+    the span closes it (only a span opening the line or inside it is cut),
+    or when the restatement runs on past the cut (`_runs_on`). Every word the
+    cut removes is one the line prints, so Reject All, which prints the line
+    above the sub-point, still holds each word of the fragment."""
+    words = _line_words(fragment, set(_LINE_WORD_RE.findall(line.lower())))
+    opening_tokens = _RENDER_TOKEN_RE.findall(_norm(_LEADING_DATE_RE.sub('', line if opening is None else opening,
+                                                                          count=1)))
+    span = _restated_span(words, set(list(dict.fromkeys(opening_tokens))[:SUBPOINT_RESTATED_OPENING_WORDS]))
+    if span is None or _runs_on(words, span[1]):
+        return fragment
+    before = fragment[:words[span[0]].start]
+    after = fragment[words[span[1] - 1].end:]
+    if not _LINE_WORD_RE.search(after):
+        return '' if not _LINE_WORD_RE.search(before) else fragment
+    rest = after.lstrip(_MARKS_AFTER_A_CUT)
+    if _LINE_WORD_RE.search(before):
+        rest = f'{before.rstrip(_MARKS_BEFORE_A_CUT)} {rest}'
+    return rest
+
+
+def _printed_cell_text(cell: BaseOxmlElement) -> str:
+    """A table cell's text as both documents print it: each of its
+    paragraphs' text (python-docx's, which reads no tracked insertion or
+    deletion), joined by spaces."""
+    return ' '.join(Paragraph(p, None).text for p in cell.iter(qn('w:p')))
+
+
+def _printed_line(anchor: AnchorCandidate) -> tuple[str, str | None]:
+    """(the line a sub-point under `anchor` goes under, the text it opens
+    with when that is not its own), as `unrestated` reads them. A row of a
+    label/value table (one grant, one mentee, `_is_label_table`) is the whole
+    table, as its sub-point goes at the table's end and the entry prints
+    there, opening with its first value, not a "Label:"; any other row or
+    paragraph is the anchor's own text, and so is a candidate read from text
+    alone, with no paragraph."""
+    paragraph = anchor.paragraph
+    table = None if paragraph is None else next(paragraph._p.iterancestors(qn('w:tbl')), None)
+    if table is None or not _is_label_table(table):
+        return anchor.text, None
+    # A sub-point row's text is all w:delText, which python-docx does not read.
+    rows = [[_printed_cell_text(cell) for cell in row.findall(qn('w:tc'))] for row in table.findall(qn('w:tr'))]
+    return (' '.join(text for cells in rows for text in cells if text),
+            ' '.join(text for cells in rows for text in cells[1:] if text))
+
+
 def _withholds_prose(entry: Mapping) -> bool:
     """Whether the entry's prose is kept off the page as protected data. The
     PII pass touched the entry (`PII_WITHHELD_KEY`): it cut a fragment of its
@@ -1917,7 +2130,14 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     still carries Q2), so what rendered decides, not the code. Its prose is
     not offered under any later entry either.
 
-    Nor does an entry holding protected data (`_withholds_prose`)."""
+    Nor does an entry holding protected data (`_withholds_prose`).
+
+    A fragment that writes the line it goes under again and then adds words
+    is written as the added words (`_written_paragraphs`, `unrestated`; owner
+    decision 2026-10-25), under the same line; the sub-point keeps the
+    fragments as the CV wrote them (`SubPoint.lines`), and is offered once
+    by them. One whose every fragment only restates its line writes no
+    paragraph, and still stands for its entry: the line prints its prose."""
     planned, offered = [], set()
     for code in sorted(entries_by_code, key=_offer_order):
         if code not in SUBPOINT_CODES or code not in spans:
@@ -1940,18 +2160,29 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
             offered.update(fragments)
             if excluded_tables and _in_tables(anchor, excluded_tables):
                 continue
-            planned.append(SubPoint(anchor, tuple(fragments), id(entry), code,
-                                    entry.get('element_idx_start')))
+            planned.append(SubPoint(anchor, _written_paragraphs(fragments, anchor), id(entry), code,
+                                    entry.get('element_idx_start'), tuple(fragments)))
     return planned
+
+
+def _written_paragraphs(fragments: Sequence[str], anchor: AnchorCandidate) -> tuple[str, ...]:
+    """The paragraphs a sub-point under `anchor` writes for `fragments`: each
+    without the span restating the line it goes under (`unrestated`,
+    `_printed_line`), and none for a fragment nothing else is left of."""
+    line, opening = _printed_line(anchor)
+    return tuple(paragraph for paragraph in (unrestated(fragment, line, opening) for fragment in fragments)
+                 if paragraph)
 
 
 def _carries_overflow(subpoint: SubPoint, text: str | None) -> bool:
     """Whether `subpoint` and the line it goes under hold every part
     (`_split_fragments`) of `text`: each part is a piece of one of the
-    sub-point's paragraphs, read without spacing or case (`_squash`), or
-    every word of it is one the line prints (`_LINE_WORD_RE`)."""
+    sub-point's lines as the CV wrote them (`SubPoint.source_lines`; a line
+    cut of its restatement is held by the paragraph and the line it goes
+    under together), read without spacing or case (`_squash`), or every word
+    of it is one the line prints (`_LINE_WORD_RE`)."""
     line_words = set(_LINE_WORD_RE.findall(subpoint.anchor.text.lower()))
-    paragraphs = [_squash(paragraph) for paragraph in subpoint.paragraphs]
+    paragraphs = [_squash(paragraph) for paragraph in subpoint.source_lines()]
     return all(any(_squash(part) in paragraph for paragraph in paragraphs)
                or set(_LINE_WORD_RE.findall(part.lower())) <= line_words
                for part in _split_fragments(text))
@@ -2166,7 +2397,10 @@ def write_row_subpoint(row: BaseOxmlElement, texts: tuple[str, ...],
 
 
 def write_subpoint(subpoint: SubPoint, revision: Revision) -> None:
-    """Write one `SubPoint` under its anchor (module docstring)."""
+    """Write one `SubPoint` under its anchor (module docstring); one with no
+    paragraph, whose every line only restated its anchor, writes nothing."""
+    if not subpoint.paragraphs:
+        return
     anchor = subpoint.anchor.paragraph
     parent = anchor._p.getparent()
     if parent is not None and parent.tag == qn('w:tc'):
