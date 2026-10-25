@@ -366,6 +366,30 @@ def subpoint_text(lines: list[str] | None,
         for idx, texts in written.items()})
 
 
+def subpoint_owners(subpoints: SubpointText | None) -> dict[str, frozenset | None]:
+    """Each sub-point line of the document, squashed, with the
+    `element_idx_start` of each entry whose own it is (`SubpointText.by_entry`):
+    the per-entry view `offered_as_subpoint` reads, turned round for a reader
+    that meets the line first (`source_line_coverage`). A line no placement
+    wrote is no entry's. Every line's owners are None when there is no
+    record of whose each one is (no placements), as every sub-point then
+    counts for every entry; empty when no sub-points were read."""
+    if subpoints is None:
+        return {}
+    if subpoints.by_entry is None:
+        return dict.fromkeys(_subpoint_lines(subpoints))
+    owners: dict[str, set] = {line: set() for line in _subpoint_lines(subpoints)}
+    for idx, own in subpoints.by_entry.items():
+        for line in _subpoint_lines(own):
+            owners.setdefault(line, set()).add(idx)
+    return {line: frozenset(idxs) for line, idxs in owners.items()}
+
+
+def _subpoint_lines(view: SubpointText) -> list[str]:
+    """`view`'s squashed lines, as `_subpoint_view` joined them."""
+    return view.text.split(_LINE_SENTINEL) if view.text else []
+
+
 def offered_as_subpoint(text: str, subpoints: SubpointText | None,
                         element_idx: object = None) -> bool:
     """Whether `text` -- a record line, an entry's prose, a field value --

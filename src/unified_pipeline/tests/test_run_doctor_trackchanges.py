@@ -299,3 +299,70 @@ def test_run_doctor_reads_the_placements_from_the_render_sidecar(tmp_path):
     assert unrendered(_sidecar_placements(SubpointPlacement(463, "N3A", (others,)))) == [
         "entry 477 (N3A): 1 of 2 records absent from output"]
     assert unrendered({"warnings": []}) == []
+
+
+def test_subpoint_owners_turns_the_per_entry_view_round():
+    """Each sub-point line of the document with the entries whose own it is
+    (`subpoint_owners`, which `source_line_coverage` reads): a line two
+    placements wrote is both entries'; one no placement wrote is no entry's;
+    with no record of whose each one is, every line's owners are unknown
+    (None), so it counts for every entry."""
+    from unified_pipeline.core.text_norm import squash
+    from unified_pipeline.doctor.shared import (
+        subpoint_owners,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    unplaced = "Chairs the departmental finance review panel"
+    lines = [_SUBPOINT_PROSE, _OTHER_SUBPOINT, unplaced]
+    placements = subpoint_placements(_sidecar_placements(
+        SubpointPlacement(29, "D1", (_SUBPOINT_PROSE,)), SubpointPlacement(30, "K1", (_OTHER_SUBPOINT,)),
+        SubpointPlacement(31, "K1", (_OTHER_SUBPOINT,))))
+    assert subpoint_owners(subpoint_text(lines, placements)) == {
+        squash(_SUBPOINT_PROSE): frozenset({29}), squash(_OTHER_SUBPOINT): frozenset({30, 31}),
+        squash(unplaced): frozenset()}
+    assert subpoint_owners(subpoint_text([], placements)) == {}
+    assert subpoint_owners(subpoint_text(lines)) == dict.fromkeys(map(squash, lines))
+    assert subpoint_owners(None) == {}
+
+
+def test_run_doctor_hands_source_line_coverage_the_sub_points_and_their_owners(tmp_path):
+    """The wire (#1205, BMAMWE 1368's shape, invented): run_doctor gives
+    source_line_coverage the docx's sub-points with the sidecar's
+    placements, so a note only another entry's sub-point holds is
+    reported, and with a sidecar from before the placements it is not."""
+    from unified_pipeline.stage6.supplementary import (
+        Revision,
+        SubpointPlacement,
+        write_row_subpoint,
+    )
+
+    prose = "Featured on the cover of the spring marsupial issue, with an editorial on wallaby welfare"
+    note = "Cover feature of the spring marsupial issue, with an editorial on wallaby welfare"
+    source = Document()
+    source.add_paragraph(note)
+    source.save(str(tmp_path / "WSHAPE.docx"))
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    table.rows[0].cells[0].text = "Farrow Q. Wallaby circulation. J Marsupial Med. 2019;3:1-5."
+    write_row_subpoint(table.rows[0]._tr, (prose,), Revision(1, "2026-01-01T00:00:00Z"))
+    stage6 = tmp_path / "stage_6_wcm_documents"
+    stage6.mkdir()
+    doc.save(str(stage6 / "WSHAPE_wcm.docx"))
+    stage3b = tmp_path / "stage_3b_classified_entries"
+    stage3b.mkdir()
+    (stage3b / "WSHAPE_classified.json").write_text(json.dumps({"entries": [
+        {"element_idx_start": 20, "taxonomy_code": "S1", "text": f"Farrow Q. Wallaby circulation.\t{prose}"},
+        {"element_idx_start": 30, "taxonomy_code": "S7", "text": note}]}))
+    sidecar = stage6 / "WSHAPE_render_warnings.json"
+
+    def coverage(report):
+        sidecar.write_text(json.dumps(report))
+        return [f["message"].split(":")[0] for f in run_doctor(tmp_path, "WSHAPE")["findings"]
+                if f["lint"] == "source_line_coverage"]
+
+    assert coverage(_sidecar_placements(SubpointPlacement(20, "S1", (prose,)))) == ["entry 30"]
+    assert coverage(_sidecar_placements(SubpointPlacement(30, "S7", (prose,)))) == []
+    assert coverage({"warnings": []}) == []
