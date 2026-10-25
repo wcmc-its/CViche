@@ -408,21 +408,26 @@ def _month_spans_overlap(span: tuple[_MonthDate, _MonthDate | None],
 # the award. So two awards of another class are two awards, in the same year
 # or not, and a class year in the kept text does not vouch for the dropped
 # award's year ("... 2031" beside "(Class of 2031) ... 2029"). Only for an
-# award: a degree's "Class of" year is its date.
+# award: a degree's "Class of" year is its date. And only when the kept text
+# states a year outside its class labels: when the class year is its one year,
+# it dates the award ("Gizmo Honor Society, Class of 2031" beside "Gizmo Honor
+# Society, 2031" is one honor).
 _CLASS_YEAR_RE = re.compile(rf'\bclass\s+of\s+({_YEAR_PATTERN})\b', re.IGNORECASE)
 _CLASS_YEAR_CODES = frozenset({'H'})
 
 
 def _class_year_apart(dropped_text: str, kept_text: str, code: str | None) -> bool:
     """True, for an award code, when the dropped text names a class year the
-    kept text does not, or states a date the kept text does not carry once
+    kept text does not, or, when the kept text states a year outside its class
+    labels, the dropped text states a date the kept text does not carry once
     every "Class of <year>" is cut out of both (`_dates_compatible`)."""
     if code not in _CLASS_YEAR_CODES:
         return False
     if not set(_CLASS_YEAR_RE.findall(dropped_text)) <= set(_CLASS_YEAR_RE.findall(kept_text)):
         return True
-    return not _dates_compatible(_CLASS_YEAR_RE.sub(' ', dropped_text),
-                                 _CLASS_YEAR_RE.sub(' ', kept_text))
+    kept_dates = _CLASS_YEAR_RE.sub(' ', kept_text)
+    return bool(_YEAR_RE.search(kept_dates)) and not _dates_compatible(
+        _CLASS_YEAR_RE.sub(' ', dropped_text), kept_dates)
 
 
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
@@ -647,22 +652,36 @@ def _different_institution(code: str | None, dropped_fields: dict,
     One name is the other reworded (cut short, a city or a word inserted, a
     one-letter initial spelled out) when its words occur in the other's, in
     order. "Acme Regional Clinic" and "Gadget Clinic for Children at Acme
-    Regional" share every word and are still two clinics. A longer
-    abbreviation ("Univ." for "University"), a name split in two ("North
-    Shore", "Northshore") and one half of a dual name are not recognised:
-    they keep both rows (the safe side).
+    Regional" share every word and are still two clinics. For a society (I),
+    its words reordered are the same name too (`_REORDERED_NAME_CODES`). A
+    longer abbreviation ("Univ." for "University"), a name split in two
+    ("North Shore", "Northshore") and one half of a dual name are not
+    recognised: they keep both rows (the safe side).
     """
     key = _INSTITUTION_FIELD_BY_CODE.get(code or '')
     dropped, kept = dropped_fields.get(key), kept_fields.get(key)
     if not (isinstance(dropped, str) and isinstance(kept, str)):
         return None
-    return dropped if _names_apart(dropped, kept) else None
+    return dropped if _names_apart(dropped, kept, code) else None
 
 
-def _names_apart(name: str, other: str) -> bool:
+# A society's or an award's name restated with its words in another order is
+# the same name: "ASWG - American Society of Widget Gizmos" beside "American
+# Society of Widget Gizmos (ASWG)", "Dean's Gizmo Award" beside "Gizmo Award
+# (Dean's)". Not for a hospital, a university or a venue, whose word order is
+# part of the name: "University of Acme Medical Center" and "Acme University
+# Medical Center" are two hospitals.
+_REORDERED_NAME_CODES = frozenset({'I', 'H'})
+
+
+def _names_apart(name: str, other: str, code: str | None) -> bool:
     """True when neither name's words occur in the other's in order
-    (`_different_institution`). A name with no words occurs in any."""
+    (`_different_institution`), and, for a `_REORDERED_NAME_CODES` code, the
+    two names are not the same words reordered. A name with no words occurs
+    in any."""
     words, other_words = _ordered_words(name), _ordered_words(other)
+    if code in _REORDERED_NAME_CODES and set(words) == set(other_words):
+        return False
     return not _is_subsequence(words, other_words) and not _is_subsequence(other_words, words)
 
 
@@ -682,7 +701,7 @@ def _other_award_name(code: str | None, dropped_fields: dict, kept_fields: dict)
     (`_names_apart`)."""
     key = _AWARD_NAME_FIELD_BY_CODE.get(code or '')
     dropped, kept = dropped_fields.get(key), kept_fields.get(key)
-    return isinstance(dropped, str) and isinstance(kept, str) and _names_apart(dropped, kept)
+    return isinstance(dropped, str) and isinstance(kept, str) and _names_apart(dropped, kept, code)
 
 
 # A word that makes a title another rank, or a name another award or body:
@@ -1061,8 +1080,18 @@ def _other_journal_same_row(dropped_entry: dict, kept_entry: dict,
                 and _journal_core_words(name) != _journal_core_words(kept_name))
 
 
-# `_lists_name`: the separators between the items of a listed text.
+# `_lists_name`: the separators between the items of a listed text. A title in
+# double quotation marks is one item, whatever separators it holds: the row of
+# a reviewed book titled “Widgets: Gizmos, Sprockets and Cogs” lists no
+# journal "Widgets" (#666, LFFKVV 1487).
 _LIST_ITEM_SEPARATOR_RE = re.compile(r'[,;:|\t\n]')
+_QUOTED_TITLE_RE = re.compile(r'“[^”]*”|"[^"]*"')
+
+
+def _list_items(text: str) -> list[str]:
+    """The items of `text` (`_LIST_ITEM_SEPARATOR_RE`), a quoted title one item."""
+    unsplit = _QUOTED_TITLE_RE.sub(lambda title: _LIST_ITEM_SEPARATOR_RE.sub(' ', title.group()), text)
+    return _LIST_ITEM_SEPARATOR_RE.split(unsplit)
 
 
 def _lists_name(entry: dict, name: str, key: str, code: str | None,
@@ -1073,8 +1102,8 @@ def _lists_name(entry: dict, name: str, key: str, code: str | None,
     `degree` or a citation's journal vouched for a reviewer row that only
     shared a word with them):
 
-    - an item of its text is exactly that name, and the entry is of the same
-      code (the record's own list: "Gizmo Review, Widgets");
+    - an item of its text (`_list_items`) is exactly that name, and the entry
+      is of the same code (the record's own list: "Gizmo Review, Widgets");
     - its `key` field, the one that named the dropped record, holds exactly
       that name and the row says the same about it as the dropped row
       (`_same_row`). A longer name holding it ("Widgets Quarterly") is
@@ -1083,8 +1112,7 @@ def _lists_name(entry: dict, name: str, key: str, code: str | None,
     target = _alnum(name)
     text = entry.get('text') or ''
     same_code = entry.get('taxonomy_code') == code
-    if same_code and any(
-            _alnum(item) == target for item in _LIST_ITEM_SEPARATOR_RE.split(text)):
+    if same_code and any(_alnum(item) == target for item in _list_items(text)):
         return True
     fields = entry.get('extracted_fields') or {}
     return (_alnum(str(fields.get(key) or '')) == target
@@ -1291,7 +1319,8 @@ def _under_another_year_head(dropped_entry: dict, kept_entry: dict,
 # Reviews" heading beside that agency's study-section row under "Standing
 # Widget Panels". A row is ad hoc when its text, its role or a heading it is listed
 # under says so. Only a row naming an agency or a panel: a role line alone is
-# a fragment.
+# a fragment. A panel listed twice in one year, once as ad hoc, cannot be told
+# from these two records, so it prints twice: doubt keeps.
 _AD_HOC_CODES = frozenset({'Q3'})
 _AD_HOC_RE = re.compile(r'\bad[\s-]*hoc\b', re.IGNORECASE)
 _REVIEW_RECORD_FIELDS = ('agency', 'panel_name')

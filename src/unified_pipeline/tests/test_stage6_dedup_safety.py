@@ -1340,6 +1340,11 @@ def test_distinct_bare_names(dropped_text, kept_text, kept_name, distinct):
     ({"text": "Widgets", "extracted_fields": {"notes": "Widgets"}}, True),  # the text lists it
     ({"text": "Gizmo", "extracted_fields": {"notes": "Widgets"}}, False),
     ({"text": None, "extracted_fields": None}, False),
+    # a quoted title is one item: a book's title opening "Widgets:" lists no journal
+    ({"text": "“Widgets: Gizmos, Sprockets and Cogs” A. Writer.\tBook Proposal Reviewer"}, False),
+    ({"text": '"Widgets: Gizmos" A. Writer'}, False),
+    ({"text": "Reviewer for “Gizmos”, “Widgets”"}, True),  # quoted items of a list
+    ({"text": '"Gizmos"; "Widgets"'}, True),
 ])
 def test_lists_name_needs_the_exact_name(entry, listed):
     entry = {"taxonomy_code": "Q4D", **entry}
@@ -3153,6 +3158,17 @@ def test_a_bare_journal_name_is_not_carried_by_a_longer_name_holding_its_word(ma
     assert not _kept_both("Q4D", dropped, kept, longer, _journal("Widgets"))
 
 
+def test_a_bare_journal_name_opening_a_reviewed_books_title_is_not_carried_by_it():
+    # LFFKVV 1487 (review round): the book's title, split at its colon, was
+    # read as a listing of the bare journal name.
+    dropped, kept = _journal("Widgets"), _journal("Widgets and Widgetry")
+    book = _entry("Q4D", "“Widgets: Gizmos, Sprockets and Cogs” A. Writer. Example Press.\t"
+                         "Book Proposal Reviewer\t2030", journal_name=None, year="2030")
+    assert _kept_both("Q4D", dropped, kept, book)
+    # The near miss: a list that names the journal still carries it.
+    assert not _kept_both("Q4D", dropped, kept, book, _entry("Q4D", "Gizmos, Widgets"))
+
+
 @pytest.mark.parametrize("dropped_text, other_text, carried", [
     ("Widgets", "Annals of Widgets", False),           # a bare name: only a listing carries it
     ("Widgets", "Gizmos, Widgets", True),              # its own list names it
@@ -3181,6 +3197,32 @@ def test_a_membership_of_another_society_is_kept():
     assert _different_institution_for("I", dropped, kept) is None
     assert not _kept_both("I", dropped, kept)
     assert not _kept_both("I", _membership("Widget Society"), _membership("Widget Society"))
+
+
+@pytest.mark.parametrize("code, make, name, kept_name", [
+    # an acronym moved, and two segments swapped: one society restated
+    ("I", _membership, "ASWG - American Society of Widget Gizmos",
+     "American Society of Widget Gizmos (ASWG)"),
+    ("I", _membership, "American Gizmo Association, Council on Widgets",
+     "Council on Widgets, American Gizmo Association"),
+    # one award restated with its words reordered
+    ("H", lambda name: _entry("H", f"2030 {name}, Acme Cog College", award_name=name,
+                              granting_body="Acme Cog College", date="2030"),
+     "Gizmo Teaching Award (Dean's)", "Dean's Gizmo Teaching Award"),
+])
+def test_a_name_restated_with_its_words_reordered_prints_once(code, make, name, kept_name):
+    first, second = make(kept_name), make(name)
+    document = [first, second]
+    assert len(deduplicate_entries([first, second], code=code, document=document)) == 1
+
+
+def test_an_institution_with_its_words_reordered_is_still_another_one():
+    # The near miss: a hospital's word order is part of its name.
+    dropped = {"institution": "University of Acme Medical Center"}
+    kept = {"institution": "Acme University Medical Center"}
+    assert _different_institution("D2", dropped, kept) == "University of Acme Medical Center"
+    assert _different_institution("I", {"organization": "University of Acme Medical Center"},
+                                  {"organization": "Acme University Medical Center"}) is None
 
 
 # LTTYWI 175, 179: an undated committee row under one year head beside a row
@@ -3383,6 +3425,14 @@ def test_an_award_of_another_class_or_year_is_kept(dropped_text, kept_text):
     # a degree's class year is its date
     ("B1", "Doctor of Widgetry, Acme University School of Gizmos, 2031",
      "Doctor of Widgetry, Acme University School of Gizmos, Class of 2031, Dean's List"),
+    # the same class and year, the class not the award year: its label is cut from both
+    ("H", "Teacher of the Year - (Class of 2031) - Widget College 2029",
+     "Teacher of the Year - (Class of 2031) - Acme University Widget College 2029"),
+    # the class year is the kept text's one year, so it dates the honor (review round)
+    ("H", "Gizmo Honor Society, Acme Widget University, 2030",
+     "Gizmo Honor Society, Acme Widget University, Class of 2030"),
+    ("H", "Summa Cum Laude, Acme Widget University 2030",
+     "Summa Cum Laude, Acme Widget University, Class of 2030"),
 ])
 def test_an_award_of_the_same_class_and_year_or_another_code_still_drops(code, dropped_text, kept_text):
     assert not _class_year_apart(dropped_text, kept_text, code)
@@ -3414,6 +3464,7 @@ def test_an_award_of_another_name_at_the_same_university_is_kept():
     ("H", "Gizmo Scholar", "Gizmo Scholar"),
     ("H", "--", "Jane Roe Scholar"),                 # a name with no words
     ("R", "Gizmo Scholar", "Jane Roe Scholar"),      # not an award code
+    ("H", "Gizmo Teaching Award (Dean's)", "Dean's Gizmo Teaching Award"),  # its words reordered
 ])
 def test_an_award_whose_name_the_kept_one_holds_in_order_still_drops(code, name, kept_name):
     dropped, kept = _award_row(name), _award_row(kept_name)
