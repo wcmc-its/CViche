@@ -6428,6 +6428,30 @@ _SUB_RECORD_FAMILIES = {
         sub_led="2015-2017 Chair, Early Career Reviewers Committee",
         prose=("As chair of the early career reviewers committee, mentored the journal's new "
                "referees")),
+    "S1": dict(
+        code="S1", idx=1200,
+        fields={"authors": "Quill AM, Rook BT", "title": "Sediment Budgets of Restored Tidal Marshes",
+                "journal": "Journal of Estuarine Sediment Studies", "year": "2013-2014"},
+        own=("Quill AM, Rook BT. Sediment Budgets of Restored Tidal Marshes. Journal of Estuarine "
+             "Sediment Studies, 2013-2014"),
+        own_led=("2013-2014 Quill AM, Rook BT. Sediment Budgets of Restored Tidal Marshes. Journal of "
+                 "Estuarine Sediment Studies"),
+        sub="Featured Article, Example Coastal Society Newsletter, 2016-2017",
+        sub_led="2016-2017 Featured Article, Example Coastal Society Newsletter",
+        prose=("As the coastal society newsletter's featured article, summarised the findings for "
+               "marsh managers")),
+    "S2": dict(
+        code="S2", idx=1210,
+        fields={"authors": "Quill AM", "title": "Restoring Tidal Marshes: A Review of Sediment Budgets",
+                "journal": "Kestrel Review of Tidal Ecology", "year": "2015-2016"},
+        own=("Quill AM. Restoring Tidal Marshes: A Review of Sediment Budgets. Kestrel Review of Tidal "
+             "Ecology, 2015-2016"),
+        own_led=("2015-2016 Quill AM. Restoring Tidal Marshes: A Review of Sediment Budgets. Kestrel "
+                 "Review of Tidal Ecology"),
+        sub="Invited Commentary, Example Estuarine Society Bulletin, 2018-2019",
+        sub_led="2018-2019 Invited Commentary, Example Estuarine Society Bulletin",
+        prose=("As the estuarine society bulletin's invited commentary, answered the review's "
+               "critics")),
 }
 #: The two line shapes in which sub-points on lost the sub-record: tab parts
 #: ending in their years, where the sub-point offered the sub-record itself;
@@ -6435,8 +6459,8 @@ _SUB_RECORD_FAMILIES = {
 #: sub-record rendered. B1, C, H and O lost it in the first shape only: their
 #: own rules (`_own_record_line`, the honors writer's rows) offer nothing in
 #: the second. P lost it in neither (`_own_committee_line`), I since #1991.
-#: L3, Q4B and Q4C, which joined after #2010, are pinned in the first shape:
-#: their own rule (`_own_record_line`) offers nothing in the second.
+#: L3, Q4B, Q4C, S1 and S2, which joined after #2010, are pinned in the first
+#: shape: their own rule (`_own_record_line`) offers nothing in the second.
 _TRAILING_YEARS, _DATE_LED = "tab_trailing_years", "tab_date_led"
 _SUB_RECORD_CASES = [*((name, _TRAILING_YEARS) for name in _SUB_RECORD_FAMILIES),
                      *((name, _DATE_LED) for name in ("K1", "M2A", "D1", "Q1", "Q2", "N3A", "N3B", "R"))]
@@ -8369,6 +8393,478 @@ def test_editorial_board_prose_holding_protected_data_is_not_offered_through_the
                                      [protect(_board_seat(), _EDITORIAL_PROSE)])
     assert placements == []
     assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+# --- #1205: S1/S2 publications, the next code family -------------------------
+# The bibliography writer writes every S1 and S2 entry as one citation
+# paragraph under its subsection label, and records that paragraph against
+# the entry. So the prose is a deleted paragraph under the paper's own
+# citation, the one the writer recorded for that entry (the row-receipt
+# ledger), unless the citation is itself a tracked change.
+
+_PAPER_AUTHORS = "Quill AM, Rook BT, Marblegate Q"
+_PAPER_TITLE = "Sediment budgets of restored tidal marshes"
+_PAPER_JOURNAL = "Journal of Estuarine Sediment Studies"
+_PAPER_PROSE = "Designed the sampling study, analysed the sediment cores and wrote the manuscript"
+_LATER_PAPER_PROSE = "Led the field campaign across the three restored marshes and drafted the figures"
+
+
+def _publication(idx=1200, code="S1", title=_PAPER_TITLE, year="2014", prose=_PAPER_PROSE, **fields):
+    """A paper whose source line goes on past its citation into what the
+    owner did for it, on a line of its own (EBYSBC SJWASY's shape). A later
+    paper of the same group in the same journal shares every distinctive
+    word of its citation but the title's last ones."""
+    citation = f"{_PAPER_AUTHORS}. {title}. {_PAPER_JOURNAL}. {year};12(3):45-52."
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "text": citation + (f"\t{prose}" if prose else ""),
+        "extracted_fields": {"authors": _PAPER_AUTHORS, "title": title, "journal": _PAPER_JOURNAL,
+                             "year": year, "volume": "12", "issue": "3", "pages": "45-52", **fields},
+    }
+
+
+def _later_publication(code="S1", prose=""):
+    """The group's 2018 paper: it renders first, reverse chronologically."""
+    return _publication(idx=1190, code=code, title=f"{_PAPER_TITLE} after a decade", year="2018",
+                        prose=prose)
+
+
+def _enriched(entry):
+    """`entry` as stage 5 leaves an enriched citation: the writer deletes the
+    CV's whole line and inserts PubMed's citation beside it."""
+    return dict(entry, enrichment_status="enriched", enrichment_source="pubmed")
+
+
+def _render_publications(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = {}
+    for entry in entries:
+        grouped.setdefault(entry["taxonomy_code"], []).append(entry)
+    gen._fill_bibliography(grouped, cv_owner={"last_name": "Marblegate"})
+    gen._add_supplementary_subpoints(grouped)
+    return gen
+
+
+def _citation_text(p):
+    """A citation paragraph's text in Accept All: its plain and inserted runs."""
+    return "".join(t.text or "" for t in p.iter(qn("w:t")))
+
+
+def _without_revision_dates(body):
+    """`body` with every `w:date` dropped: an enriched citation's revisions
+    are stamped with the clock, which differs between two renders."""
+    body = copy.deepcopy(body)
+    for element in body.iter():
+        element.attrib.pop(qn("w:date"), None)
+    return etree.tostring(body, method="c14n")
+
+
+def _publication_table_row(code="S1"):
+    """The same paper read from a source table: stage 2 joins the row's
+    cells with pipes, and its position names the row ("41.3")."""
+    entry = _publication(code=code)
+    entry["element_idx_start"] = "41.3"
+    entry["text"] = entry["text"].replace("\t", " | ")
+    return entry
+
+
+@pytest.mark.parametrize("code, make", [("S1", _publication), ("S2", _publication),
+                                        ("S1", _publication_table_row)], ids=["S1", "S2", "S1_table_row"])
+def test_publication_prose_is_a_deleted_paragraph_under_its_own_citation(code, make):
+    entry = make(code=code)
+    gen = _render_publications([entry], supplementary_subpoints=True)
+
+    (para,) = _subpoint_paragraphs(gen)
+    above = para.getprevious()
+    assert _citation_text(above).startswith(f"1. {_PAPER_AUTHORS}. {_PAPER_TITLE}.")
+    assert "".join(t.text for t in para.iter(qn("w:delText"))) == _PAPER_PROSE
+    assert list(para.iter(qn("w:t"))) == []
+    assert para.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
+    # No bullet and the citation's indent (the writer gives a citation
+    # none); a paragraph follows, so the mark stays deleted and Accept All
+    # leaves no empty line.
+    assert para.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
+    assert para.find(f"{qn('w:pPr')}/{qn('w:ind')}") is None
+    assert para.getnext().tag == qn("w:p")
+    span = gen._subpoint_section_spans()[code]
+    assert span.start < list(gen.doc.element.body).index(para)
+    assert gen.stats["supplementary_subpoints"] == 1
+    (placement,) = gen._subpoint_placements
+    assert (placement.element_idx_start, placement.code) == (entry["element_idx_start"], code)
+
+
+def test_a_papers_several_prose_lines_are_paragraphs_in_source_order():
+    lines = (_PAPER_PROSE, "Presented the findings at the Example Coastal Ecology Congress plenary session")
+    gen = _render_publications([_publication(prose="\t".join(lines))], supplementary_subpoints=True)
+
+    paragraphs = _subpoint_paragraphs(gen)
+    assert [_paragraph_text(p) for p in paragraphs] == list(lines)
+    assert _citation_text(paragraphs[0].getprevious()).startswith("1. ")
+    assert paragraphs[1].getprevious() is paragraphs[0]
+
+
+@pytest.mark.parametrize("code", ["S1", "S2"])
+def test_publication_prose_goes_under_its_own_citation_among_papers_of_one_group(code):
+    """The later paper renders first and holds every distinctive word of the
+    earlier one's citation, so words alone put the earlier one's prose under
+    the later citation. Only the paragraph the writer recorded for the
+    earlier entry takes it."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_publications([_later_publication(code), _publication(code=code)],
+                               supplementary_subpoints=True)
+
+    (para,) = _subpoint_paragraphs(gen)
+    assert _citation_text(para.getprevious()).startswith(f"2. {_PAPER_AUTHORS}. {_PAPER_TITLE}.")
+    assert _citation_text(para.getprevious().getprevious()).startswith("1. ")
+    # Words alone would have taken the later paper's citation.
+    off = _render_publications([_later_publication(code), _publication(code=code)],
+                               supplementary_subpoints=False)
+    lines = [line for line in supplementary.anchor_candidates(off.doc) if _PAPER_AUTHORS in line.text]
+    assert supplementary.best_anchor(supplementary._value_tokens(_publication(code=code), code),
+                                     lines) is lines[0]
+    assert lines[0].text.startswith("1. ")
+
+
+def test_papers_of_one_group_each_take_their_own_prose():
+    gen = _render_publications([_later_publication(prose=_LATER_PAPER_PROSE), _publication()],
+                               supplementary_subpoints=True)
+
+    by_text = {_paragraph_text(p): p for p in _subpoint_paragraphs(gen)}
+    assert set(by_text) == {_LATER_PAPER_PROSE, _PAPER_PROSE}
+    assert _citation_text(by_text[_LATER_PAPER_PROSE].getprevious()).startswith("1. ")
+    assert _citation_text(by_text[_PAPER_PROSE].getprevious()).startswith("2. ")
+    assert [(p.element_idx_start, p.paragraphs) for p in gen._subpoint_placements] \
+        == [(1190, (_LATER_PAPER_PROSE,)), (1200, (_PAPER_PROSE,))]
+
+
+@pytest.mark.parametrize("entries", [
+    lambda: [_later_publication(), _publication()],
+    # An enriched paper beside them, and a review: neither changes.
+    lambda: [_enriched(_later_publication(prose=_LATER_PAPER_PROSE)), _publication(),
+             _publication(idx=1210, code="S2", title="Restoring tidal marshes: a review", year="2016")],
+], ids=["S1", "S1_enriched_and_S2"])
+def test_publication_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it(entries):
+    off = _render_publications(entries(), supplementary_subpoints=False)
+    on = _render_publications(entries(), supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert rejected.count(_PAPER_PROSE) == len(on._subpoint_placements)
+    assert _PAPER_PROSE not in "".join(_texts_of(off.doc.element.body))
+    accepted = _accept_all(on)
+    # Empty paragraphs and every table row, cell by cell, included.
+    assert _texts_of(accepted) == _texts_of(off.doc.element.body)
+    assert _row_texts(accepted) == _row_texts(off.doc.element.body)
+    assert _without_revision_dates(accepted) == _without_revision_dates(off.doc.element.body)
+
+
+def test_an_enriched_citation_gets_no_sub_point_and_reject_all_restores_its_prose_once():
+    """An enriched citation deletes the CV's whole line beside PubMed's
+    inserted one. Reject All already gives the line back, prose and all, so
+    a sub-point would print the prose twice; it gets none, and the document
+    is the flag-off one. The re-rank's shape: the citation is inside w:ins,
+    no word of it visible to the word test, which took the paper before it
+    (EBYSBC, 21 of 64 placements)."""
+    from unified_pipeline.stage6 import supplementary
+
+    enriched = _enriched(_publication())
+    on = _render_publications([_later_publication(), enriched], supplementary_subpoints=True)
+    off = _render_publications([_later_publication(), _enriched(_publication())],
+                               supplementary_subpoints=False)
+
+    (own,) = on._row_receipts.elements_for(enriched)
+    assert supplementary._holds_tracked_change(own) and _citation_text(own).startswith("2. ")
+    assert _subpoint_paragraphs(on) == [] and on._subpoint_placements == []
+    assert _deleted_texts(on).count(_PAPER_PROSE) == 1
+    assert _without_revision_dates(on.doc.element.body) == _without_revision_dates(off.doc.element.body)
+
+
+def _paper_titled_by_its_prose():
+    """The prose is the title stage 4 extracted, which the citation prints."""
+    return _publication(title=_PAPER_PROSE)
+
+
+def _paper_whose_journal_is_its_prose():
+    """The prose is the journal stage 4 extracted."""
+    return _publication(journal=_PAPER_PROSE)
+
+
+@pytest.mark.parametrize("entry", [_paper_titled_by_its_prose, _paper_whose_journal_is_its_prose])
+def test_publication_prose_already_in_its_citation_is_not_offered_again(entry):
+    """The citation prints it (`_record_rendered`), so it does not print twice."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _render_publications([entry()], supplementary_subpoints=True)
+    assert _PAPER_PROSE in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry(), "S1", haystack) == []
+
+
+def _declined_paper():
+    """No title and no year: the writer declines it as no citation (#446)
+    and writes no paragraph for it."""
+    entry = _publication()
+    entry["extracted_fields"] = {"authors": _PAPER_AUTHORS, "journal": _PAPER_JOURNAL}
+    return entry
+
+
+def _superseded_paper():
+    """An "in press" copy stage 5 found published: written as one tracked
+    deletion of its line, with no citation number and no receipt."""
+    return dict(_publication(), in_press_superseded=True,
+                in_press_note="Published since; listed again below.")
+
+
+def _fused_papers():
+    """Two papers stage 5d formatted as one block (#208): the writer splits
+    it into two citations of its own copies, neither of them the entry."""
+    entry = _publication()
+    second = f"{_PAPER_AUTHORS}. {_PAPER_TITLE} after a decade. {_PAPER_JOURNAL}. 2018;16(1):1-9."
+    entry["extracted_fields"].update(
+        formatted_citation=f"{_PAPER_AUTHORS}. {_PAPER_TITLE}. {_PAPER_JOURNAL}. 2014;12(3):45-52.\n{second}",
+        formatting_source="stage_5d_llm")
+    return entry
+
+
+@pytest.mark.parametrize("make", [_declined_paper, _superseded_paper, _fused_papers],
+                         ids=["declined", "in_press_superseded", "split_by_the_writer"])
+def test_a_paper_the_bibliography_writes_no_citation_of_its_own_for_gets_no_sub_point(make):
+    entry = make()
+    gen = _render_publications([_later_publication(), entry], supplementary_subpoints=True)
+
+    assert gen._row_receipts.elements_for(entry) == []
+    assert _subpoint_paragraphs(gen) == [] and gen._subpoint_placements == []
+
+
+def test_the_publication_span_is_the_bibliography():
+    """`_get_wcm_section_header` falls back on the 'S' prefix to the whole
+    Bibliography, which holds every citation the writer writes; the sub-point
+    pass needs no heading of its own for S1 or S2."""
+    gen = _render_publications([_publication(), _publication(idx=1210, code="S2", title="Restoring tidal marshes",
+                                                             prose=_LATER_PAPER_PROSE)],
+                               supplementary_subpoints=True)
+    body = list(gen.doc.element.body)
+    for code in ("S1", "S2"):
+        assert WCMTemplateGenerator._get_wcm_section_header(code) == "BIBLIOGRAPHY"
+        span = gen._subpoint_section_spans()[code]
+        assert "".join(t.text or "" for t in body[span.start].iter(qn("w:t"))).startswith("BIBLIOGRAPHY")
+    assert len(_subpoint_paragraphs(gen)) == 2
+
+
+def _render_grouped_publications(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_bibliography(grouped, cv_owner={"last_name": "Marblegate"})
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+@pytest.mark.parametrize("code, heading", [("S0", "RESEARCHER PROFILES"), ("N1", "MENTORING PROGRAMS")])
+def test_a_paper_rerouted_out_of_s1_to_an_excluded_code_gets_no_sub_point(code, heading):
+    """S0 and N1 are excluded: a paper rendered as either is that code's
+    record, so neither its citation of the same words nor any other carries
+    its prose."""
+    gen, grouped = _render_grouped_publications(
+        [_later_publication(), _rerouted(_publication(), code, heading)], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[code]] == [1200]
+    assert [e["element_idx_start"] for e in grouped["S1"]] == [1190]
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("code, heading", [("S8", "ABSTRACTS"), ("F2", "BOARD CERTIFICATION")])
+def test_a_refused_reroute_keeps_the_publication_rule(code, heading):
+    """A peer-reviewed article under an abstracts heading keeps its S1 code
+    (S1 -> S8 is a confusion the taxonomy warns of,
+    `_TAXONOMY_WARNED_CONFUSIONS`), and one under the board certification
+    heading too, the code the span gap blocks (its renderer would drop the
+    title, `_fields_lost_in_reroute`). It renders as an S1 citation and its
+    prose is a deleted paragraph under it."""
+    gen, grouped = _render_grouped_publications([_rerouted(_publication(), code, heading)],
+                                                supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["S1"]] == [1200]
+    (para,) = _subpoint_paragraphs(gen)
+    assert _citation_text(para.getprevious()).startswith(f"1. {_PAPER_AUTHORS}.")
+    assert _paragraph_text(para) == _PAPER_PROSE
+
+
+@pytest.mark.parametrize("assigned, target, heading", [
+    ("S8", "S1", "Peer-Reviewed Research Articles"),
+    ("S3", "S2", "Reviews and Editorials"),
+])
+def test_a_record_rerouted_into_a_publication_code_follows_the_publication_rule(assigned, target, heading):
+    """An abstract under a peer-reviewed heading, or a book under the reviews
+    heading, renders as that heading's citation: its prose is a deleted
+    paragraph under it, recorded under the code it rendered as."""
+    gen, grouped = _render_grouped_publications(
+        [_rerouted(_publication(code=assigned), target, heading)], supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped[target]] == [1200]
+    (para,) = _subpoint_paragraphs(gen)
+    assert _paragraph_text(para) == _PAPER_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.code == target
+
+
+def test_a_paper_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass touched the entry. What is left can still describe
+    what was withheld, so none of it is offered."""
+    withheld = _publication()
+    withheld["_pii_withheld"] = True
+    gen = _render_publications([_later_publication(), withheld], supplementary_subpoints=True)
+
+    assert gen._row_receipts.elements_for(withheld)
+    assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
+
+
+@pytest.mark.parametrize("protect, value", [(_naming_the_spouse, _SPOUSE),
+                                            (_with_a_home_phone, _HOME_PHONE)],
+                         ids=["spouse", "home_phone"])
+def test_publication_prose_holding_protected_data_is_not_offered_through_the_pii_pass(
+        tmp_path, monkeypatch, protect, value):
+    """The PII pass drops a field named for protected data and marks the
+    entry withheld; no scope withholds a phone number in the middle of a
+    line. The same paper without them still has its sub-point."""
+    _doc, placements = _stage6_render(tmp_path / "plain", monkeypatch, [_publication()])
+    assert placements == [[_PAPER_PROSE]]
+
+    doc, placements = _stage6_render(tmp_path / "protected", monkeypatch,
+                                     [protect(_publication(), _PAPER_PROSE)])
+    assert placements == []
+    assert value not in "".join(t.text or "" for t in doc.element.body.iter(qn("w:t"), qn("w:delText")))
+
+
+def test_a_paper_dedup_drops_offers_its_prose_once_under_the_kept_citation():
+    """Stage 6 dedups before the sections render and hands the sub-point
+    pass the entries from before it: the dropped copy wrote no citation, so
+    its prose goes only under the citation of the copy dedup kept, once."""
+    gen = _generator(supplementary_subpoints=True)
+    grouped = gen._group_entries_by_code([_publication(idx=1200), _publication(idx=1201)])
+    kept, before, _decisions = gen._dedup_grouped_entries(grouped)
+    assert len(before["S1"]) == 2 and len(kept["S1"]) == 1
+    gen._fill_bibliography(kept, cv_owner={"last_name": "Marblegate"})
+    gen._add_supplementary_subpoints(before)
+
+    (para,) = _subpoint_paragraphs(gen)
+    assert _citation_text(para.getprevious()).startswith(f"1. {_PAPER_AUTHORS}.")
+    assert _deleted_texts(gen) == _PAPER_PROSE
+    (placement,) = gen._subpoint_placements
+    assert placement.element_idx_start == kept["S1"][0]["element_idx_start"]
+
+
+def test_a_low_coverage_paper_never_reaches_the_content_overflow():
+    """`is_overflow_candidate` turns every S code away, so a paper whose
+    coverage and length would qualify another code is not queued: its
+    sub-point stands for nothing the overflow would write (#2013's
+    neither-document gap cannot arise), and Accept All is the flag-off
+    render."""
+    from unified_pipeline.stage_6_word_template import is_overflow_candidate
+
+    blocks = "\t".join(f"{_PAPER_PROSE}, part {n} of the study's methods" for n in range(12))
+
+    def render(flag):
+        entry = _publication(prose=blocks)
+        entry["extraction_coverage"] = {"extraction_coverage_percent": 5.0}
+        gen = _generator(supplementary_subpoints=flag)
+        gen._fill_bibliography({"S1": [entry]}, cv_owner={"last_name": "Marblegate"})
+        assert not is_overflow_candidate(entry) and gen._overflow_entries == []
+        assert is_overflow_candidate(dict(entry, taxonomy_code="D1"))
+        gen._place_unrendered_prose({"S1": [entry]})
+        return gen
+
+    on, off = render(True), render(False)
+    assert len(_subpoint_paragraphs(on)) == 12
+    assert on.stats["overflow_bullets_added"] == off.stats["overflow_bullets_added"] == 0
+    accepted = _accept_all(on)
+    assert etree.tostring(accepted, method="c14n") == etree.tostring(off.doc.element.body, method="c14n")
+
+
+def test_fan_out_children_of_a_papers_line_offer_nothing_their_own_segment_does_not_hold():
+    """Stage 4 returned two papers from one line: fan-out gives the earlier
+    one its own segment and the last one the whole line, which reads only
+    its own segment when the segments pair with the records
+    (`_own_record_line`). Prose on a segment of its own pairs with no
+    record, so neither child offers it, as which paper it is about cannot
+    be told. The same line kept whole, with no records, offers it: the
+    later paper, by the same group in the same journal, restates the
+    entry's fields (`_restates_row`) and holds its title, so it reads as the
+    entry's own citation, not another paper's (`_cites_another_paper`)."""
+    later = f"{_PAPER_AUTHORS}. {_PAPER_TITLE} after a decade. {_PAPER_JOURNAL}. 2018;16(1):1-9."
+    own = f"{_PAPER_AUTHORS}. {_PAPER_TITLE}. {_PAPER_JOURNAL}. 2014;12(3):45-52."
+    records = [{"authors": _PAPER_AUTHORS, "title": f"{_PAPER_TITLE} after a decade", "journal": _PAPER_JOURNAL,
+                "year": "2018"},
+               {"authors": _PAPER_AUTHORS, "title": _PAPER_TITLE, "journal": _PAPER_JOURNAL, "year": "2014"}]
+    text = f"{later}\t{own}\t{_PAPER_PROSE}"
+    for listed, children, offered in ((True, 2, []), (False, 1, [(_PAPER_PROSE,)])):
+        fields = {**records[-1], STAGE4_RECORDS_KEY: copy.deepcopy(records)} if listed else dict(records[-1])
+        entry = {"element_idx_start": 1300, "taxonomy_code": "S1", "text": text, "extracted_fields": fields}
+        gen, grouped = _render_grouped_publications([entry], supplementary_subpoints=True)
+        assert len(grouped["S1"]) == children
+        assert all(gen._row_receipts.elements_for(e) for e in grouped["S1"])
+        assert [p.paragraphs for p in gen._subpoint_placements] == offered
+
+
+def test_the_doctor_matches_a_publication_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
+    """Through `run_stage6`: the sidecar records the earlier paper's
+    sub-point under its own index and S1, and the doctor's per-entry match
+    counts it for that entry, not for the later paper that shares its words.
+    The sub-point sits directly under its citation at the citation's own
+    indent, none: Reject All shows it as an unnumbered paragraph level with
+    the citations."""
+    from unified_pipeline.doctor.shared import (
+        docx_subpoint_lines,
+        offered_as_subpoint,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6 import supplementary
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    doc, placements = _stage6_render(tmp_path, monkeypatch, [_later_publication(), _publication()],
+                                     uid="T1205S")
+    assert placements == [[_PAPER_PROSE]]
+    sidecar = json.loads((tmp_path / "T1205S_render_warnings.json").read_text())
+    assert [(p["element_idx_start"], p["code"]) for p in sidecar[SUBPOINT_PLACEMENTS_KEY]] == [(1200, "S1")]
+    subpoints = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert offered_as_subpoint(_PAPER_PROSE, subpoints, element_idx=1200)
+    assert not offered_as_subpoint(_PAPER_PROSE, subpoints, element_idx=1190)
+    (para,) = [p for p in doc.element.body.iterchildren(qn("w:p")) if supplementary._is_subpoint(p)]
+    assert _citation_text(para.getprevious()).startswith("2. ")
+    assert para.find(f"{qn('w:pPr')}/{qn('w:ind')}") is None
+    assert para.getprevious().find(f"{qn('w:pPr')}/{qn('w:ind')}") is None
+
+
+_FUSED_PAPER = "Fenn CD, Quill AM. Saltmarsh accretion under rising tides. Coastal Studies Review. 2011;9:101-12."
+
+
+@pytest.mark.parametrize("second, placed", [(_FUSED_PAPER, []), (_PAPER_PROSE, [[_PAPER_PROSE]])],
+                         ids=["another_paper", "own_prose"])
+def test_the_doctor_still_reports_another_paper_fused_onto_a_publications_line(tmp_path, monkeypatch,
+                                                                               second, placed):
+    """Through `run_stage6` (#1205 review): the CV's next paper joined to
+    the entry's line with no list number is no sub-point, so the doctor's
+    `source_line_coverage` reports it missing from the entry with sub-points
+    on as with them off. The paper's own prose in its place is the
+    sub-point, which the doctor reads as there."""
+    from unified_pipeline.doctor.lints.coverage import lint_source_line_coverage
+    from unified_pipeline.doctor.shared import docx_body_blocks
+
+    entry = _publication(prose=second)
+    citation = entry["text"].split("\t")[0]
+
+    def missing(flag):
+        doc, placements = _stage6_render(tmp_path / str(flag), monkeypatch, [copy.deepcopy(entry)],
+                                         supplementary_subpoints=flag)
+        findings = lint_source_line_coverage([citation, second], docx_body_blocks(doc),
+                                             docx_body_blocks(doc, deleted=True),
+                                             stage3b={"entries": [copy.deepcopy(entry)]})
+        return placements, [(f["message"].split(":")[0], f["evidence"]) for f in findings]
+
+    assert missing(False) == ([], [("entry 1200", [second])])
+    assert missing(True) == (placed, [] if placed else [("entry 1200", [second])])
 
 
 # ------------------------------------------- date-led sibling records (#983)
