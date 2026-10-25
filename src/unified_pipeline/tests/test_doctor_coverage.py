@@ -716,6 +716,38 @@ def test_a_sub_point_row_whose_second_paragraph_holds_its_first_is_still_one_ent
     assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
 
 
+def test_a_sub_point_row_whose_paragraph_holds_the_cell_joiner_is_still_one_entrys():
+    """A duties paragraph typed with " | " (TABLE_ROW_JOINER) splits the
+    joined line mid-paragraph: read cell by cell, no paragraph empties a
+    cell, the row reads as no sub-point's, and it vouches for every line
+    again. Read whole, it is entry 20's row, as without the pipe: made of
+    that paragraph alone, not of another entry's sub-point elsewhere, and
+    not when a cell holds other text beside it."""
+    from unified_pipeline.core.text_norm import squash
+    from unified_pipeline.doctor.lints.coverage import _subpoint_paragraphs
+    from unified_pipeline.doctor.shared import subpoint_owners
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    duties = (f"Supervised the regional sprocket audit{TABLE_ROW_JOINER}trained gizmo apprentices in flywheel repair",)
+    line = "Supervised the regional sprocket audit and trained gizmo apprentices in flywheel repair, Example Guild"
+    blocks, views = _sub_point_row(duties, SubpointPlacement(20, "D1", duties), elsewhere=((40, _SUBPOINT),))
+    joined = TABLE_ROW_JOINER.join(duties * 2)
+    assert joined in views["deleted_blocks"][-1][1].split("\n")
+    owners = subpoint_owners(views["subpoints"])
+    assert _subpoint_paragraphs(joined, owners) == [squash(duties[0])]
+    assert _subpoint_paragraphs(f"{duties[0]}{TABLE_ROW_JOINER}Example Guild", owners) is None
+    # A row of two paragraphs is made of both: its owners are the entries whose own each one is.
+    pair = (duties[0], "Kept the guild ledger")
+    _, pair_views = _sub_point_row(pair, SubpointPlacement(20, "D1", pair))
+    pair_joined = TABLE_ROW_JOINER.join([" ".join(pair)] * 2)
+    assert pair_joined in pair_views["deleted_blocks"][-1][1].split("\n")
+    pair_owners = subpoint_owners(pair_views["subpoints"])
+    assert sorted(_subpoint_paragraphs(pair_joined, pair_owners)) == sorted(map(squash, pair))
+    findings = _run([line], blocks, stage3b=_entries_of((30, "D1", line)), **views)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
+    assert _run([line], blocks, stage3b=_3b((20, "D1", line)), **views) == []
+
+
 def test_the_research_summary_is_no_record_of_a_lines_period():
     """The research summary stage 4.5 wrote vouches for no line but a
     research-activities one (`_Judged.narrative`), nor for one period of a

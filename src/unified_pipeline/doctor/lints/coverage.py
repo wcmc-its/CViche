@@ -159,7 +159,12 @@ def _reads(owners: frozenset | None, entries: frozenset) -> bool:
     once a sub-point took the claims that had held it). A deletion no
     record places (`owners` None) vouches for every line, as before; so
     does every deletion for a line no entry holds, whose own entry is
-    unknown. A line stage 3b put in several entries is each one's."""
+    unknown. A line stage 3b put in several entries is each one's. A record
+    the CV lists twice, in two entries, shares one rendering in the
+    accepted view (`_Judged.keys`) but not a tracked deletion: the owner's
+    rule (#1205 comment 6398270589) is the line's own entry's deletions
+    only, and a twin's would let another entry's deletion vouch again
+    wherever `_same_record` reads two lines as one record."""
     return owners is None or not entries or not owners.isdisjoint(entries)
 
 
@@ -368,27 +373,27 @@ def _entry_index(start: object) -> int | None:
 def _subpoint_paragraphs(line: str, owners: Mapping[str, frozenset | None]) -> list[str] | None:
     """The #1205 sub-point paragraphs (`owners`, `subpoint_owners`) one
     deleted line is made of: the line itself, or a table row's joined line
-    (TABLE_ROW_JOINER) whose every cell is a run of them, a spanning
+    (TABLE_ROW_JOINER) made of nothing but them and the joiners, a spanning
     sub-point row's cell repeated per column. None when it is made of other
     text. Read by text, as `subpoint_text` places them: a deletion of a
     sub-point's very words would read as that sub-point (none on the
-    102-run farm). ponytail: a cell's paragraphs are taken out longest
-    first; a cell they do not empty is read as other text."""
+    102-run farm). The paragraphs are taken out of the whole line before
+    its joiners, so a paragraph that itself holds the joiner (a duties
+    line typed with " | ") is still read whole. ponytail: they are taken
+    out longest first; a line they do not empty is read as other text."""
     key = squash(line)
     if key in owners:
         return [key]
     if TABLE_ROW_JOINER not in line:
         return None
-    longest_first = sorted(owners, key=len, reverse=True)
+    rest = key
     paragraphs: list[str] = []
-    for cell in line.split(TABLE_ROW_JOINER):
-        rest = squash(cell)
-        for paragraph in longest_first:
-            if paragraph in rest:
-                rest = rest.replace(paragraph, "")
-                paragraphs.append(paragraph)
-        if rest:
-            return None
+    for paragraph in sorted(owners, key=len, reverse=True):
+        if paragraph in rest:
+            rest = rest.replace(paragraph, "")
+            paragraphs.append(paragraph)
+    if rest.replace(squash(TABLE_ROW_JOINER), ""):
+        return None
     return paragraphs
 
 
@@ -401,7 +406,16 @@ def _deleted_line_owners(line: str, owners: Mapping[str, frozenset | None],
     entry, without placements, as `offered_as_subpoint` reads them. For any
     other deletion, such as the enrichment's w:del of a citation's CV line,
     the stage-3b entries whose text holds it (`_Entries.holding`); None when
-    none does, as for a formatter's fragment no entry holds verbatim."""
+    none does, as for a formatter's fragment no entry holds verbatim.
+
+    A sub-point's owners are the indexes the sidecar names, a source line's
+    own entries the ones stage 3b names, and the two are not reconciled. A
+    placement under an index that no stage-3b entry holding the line
+    carries (another index, or None) vouches for none of that line, and so
+    does a sub-point whose written text differs from its placement's
+    paragraph, which no placement then names. On the 102-run farm every
+    placement's index is a stage-3b entry's and every sub-point line is a
+    placement's."""
     paragraphs = _subpoint_paragraphs(line, owners)
     if not paragraphs:
         return entries.holding(line) or None
@@ -1256,7 +1270,7 @@ def lint_source_line_coverage(source_lines: list[str], blocks: list[tuple[str, s
 
     INFO, and a review-copy note only, never a run-page row
     (REVIEW_COPY_ONLY_LINTS); its precision is doctor/PRECISION.md's
-    SLC-A3."""
+    SLC-A3, and SLC-OWN measures the own-entry reading of deletions."""
     by_entry: dict[int | None, list[tuple[str, float]]] = {}
     for verdict in _line_verdicts(source_lines, blocks, deleted_blocks, stage1a, stage3b, table_rows,
                                   stage_4_5, subpoints):
