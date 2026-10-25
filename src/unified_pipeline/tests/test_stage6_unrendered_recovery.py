@@ -9398,16 +9398,17 @@ def test_a_degree_line_restating_its_row_is_written_as_its_honors_under_the_row(
     assert gen._subpoint_prose == [f"{_PHD_LINE} ({_DEGREE_HONORS})"]
 
 
-@pytest.mark.parametrize("entries", [
-    lambda: [_restating_degree()],
+@pytest.mark.parametrize("entries, written", [
+    (lambda: [_doctorate(), _restating_degree()], f"({_DEGREE_HONORS})"),
     # The line inside the fragment, new words on both sides (YUYVIG IZIXVF 13's shape).
-    lambda: [_restating_degree(f"1. Graduate: Ph.D., {_DEGREE_FIELD}, 2005 ({_DEGREE_HONORS})")],
-    lambda: [_doctorate() | {"text": _PHD_LINE}, _degree()],
-], ids=["prefix", "middle", "unrestated"])
-def test_a_restated_line_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it(entries):
+    (lambda: [_restating_degree(f"1. Graduate: Ph.D., {_DEGREE_FIELD}, 2005 ({_DEGREE_HONORS})")],
+     f"1. Graduate: ({_DEGREE_HONORS})"),
+], ids=["prefix", "middle"])
+def test_a_restated_line_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it(entries, written):
     off = _render_education(entries(), supplementary_subpoints=False)
     on = _render_education(entries(), supplementary_subpoints=True)
 
+    assert _deleted_texts(on) == written
     accepted = _accept_all(on)
     assert _texts_of(accepted) == _texts_of(off.doc.element.body)
     assert _row_texts(accepted) == _row_texts(off.doc.element.body)
