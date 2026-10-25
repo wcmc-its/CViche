@@ -25,9 +25,11 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _GROUP_HEADER_RE,
     DEDUP_UNNAMED_SHORT_MAX_WORDS,
     SPLIT_SIBLING_METRIC,
+    _ad_hoc_apart,
     _author_name_sets,
     _bare_occasion_apart,
     _carries_record,
+    _class_year_apart,
     _companion_title,
     _counts,
     _dates_compatible,
@@ -40,24 +42,30 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _drop_split_siblings,
     _field_dates_text,
     _first_author_names,
+    _is_ad_hoc,
     _lists_name,
     _names_a_sibling,
     _names_record,
     _narrower_committee,
     _one_slip_apart,
+    _other_award_name,
     _other_journal_same_row,
     _other_series_member,
     _part_numbers,
     _place_only_event,
+    _record_carried,
     _record_name,
     _row_residue,
+    _same_row,
     _series_marks,
     _shorter_journal_than_kept,
     _split_record_family,
     _standalone_numerals,
     _title_only_fragment,
     _undated_split_record_absorbs_date,
+    _under_another_year_head,
     _verbatim_contained,
+    _year_head,
     recovered_row_already_rendered,
 )
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
@@ -3087,3 +3095,333 @@ def test_a_committee_whose_organization_column_states_the_kept_qualifier_still_d
                      committee_name="Scientific Widget Committee", organization="Gizmo Society",
                      role="Member", start_date="2030", end_date="2032")
     assert not _kept_both("Q2", dropped, kept)
+
+
+# ------------ #666 residual (comment 6318606534): distinct records still dropped
+
+# LFFKVV 1434: an editorial board's row for the shorter of two journal names,
+# vouched for by a bare listing of that name under another code.
+
+def _board_row(name: str) -> dict:
+    return _entry("Q4B", f"{name}\tReview Editor\t2030-Present", journal_name=name,
+                  role="Review Editor", start_date="2030", end_date="present")
+
+
+def test_a_bare_listing_under_another_code_does_not_vouch_for_a_row_with_a_role():
+    kept, dropped = _board_row("Widget Applied Gizmology"), _board_row("Widget Gizmology")
+    reviewer_listing = _entry("Q4D", "Widget Gizmology", journal_name="Widget Gizmology")
+    assert _kept_both("Q4B", dropped, kept, reviewer_listing)
+    # The near miss: the same bare listing in the row's own code still vouches,
+    # and so does a row of another code that says the same about the journal.
+    board_listing = _entry("Q4B", "Widget Gizmology", journal_name="Widget Gizmology")
+    assert not _kept_both("Q4B", dropped, kept, board_listing)
+    same_row = dict(_board_row("Widget Gizmology"), taxonomy_code="Q4C")
+    assert not _kept_both("Q4B", dropped, kept, same_row)
+
+
+@pytest.mark.parametrize("text, same_code, same", [
+    ("Widgets", True, True),                          # a bare listing in the row's own code
+    ("Widgets", False, False),                        # a bare listing under another code
+    ("Widgets\tReview Editor\t2019-present", False, True),  # another code, the same row
+    ("Widgets\tEditorial Board\t2019", True, False),  # another role
+    ("Gizmos", True, False),                          # does not hold the name
+])
+def test_same_row(text, same_code, same):
+    assert _same_row(text, "Widgets\tReview Editor\t2030-present", "Widgets", same_code) is same
+
+
+# ZASOTV 223/236/241, LFFKVV 1572: a journal listed by its bare name, dropped
+# against a line whose fields name no journal or another one, then vouched for
+# by a longer journal name holding its word.
+
+def _lead_in() -> dict:
+    return _entry("Q4D", "Reviewer for Widgets journals:", journal_name=None)
+
+
+def _book_review() -> dict:
+    return _entry("Q4D", "“Gizmo approach to widgets” by A. Writer. Example Press.\t"
+                         "Book Reviewer\t2030",
+                  journal_name="Studies in Gizmo Craft - Book Reviewer", year="2030")
+
+
+@pytest.mark.parametrize("make_kept", [_lead_in, _book_review], ids=["lead-in", "book-review"])
+def test_a_bare_journal_name_is_not_carried_by_a_longer_name_holding_its_word(make_kept):
+    kept, dropped = make_kept(), _journal("Widgets")
+    longer = _journal("Annals of Widgets")
+    assert _kept_both("Q4D", dropped, kept, longer)
+    # The near miss: a listing of exactly that name still carries it.
+    assert not _kept_both("Q4D", dropped, kept, longer, _journal("Widgets"))
+
+
+@pytest.mark.parametrize("dropped_text, other_text, carried", [
+    ("Widgets", "Annals of Widgets", False),           # a bare name: only a listing carries it
+    ("Widgets", "Gizmos, Widgets", True),              # its own list names it
+    ("Widgets, Reviewer", "Annals of Widgets", True),  # not bare: named is carried, as before
+])
+def test_record_carried(dropped_text, other_text, carried):
+    other = _entry("Q4D", other_text)
+    assert _record_carried(other, "Widgets", "journal_name", "Q4D", dropped_text) is carried
+
+
+# LFFKVV 112: two societies over the same years, the shorter name's words all
+# inside the longer one's, out of order.
+
+def _membership(name: str) -> dict:
+    return _entry("I", f"{name}\t2030-Present", organization=name,
+                  start_date="2030", end_date="present")
+
+
+def test_a_membership_of_another_society_is_kept():
+    kept = _membership("International Society for Applied Widget Gizmos")
+    dropped = _membership("Widget Society on Gizmos")
+    assert _kept_both("I", dropped, kept)
+    assert _different_institution_for("I", dropped, kept) == "Widget Society on Gizmos"
+    # The near miss: in order, the shorter name is the kept one cut short.
+    kept = _membership("Widget Society on Gizmos of North Example")
+    assert _different_institution_for("I", dropped, kept) is None
+    assert not _kept_both("I", dropped, kept)
+    assert not _kept_both("I", _membership("Widget Society"), _membership("Widget Society"))
+
+
+# LTTYWI 175, 179: an undated committee row under one year head beside a row
+# of the same committee under another.
+
+def _list_row(index: int, text: str, code: str = "P", **fields) -> dict:
+    return {"taxonomy_code": code, "element_idx_start": index, "element_idx_end": index,
+            "text": text, "extracted_fields": fields, "hierarchy": ["Administrative Duties"]}
+
+
+def _committee_rows(dropped_index: int = 11) -> tuple[dict, dict, list[dict]]:
+    head = _list_row(10, "2030-2035 Member, Gadget Committee", committee_name="Gadget Committee",
+                     role="Member", start_date="2030", end_date="2035")
+    dropped = _list_row(dropped_index, "Member, Widget Committee", committee_name="Widget Committee",
+                        role="Member")
+    between = _list_row(13, "2033-2034 Chair, Sprocket Committee", committee_name="Sprocket Committee",
+                        role="Chair", start_date="2033", end_date="2034")
+    kept = _list_row(14, "2036-2037 Member, Widget Committee", committee_name="Widget Committee",
+                     role="Member", start_date="2036", end_date="2037")
+    return dropped, kept, [head, between]
+
+
+def test_an_undated_row_under_another_year_head_is_another_term():
+    dropped, kept, others = _committee_rows()
+    assert _kept_both("P", dropped, kept, *others)
+    assert _under_another_year_head(dropped, kept, "P", [dropped, kept, *others])
+    # Through an undated sibling line of the same group, too.
+    sibling = _list_row(11, "Chair, Gadget Committee", code="Q1", role="Chair")
+    dropped, kept, others = _committee_rows(dropped_index=12)
+    assert _kept_both("P", dropped, kept, sibling, *others)
+
+
+def test_an_undated_row_after_a_blank_line_is_no_row_of_the_group_above():
+    # The near miss: a blank line (element 11) ends the 2030-2035 group, so
+    # the undated line heads the rows below it and is the kept row's copy.
+    dropped, kept, others = _committee_rows(dropped_index=12)
+    assert not _under_another_year_head(dropped, kept, "P", [dropped, kept, *others])
+    assert not _kept_both("P", dropped, kept, *others)
+
+
+def test_an_undated_row_under_the_kept_row_itself_still_drops():
+    # The near miss: the undated line is a sub-line of the kept row, so it
+    # repeats that row.
+    kept = _list_row(10, "2036-2037 Member, Widget Committee", committee_name="Widget Committee",
+                     role="Member", start_date="2036", end_date="2037")
+    dropped = _list_row(11, "Member, Widget Committee", committee_name="Widget Committee", role="Member")
+    assert not _under_another_year_head(dropped, kept, "P", [dropped, kept])
+    assert not _kept_both("P", dropped, kept)
+
+
+@pytest.mark.parametrize("code, fields", [
+    ("P", {}),      # a fragment names no record
+    ("T", {}),      # a text-rendered code: a T fold
+    ("P", {"committee_name": "Widget Committee", "start_date": "2036"}),  # dated by a field
+])
+def test_an_undated_row_that_names_no_record_or_is_dated_is_left_to_the_other_checks(code, fields):
+    dropped, kept, others = _committee_rows()
+    dropped = dict(dropped, taxonomy_code=code, extracted_fields=fields)
+    kept = dict(kept, taxonomy_code=code)
+    assert not _under_another_year_head(dropped, kept, code, [dropped, kept, *others])
+
+
+def test_a_year_head_spanning_two_lines_heads_the_row_after_its_last_line():
+    dropped, kept, (head, between) = _committee_rows(dropped_index=12)
+    head = dict(head, element_idx_end=11)
+    assert _kept_both("P", dropped, kept, head, between)
+
+
+def _with(row: dict, **changes) -> dict:
+    return {**row, **changes}
+
+
+@pytest.mark.parametrize("change", [
+    # the row above states its year after its name: it heads no group
+    lambda dropped, kept, head: (dropped, kept, _with(head, text="Member, Gadget Committee, 2030-2035")),
+    # the year-led row above sits in another source section
+    lambda dropped, kept, head: (dropped, kept, _with(head, hierarchy=["Other Duties"])),
+    # the kept row sits in another source section
+    lambda dropped, kept, head: (dropped, _with(kept, hierarchy=["Other Duties"]), head),
+    # the kept row's year does not lead, so it has no year head
+    lambda dropped, kept, head: (dropped, _with(kept, text="Member, Widget Committee, 2036-2037"), head),
+    # no row names its source section
+    lambda dropped, kept, head: (_with(dropped, hierarchy=None), _with(kept, hierarchy=None),
+                                 _with(head, hierarchy=None)),
+])
+def test_rows_without_two_year_heads_in_one_section_are_left_to_the_other_checks(change):
+    dropped, kept, (head, between) = _committee_rows()
+    dropped, kept, head = change(dropped, kept, head)
+    assert not _under_another_year_head(dropped, kept, "P", [dropped, kept, head, between])
+    assert not _kept_both("P", dropped, kept, head, between)
+
+
+def test_a_dropped_row_stating_its_own_year_is_left_to_the_date_checks():
+    dropped, kept, others = _committee_rows()
+    dropped = _with(dropped, text="2036 Member, Widget Committee")
+    assert not _under_another_year_head(dropped, kept, "P", [dropped, kept, *others])
+
+
+@pytest.mark.parametrize("text, heads", [
+    ("2036-2037 Member, Widget Committee", True),
+    ("• 2036 Member, Widget Committee", True),
+    ("Member, Widget Committee, 2036-2037", False),  # its year does not lead
+])
+def test_year_head_of_a_dated_row_is_the_row_when_its_year_leads(text, heads):
+    row = _list_row(14, text, committee_name="Widget Committee")
+    assert (_year_head(row, [row]) is row) is heads
+
+
+# BLBVPD 213, IXJMKS 866: an ad hoc review beside a standing seat on the panel.
+
+def _review(text: str, hierarchy: str = "Review Panels", **fields) -> dict:
+    return dict(_entry("Q3", text, **fields), hierarchy=[hierarchy])
+
+
+@pytest.mark.parametrize("agency", ["Widget Agency", None])
+def test_a_standing_seat_beside_an_ad_hoc_review_of_the_panel_is_kept(agency):
+    # A row naming the panel and no agency is a review record too.
+    kept = _review("2030 Ad hoc Reviewer, Widget Agency Gadget Review Committee, Special Panel",
+                   role="Ad hoc Reviewer", agency=agency,
+                   panel_name="Gadget Review Committee, Special Panel", start_date="2030")
+    dropped = _review("2030 Widget Agency Gadget Review Committee", agency=agency,
+                      panel_name="Gadget Review Committee", start_date="2030")
+    assert _kept_both("Q3", dropped, kept)
+    assert _ad_hoc_apart(dropped, kept, "Q3")
+
+
+def test_an_agency_under_an_ad_hoc_heading_beside_its_study_section_row_is_kept():
+    kept = _review("Widget Agency Gadget Panel, June 2030", "Standing Widget Panels",
+                   agency="Widget Agency", role="Gadget Panel Member",
+                   panel_name="Widget Agency Gadget Panel", start_date="2030-06")
+    dropped = _review("Widget Agency", "Ad Hoc Widget Reviews", agency="Widget Agency")
+    assert _kept_both("Q3", dropped, kept)
+
+
+@pytest.mark.parametrize("dropped, kept", [
+    # both ad hoc: by the heading, or by the role
+    (_review("Widget Agency", "Ad Hoc Widget Reviews", agency="Widget Agency"),
+     _review("Widget Agency Gadget Panel, June 2030", "Ad Hoc Widget Reviews",
+             agency="Widget Agency", panel_name="Widget Agency Gadget Panel")),
+    (_review("2030 Ad-hoc reviewer, Widget Agency Gadget Panel", role="Ad-hoc reviewer",
+             agency="Widget Agency"),
+     _review("2030 Ad hoc Reviewer, Widget Agency Gadget Panel, Special Session",
+             role="Ad hoc Reviewer", agency="Widget Agency")),
+    # neither ad hoc
+    (_review("Widget Agency", agency="Widget Agency"),
+     _review("Widget Agency Gadget Panel, June 2030", agency="Widget Agency")),
+])
+def test_two_review_rows_of_one_kind_still_drop(dropped, kept):
+    assert not _ad_hoc_apart(dropped, kept, "Q3")
+    assert not _kept_both("Q3", dropped, kept)
+
+
+def test_an_ad_hoc_role_line_with_no_agency_or_panel_or_another_code_is_no_review_record():
+    kept = _review("Widget Agency Gadget Panel, June 2030", agency="Widget Agency")
+    assert not _ad_hoc_apart(_review("Ad hoc reviewer", role="Ad hoc reviewer"), kept, "Q3")
+    ad_hoc = dict(_review("Widget Agency", "Ad hoc Reviewer", agency="Widget Agency"),
+                  taxonomy_code="Q2")
+    assert not _ad_hoc_apart(ad_hoc, dict(kept, taxonomy_code="Q2"), "Q2")
+
+
+@pytest.mark.parametrize("entry, ad_hoc", [
+    ({"text": "2030 Ad hoc member, Gadget Panel"}, True),
+    ({"text": "2030 Gadget Panel", "extracted_fields": {"role": "ad-hoc reviewer"}}, True),
+    ({"text": "2030 Gadget Panel", "hierarchy": ["SERVICE", "Ad Hoc Reviews"]}, True),
+    ({"text": "2030 Gadget Panel", "extracted_fields": {"role": None}, "hierarchy": [None]}, False),
+    ({"text": "2030 Ad Hockey League Panel"}, False),  # "hoc" opening a longer word
+])
+def test_is_ad_hoc(entry, ad_hoc):
+    assert _is_ad_hoc(entry) is ad_hoc
+
+
+# LTTYWI 297, 307, 311, 351: a teaching award a class votes, beside the award
+# of another class or of another year whose class year is the dropped year.
+
+@pytest.mark.parametrize("dropped_text, kept_text", [
+    # another class, the same year (311, 351)
+    ("Teacher of the Year - (Class of 2031) - Widget College 2031",
+     "Teacher of the Year - (Class of 2033) - Widget College 2031"),
+    # the same class, another year: the class year vouched for the award year (297)
+    ("Teacher of the Year - (Class of 2031) - Widget College 2031",
+     "Teacher of the Year - (Class of 2031) - Widget College 2029"),
+    # no class named, another year (307)
+    ("Teacher of the Year - Widget College, Acme University 2031",
+     "Teacher of the Year - (Class of 2031) - Widget College 2029, Acme University"),
+])
+def test_an_award_of_another_class_or_year_is_kept(dropped_text, kept_text):
+    # No fields, so no name check can tell the two apart: only the class year can.
+    dropped, kept = _entry("H", dropped_text), _entry("H", kept_text)
+    assert _kept_both("H", dropped, kept)
+    assert _class_year_apart(dropped_text, kept_text, "H")
+
+
+@pytest.mark.parametrize("code, dropped_text, kept_text", [
+    # the same class and year: a copy
+    ("H", "Teacher of the Year - (Class of 2031) - Widget College 2031",
+     "Teacher of the Year - (class of 2031) - Widget College, Acme University 2031"),
+    # no class named, the same year: nothing tells them apart (262)
+    ("H", "Teacher of the Year - Widget College, Acme University 2031",
+     "Teacher of the Year - (Class of 2033) - Widget College 2031, Acme University"),
+    # a degree's class year is its date
+    ("B1", "Doctor of Widgetry, Acme University School of Gizmos, 2031",
+     "Doctor of Widgetry, Acme University School of Gizmos, Class of 2031, Dean's List"),
+])
+def test_an_award_of_the_same_class_and_year_or_another_code_still_drops(code, dropped_text, kept_text):
+    assert not _class_year_apart(dropped_text, kept_text, code)
+    assert not _kept_both(code, _entry(code, dropped_text), _entry(code, kept_text))
+
+
+# CYOFWJ 40: two awards of one year and one university, their names apart.
+
+def _award_row(name: str, year: str = "1990") -> dict:
+    return _entry("H", f"{year} {name}, Acme Gizmo University", award_name=name,
+                  date=year, granting_body="Acme Gizmo University")
+
+
+def _other_award_name_for(code, dropped, kept):
+    return _other_award_name(code, dropped["extracted_fields"], kept["extracted_fields"])
+
+
+def test_an_award_of_another_name_at_the_same_university_is_kept():
+    dropped, kept = _award_row("Gizmo Scholar"), _award_row("Jane Roe Scholar")
+    assert _kept_both("H", dropped, kept)
+    assert _other_award_name_for("H", dropped, kept)
+    # The near miss: another listing of the award on its year carries it.
+    assert not _kept_both("H", dropped, kept, _award_row("Gizmo Scholar"))
+
+
+@pytest.mark.parametrize("code, name, kept_name", [
+    ("H", "Gizmo Scholar", "Gizmo Scholar Award"),   # reworded, in order
+    ("H", "Gizmo Scholar Award", "Gizmo Scholar"),
+    ("H", "Gizmo Scholar", "Gizmo Scholar"),
+    ("H", "--", "Jane Roe Scholar"),                 # a name with no words
+    ("R", "Gizmo Scholar", "Jane Roe Scholar"),      # not an award code
+])
+def test_an_award_whose_name_the_kept_one_holds_in_order_still_drops(code, name, kept_name):
+    dropped, kept = _award_row(name), _award_row(kept_name)
+    dropped["taxonomy_code"] = kept["taxonomy_code"] = code
+    assert not _other_award_name_for(code, dropped, kept)
+
+
+def test_an_award_name_apart_needs_both_names():
+    kept = _award_row("Jane Roe Scholar")
+    assert not _other_award_name("H", {"award_name": None}, kept["extracted_fields"])
+    assert not _other_award_name("H", {"award_name": "Gizmo Scholar"}, {"award_name": ["x"]})
