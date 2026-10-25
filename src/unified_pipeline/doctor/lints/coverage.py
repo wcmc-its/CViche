@@ -1270,7 +1270,7 @@ def lint_source_line_coverage(source_lines: list[str], blocks: list[tuple[str, s
 
     INFO, and a review-copy note only, never a run-page row
     (REVIEW_COPY_ONLY_LINTS); its precision is doctor/PRECISION.md's
-    SLC-A3, and SLC-OWN measures the own-entry reading of deletions."""
+    SLC-A3, and YUY-SLCO measures the own-entry reading of deletions."""
     by_entry: dict[int | None, list[tuple[str, float]]] = {}
     for verdict in _line_verdicts(source_lines, blocks, deleted_blocks, stage1a, stage3b, table_rows,
                                   stage_4_5, subpoints):

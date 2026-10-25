@@ -455,7 +455,7 @@ Lints, ranked by the severity of the failure class they catch:
                           summary are left out; a wrapped line is judged
                           with the one before it. INFO, one per stage-3b
                           entry, and a review-copy note only, never a
-                          run-page row (SLC-A3 and SLC-OWN in
+                          run-page row (SLC-A3 and YUY-SLCO in
                           doctor/PRECISION.md).
                           Reads the source docx and the docx; stage 1a, 3b
                           and 4.5 and the render sidecar when present
