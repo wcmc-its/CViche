@@ -218,13 +218,8 @@ _CONTEXTUAL_SPACING_SUCCESSORS = (
 def mark_entry_end(para: Paragraph) -> None:
     """Give `para`, the last line of an unbulleted entry, the gap
     (`ENTRY_GAP_AFTER_PT`) that separates it from the next entry."""
-    mark_entry_end_properties(para._p.get_or_add_pPr())
-
-
-def mark_entry_end_properties(pPr: BaseOxmlElement) -> None:
-    """`mark_entry_end` on paragraph properties `pPr` directly, for a
-    paragraph built as XML (a #1205 sub-point)."""
-    pPr.get_or_add_spacing().after = Pt(ENTRY_GAP_AFTER_PT)
+    para.paragraph_format.space_after = Pt(ENTRY_GAP_AFTER_PT)
+    pPr = para._p.get_or_add_pPr()
     for old in pPr.findall(qn("w:contextualSpacing")):
         pPr.remove(old)
     contextual = OxmlElement("w:contextualSpacing")

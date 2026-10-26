@@ -2826,11 +2826,12 @@ def _gap_flags(anchor):
     return flags
 
 
-def test_sub_points_under_an_entrys_last_line_move_the_entry_gap_to_the_last_one():
+def test_sub_points_under_an_entrys_last_line_pass_the_entry_gap_to_the_last_one():
     # An entry's last line carries the gap to the next entry
-    # (`mark_entry_end`). Sub-points written under it become the entry's last
-    # lines, so the gap moves to the last of them: none between the line and
-    # its sub-points, or between two sub-points.
+    # (`mark_entry_end`). Sub-points written under it stay tight to each
+    # other and the last one carries the gap, so it still lands before the
+    # next entry. The anchor keeps its own: Accept All must give back the
+    # render without sub-points, markup included.
     doc = Document()
     anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
     mark_entry_end(anchor)
@@ -2838,11 +2839,11 @@ def test_sub_points_under_an_entrys_last_line_move_the_entry_gap_to_the_last_one
 
     revision = sp.Revision(0, _DATE)
     sp.write_subpoint(_subpoint(anchor, PROSE, OTHER_PROSE), revision)
-    assert _gap_flags(anchor) == [False, False, True, False]
+    assert _gap_flags(anchor) == [True, False, True, False]
 
     sp.write_subpoint(_subpoint(anchor, "A third sub-point of prose"), revision)
-    assert _gap_flags(anchor) == [False, False, False, True, False]
-    for p in [anchor._p, *list(anchor._p.itersiblings(qn("w:p")))[:2]]:
+    assert _gap_flags(anchor) == [True, False, False, True, False]
+    for p in list(anchor._p.itersiblings(qn("w:p")))[:2]:
         spacing = p.pPr.find(qn("w:spacing"))
         assert spacing is None or spacing.get(qn("w:after")) is None
         assert p.pPr.find(qn("w:contextualSpacing")) is None
