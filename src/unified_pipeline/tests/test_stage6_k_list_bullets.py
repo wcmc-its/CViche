@@ -41,7 +41,13 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.formatting import plain_entry_level  # noqa: E402
+from docx.shared import Pt  # noqa: E402
+
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    ENTRY_GAP_AFTER_PT,
+    is_entry_end,
+    plain_entry_level,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -604,3 +610,78 @@ def test_generate_hands_the_original_doc_path_to_section_k():
     # Dropping the argument leaves every render flat with all helper tests green.
     src = inspect.getsource(WCMTemplateGenerator.generate)
     assert "self._fill_teaching(entries_by_code, original_doc_path)" in src
+
+
+# --- the gap between entries (faculty-affairs feedback, 2026-10-26) ----------
+
+_COURSE_A = ["Pharmacology Course, Lecturer", "Lectures on drug metabolism",
+             "Small-group case discussions"]
+_COURSE_B = ["Physiology Course, Lecturer", "Cardiac physiology module"]
+
+
+def _k_entry(lines):
+    return {"taxonomy_code": "K1", "text": "\n".join(lines),
+            "extracted_fields": {"formatted_text": " ".join(lines)}}
+
+
+def _has_entry_gap(para):
+    return (is_entry_end(para._p.pPr)
+            and para.paragraph_format.space_after == Pt(ENTRY_GAP_AFTER_PT))
+
+
+def test_only_the_last_line_of_each_teaching_entry_carries_the_entry_gap():
+    # Multi-line K entries ran together: the List Paragraph style's
+    # contextual spacing drops the space between two of its paragraphs. The
+    # last line of each entry now turns that off and sets the gap; its other
+    # lines keep the style's tight spacing.
+    gen = _generator()
+    gen._fill_teaching({"K1": [_k_entry(_COURSE_A), _k_entry(_COURSE_B)]})
+    paras = gen.doc.paragraphs
+    first = next(i for i, p in enumerate(paras) if p.text in (_COURSE_A[0], _COURSE_B[0]))
+    rendered = paras[first:first + len(_COURSE_A) + len(_COURSE_B)]
+    texts = [p.text for p in rendered]
+    assert sorted(texts) == sorted(_COURSE_A + _COURSE_B)
+    for para in rendered:
+        is_last = para.text in (_COURSE_A[-1], _COURSE_B[-1])
+        assert _has_entry_gap(para) is is_last, para.text
+        if not is_last:
+            assert para.paragraph_format.space_after is None
+            assert not is_entry_end(para._p.pPr)
+    # The first entry still gets its blank line above it, and only it does.
+    assert paras[first - 1].text == ""
+    assert not _has_entry_gap(paras[first - 1])
+    assert sum(p.text == "" for p in rendered) == 0
+
+
+def test_a_single_line_teaching_entry_carries_the_entry_gap():
+    gen = _generator()
+    gen._fill_teaching({"K1": [{
+        "taxonomy_code": "K1",
+        "text": "2018-2022 - PA Student Lectures, Lecturer",
+        "extracted_fields": {"formatted_text": "2018-2022 - PA Student Lectures, Lecturer"},
+    }]})
+    rendered = [p for p in gen.doc.paragraphs if "PA Student Lectures" in p.text]
+    assert len(rendered) == 1
+    assert _has_entry_gap(rendered[0])
+
+
+def test_the_shared_bulleted_entry_helper_adds_no_entry_gap():
+    # `_insert_bulleted_entry` is shared with the passthrough writer; the gap
+    # is set by the K and L callers, so the helper's own output is unchanged.
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+    para = gen._insert_bulleted_entry(idx + 1, "A non-K bullet", None, list_level=0)
+    assert not is_entry_end(para._p.pPr)
+    assert para.paragraph_format.space_after is None
+
+
+def test_a_teaching_entrys_last_line_writes_the_gap_as_literal_ooxml():
+    # Read the markup Word sees, as literals: checking through the module's
+    # own constants passes even when a constant itself is wrong (val "1"
+    # would leave contextual spacing ON and the gap swallowed).
+    gen = _generator()
+    gen._fill_teaching({"K1": [_k_entry(_COURSE_A), _k_entry(_COURSE_B)]})
+    last = next(p for p in gen.doc.paragraphs if p.text == _COURSE_A[-1])
+    contextual = last._p.pPr.findall(qn("w:contextualSpacing"))
+    assert [c.get(qn("w:val")) for c in contextual] == ["0"]
+    assert last._p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "120"  # 6pt

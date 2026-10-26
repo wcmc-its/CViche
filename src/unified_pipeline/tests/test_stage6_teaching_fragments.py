@@ -613,6 +613,24 @@ def test_a_formatted_date_range_whose_ends_read_the_same_renders_once(
     assert _visible(gen) == ["Didactic teaching", expected, "SENTINEL-END"]
 
 
+def test_a_year_to_month_span_from_5c_fields_line_renders_the_month_in_words():
+    """#2020 on the wire: a K2 record dated 2025 to September 2026, whose
+    5c fields line writes "2025-2026-09", renders the end as a month-year,
+    never as a stray ISO year-month after the start."""
+    record = {"start_date": "2025", "end_date": "2026-09",
+              "program_name": "Fictional program"}
+    raw_text = "Fictional program 2025–Sep 2026"
+    formatted_text = s5c.fields_line(record, raw_text)
+    expected = "2025-September 2026 - Fictional program"
+    assert _teaching_entry_lines({**record, "formatted_text": formatted_text},
+                                 raw_text, taxonomy_code="K2") == [expected]
+
+    gen = _generator("Clinical teaching", "SENTINEL-END")
+    gen._fill_teaching({"K2": [_entry("K2", raw_text, formatted_text=formatted_text,
+                                      **record)]})
+    assert _visible(gen) == ["Clinical teaching", expected, "SENTINEL-END"]
+
+
 def test_mixed_newline_tab_pipe_teaching_input_renders_one_bullet_per_line():
     """Case 26 at the render, the delimiter contract end to end. Newlines
     separate items; a tab and a pipe INSIDE a line stay inside their bullet,
