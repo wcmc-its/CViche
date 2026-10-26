@@ -2663,7 +2663,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         render. `row_receipts` is each section's given/written count (#534),
         which `lint_renderer_row_receipts` reads. Also records whose each
         #1205 sub-point is (`_subpoint_placements`), so the doctor counts a
-        sub-point only for its own entry.
+        sub-point only for its own entry, and the line each paragraph cut of
+        its restatement was written from (`SubpointPlacement.to_record`).
         """
         try:
             report_path = Path(output_path).with_name(
@@ -2674,7 +2675,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "dedup_decisions": dedup_decisions,
                 "row_receipts": [receipt.to_json() for receipt in row_receipts],
                 supplementary.SUBPOINT_PLACEMENTS_KEY: [
-                    placement._asdict() for placement in self._subpoint_placements],
+                    placement.to_record() for placement in self._subpoint_placements],
             }, indent=2))
         except Exception:
             logger.exception("could not write render-warnings sidecar")
@@ -4125,10 +4126,12 @@ Now analyze the text above:"""
         sub-point only when it and the role's line hold every part of the
         overflow's text (`supplementary.yields_to_overflow`); otherwise the
         overflow is written, as with sub-points off. A line that restates the
-        line it goes under is written as its other words
+        line it goes under is written without that span
         (`supplementary.unrestated`); the recovery and the overflow read it
-        whole, so neither changes, and a sub-point left with no paragraph is
-        written nowhere but still stands for its entry."""
+        whole, so neither changes, and the placement records it whole
+        (`SubpointPlacement.lines`), so the doctor reads it as the CV wrote
+        it too. A sub-point left with no paragraph is written nowhere but
+        still stands for its entry."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         out_lines = self._rendered_output_lines() + self._subpoint_lines
@@ -4157,7 +4160,8 @@ Now analyze the text above:"""
                 self._sanitize_run_text(text) for text in subpoint.paragraphs))
             supplementary.write_subpoint(subpoint, revision)
             self._subpoint_placements.append(supplementary.SubpointPlacement(
-                subpoint.element_idx_start, subpoint.code, subpoint.paragraphs))
+                subpoint.element_idx_start, subpoint.code, subpoint.paragraphs,
+                tuple(self._sanitize_run_text(line) for line in subpoint.written_from)))
         self._revision_id = revision.next_id
         self.stats['supplementary_subpoints'] = len(self._subpoint_placements)
         self.stats['track_changes_added'] += sum(len(sp.paragraphs) for sp in planned)

@@ -225,7 +225,7 @@ def test_read_docx_subpoints_feeds_offered_as_subpoint(tmp_path):
 def _sidecar_placements(*placements):
     from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
 
-    return {"warnings": [], SUBPOINT_PLACEMENTS_KEY: [p._asdict() for p in placements]}
+    return {"warnings": [], SUBPOINT_PLACEMENTS_KEY: [p.to_record() for p in placements]}
 
 
 _OTHER_SUBPOINT = "Organises the regional examiners' workshop and moderates assessment panels"
@@ -366,3 +366,100 @@ def test_run_doctor_hands_source_line_coverage_the_sub_points_and_their_owners(t
     assert coverage(_sidecar_placements(SubpointPlacement(20, "S1", (prose,)))) == ["entry 30"]
     assert coverage(_sidecar_placements(SubpointPlacement(30, "S7", (prose,)))) == []
     assert coverage({"warnings": []}) == []
+
+
+# --- #1205 review: a sub-point cut of its line's restatement ------------------
+# The row prints "<award>, <institution>, <year>" and the sub-point only the
+# words after it; the sidecar records the line each cut paragraph was written
+# from (`SubpointPlacement.lines`), and the doctor reads the two as one place.
+
+_AWARD_ROW = ("Example Teaching Award", "Norvale University", "2016")
+_AWARD_NOTE = "given each year to one faculty member for excellence in bedside teaching"
+_AWARD_LINE = f"Example Teaching Award, Norvale University, 2016: {_AWARD_NOTE}"
+
+
+def test_a_sub_point_cut_of_its_restatement_is_read_with_the_line_it_was_written_from():
+    from unified_pipeline.core.text_norm import squash
+    from unified_pipeline.doctor.shared import (
+        offered_as_subpoint,
+        subpoint_owners,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    record = f"{_AWARD_LINE}\tExample College"
+    placements = subpoint_placements(_sidecar_placements(
+        SubpointPlacement(29, "H", (_AWARD_NOTE,), (_AWARD_LINE,)), SubpointPlacement(30, "K1", (_OTHER_SUBPOINT,))))
+    placed = subpoint_text([_AWARD_NOTE, _OTHER_SUBPOINT], placements)
+    # The record line opens with the row's words, which only the line holds.
+    assert offered_as_subpoint(record, placed, 29) and offered_as_subpoint(record, placed)
+    assert not offered_as_subpoint(record, placed, 30)
+    assert subpoint_owners(placed)[squash(_AWARD_LINE)] == frozenset({29})
+    # Read as the paragraph alone, it does not hold the line's opening.
+    alone = subpoint_text([_AWARD_NOTE, _OTHER_SUBPOINT], subpoint_placements(_sidecar_placements(
+        SubpointPlacement(29, "H", (_AWARD_NOTE,)), SubpointPlacement(30, "K1", (_OTHER_SUBPOINT,)))))
+    assert not offered_as_subpoint(record, alone, 29)
+    # The document says what is offered: a copy no longer holding the
+    # paragraph as a sub-point does not get its line back.
+    gone = subpoint_text([_OTHER_SUBPOINT], placements)
+    assert not offered_as_subpoint(record, gone, 29) and squash(_AWARD_LINE) not in subpoint_owners(gone)
+
+
+def test_as_written_deletions_reads_each_cut_paragraph_as_its_line():
+    from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, as_written_deletions
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    # A paragraph may itself hold the joiner (a duties line typed with " | ").
+    piped = f"Ran the bedside teaching rounds{TABLE_ROW_JOINER}chaired the clerkship committee"
+    placements = (SubpointPlacement(29, "H", (_AWARD_NOTE, _OTHER_SUBPOINT), (_AWARD_LINE, _OTHER_SUBPOINT)),
+                  SubpointPlacement(31, "D1", (piped,), (f"Associate Professor, Norvale University: {piped}",)))
+    row = TABLE_ROW_JOINER.join([_AWARD_NOTE] * 3)
+    deleted = [("p", _AWARD_NOTE), ("table", f"{_AWARD_NOTE}\n{row}\n{_OTHER_SUBPOINT}"), ("p", ""),
+               ("p", f"old wording {_AWARD_NOTE}"), ("p", piped)]
+    assert as_written_deletions(deleted, placements) == [
+        ("p", _AWARD_LINE),
+        ("table", f"{_AWARD_LINE}\n{TABLE_ROW_JOINER.join([_AWARD_LINE] * 3)}\n{_OTHER_SUBPOINT}"),
+        ("p", ""), ("p", f"old wording {_AWARD_NOTE}"), ("p", f"Associate Professor, Norvale University: {piped}")]
+    # A paragraph written as the CV wrote it, no placements, or no view: as the document holds it.
+    for none_cut in ((SubpointPlacement(29, "H", (_AWARD_NOTE,)),), (), None):
+        assert as_written_deletions(deleted, none_cut) == deleted
+    assert as_written_deletions(None, placements) is None
+
+
+def test_run_doctor_hands_source_line_coverage_the_cut_sub_points_as_their_lines(tmp_path):
+    """The wire: with the sidecar's lines, a source line the cut split
+    between its row and its sub-point is found in one place; read as the
+    paragraphs alone, as with a sidecar recording no lines, it holds under
+    half in each and is reported."""
+    from unified_pipeline.stage6.supplementary import (
+        Revision,
+        SubpointPlacement,
+        write_row_subpoint,
+    )
+
+    shared = "Shared with two chief residents of the medicine service"
+    source = Document()
+    source.add_paragraph(f"{_AWARD_LINE} {shared}")
+    source.save(str(tmp_path / "XSHAPE.docx"))
+    doc = Document()
+    table = doc.add_table(rows=1, cols=3)
+    for cell, text in zip(table.rows[0].cells, _AWARD_ROW, strict=True):
+        cell.text = text
+    write_row_subpoint(table.rows[0]._tr, (_AWARD_NOTE, shared), Revision(1, "2026-01-01T00:00:00Z"))
+    stage6 = tmp_path / "stage_6_wcm_documents"
+    stage6.mkdir()
+    doc.save(str(stage6 / "XSHAPE_wcm.docx"))
+    stage3b = tmp_path / "stage_3b_classified_entries"
+    stage3b.mkdir()
+    (stage3b / "XSHAPE_classified.json").write_text(json.dumps({"entries": [
+        {"element_idx_start": 20, "taxonomy_code": "H", "text": f"{_AWARD_LINE}\t{shared}"}]}))
+    sidecar = stage6 / "XSHAPE_render_warnings.json"
+
+    def coverage(*placements):
+        sidecar.write_text(json.dumps(_sidecar_placements(*placements)))
+        return [f["message"].split(":")[0] for f in run_doctor(tmp_path, "XSHAPE")["findings"]
+                if f["lint"] == "source_line_coverage"]
+
+    assert coverage(SubpointPlacement(20, "H", (_AWARD_NOTE, shared), (_AWARD_LINE, shared))) == []
+    assert coverage(SubpointPlacement(20, "H", (_AWARD_NOTE, shared))) == ["entry 20"]

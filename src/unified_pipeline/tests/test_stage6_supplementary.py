@@ -214,10 +214,29 @@ def test_plan_records_the_code_each_entry_is_planned_under_and_its_index():
 
 def test_a_placement_reads_back_from_its_sidecar_record():
     placement = sp.SubpointPlacement(1477, "N3B", (PROSE, OTHER_PROSE))
-    assert sp.SubpointPlacement.from_record(json.loads(json.dumps(placement._asdict()))) == placement
+    assert sp.SubpointPlacement.from_record(json.loads(json.dumps(placement.to_record()))) == placement
     # A record missing a key, or holding a stray shape, reads as empty, not as text.
     assert sp.SubpointPlacement.from_record({"paragraphs": PROSE}) == sp.SubpointPlacement(None, "", ())
     assert sp.SubpointPlacement.from_record({"paragraphs": [7]}).paragraphs == ("7",)
+
+
+def test_a_placement_records_the_line_each_cut_paragraph_was_written_from():
+    # A placement written as the CV wrote it is recorded as before; one with
+    # a paragraph cut of its line's restatement also records the lines,
+    # paragraph for paragraph, and reads back with them.
+    line = f"Associate Professor, Example University, 2010-2015. {PROSE}"
+    assert json.loads(json.dumps(sp.SubpointPlacement(7, "D1", (PROSE,)).to_record())) == {
+        "element_idx_start": 7, "code": "D1", "paragraphs": [PROSE]}
+    cut = sp.SubpointPlacement(7, "D1", (PROSE, OTHER_PROSE), (line, OTHER_PROSE))
+    assert json.loads(json.dumps(cut.to_record())) == {
+        "element_idx_start": 7, "code": "D1", "paragraphs": [PROSE, OTHER_PROSE], "lines": [line, OTHER_PROSE]}
+    assert sp.SubpointPlacement.from_record(json.loads(json.dumps(cut.to_record()))) == cut
+    # Only a paragraph that differs from its line was cut.
+    assert cut.as_written() == ((PROSE, line),)
+    assert sp.SubpointPlacement(7, "D1", (PROSE,)).as_written() == ()
+    # Lines that do not pair with the paragraphs are none.
+    assert sp.SubpointPlacement.from_record({"paragraphs": [PROSE], "lines": [line, line]}).lines == ()
+    assert sp.SubpointPlacement(7, "D1", (PROSE,), (line, line)).as_written() == ()
 
 
 def test_plan_finds_no_anchor_outside_the_section():
@@ -3034,10 +3053,16 @@ def test_a_line_inside_a_fragment_is_cut_from_its_middle(fragment, written):
     "Awarded the Associate Professor Example University fellowship for the graduate biostatistics sequence",
     # Only a later cell of the line: its opening words (the title) are not held.
     "Example University, 2010-2015: taught the graduate biostatistics sequence",
+    # The line's words after a word that closes no part ("the"): a span opens
+    # the fragment or follows a mark, so a sentence is not cut in two.
+    "Named the Associate Professor, Example University, in its first year of the chair",
     # The line closes the fragment: only a span opening it or inside it is cut,
     # with a lone mark after it or not.
     "Taught the graduate biostatistics sequence; Associate Professor, Example University, 2010-2015",
     "Taught the graduate biostatistics sequence; Associate Professor, Example University, 2010-2015 )",
+    # ... or closes a bracket it did not open: stopped short of the bracket,
+    # the line's words still run on to the fragment's end.
+    "Taught the graduate biostatistics sequence (interim; Associate Professor, Example University, 2010-2015)",
     # The restatement runs on past the cut, through one word the line does not print:
     # two more of the line's distinctive words (SUBPOINT_RESTATEMENT_RUN_ON_WORDS).
     "Associate Professor, Example University, and Example University 2010-2015 consult service",
@@ -3126,6 +3151,59 @@ def test_the_marks_left_at_a_cut_are_trimmed_and_the_first_restatement_is_cut(fr
     assert sp.unrestated(fragment, "Example Teaching Award Norvale University 2016") == written
 
 
+@pytest.mark.parametrize("fragment, written", [
+    # A mark joined to a letter or a digit is part of the word the CV wrote:
+    # only a separator word goes with the cut, on either side of it.
+    ("Example Teaching Award, Norvale University, 2016. .5 FTE protected time for bedside teaching",
+     ".5 FTE protected time for bedside teaching"),
+    ("Example Teaching Award, Norvale University, 2016; -40% of the prize went to the residents",
+     "-40% of the prize went to the residents"),
+    ("Example Teaching Award, Norvale University, 2016: /s/ signed by the dean of bedside teaching",
+     "/s/ signed by the dean of bedside teaching"),
+    ("Since 2019- Example Teaching Award, Norvale University, 2016; given for bedside teaching",
+     "Since 2019- given for bedside teaching"),
+    # Separator words, one after another, go with it.
+    ("Example Teaching Award, Norvale University, 2016 | / given for bedside teaching",
+     "given for bedside teaching"),
+    ("Shared • – Example Teaching Award, Norvale University, 2016; given for bedside teaching",
+     "Shared given for bedside teaching"),
+])
+def test_a_cut_leaves_every_other_word_as_the_cv_wrote_it(fragment, written):
+    assert sp.unrestated(fragment, "Example Teaching Award Norvale University 2016") == written
+
+
+@pytest.mark.parametrize("fragment, written", [
+    # The restatement ends inside a bracket: no cut is left holding its
+    # closing half, so the fragment is written as the CV wrote it.
+    ("Example Teaching Award (Norvale University, 2016; shared with two colleagues) for bedside teaching",
+     "Example Teaching Award (Norvale University, 2016; shared with two colleagues) for bedside teaching"),
+    ("Example Teaching Award “Norvale University, 2016; shared with two colleagues” for bedside teaching",
+     "Example Teaching Award “Norvale University, 2016; shared with two colleagues” for bedside teaching"),
+    ('Example Teaching Award "Norvale University, 2016; shared with two colleagues" for bedside teaching',
+     'Example Teaching Award "Norvale University, 2016; shared with two colleagues" for bedside teaching'),
+    # ... or opens inside one and would close it: the span stops before.
+    ("Finalist (2015; Example Teaching Award, Norvale University, 2016) for bedside teaching",
+     "Finalist (2015; 2016) for bedside teaching"),
+    ("Finalist [2015; Example Teaching Award, Norvale University, 2016] for bedside teaching",
+     "Finalist [2015; 2016] for bedside teaching"),
+    # A bracket the span opens and closes goes with it, and so does one the
+    # CV opened and never closed.
+    ("Example Teaching Award (Norvale University, 2016); given for bedside teaching",
+     "given for bedside teaching"),
+    ("Example Teaching Award (Norvale University, 2016; given for bedside teaching",
+     "given for bedside teaching"),
+    ("Example Teaching Award “Norvale University, 2016. “Bedside” teaching prize",
+     "“Bedside” teaching prize"),
+    ('"Example Teaching Award, Norvale University, 2016; given for bedside teaching',
+     "given for bedside teaching"),
+    # One the CV never closed, after the span, stays as it was.
+    ("Example Teaching Award, Norvale University, 2016; given for bedside teaching (and the residents",
+     "given for bedside teaching (and the residents"),
+])
+def test_a_cut_leaves_no_bracket_open(fragment, written):
+    assert sp.unrestated(fragment, "Example Teaching Award Norvale University 2016") == written
+
+
 def test_a_span_ends_before_a_word_opening_a_quote():
     assert sp.unrestated("Example Teaching Award, Norvale University “for excellence in bedside teaching”",
                          "Example Teaching Award Norvale University 2016") == (
@@ -3149,7 +3227,7 @@ def test_the_planner_writes_a_degree_line_restating_its_row_as_its_honors_under_
                                    rows_written=lambda e: [table.rows[0]._tr])
     assert planned.anchor is lines[1]
     assert planned.paragraphs == (f"({_HONORS})",) and planned.lines == (line,)
-    assert planned.source_lines() == (line,)
+    assert planned.source_lines() == (line,) and planned.written_from == (line,)
 
 
 def test_the_planner_offers_a_short_remainder_though_it_is_under_the_prose_threshold():
@@ -3179,6 +3257,16 @@ def test_the_planner_keeps_a_sub_point_whose_every_line_restates_its_row_and_wri
     (planned,) = sp.plan_subpoints({"D1": [entry]}, _haystack("Unrelated rendered line"), [candidate],
                                    {"D1": sp.SectionSpan(0, None)})
     assert planned.anchor is candidate and planned.paragraphs == () and planned.lines == (line,)
+    assert planned.written_from == ()
+    # With a line that adds words, that line's paragraph is written, and the
+    # line it was cut from is recorded with it, paragraph for paragraph.
+    noted = f"Associate Professor of Marsh Ecology and Hydrology, Example University: {PROSE}"
+    entry = _entry(f"{line}\t{noted}\tAssociate Professor\tExample University", title="Associate Professor",
+                   institution="Example University")
+    (planned,) = sp.plan_subpoints({"D1": [entry]}, _haystack("Unrelated rendered line"), [candidate],
+                                   {"D1": sp.SectionSpan(0, None)})
+    assert planned.paragraphs == (PROSE,) and planned.lines == (line, noted)
+    assert planned.written_from == (noted,)
 
 
 def test_the_planner_writes_a_line_not_restating_its_row_as_written():
@@ -3188,7 +3276,7 @@ def test_the_planner_writes_a_line_not_restating_its_row_as_written():
     entry = _entry(f"Associate Professor\tExample University\t{line}", title="Associate Professor",
                    institution="Example University", start_date="2010", end_date="2015")
     (planned,) = sp.plan_subpoints({"D1": [entry]}, _haystack(), [candidate], {"D1": sp.SectionSpan(0, None)})
-    assert planned.paragraphs == (line,) and planned.lines == (line,)
+    assert planned.paragraphs == (line,) and planned.lines == (line,) and planned.written_from == ()
 
 
 def test_a_label_tables_line_reads_each_cell_and_each_paragraph_in_it():

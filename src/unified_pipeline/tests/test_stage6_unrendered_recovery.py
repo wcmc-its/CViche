@@ -3540,6 +3540,19 @@ def test_a_thesis_on_its_degrees_own_line_is_written_without_the_line():
     assert "".join(t.text for t in row.iter(qn("w:delText"))) == _THESIS
 
 
+def test_a_cut_paragraphs_placement_records_its_line_as_a_run_would_hold_it():
+    """The placement records the line the thesis was cut from (#1205
+    review), for the doctor to read the row and the sub-point as one place;
+    like the paragraph, without the control characters every run write
+    strips (`_sanitize_run_text`)."""
+    entry = _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+    entry["text"] = f"{_PHD_LINE}. {_THESIS.replace(': ', ':\x07 ')}"
+    gen = _render_education([entry], supplementary_subpoints=True)
+
+    (placement,) = gen._subpoint_placements
+    assert placement.paragraphs == (_THESIS,) and placement.lines == (f"{_PHD_LINE}. {_THESIS}",)
+
+
 def test_the_doctor_matches_a_degree_sub_point_to_its_own_entry_only(tmp_path, monkeypatch):
     """Through `run_stage6`: the sidecar records the M.S. entry's sub-point
     under its own index and B1, and the doctor's per-entry match counts it for
@@ -3567,6 +3580,91 @@ def test_the_doctor_matches_a_degree_sub_point_to_its_own_entry_only(tmp_path, m
     subpoints = subpoint_text(docx_subpoint_lines(Document(out)), subpoint_placements(sidecar))
     assert offered_as_subpoint(_THESIS, subpoints, element_idx=19)
     assert not offered_as_subpoint(_THESIS, subpoints, element_idx=17)
+
+
+def _render_degree_run(tmp_path, monkeypatch, entry):
+    """`entry` through `run_stage6`: the docx and the render sidecar."""
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    payload = {"document_uid": "T1205R", "cv_owner": {"full_name": "Quenby Marblegate"}, "entries": [entry]}
+    input_path = tmp_path / "T1205R_fields.json"
+    input_path.write_text(json.dumps(payload))
+    out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
+    return Document(out), json.loads((tmp_path / "T1205R_render_warnings.json").read_text())
+
+
+_RESTATED_DEGREE = f"{_PHD_LINE}, {_THESIS}"
+_MEDAL = "Graduate school medal for the dissertation on wetland soils"
+
+
+def test_the_doctor_reads_a_record_line_cut_of_its_restatement_as_the_cv_wrote_it(tmp_path, monkeypatch):
+    """#1205 review: a multi-line entry whose record line restates its row
+    before its prose. The sub-point holds only the prose, so the record
+    line's opening is in the row, not the sub-point; the sidecar records the
+    line each cut paragraph was written from, and the doctor reads the two as
+    one place, so `unrendered_records` (WARN) does not call the line absent,
+    as it did not when the sub-point held the whole line."""
+    from unified_pipeline.doctor.lints.render import lint_unrendered_records
+    from unified_pipeline.doctor.shared import (
+        docx_body_blocks,
+        docx_subpoint_lines,
+        subpoint_placements,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import SUBPOINT_PLACEMENTS_KEY
+
+    entry = _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+    entry["text"] = f"{_RESTATED_DEGREE}\t2005\n2006\t{_MEDAL}"
+    doc, sidecar = _render_degree_run(tmp_path, monkeypatch, entry)
+
+    assert sidecar[SUBPOINT_PLACEMENTS_KEY] == [{
+        "element_idx_start": 17, "code": "B1", "paragraphs": [_THESIS, _MEDAL],
+        "lines": [_RESTATED_DEGREE, _MEDAL]}]
+    blocks = docx_body_blocks(doc)
+    placed = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert lint_unrendered_records({"entries": [entry]}, blocks, placed) == []
+    # Read without the lines, as the sub-point's paragraphs alone, the line
+    # is absent.
+    del sidecar[SUBPOINT_PLACEMENTS_KEY][0]["lines"]
+    alone = subpoint_text(docx_subpoint_lines(doc), subpoint_placements(sidecar))
+    assert [f["message"] for f in lint_unrendered_records({"entries": [entry]}, blocks, alone)] == [
+        "entry 17 (B1): 1 of 2 records absent from output"]
+
+
+def test_source_line_coverage_finds_a_line_cut_of_its_restatement_in_its_row_and_sub_point(tmp_path,
+                                                                                           monkeypatch):
+    """#1205 review: `source_line_coverage` aligns a source line to one
+    output unit, and a line the cut split between its row and its sub-point
+    holds under half in each. Read through the as-written deletions
+    (`as_written_deletions`), the sub-point is the line again, as before the
+    cut, so the line is found in its own place."""
+    from unified_pipeline.doctor.lints.coverage import lint_source_line_coverage
+    from unified_pipeline.doctor.shared import (
+        as_written_deletions,
+        docx_body_blocks,
+        docx_subpoint_lines,
+        docx_table_rows,
+        subpoint_placements,
+        subpoint_text,
+    )
+
+    grant = "Funded by the Example Coastal Trust fellowship"
+    line = f"{_PHD_LINE}. {_THESIS}"
+    entry = _degree(idx=17, degree="Ph.D.", year="2005", prose="")
+    entry["text"] = f"{line}\t{grant}"
+    doc, sidecar = _render_degree_run(tmp_path, monkeypatch, entry)
+    placements = subpoint_placements(sidecar)
+    assert [p.as_written() for p in placements] == [((_THESIS, line),)]
+    stage3b = {"entries": [{"element_idx_start": 17, "taxonomy_code": "B1", "text": entry["text"]}]}
+
+    def hits(deleted):
+        return [f["evidence"] for f in lint_source_line_coverage(
+            [f"{line} {grant}"], docx_body_blocks(doc), deleted, None, stage3b, docx_table_rows(doc), None,
+            subpoint_text(docx_subpoint_lines(doc), placements))]
+
+    deleted = docx_body_blocks(doc, deleted=True)
+    assert hits(as_written_deletions(deleted, placements)) == []
+    assert hits(deleted) == [[f"{line} {grant}"[:100]]]
 
 
 # --- #1205: O institutional leadership, the next code family -----------------

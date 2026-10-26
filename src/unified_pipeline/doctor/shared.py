@@ -353,17 +353,55 @@ def subpoint_text(lines: list[str] | None,
     each entry's own lines: those a placement of that entry wrote. The
     document stays the record of what is offered, since a corrected copy
     (#1654) is read with the run's own sidecar; a placement only says whose
-    a line is."""
+    a line is.
+
+    A paragraph stage 6 cut of a span restating the line it goes under
+    (`SubpointPlacement.as_written`, #1205 owner decision 2026-10-25) is
+    read with the line it was written from, as the CV wrote it, while the
+    document holds the paragraph: the line above prints the words cut, so
+    the two are one place, and a record line or prose the CV wrote with its
+    line is offered as it was before the cut."""
     lines = [line for line in lines or () if line.strip()]
-    whole = _subpoint_view(lines)
     if placements is None:
-        return whole
+        return _subpoint_view(lines)
+    held = set(map(squash, lines))
     written: dict[object, set[str]] = defaultdict(set)
+    restated: dict[object, list[str]] = defaultdict(list)
     for placement in placements:
         written[placement.element_idx_start].update(map(squash, placement.paragraphs))
+        restated[placement.element_idx_start] += [line for paragraph, line in placement.as_written()
+                                                  if squash(paragraph) in held]
+    whole = _subpoint_view(lines + [line for own in restated.values() for line in own])
     return whole._replace(by_entry={
-        idx: _subpoint_view([line for line in lines if squash(line) in texts])
+        idx: _subpoint_view([line for line in lines if squash(line) in texts] + restated[idx])
         for idx, texts in written.items()})
+
+
+def as_written_deletions(deleted_blocks: list[tuple[str, str]] | None,
+                         placements: tuple[SubpointPlacement, ...] | None,
+                         ) -> list[tuple[str, str]] | None:
+    """The tracked-deletion view (`docx_body_blocks(..., deleted=True)`),
+    block for block, with each line that is a sub-point paragraph stage 6
+    cut of a span restating the line it goes under
+    (`SubpointPlacement.as_written`) read as the line it was written from,
+    and so each such cell of a table row's joined line (TABLE_ROW_JOINER).
+    The line above prints the words cut, so a source line split between it
+    and its sub-point is found in one place (`source_line_coverage`), as
+    before the cut (#1205). Every other line is as the document holds it;
+    None for None. ponytail: read by squashed text, so two placements'
+    identical paragraphs written from different lines read as the later
+    one's."""
+    if deleted_blocks is None:
+        return None
+    cut = {squash(paragraph): line for placement in placements or ()
+           for paragraph, line in placement.as_written()}
+
+    def read(line: str) -> str:
+        if (whole := cut.get(squash(line))) is not None:
+            return whole
+        return TABLE_ROW_JOINER.join(cut.get(squash(cell), cell) for cell in line.split(TABLE_ROW_JOINER))
+
+    return [(kind, "\n".join(map(read, str(text).split("\n")))) for kind, text in deleted_blocks]
 
 
 def subpoint_owners(subpoints: SubpointText | None) -> dict[str, frozenset | None]:
