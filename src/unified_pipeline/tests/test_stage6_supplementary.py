@@ -3218,6 +3218,112 @@ def test_a_cut_never_falls_inside_a_word():
         "Co-Director, Example Outreach Programme, Norvale University; ran the summer school")
 
 
+_AWARD_LINE = "Example Teaching Award Norvale University 2016"
+
+
+@pytest.mark.parametrize("line, fragment", [
+    # The words after the cut open with SUBPOINT_RESTATED_RUN_WORDS words the
+    # line prints: the cut stopped inside the line's own phrase.
+    ("Example Teaching Award Norvale Graduation Ceremony, NVU Class of 2019 2019",
+     "Example Teaching Award, Norvale Graduation Ceremony, NVU Class of 2016, chosen by the senior residents"),
+    # ... with a bracket closed by a colon, the tail of the label the span opened.
+    ("2012-2017 - BIO 210: Hydrogels in Estuarine Engineering, Lecturer (Norvale University)",
+     "B. ENG 301: Hydrogels in Estuarine Engineering (2009-2011): a graduate course on hydrogel design"),
+    # ... with the line's dates or pages, in full or in a short form, which
+    # would read as the next record's.
+    ("Example Advisory Panel Member Example Water Authority 2003-2004",
+     "Member, Example Advisory Panel, Example Water Authority, 2003-04. Chair, Norvale Drought Board, 2005-2008."),
+    ("Associate Professor Example University, Norvale 2010-2015",
+     "Associate Professor, Example University, Norvale, 2010-2015 Visiting Lecturer, Norvale Marine Institute, "
+     "2016-2017"),
+    ("3. Quill R, Marsh T. Example tidal budgets. J Estuar Stud. 2014;12(3):212-219.",
+     "7. Quill R*, Marsh T. Example tidal budgets. J Estuar Stud. 2014; 12(3): 212-9. Reply to a letter on the "
+     "same budgets."),
+    # ... with a function word the cut runs straight into, no mark but a
+    # closing bracket parting them.
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) for the best bedside teaching of the year"),
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) and the bedside teaching prize of the year"),
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) with the bedside teaching prize of the year"),
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) without the bedside teaching prize of the year"),
+    # ... with a relative pronoun, or an appositive, whose noun the span held.
+    (_AWARD_LINE, "Example Teaching Award, Norvale University, 2016, which is given each year to one faculty member"),
+    (_AWARD_LINE, "Example Teaching Award, Norvale University, 2016, which, since 2010, is given to one faculty member"),
+    (_AWARD_LINE, "Example Teaching Award: Norvale University, a coastal research school, names one teacher each year"),
+    # A cut inside the line leaves the words before it open: a lower-case
+    # word ending in a colon, which the span completes ...
+    (_AWARD_LINE, "Organized a symposium titled: Example Teaching Award, Norvale University, held at the harbour hall"),
+    # ... or a comma, the cut closing the sentence it began ahead of a new one,
+    # its stop outside a closing quote or inside it.
+    ("2016 - Hydrogels in Estuarine Engineering, Lecturer (Norvale University)",
+     "(c) Teaching at Norvale University: Spring, 2016, “Hydrogels in Estuarine Engineering”. This course pairs "
+     "hydrogel design with field work"),
+    ("2016 - Hydrogels in Estuarine Engineering, Lecturer (Norvale University)",
+     "(c) Teaching at Norvale University: Spring, 2016, “Hydrogels in Estuarine Engineering.” This course pairs "
+     "hydrogel design with field work"),
+])
+def test_a_cut_whose_words_left_would_not_start_cleanly_is_written_as_the_cv_wrote_it(line, fragment):
+    # Owner decision 2026-10-25 (#1205): when in doubt, the line is written as
+    # the CV wrote it, the approved fallback (`_starts_cleanly`).
+    assert sp.unrestated(fragment, line) == fragment
+
+
+@pytest.mark.parametrize("fragment, written", [
+    # Two words the line prints open the new words.
+    ("Example Teaching Award, Norvale University; Award 2016 shared with two colleagues",
+     "Award 2016 shared with two colleagues"),
+    # A single year of the line, or a range it does not print or that ends
+    # past its numbers, opens them.
+    ("Example Teaching Award, Norvale University, 2016 Example Research Prize, Norvale Marine Institute",
+     "2016 Example Research Prize, Norvale Marine Institute"),
+    ("Example Teaching Award, Norvale University; 30-31 residents each year", "30-31 residents each year"),
+    ("Example Teaching Award, Norvale University; 2015-16 cohort of residents", "2015-16 cohort of residents"),
+    ("Example Teaching Award, Norvale University; 2016-19 cohort of residents", "2016-19 cohort of residents"),
+    # A label of the new words' own, not a bracket's tail.
+    ("Example Teaching Award, Norvale University, 2016. Duties: ran the bedside teaching rounds",
+     "Duties: ran the bedside teaching rounds"),
+    # A capitalized label before the cut.
+    ("Prize: Example Teaching Award, Norvale University, given each year to one faculty member",
+     "Prize: given each year to one faculty member"),
+    # A comma before the cut, and the new words go on from it: after a stop,
+    # with a date; after a comma, with a capital.
+    ("Judge, Coastal Prize Board, Example Teaching Award, Norvale University. 2016 to 2019.",
+     "Judge, Coastal Prize Board, 2016 to 2019."),
+    ("Judge, Coastal Prize Board, Example Teaching Award, Norvale University, Bedside teaching rounds",
+     "Judge, Coastal Prize Board, Bedside teaching rounds"),
+    # A stop before the cut, and a new sentence after it.
+    ("Judged in 2015. Example Teaching Award, Norvale University. Shared with two colleagues",
+     "Judged in 2015. Shared with two colleagues"),
+    # A function word after a cut ending in a comma, inside a closing quote or not.
+    ("Graduated – Example Teaching Award, Norvale University, 2016, with highest honors",
+     "Graduated with highest honors"),
+    ("“Example Teaching Award, Norvale University,” for excellence in bedside teaching",
+     "for excellence in bedside teaching"),
+    # An article-led note with no comma, one closed by another mark or before
+    # a quote, or a new sentence.
+    ("Example Teaching Award, Norvale University, a prize for bedside teaching given each year",
+     "a prize for bedside teaching given each year"),
+    ("Example Teaching Award, Norvale University, a prize for residents; given each year",
+     "a prize for residents; given each year"),
+    ("Example Teaching Award, Norvale University, a prize for residents,", "a prize for residents,"),
+    ("Example Teaching Award, Norvale University, a prize of the dean, “for bedside teaching”",
+     "a prize of the dean, “for bedside teaching”"),
+    ("Example Teaching Award, Norvale University. The prize, given each year, names one teacher",
+     "The prize, given each year, names one teacher"),
+])
+def test_a_cut_whose_words_left_start_cleanly_still_stands(fragment, written):
+    assert sp.unrestated(fragment, _AWARD_LINE) == written
+
+
+def test_a_range_of_the_lines_numbers_is_read_from_its_numbers_only():
+    # "19" ends a run the line prints, but not a number: the range is not the line's.
+    assert sp.unrestated("Example Teaching Award, Norvale University, COVID19; 2016-19 cohort of residents",
+                         "Example Teaching Award Norvale University COVID19 2016") == "2016-19 cohort of residents"
+    # Two of the line's words joined by a dash are no range.
+    assert sp.unrestated("Example Teaching Award, Norvale University; ad-hoc panels met twice each year",
+                         "Example Teaching Award ad hoc panel Norvale University 2016") == (
+        "ad-hoc panels met twice each year")
+
+
 def test_the_planner_writes_a_degree_line_restating_its_row_as_its_honors_under_the_same_row():
     table, lines = _degree_rows(["Ph.D., Example Marine Studies", "Norvale University", "2005"])
     line = f"Ph.D., Example Marine Studies, Norvale University, 2005 ({_HONORS})"

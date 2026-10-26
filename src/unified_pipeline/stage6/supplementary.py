@@ -44,7 +44,10 @@ fragment or inside it, so a fragment is still written as the CV wrote it,
 restatement and all, when the restatement closes it (a role-first line),
 when it runs on past the cut (`SUBPOINT_RESTATEMENT_RUN_ON_WORDS`), when it
 would take one half of a bracket, when its words do not open with the
-line's first distinctive ones (`SUBPOINT_RESTATED_OPENING_WORDS`), or when
+line's first distinctive ones (`SUBPOINT_RESTATED_OPENING_WORDS`), when the
+words left would not start cleanly (`_starts_cleanly`: a cut inside a
+sentence, a date or page range of the line left at the front, a clause
+whose subject the cut took), or when
 it repeats only the line's later parts; a cut fragment may still repeat a
 later part of the line. The overflow and the #221 recovery read the fragment as the CV wrote
 it (`SubPoint.lines`), so the cut changes nothing in the accepted document;
@@ -581,6 +584,35 @@ _WORD_RE = re.compile(r'\S+')
 #: The date a row opens with, which names no record: "2021-2025 - ",
 #: "September 1998 - ", "2015-present - ".
 _LEADING_DATE_RE = re.compile(rf'^\W*{_RECORD_DATE}(?!\w)', re.IGNORECASE)
+#: A cut stands only where the words left start cleanly (`_starts_cleanly`);
+#: otherwise the line is written as the CV wrote it, the approved fallback
+#: (owner decision 2026-10-25). The words after a cut read on from the words
+#: it removes when they open with this many words the row prints: the cut
+#: stopped inside the row's own phrase ("<award>, <ceremony>, <school> Class
+#: of <year>, ..." cut before "<school> Class of"). Two such words open the
+#: new words of three farm sub-points, so two is not enough.
+SUBPOINT_RESTATED_RUN_WORDS = 3
+#: ... or with a bracket closed by a colon, the tail of a label the span
+#: opened ("<code>: <title> (<years>): <description>" cut of its title).
+_LABEL_TAIL_RE = re.compile(r'[(\[][^()\[\]]*[)\]]:')
+#: ... or with a function word the removed words run straight into, no mark
+#: but a closing bracket or quote parting them ("<title> (<count>) for
+#: <purpose>"): the word belongs to the phrase cut.
+_DANGLING_WORDS = frozenset({
+    'a', 'an', 'the', 'and', 'or', 'nor', 'but', 'about', 'after', 'against', 'among', 'as', 'at',
+    'before', 'between', 'by', 'during', 'for', 'from', 'in', 'into', 'of', 'on', 'onto', 'over',
+    'per', 'than', 'through', 'to', 'toward', 'towards', 'under', 'upon', 'via', 'with', 'within',
+    'without'})
+#: The marks that part a cut from the words after it, read at the last word
+#: removed with any closing bracket or quote (`_CLOSING_BRACKETS`) aside.
+_SEPARATING_MARKS = (',', ';', ':', '.', '!', '?', '-', '–', '—')
+_SENTENCE_END_MARKS = ('.', '!', '?')
+_CLOSING_BRACKETS = ')]}”"’\''
+#: ... or with a relative pronoun, or an article-led part closed by a comma
+#: before a lower-case word, an appositive whose noun the span held
+#: ("<award>: <body>, a <description>, <verb> ...").
+_RELATIVE_WORDS = frozenset({'which', 'who', 'whom', 'whose'})
+_ARTICLES = frozenset({'a', 'an', 'the'})
 
 #: Revision author in Word's review pane, so a reviewer can tell these from
 #: the enrichment and formatter changes and from their own edits.
@@ -2101,11 +2133,13 @@ def unrestated(fragment: str, line: str, opening: str | None = None) -> str:
 
     The fragment is returned as written when no span restates the line, when
     the span closes it, the line's words running on to its end (only a span
-    opening the line or inside it is cut), or when the restatement runs on
-    past the cut through a word the line does not print (`_runs_on`). Every
+    opening the line or inside it is cut), when the restatement runs on
+    past the cut through a word the line does not print (`_runs_on`), or
+    when the words left would not start cleanly (`_starts_cleanly`). Every
     word the cut removes is one the line prints, so Reject All, which prints
     the line above the sub-point, still holds each word of the fragment."""
-    words = _line_words(fragment, set(_LINE_WORD_RE.findall(line.lower())))
+    printed = set(_LINE_WORD_RE.findall(line.lower()))
+    words = _line_words(fragment, printed)
     opening_tokens = _RENDER_TOKEN_RE.findall(_norm(_LEADING_DATE_RE.sub('', line if opening is None else opening,
                                                                           count=1)))
     span = _restated_span(words, set(list(dict.fromkeys(opening_tokens))[:SUBPOINT_RESTATED_OPENING_WORDS]))
@@ -2120,6 +2154,8 @@ def unrestated(fragment: str, line: str, opening: str | None = None) -> str:
         last += 1
     while first and _separator(words[first - 1], _MARKS_BEFORE_A_CUT):
         first -= 1
+    if not _starts_cleanly(words, first, last, printed):
+        return fragment
     rest = fragment[words[last].start:]
     if not any(word.printed is not None for word in words[:first]):
         return rest  # only marks before the span, a bullet: the line opens the fragment
@@ -2131,6 +2167,80 @@ def _separator(word: _LineWord, marks: str) -> bool:
     characters is one of `marks` (`_MARKS_AFTER_A_CUT`, `_MARKS_BEFORE_A_CUT`),
     none of which is a letter or a digit."""
     return all(mark in marks for mark in word.text)
+
+
+def _starts_cleanly(words: Sequence[_LineWord], first: int, last: int, printed: Collection[str]) -> bool:
+    """Whether cutting `words[first:last]` leaves words that start cleanly:
+    the words after the cut do not read on from the words it removes
+    (`_reads_on`), and a cut inside the line does not leave the words before
+    it open (`_left_open`). `printed` is the line's runs of letters and
+    digits (`_line_words`)."""
+    before = words[first - 1] if first else None
+    return not (_reads_on(words[last:], words[last - 1], printed)
+                or before is not None and _left_open(before, words[last - 1], words[last]))
+
+
+def _reads_on(rest: Sequence[_LineWord], removed: _LineWord, printed: Collection[str]) -> bool:
+    """Whether the words after a cut, `rest`, read on from the words it
+    removes, the last of them `removed`: they open with
+    `SUBPOINT_RESTATED_RUN_WORDS` words the line prints, with the tail of a
+    label (`_LABEL_TAIL_RE`), with the line's numbers (`_holds_lines_numbers`),
+    with a function word `removed` runs straight into (`_DANGLING_WORDS`,
+    `_SEPARATING_MARKS`), or with a clause whose subject the cut took
+    (`_opens_headless_clause`)."""
+    head = _bare_word(rest[0])
+    runs_into = not removed.text.rstrip(_CLOSING_BRACKETS).endswith(_SEPARATING_MARKS)
+    return (all(word.printed for word in rest[:SUBPOINT_RESTATED_RUN_WORDS])
+            or bool(_LABEL_TAIL_RE.match(' '.join(word.text for word in rest)))
+            or _holds_lines_numbers(rest[0], printed)
+            or (runs_into and head in _DANGLING_WORDS)
+            or _opens_headless_clause(rest, head))
+
+
+def _bare_word(word: _LineWord) -> str:
+    """The run of letters and digits `word` opens with, as the CV wrote it
+    (`_LINE_WORD_RE`); '' when it opens with a mark."""
+    match = _LINE_WORD_RE.match(word.text)
+    return match.group() if match else ''
+
+
+def _holds_lines_numbers(word: _LineWord, printed: Collection[str]) -> bool:
+    """Whether `word` is a range or a volume of the line's numbers, the cut
+    record's: no letter, two runs of digits or more, the first one the line
+    prints and each later one printed or the end of a longer number it
+    prints ("2003-04." under 2003-2004, "212-9." under pages 212-219)."""
+    runs = _LINE_WORD_RE.findall(word.text)
+    if len(runs) < 2 or not all(run.isdigit() for run in runs) or runs[0] not in printed:
+        return False
+    return all(run in printed or any(number.isdigit() and number.endswith(run) for number in printed)
+               for run in runs[1:])
+
+
+def _opens_headless_clause(rest: Sequence[_LineWord], head: str) -> bool:
+    """Whether `rest`, opening with the word `head` (`_bare_word`), goes on
+    from a subject the cut took: it opens with a relative pronoun
+    (`_RELATIVE_WORDS`), or with an article (`_ARTICLES`) whose part, closed
+    by a comma, is followed by a lower-case word, an appositive."""
+    if head in _RELATIVE_WORDS:
+        return True
+    close = next((k for k, word in enumerate(rest) if _closes_part(word)), None)
+    return (head in _ARTICLES and close is not None and close + 1 < len(rest)
+            and rest[close].text.rstrip(_CLOSING_BRACKETS).endswith(',')
+            and _bare_word(rest[close + 1])[:1].islower())
+
+
+def _left_open(before: _LineWord, removed: _LineWord, after: _LineWord) -> bool:
+    """Whether a cut inside the line leaves the words before it open: the
+    word before it, `before`, is a lower-case word ending in a colon, which
+    the span completes ("<verb> a symposium titled: <title>, held at
+    <venue>"); or it ends in a comma, and the cut, whose last word `removed`
+    ends a sentence (`_SENTENCE_END_MARKS`), closes the sentence it began
+    ahead of a new one, `after` opening with a capital ("Spring, <year>,
+    <course>. <a new sentence>")."""
+    if before.text[:1].islower() and before.text.endswith(':'):
+        return True
+    return (before.text.endswith(',') and removed.text.rstrip(_CLOSING_BRACKETS).endswith(_SENTENCE_END_MARKS)
+            and next((char for char in after.text if char.isalpha()), '').isupper())
 
 
 def _printed_cell_text(cell: BaseOxmlElement) -> str:

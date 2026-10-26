@@ -3177,8 +3177,9 @@ def test_one_mentees_two_periods_on_one_line_keep_its_prose():
     """YUYVIG ECXGAT 1479: stage 4 made one record per period of the same
     mentee, so the whole line is that mentee's, and its prose goes once,
     under the first of the two tables. Another line's mentee is no record
-    of this one. The name and level that table prints are cut; the periods,
-    the second of which it does not print, stay."""
+    of this one. It is written as the CV wrote it: cut of the name and level
+    that table prints, it would open with the period the table prints
+    (`_holds_lines_numbers`, owner decision 2026-10-25)."""
     line = f"Ana Li, Postdoctoral Associate, 2008-2010 and 2012-2014, {_MENTEE_PROSE}"
     entry = _mentee_line(line, ("Ana Li", "2008", "2010"), ("Ana Li", "2012", "2014"))
     gen, _ = _render_grouped_mentoring([_other_postdoc(), entry], supplementary_subpoints=True)
@@ -3186,7 +3187,7 @@ def test_one_mentees_two_periods_on_one_line_keep_its_prose():
     assert sorted(_mentee_names(gen)) == ["Ana Li", "Ana Li", "Casey Sample"]
     (row,) = _subpoint_rows(gen)
     assert _mentee_named_by(row) == "Ana Li"
-    assert _deleted_texts(gen) == f"2008-2010 and 2012-2014, {_MENTEE_PROSE}"
+    assert _deleted_texts(gen) == line
 
 
 # --- #1205: B1 degrees, the next code family ----------------------------------
@@ -5197,15 +5198,17 @@ _ESTUARY_PROSE = ("Opened the morning session on sediment budgets and led a disc
     ([f"{_ESTUARY_LINE}. {_ESTUARY_PROSE}", _WETLAND_LINE],
      [("Estuary Sediment Transport in Tidal Marshes", _ESTUARY_PROSE)]),
     ([_ESTUARY_LINE, f"Invited speaker, {_WETLAND_LINE}. {_TALK_PROSE}"],
-     [(_TALK_TITLE, f"Invited speaker, {_TALK_PROSE}")]),
+     [(_TALK_TITLE, f"Invited speaker, {_WETLAND_LINE}. {_TALK_PROSE}")]),
     # They do not: which talk the prose is about cannot be told, so neither takes it.
     ([_ESTUARY_LINE, _TALK_PROSE, _WETLAND_LINE], []),
 ])
 def test_prose_on_a_line_of_several_talks_goes_under_its_own_or_none(segments, offered):
     """A sub-point is read from the whole tab segment: one that holds the
     talk's line as well as its prose is written without the title, venue
-    and year the row prints (owner decision 2026-10-25, #1205); a role the
-    row does not print, before them, stays."""
+    and year the row prints (owner decision 2026-10-25, #1205). After a role
+    the row does not print it is written as the CV wrote it: the cut would
+    leave the role's clause open ahead of the prose's new sentence
+    (`_left_open`)."""
     entry = _talk_line("\t".join(segments), _ESTUARY, _WETLAND)
     gen, grouped = _render_grouped_talks([entry], supplementary_subpoints=True)
 
@@ -5223,11 +5226,12 @@ def test_a_talk_line_opening_with_its_title_cell_is_read_as_its_row():
     """A line that opens with the Title cell's whole text holds the row's own
     text verbatim (`_record_rendered`'s first `RENDER_PIECE_WINDOW`
     characters), and the whole line reads as rendered: none of it is offered,
-    its prose included. A line opening with the role is offered, and written
-    without the title, meeting, venue and year the row prints, inside it."""
+    its prose included. A line opening with the role is offered as the CV
+    wrote it: cut of the title, meeting, venue and year the row prints,
+    inside it, the role's clause would be left open (`_left_open`)."""
     title_first = f"{_TALK_TITLE}, {_TALK_EVENT}, {_TALK_VENUE}, 2016. {_TALK_PROSE}"
     role_first = f"Invited speaker, {title_first}"
-    for line, offered in ((title_first, ""), (role_first, f"Invited speaker, {_TALK_PROSE}")):
+    for line, offered in ((title_first, ""), (role_first, role_first)):
         entry = _talk(prose=None)
         entry["text"] = line
         gen = _render_talks([entry], supplementary_subpoints=True)
@@ -5776,15 +5780,17 @@ _INTERNSHIP_PROSE = ("Rotated through the trauma, burns and vascular services un
     ([f"{_INTERNSHIP_LINE}. {_INTERNSHIP_PROSE}", _RESIDENCY_LINE],
      [("Example Surgical Internship", _INTERNSHIP_PROSE)]),
     ([_INTERNSHIP_LINE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}"],
-     [(_TRAINING_TYPE, f"Chief resident, {_TRAINING_PROSE}")]),
+     [(_TRAINING_TYPE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}")]),
     # They do not: which position the prose is about cannot be told, so neither takes it.
     ([_INTERNSHIP_LINE, _TRAINING_PROSE, _RESIDENCY_LINE], []),
 ])
 def test_prose_on_a_line_of_several_positions_goes_under_its_own_or_none(segments, offered):
     """A sub-point is read from the whole tab segment: one that holds the
     position's line as well as its prose is written without the type,
-    hospital and year the row prints (owner decision 2026-10-25, #1205); a
-    role the row does not print, before them, stays."""
+    hospital and year the row prints (owner decision 2026-10-25, #1205).
+    After a role the row does not print it is written as the CV wrote it:
+    the cut would leave the role's clause open ahead of the prose's new
+    sentence (`_left_open`)."""
     entry = _training_line("\t".join(segments), _INTERNSHIP, _RESIDENCY)
     gen, grouped = _render_grouped_training([entry], supplementary_subpoints=True)
 
@@ -8289,11 +8295,12 @@ def test_a_seats_line_opening_with_its_rows_first_cell_is_read_as_its_row():
     holds the row's own text verbatim (`_record_rendered`'s first
     `RENDER_PIECE_WINDOW` characters), and the whole line reads as rendered:
     none of it is offered, its prose included, as for a talk. A line opening
-    otherwise is offered, and written without the role, journal and years
-    the row prints, inside it."""
+    otherwise is offered as the CV wrote it: cut of the role, journal and
+    years the row prints, inside it, the clause before them would be left
+    open (`_left_open`)."""
     cell_first = f"{_EDITORIAL_SEAT}, {_EDITORIAL_JOURNAL}, 2012-2016. {_EDITORIAL_PROSE}"
     society_first = f"Appointed by the society, {cell_first}"
-    for line, offered in ((cell_first, ""), (society_first, f"Appointed by the society, {_EDITORIAL_PROSE}")):
+    for line, offered in ((cell_first, ""), (society_first, society_first)):
         entry = _board_seat(prose=None)
         entry["text"] = line
         gen = _render_editorial_boards([entry], supplementary_subpoints=True)
