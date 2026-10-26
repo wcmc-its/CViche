@@ -1201,6 +1201,41 @@ def test_normalize_still_rewrites_a_strict_iso_date(text, expected):
     assert normalize_iso_dates_in_text(text) == expected
 
 
+# --- #2020: a year start and an ISO year-month end ---------------------------
+
+@pytest.mark.parametrize("text, expected", [
+    # 5c's fields line writes start "2025", end "2026-09" as "2025-2026-09"
+    # (source "2025–Sep 2026"). The end reads as the month-year it is,
+    # the mirror of "April 2010-2018" above.
+    ("2025-2026-09 - Fictional course", "2025-September 2026 - Fictional course"),
+    ("**2025-2026-09** - Fictional course", "**2025-September 2026** - Fictional course"),
+    ("Fictional course (2025-2026-09)", "Fictional course (2025-September 2026)"),
+    ("2025-2026-09-15 Fictional course", "2025-September 2026 Fictional course"),
+    # An en dash never blocked the end's own rewrite.
+    ("2025–2026-09 Fictional course", "2025–September 2026 Fictional course"),
+])
+def test_normalize_reads_a_year_to_iso_month_span(text, expected):
+    assert normalize_iso_dates_in_text(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    # An end before the start is not a span: a reference number
+    # (with "0999-0000-12" in the list above).
+    "Fictional ref 2026-2025-09",
+    # Part of a longer numeric token on either side.
+    "Fictional ref 12-2025-2026-09",
+    "Fictional ref 2025-2026-09-123",
+    "doi:10.1186/1471-2458-10-771",
+    # A slash, not a hyphen, before the end.
+    "2025/2026-09 Fictional course",
+    # Already-correct spans the fix must not touch.
+    "2011-2012 Fictional course",
+    "2011-Present Fictional course",
+])
+def test_normalize_leaves_a_non_span_year_to_month_shape_alone(text):
+    assert normalize_iso_dates_in_text(text) == text
+
+
 def test_an_extra_span_ending_to_date_reads_as_running():
     fields = {"start_date": "1990", "end_date": "1995",
               "additional_date_ranges": "2004-to date"}

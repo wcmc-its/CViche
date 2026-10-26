@@ -702,6 +702,14 @@ _ISO_RANGE_IN_TEXT_RE = re.compile(
     _NOT_AFTER_NUMBER + _iso_date_pattern('year', 'month') + '-'
     + _iso_date_pattern('end_year', 'end_month', month_optional=True)
     + _NOT_BEFORE_NUMBER)
+# A year alone followed by a bare hyphen and an ISO date, "2025-2026-09":
+# 5c's fields line for a start of 2025 and an end of September 2026 (#2020,
+# `stage_5c_teaching_formatter._fields_date`). The mirror of the range above
+# with the month on the other end; the end's own guard refuses it for the
+# hyphen before it, so without this it rendered as written.
+_YEAR_TO_ISO_RANGE_IN_TEXT_RE = re.compile(
+    _NOT_AFTER_NUMBER + r'(?P<start_year>\d{4})-'
+    + _iso_date_pattern('year', 'month') + _NOT_BEFORE_NUMBER)
 
 
 def _iso_date_as_words(match: re.Match) -> str:
@@ -717,6 +725,15 @@ def _iso_range_as_words(match: re.Match) -> str:
     return f"{_iso_date_as_words(match)}-{end}"
 
 
+def _year_to_iso_range_as_words(match: re.Match) -> str:
+    """One `_YEAR_TO_ISO_RANGE_IN_TEXT_RE` match as "<year>-<Month> <year>",
+    the end in `_iso_date_as_words`' form. An end before its start is not a
+    span (a reference number such as "0999-0000-12") and stays as written."""
+    if int(match['year']) < int(match['start_year']):
+        return match[0]
+    return f"{match['start_year']}-{_iso_date_as_words(match)}"
+
+
 def normalize_iso_dates_in_text(text: str) -> str:
     """Replace ISO-format dates in free text with human-readable equivalents,
     then collapse a range whose two ends read the same to one value.
@@ -726,6 +743,7 @@ def normalize_iso_dates_in_text(text: str) -> str:
       2019-08-01–2019-09-01  -> August 2019–September 2019
       2018-08  -> August 2018
       2012-06–2012-07  -> June 2012–July 2012
+      2025-2026-09  -> 2025-September 2026
       2006-03-21 to 2006-03-23  -> March 2006
       2011-2011  -> 2011
 
@@ -736,5 +754,6 @@ def normalize_iso_dates_in_text(text: str) -> str:
     if not text:
         return text
     text = _ISO_RANGE_IN_TEXT_RE.sub(_iso_range_as_words, text)
+    text = _YEAR_TO_ISO_RANGE_IN_TEXT_RE.sub(_year_to_iso_range_as_words, text)
     text = _ISO_DATE_IN_TEXT_RE.sub(_iso_date_as_words, text)
     return _SAME_VALUE_RANGE_RE.sub(r'\1', text)
