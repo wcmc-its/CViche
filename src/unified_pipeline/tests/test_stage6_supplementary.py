@@ -32,6 +32,7 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
     LAST_STAGE4_RECORD,
 )
 from unified_pipeline.stage6.formatting import (  # noqa: E402
+    clear_entry_end,
     is_entry_end,
     mark_entry_end,
 )
@@ -2882,6 +2883,67 @@ def test_sub_points_under_a_line_without_the_entry_gap_copy_its_properties_uncha
     for p in subpoints:
         assert not is_entry_end(p.pPr)
         assert p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "240"
+
+
+def test_an_earlier_sub_point_that_kept_its_mark_loses_the_entry_gap_when_another_follows():
+    # The anchor is the document's last paragraph, so the first sub-point
+    # keeps its mark (`_keep_mark`) and carries the gap. A second write
+    # deletes that mark again and must also take the gap off it: only the
+    # new last sub-point ends the entry.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    mark_entry_end(anchor)
+
+    revision = sp.Revision(0, _DATE)
+    sp.write_subpoint(_subpoint(anchor, PROSE), revision)
+    first = anchor._p.getnext()
+    assert first.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is None  # kept its mark
+    assert _gap_flags(anchor) == [True, True]
+
+    sp.write_subpoint(_subpoint(anchor, OTHER_PROSE), revision)
+    assert first.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
+    assert _gap_flags(anchor) == [True, False, True]
+    assert first.pPr.find(qn("w:contextualSpacing")) is None
+    assert first.pPr.find(qn("w:spacing")) is None
+
+
+def test_is_entry_end_needs_contextual_spacing_off_as_well_as_the_gap():
+    doc = Document()
+    para = doc.add_paragraph("A line with 6pt after but contextual spacing left on")
+    para.paragraph_format.space_after = Twips(120)
+    assert not is_entry_end(para._p.pPr)
+
+
+def test_mark_entry_end_replaces_an_existing_contextual_spacing():
+    doc = Document()
+    para = doc.add_paragraph("Entry")
+    pPr = para._p.get_or_add_pPr()
+    pPr.append(OxmlElement("w:contextualSpacing"))  # on: no w:val
+    mark_entry_end(para)
+    assert [c.get(qn("w:val")) for c in pPr.findall(qn("w:contextualSpacing"))] == ["0"]
+
+
+def test_mark_entry_end_puts_contextual_spacing_in_schema_order():
+    # CT_PPr puts w:contextualSpacing before w:jc and w:rPr; Word rejects the
+    # file when it comes after them.
+    doc = Document()
+    para = doc.add_paragraph("Entry")
+    para.paragraph_format.alignment = 1  # w:jc
+    para._p.get_or_add_pPr().append(OxmlElement("w:rPr"))
+    mark_entry_end(para)
+    tags = [child.tag for child in para._p.pPr]
+    assert tags.index(qn("w:contextualSpacing")) < tags.index(qn("w:jc"))
+    assert tags.index(qn("w:contextualSpacing")) < tags.index(qn("w:rPr"))
+
+
+def test_clear_entry_end_leaves_no_empty_spacing_element():
+    doc = Document()
+    para = doc.add_paragraph("Entry")
+    mark_entry_end(para)
+    pPr = copy.deepcopy(para._p.pPr)
+    clear_entry_end(pPr)
+    assert pPr.find(qn("w:spacing")) is None
+    assert pPr.find(qn("w:contextualSpacing")) is None
 
 
 @pytest.mark.parametrize("anchor_kind", ["bullet", "citation"])

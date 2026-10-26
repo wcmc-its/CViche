@@ -673,3 +673,15 @@ def test_the_shared_bulleted_entry_helper_adds_no_entry_gap():
     para = gen._insert_bulleted_entry(idx + 1, "A non-K bullet", None, list_level=0)
     assert not is_entry_end(para._p.pPr)
     assert para.paragraph_format.space_after is None
+
+
+def test_a_teaching_entrys_last_line_writes_the_gap_as_literal_ooxml():
+    # Read the markup Word sees, as literals: checking through the module's
+    # own constants passes even when a constant itself is wrong (val "1"
+    # would leave contextual spacing ON and the gap swallowed).
+    gen = _generator()
+    gen._fill_teaching({"K1": [_k_entry(_COURSE_A), _k_entry(_COURSE_B)]})
+    last = next(p for p in gen.doc.paragraphs if p.text == _COURSE_A[-1])
+    contextual = last._p.pPr.findall(qn("w:contextualSpacing"))
+    assert [c.get(qn("w:val")) for c in contextual] == ["0"]
+    assert last._p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "120"  # 6pt
