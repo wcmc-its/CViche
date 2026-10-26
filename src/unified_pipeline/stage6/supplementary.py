@@ -110,6 +110,8 @@ from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
 from .formatting import (
     PRESENTATION_DATE_FIELDS,
     PRESENTATION_END_DATE_FIELD,
+    clear_entry_end,
+    is_entry_end,
     plain_entry_left_twips,
     plain_entry_level,
     presentation_date_spans,
@@ -2094,7 +2096,11 @@ def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
     """Deleted paragraphs after `anchor`, with its paragraph properties; a
     list paragraph goes one level deeper, so it reads as a sub-bullet, and so
     does an unbulleted entry (`_deepen_plain_entry`). The last one keeps its
-    mark when no paragraph follows it (`_keep_mark`)."""
+    mark when no paragraph follows it (`_keep_mark`). When the anchor is an
+    entry's last line (`mark_entry_end`), only the last sub-point under it
+    copies that gap, so the sub-points stay tight to each other and the gap
+    still comes before the next entry. The anchor keeps its own gap: Accept
+    All must give back the render without sub-points, markup included."""
     ppr = copy.deepcopy(anchor._p.pPr) if anchor._p.pPr is not None else None
     if ppr is not None:
         level = ppr.find(f"{qn('w:numPr')}/{qn('w:ilvl')}")
@@ -2102,12 +2108,19 @@ def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
             level.set(qn('w:val'), str(int(level.get(qn('w:val'), '0')) + 1))
         else:
             _deepen_plain_entry(ppr)
+    inner_ppr = ppr
+    if is_entry_end(ppr):
+        inner_ppr = copy.deepcopy(ppr)
+        clear_entry_end(inner_ppr)
     after = _after_subpoints(anchor._p)
     if after is not anchor._p and not _has_deleted_mark(after):
         # An earlier sub-point kept its mark; one now follows it, so delete it again.
-        after.replace(after.find(qn('w:pPr')), _deleted_mark_ppr(ppr, revision))
-    for text in texts:
-        p = _deleted_paragraph(text, revision, ppr)
+        after.replace(after.find(qn('w:pPr')), _deleted_mark_ppr(inner_ppr, revision))
+    elif after is not anchor._p:
+        clear_entry_end(after.find(qn('w:pPr')))  # no longer the entry's last line
+    for index, text in enumerate(texts):
+        last = index == len(texts) - 1
+        p = _deleted_paragraph(text, revision, ppr if last else inner_ppr)
         after.addnext(p)
         after = p
     following = after.getnext()

@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml import OxmlElement  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 from docx.shared import Twips  # noqa: E402
 
@@ -29,6 +30,11 @@ from unified_pipeline.stage6 import supplementary as sp  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
+)
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    clear_entry_end,
+    is_entry_end,
+    mark_entry_end,
 )
 
 _DATE = "2026-10-08T00:00:00Z"
@@ -2811,6 +2817,133 @@ def test_a_sub_point_under_an_off_grid_indent_keeps_the_anchor_indent():
     sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(40, _DATE))
 
     assert anchor._p.getnext().find(f"{qn('w:pPr')}/{qn('w:ind')}").get(qn("w:left")) == "720"
+
+
+def _gap_flags(anchor):
+    """Whether the anchor and each paragraph after it carry the entry gap."""
+    flags = []
+    for p in [anchor._p, *anchor._p.itersiblings(qn("w:p"))]:
+        flags.append(is_entry_end(p.pPr))
+    return flags
+
+
+def test_sub_points_under_an_entrys_last_line_pass_the_entry_gap_to_the_last_one():
+    # An entry's last line carries the gap to the next entry
+    # (`mark_entry_end`). Sub-points written under it stay tight to each
+    # other and the last one carries the gap, so it still lands before the
+    # next entry. The anchor keeps its own: Accept All must give back the
+    # render without sub-points, markup included.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    mark_entry_end(anchor)
+    doc.add_paragraph("Next entry")
+
+    revision = sp.Revision(0, _DATE)
+    sp.write_subpoint(_subpoint(anchor, PROSE, OTHER_PROSE), revision)
+    assert _gap_flags(anchor) == [True, False, True, False]
+
+    sp.write_subpoint(_subpoint(anchor, "A third sub-point of prose"), revision)
+    assert _gap_flags(anchor) == [True, False, False, True, False]
+    for p in list(anchor._p.itersiblings(qn("w:p")))[:2]:
+        spacing = p.pPr.find(qn("w:spacing"))
+        assert spacing is None or spacing.get(qn("w:after")) is None
+        assert p.pPr.find(qn("w:contextualSpacing")) is None
+
+
+def test_a_template_heading_with_contextual_spacing_off_is_not_an_entry_end():
+    # The template turns contextual spacing off on some headings, with no
+    # space after; a sub-point under one copies its properties untouched.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    anchor.paragraph_format.space_after = Twips(0)
+    contextual = OxmlElement("w:contextualSpacing")
+    contextual.set(qn("w:val"), "0")
+    anchor._p.pPr.append(contextual)
+    doc.add_paragraph("Next line")
+
+    sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(0, _DATE))
+
+    for p in (anchor._p, anchor._p.getnext()):
+        assert not is_entry_end(p.pPr)
+        assert p.pPr.find(qn("w:contextualSpacing")).get(qn("w:val")) == "0"
+        assert p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "0"
+
+
+def test_sub_points_under_a_line_without_the_entry_gap_copy_its_properties_unchanged():
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    anchor.paragraph_format.space_after = Twips(240)
+    doc.add_paragraph("Next line")
+
+    revision = sp.Revision(0, _DATE)
+    sp.write_subpoint(_subpoint(anchor, PROSE, OTHER_PROSE), revision)
+    sp.write_subpoint(_subpoint(anchor, "A third sub-point of prose"), revision)
+
+    subpoints = list(anchor._p.itersiblings(qn("w:p")))[:3]
+    for p in subpoints:
+        assert not is_entry_end(p.pPr)
+        assert p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "240"
+
+
+def test_an_earlier_sub_point_that_kept_its_mark_loses_the_entry_gap_when_another_follows():
+    # The anchor is the document's last paragraph, so the first sub-point
+    # keeps its mark (`_keep_mark`) and carries the gap. A second write
+    # deletes that mark again and must also take the gap off it: only the
+    # new last sub-point ends the entry.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    mark_entry_end(anchor)
+
+    revision = sp.Revision(0, _DATE)
+    sp.write_subpoint(_subpoint(anchor, PROSE), revision)
+    first = anchor._p.getnext()
+    assert first.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is None  # kept its mark
+    assert _gap_flags(anchor) == [True, True]
+
+    sp.write_subpoint(_subpoint(anchor, OTHER_PROSE), revision)
+    assert first.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
+    assert _gap_flags(anchor) == [True, False, True]
+    assert first.pPr.find(qn("w:contextualSpacing")) is None
+    assert first.pPr.find(qn("w:spacing")) is None
+
+
+def test_is_entry_end_needs_contextual_spacing_off_as_well_as_the_gap():
+    doc = Document()
+    para = doc.add_paragraph("A line with 6pt after but contextual spacing left on")
+    para.paragraph_format.space_after = Twips(120)
+    assert not is_entry_end(para._p.pPr)
+
+
+def test_mark_entry_end_replaces_an_existing_contextual_spacing():
+    doc = Document()
+    para = doc.add_paragraph("Entry")
+    pPr = para._p.get_or_add_pPr()
+    pPr.append(OxmlElement("w:contextualSpacing"))  # on: no w:val
+    mark_entry_end(para)
+    assert [c.get(qn("w:val")) for c in pPr.findall(qn("w:contextualSpacing"))] == ["0"]
+
+
+def test_mark_entry_end_puts_contextual_spacing_in_schema_order():
+    # CT_PPr puts w:contextualSpacing before w:jc and w:rPr; Word rejects the
+    # file when it comes after them.
+    doc = Document()
+    para = doc.add_paragraph("Entry")
+    para.paragraph_format.alignment = 1  # w:jc
+    para._p.get_or_add_pPr().append(OxmlElement("w:rPr"))
+    mark_entry_end(para)
+    tags = [child.tag for child in para._p.pPr]
+    assert tags.index(qn("w:contextualSpacing")) < tags.index(qn("w:jc"))
+    assert tags.index(qn("w:contextualSpacing")) < tags.index(qn("w:rPr"))
+
+
+def test_clear_entry_end_leaves_no_empty_spacing_element():
+    doc = Document()
+    para = doc.add_paragraph("Entry")
+    mark_entry_end(para)
+    pPr = copy.deepcopy(para._p.pPr)
+    clear_entry_end(pPr)
+    assert pPr.find(qn("w:spacing")) is None
+    assert pPr.find(qn("w:contextualSpacing")) is None
 
 
 @pytest.mark.parametrize("anchor_kind", ["bullet", "citation"])
