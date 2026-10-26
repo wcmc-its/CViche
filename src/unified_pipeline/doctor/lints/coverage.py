@@ -13,11 +13,12 @@ its facts and rare words (`_align`). Normalising every fact that was
 legitimately reformatted (5c teaching, 5d citations, dates) is the part
 #1588 leaves open.
 """
+import copy
 import heapq
 import math
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
@@ -39,7 +40,13 @@ from unified_pipeline.stage6.sections.licensure import (
 )
 from unified_pipeline.stage_4_5_research_summary import RESEARCH_ACTIVITIES_CODE
 
-from ..shared import TABLE_ROW_JOINER, _finding, normalise_hyphens
+from ..shared import (
+    TABLE_ROW_JOINER,
+    SubpointText,
+    _finding,
+    normalise_hyphens,
+    subpoint_owners,
+)
 from .summary import generated_summary
 
 #: A word the check reads: three or more letters, after `norm`'s case and
@@ -129,33 +136,85 @@ def _words(text: str) -> list[str]:
     return _WORD_RE.findall(norm(text))
 
 
+class _DeletedLine(NamedTuple):
+    """One line of a tracked deletion (`deleted_blocks`): `block` its
+    body-order block, and `owners` the entries it is the text of
+    (`_deleted_line_owners`), None when no record says whose it is, so
+    every source line may read it."""
+    block: int
+    text: str
+    owners: frozenset | None
+
+
+def _reads(owners: frozenset | None, entries: frozenset) -> bool:
+    """Whether a source line that the stage-3b `entries` hold (their
+    `element_idx_start`s, `_Entries.holding`) may be found in a deleted
+    line that is the text of the entries `owners`. A tracked deletion is
+    its own entry's struck text: a #1205 sub-point is source prose stage 6
+    offers under its own entry, as `offered_as_subpoint` reads it, and the
+    enrichment's w:del is the CV's own line of the citation it replaced. So
+    it vouches for that entry's lines only: another entry's struck text
+    sharing a line's facts is not where the line went (BMAMWE 1368, #1205
+    comment 6388379186: another citation's enrichment w:del held the note
+    once a sub-point took the claims that had held it). A deletion no
+    record places (`owners` None) vouches for every line, as before; so
+    does every deletion for a line no entry holds, whose own entry is
+    unknown. A line stage 3b put in several entries is each one's. A record
+    the CV lists twice, in two entries, shares one rendering in the
+    accepted view (`_Judged.keys`) but not a tracked deletion: the owner's
+    rule (#1205 comment 6398270589) is the line's own entry's deletions
+    only, and a twin's would let another entry's deletion vouch again
+    wherever `_same_record` reads two lines as one record."""
+    return owners is None or not entries or not owners.isdisjoint(entries)
+
+
 class _Output:
     """Which rendered lines hold each word. A source word pair is rendered
     when one output line holds both words, in either order: stage 6 and the
     formatters reorder a record's parts ("Member, Committee" becomes
     "Committee | Member") without losing them. Lines are read from the whole
-    document, the Appendix and tracked deletions included, so content the
-    Appendix holds, or that stage 6 struck through on purpose, is accounted
-    for."""
+    document, the Appendix and tracked deletions (`deleted`) included, so
+    content the Appendix holds, or that stage 6 struck through on purpose,
+    is accounted for; a tracked deletion only for its own entry's lines
+    (`read_by`)."""
 
-    def __init__(self, blocks: Iterable[tuple[str, str]]) -> None:
+    def __init__(self, blocks: Iterable[tuple[str, str]], deleted: Iterable[_DeletedLine] = ()) -> None:
         self._lines: dict[str, set[int]] = defaultdict(set)
-        line_id = 0
-        for _, text in blocks:
-            for line in str(text).split("\n"):
-                for word in _words(line):
-                    self._lines[word].add(line_id)
-                line_id += 1
+        #: Each deleted line's own entries, by line id (`_DeletedLine.owners`).
+        self._owners: dict[int, frozenset] = {}
+        #: The entries of the source line reading this output (`read_by`).
+        self._reader: frozenset = frozenset()
+        lines = [(line, None) for _, text in blocks for line in str(text).split("\n")]
+        lines += [(d.text, d.owners) for d in deleted]
+        for line_id, (line, owners) in enumerate(lines):
+            for word in _words(line):
+                self._lines[word].add(line_id)
+            if owners is not None:
+                self._owners[line_id] = owners
+
+    def read_by(self, entries: frozenset) -> _Output:
+        """This output as a source line the stage-3b `entries` hold reads
+        it (`_reads`): another entry's struck text is not in it."""
+        view = copy.copy(self)
+        view._reader = entries
+        return view
+
+    def _holding(self, word: str) -> set[int]:
+        """The lines holding `word` that this output's reader may read."""
+        held = self._lines.get(word, set())
+        if not self._owners:
+            return held
+        return {line_id for line_id in held if _reads(self._owners.get(line_id), self._reader)}
 
     def renders(self, pair: tuple[str, str]) -> bool:
         first, second = pair
-        return bool(self._lines.get(first, set()) & self._lines.get(second, set()))
+        return bool(self._holding(first) & self._holding(second))
 
     def most_groups_on_one_line(self, groups: list[list[str]]) -> int:
         """The most groups any one rendered line holds a word of."""
         counts: dict[int, int] = defaultdict(int)
         for group in groups:
-            for line_id in set().union(*(self._lines.get(word, set()) for word in group)):
+            for line_id in set().union(*(self._holding(word) for word in group)):
                 counts[line_id] += 1
         return max(counts.values(), default=0)
 
@@ -296,8 +355,85 @@ class _Entries:
         piece = squash(line)
         for text, start, code in self._entries:
             if piece in text:
-                return (int(start) if isinstance(start, (int, float)) else None), code
+                return _entry_index(start), code
         return None, None
+
+    def holding(self, line: str) -> frozenset[int]:
+        """The element_idx_start of every entry whose text holds the line."""
+        piece = squash(line)
+        return frozenset(idx for text, start, _ in self._entries
+                         if piece in text and (idx := _entry_index(start)) is not None)
+
+
+def _entry_index(start: object) -> int | None:
+    """A stage-3b entry's element_idx_start as an index; None when it is none."""
+    return int(start) if isinstance(start, (int, float)) else None
+
+
+def _subpoint_paragraphs(line: str, owners: Mapping[str, frozenset | None]) -> list[str] | None:
+    """The #1205 sub-point paragraphs (`owners`, `subpoint_owners`) one
+    deleted line is made of: the line itself, or a table row's joined line
+    (TABLE_ROW_JOINER) made of nothing but them and the joiners, a spanning
+    sub-point row's cell repeated per column. None when it is made of other
+    text. Read by text, as `subpoint_text` places them: a deletion of a
+    sub-point's very words would read as that sub-point (none on the
+    102-run farm). The paragraphs are taken out of the whole line before
+    its joiners, so a paragraph that itself holds the joiner (a duties
+    line typed with " | ") is still read whole. ponytail: they are taken
+    out longest first; a line they do not empty is read as other text."""
+    key = squash(line)
+    if key in owners:
+        return [key]
+    if TABLE_ROW_JOINER not in line:
+        return None
+    rest = key
+    paragraphs: list[str] = []
+    for paragraph in sorted(owners, key=len, reverse=True):
+        if paragraph in rest:
+            rest = rest.replace(paragraph, "")
+            paragraphs.append(paragraph)
+    if rest.replace(squash(TABLE_ROW_JOINER), ""):
+        return None
+    return paragraphs
+
+
+def _deleted_line_owners(line: str, owners: Mapping[str, frozenset | None],
+                         entries: _Entries) -> frozenset | None:
+    """The entries one deleted line is the text of (`_reads`). For a
+    sub-point (author SUBPOINT_AUTHOR, `docx_subpoint_lines`;
+    `_subpoint_paragraphs`), the entries the render sidecar's placements
+    name for every one of its paragraphs (`subpoint_owners`); None, every
+    entry, without placements, as `offered_as_subpoint` reads them. For any
+    other deletion, such as the enrichment's w:del of a citation's CV line,
+    the stage-3b entries whose text holds it (`_Entries.holding`); None when
+    none does, as for a formatter's fragment no entry holds verbatim.
+
+    A sub-point's owners are the indexes the sidecar names, a source line's
+    own entries the ones stage 3b names, and the two are not reconciled. A
+    placement under an index that no stage-3b entry holding the line
+    carries (another index, or None) vouches for none of that line, and so
+    does a sub-point whose written text differs from its placement's
+    paragraph, which no placement then names. On the 102-run farm every
+    placement's index is a stage-3b entry's and every sub-point line is a
+    placement's."""
+    paragraphs = _subpoint_paragraphs(line, owners)
+    if not paragraphs:
+        return entries.holding(line) or None
+    placed = [owners[paragraph] for paragraph in paragraphs]
+    if any(entry_ids is None for entry_ids in placed):
+        return None
+    return frozenset.intersection(*placed)
+
+
+def _deleted_lines(deleted_blocks: list[tuple[str, str]] | None, subpoints: SubpointText | None,
+                   entries: _Entries) -> list[_DeletedLine]:
+    """Every non-blank line of the tracked deletions, with the entries it is
+    the text of (`_deleted_line_owners`): `subpoints` is the docx's
+    sub-points (`docx_subpoint_lines`) with the render sidecar's placements."""
+    owners = subpoint_owners(subpoints)
+    return [_DeletedLine(b, line, _deleted_line_owners(line, owners, entries))
+            for b, (_, text) in enumerate(deleted_blocks or [])
+            for line in str(text).split("\n") if line.strip()]
 
 
 def _pairs(text: str, output: _Output) -> list[tuple[str, str]]:
@@ -557,10 +693,11 @@ _PARAGRAPH, _ROW, _DELETED, _SUMMARY = "p", "row", "deleted", "summary"
 class _Unit(NamedTuple):
     """One rendered line the source is aligned to: `kind` one of
     _PARAGRAPH, _ROW, _DELETED or _SUMMARY; `block` is its body-order
-    block."""
+    block; `owners` a deleted line's own entries (`_DeletedLine`)."""
     block: int
     kind: str
     text: str
+    owners: frozenset | None = None
 
 
 def _table_units(text: str, rows: list[list[str]] | None) -> list[str]:
@@ -583,13 +720,13 @@ def _table_units(text: str, rows: list[list[str]] | None) -> list[str]:
     return units + [line for line in lines if squash(line) not in held]
 
 
-def _output_units(blocks: list[tuple[str, str]], deleted_blocks: list[tuple[str, str]] | None,
+def _output_units(blocks: list[tuple[str, str]], deleted: list[_DeletedLine],
                   table_rows: list[list[list[str]]] | None, summary: str = "") -> list[_Unit]:
     """Every rendered line in the accepted view (`blocks`: tracked
     insertions in, deletions out), Appendix included, then each tracked
-    deletion's line: a sub-point or a struck original stage 6 offers the
-    reviewer. Tables are read row by row when `table_rows` (the same
-    document's top-level tables, in order) matches the blocks. The
+    deletion's line (`deleted`): a sub-point or a struck original stage 6
+    offers the reviewer. Tables are read row by row when `table_rows` (the
+    same document's top-level tables, in order) matches the blocks. The
     research summary the model wrote (`summary`) is its own kind: stage
     4.5 wrote it in place of the CV's research activities (M1), so it
     renders those lines and paraphrases other records' without rendering
@@ -604,8 +741,7 @@ def _output_units(blocks: list[tuple[str, str]], deleted_blocks: list[tuple[str,
         else:
             units += [_Unit(b, _SUMMARY if summary_key and squash(line) == summary_key else _PARAGRAPH, line)
                       for line in str(text).split("\n") if line.strip()]
-    for b, (_, text) in enumerate(deleted_blocks or []):
-        units += [_Unit(b, _DELETED, line) for line in str(text).split("\n") if line.strip()]
+    units += [_Unit(line.block, _DELETED, line.text, line.owners) for line in deleted]
     return units
 
 
@@ -642,7 +778,9 @@ class _Judged(NamedTuple):
     `_same_record`). `narrative` marks a research-activities (M1) line:
     only such a line may be aligned to the research summary, the
     paragraph stage 4.5 wrote in their place. `groups` are its record
-    groups (`_record_groups`, ALIGN_GROUP_MAX)."""
+    groups (`_record_groups`, ALIGN_GROUP_MAX). `own` is the
+    `element_idx_start` of each stage-3b entry that holds it
+    (`_Entries.holding`): the tracked deletions it may read (`_reads`)."""
     i: int
     entry: object
     keys: frozenset
@@ -651,6 +789,7 @@ class _Judged(NamedTuple):
     years: frozenset[str]
     narrative: bool = False
     groups: tuple[frozenset[str], ...] = ()
+    own: frozenset = frozenset()
 
     def anchors(self) -> list[str]:
         """The heaviest tokens, down to the first that takes their weight
@@ -729,6 +868,12 @@ class _Alignment:
             self._span_tokens[span] = (tokens, sum(self._weights.get(t, 0.0) for t in tokens))
         return self._span_tokens[span]
 
+    def _readable(self, line: _Judged, u: int, summary: bool) -> bool:
+        """Whether unit u can hold the line: the research summary only when
+        `summary`, and a tracked deletion only when it is the line's own (`_reads`)."""
+        unit = self._units[u]
+        return (summary or unit.kind != _SUMMARY) and _reads(unit.owners, line.own)
+
     def _free(self, u: int, token: str, line: _Judged) -> bool:
         claimed = self._claims.get((u, token))
         if not claimed:
@@ -789,7 +934,7 @@ class _Alignment:
         mean = line.total / len(line.weighted)
         mine = {token for token, _ in line.weighted}
         holders = {u for token, w in line.weighted if w >= mean and not token.startswith(_YEAR_TOKEN)
-                   for u in self._postings.get(token, ()) if self._units[u].kind != _SUMMARY}
+                   for u in self._postings.get(token, ()) if self._readable(line, u, summary=False)}
         own = [u for u in sorted(holders) if self._own_share(u, mine) >= ALIGN_GROUP_MIN_OWN]
         cover = set()
         for group in line.groups:
@@ -806,11 +951,12 @@ class _Alignment:
         (_Judged.anchors). The spans: the fixed ones (`_spans`), the runs
         of rows (`_row_runs`) and one unit per record group
         (`_group_covers`). The research summary is a span for a
-        research-activities line only (`_Judged.narrative`)."""
+        research-activities line only (`_Judged.narrative`), and a
+        tracked deletion for its own entry's lines only (`_reads`)."""
         if not line.weighted:
             return _NO_MATCH
         anchors = sorted({u for token in line.anchors() for u in self._postings.get(token, ())
-                          if line.narrative or self._units[u].kind != _SUMMARY})
+                          if self._readable(line, u, summary=line.narrative)})
         best = _NO_MATCH
         spans = ({span for u in anchors for span in self._spans[u]} | self._row_runs(line, anchors)
                  | self._group_covers(line))
@@ -1025,28 +1171,33 @@ def _record_keys(listings: dict[int, _Listing], entry_of: dict[int, object],
 def _align(source_lines: list[str], blocks: list[tuple[str, str]],
            deleted_blocks: list[tuple[str, str]] | None, stage1a: dict | None,
            stage3b: dict | None, table_rows: list[list[list[str]]] | None,
-           stage_4_5: dict | None = None) -> _Aligned:
+           stage_4_5: dict | None = None, subpoints: SubpointText | None = None) -> _Aligned:
     """Judge each printed line as `_rendered_share` does (A entries and
     headings left out: `_is_heading_line`), then place the judged lines one
     at a time, best match first (_Alignment), re-scoring a line whose span
-    another record claimed since it was queued."""
-    output = _Output([*blocks, *(deleted_blocks or [])])
-    headings = _heading_texts(stage1a)
+    another record claimed since it was queued. A line reads only its own
+    entry's tracked deletions and those no record places (`_reads`)."""
     entries = _Entries(stage3b)
+    deleted = _deleted_lines(deleted_blocks, subpoints, entries)
+    output = _Output(blocks, deleted)
+    headings = _heading_texts(stage1a)
     lines = _printed_lines(source_lines)
-    units = _output_units(blocks, deleted_blocks, table_rows,
+    units = _output_units(blocks, deleted, table_rows,
                           generated_summary(stage_4_5) if isinstance(stage_4_5, dict) else "")
     weights, unseen = _token_weights(lines)
     alignment = _Alignment(units, weights)
     where: list[tuple[int | None, str | None]] = []
+    held_by: dict[int, frozenset[int]] = {}
     tokens_of: dict[int, Counter] = {}
     for i, (head, line) in enumerate(lines):
         next_line = lines[i + 1].text if i + 1 < len(lines) else ""
         idx, code = entries.find(head)
         where.append((idx, code))
-        if (code != PERSONAL_DATA_CODE and _rendered_share(line, next_line, headings, output) is not None
+        held_by[i] = entries.holding(head)
+        seen = output.read_by(held_by[i])
+        if (code != PERSONAL_DATA_CODE and _rendered_share(line, next_line, headings, seen) is not None
                 and not _is_heading_line(line, headings, idx is not None or code is not None)):
-            tokens_of[i] = _aligned_tokens(line, output)
+            tokens_of[i] = _aligned_tokens(line, seen)
     entry_of = {i: ("entry", where[i][0]) if where[i][0] is not None else ("line", i) for i in tokens_of}
     keys = _record_keys({i: _listing(tokens, lines[i].text) for i, tokens in tokens_of.items()},
                         entry_of, weights, unseen)
@@ -1056,7 +1207,8 @@ def _align(source_lines: list[str], blocks: list[tuple[str, str]],
         weighted = tuple(sorted(((t, weights.get(t, unseen)) for t in tokens), key=lambda tw: (-tw[1], tw[0])))
         years = frozenset(t for t in tokens if t.startswith(_YEAR_TOKEN))
         judged[i] = _Judged(i, entry_of[i], keys[i], weighted, sum(w for _, w in weighted), years,
-                            where[i][1] == RESEARCH_ACTIVITIES_CODE, _record_groups(years, lines[i].text))
+                            where[i][1] == RESEARCH_ACTIVITIES_CODE, _record_groups(years, lines[i].text),
+                            held_by[i])
         heapq.heappush(queue, (_negated(alignment.best(judged[i]).rank()), i))
     placed: dict[int, _Match] = {}
     while queue:
@@ -1075,11 +1227,13 @@ def _line_verdicts(source_lines: list[str], blocks: list[tuple[str, str]],
                    deleted_blocks: list[tuple[str, str]] | None = None,
                    stage1a: dict | None = None, stage3b: dict | None = None,
                    table_rows: list[list[list[str]]] | None = None,
-                   stage_4_5: dict | None = None) -> list[_LineVerdict]:
+                   stage_4_5: dict | None = None,
+                   subpoints: SubpointText | None = None) -> list[_LineVerdict]:
     """Every printed source line with its verdict (`_align`): a judged
     line is a hit when its span holds under ALIGNED_MIN_SHARE of its
     weighted tokens, or misses a year it states."""
-    aligned = _align(source_lines, blocks, deleted_blocks, stage1a, stage3b, table_rows, stage_4_5)
+    aligned = _align(source_lines, blocks, deleted_blocks, stage1a, stage3b, table_rows, stage_4_5,
+                     subpoints)
     verdicts = []
     for i, line in enumerate(aligned.lines):
         idx, code = aligned.where[i]
@@ -1096,26 +1250,30 @@ def lint_source_line_coverage(source_lines: list[str], blocks: list[tuple[str, s
                               stage1a: dict | None = None,
                               stage3b: dict | None = None,
                               table_rows: list[list[list[str]]] | None = None,
-                              stage_4_5: dict | None = None) -> list[dict]:
+                              stage_4_5: dict | None = None,
+                              subpoints: SubpointText | None = None) -> list[dict]:
     """Source lines not found in their own place in the output (#1588):
     aligned one-to-one to the rendered document (accepted view, Appendix
     and tracked deletions included), a line is reported when its span holds
     under ALIGNED_MIN_SHARE of its weighted fact tokens or misses a year it
-    states (`_line_verdicts`). One finding per stage-3b entry the lines sit
-    in, led by its index so the scorer can match it, quoting up to
-    COVERAGE_EVIDENCE_MAX of the lines; lines no entry holds share one
-    finding with no index. A Personal Data (A) entry is not judged: its
-    fixed slots reformat every value and withhold the home contact by
-    design; nor is a heading or lead-in (`_is_heading_line`). A research-
-    activities (M1) line may be found in the research summary stage 4.5
-    wrote in their place.
+    states (`_line_verdicts`). A tracked deletion counts only for its own
+    entry's lines (`_reads`): a #1205 sub-point's entry is the one the
+    render sidecar places it under (`subpoints`, the docx's sub-points with
+    those placements), any other deletion's the stage-3b entry whose text
+    holds it. One finding per stage-3b entry the lines sit in, led by its
+    index so the scorer can match it, quoting up to COVERAGE_EVIDENCE_MAX of
+    the lines; lines no entry holds share one finding with no index. A
+    Personal Data (A) entry is not judged: its fixed slots reformat every
+    value and withhold the home contact by design; nor is a heading or
+    lead-in (`_is_heading_line`). A research-activities (M1) line may be
+    found in the research summary stage 4.5 wrote in their place.
 
     INFO, and a review-copy note only, never a run-page row
     (REVIEW_COPY_ONLY_LINTS); its precision is doctor/PRECISION.md's
-    SLC-A3."""
+    SLC-A3, and YUY-SLCO measures the own-entry reading of deletions."""
     by_entry: dict[int | None, list[tuple[str, float]]] = {}
     for verdict in _line_verdicts(source_lines, blocks, deleted_blocks, stage1a, stage3b, table_rows,
-                                  stage_4_5):
+                                  stage_4_5, subpoints):
         if verdict.hit:
             by_entry.setdefault(verdict.idx, []).append((verdict.text.strip(), verdict.share))
     findings = []

@@ -16,6 +16,7 @@ from unified_pipeline.doctor.lints.coverage import (  # noqa: E402
     COVERAGE_EVIDENCE_MAX,
     lint_source_line_coverage,
 )
+from unified_pipeline.doctor.shared import TABLE_ROW_JOINER  # noqa: E402
 from unified_pipeline.stage_4_5_research_summary import (
     GENERATION_METHOD_LLM,  # noqa: E402
 )
@@ -545,3 +546,277 @@ def test_a_period_is_found_in_a_row_whose_year_no_other_record_spent():
     terse, terse_rows = _rows(("2009", "Widget torsion"))
     assert _run([talk, visit], [*first, *merged, *terse], table_rows=first_rows + merged_rows + terse_rows,
                 stage3b=_3b((5, "R", talk), (6, "R", visit))) == []
+
+
+# Sub-points (#1205): stage 6 offers an entry's unrendered prose as a
+# tracked-deleted sub-point under it, and the render sidecar records whose
+# each one is. A sub-point vouches for its own entry's lines only (BMAMWE
+# 1368, #1205 comment 6388379186: another entry's sub-point sharing a note's
+# facts and rare words silenced it). Invented text only.
+
+#: Entry 20's sub-point, and entry 30's note, which shares most of its words.
+_SUBPOINT = "Featured on the cover of the spring gizmo issue, with an editorial on sprocket safety"
+_NOTE = "Cover feature of the spring gizmo issue, with an editorial on sprocket safety"
+
+
+def _subpoints(*placed, lines=(), placements=True):
+    """The docx's sub-points as run_doctor reads them (`subpoint_text`):
+    each (element_idx_start, paragraph) a sub-point the render sidecar
+    places under that entry, plus `lines` it places under none; without
+    `placements`, a sidecar from before the record existed."""
+    from unified_pipeline.doctor.shared import subpoint_text
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    records = tuple(SubpointPlacement(idx, "S1", (text,)) for idx, text in placed)
+    return subpoint_text([*(text for _, text in placed), *lines], records if placements else None)
+
+
+#: Entry 20's citation, as the CV and stage 3b have it.
+_CITATION_20 = "Doe JA, Roe R. Widget torsion in gerbils. J Widget Sci. 2019;3:1-5."
+
+
+def _entries_of(*entries):
+    """Stage-3b entries, after entry 20: its citation, then its sub-point prose."""
+    return _3b(*entries, (20, "S1", f"{_CITATION_20}\t{_SUBPOINT}"))
+
+
+def test_another_entrys_sub_point_does_not_vouch_for_a_line():
+    """The BMAMWE shape: entry 30's note is in neither document, and entry
+    20's sub-point holds most of its words. Without the sidecar's record of
+    whose each sub-point is, every sub-point counts for every line, as
+    `offered_as_subpoint` reads them; with no sub-points read at all, the
+    deletion is entry 20's text, as any other deletion is (next tests)."""
+    views = {"deleted_blocks": _p(_SUBPOINT), "stage3b": _entries_of((30, "S7", _NOTE))}
+    findings = _run([_NOTE], _p(_KEPT), subpoints=_subpoints((20, _SUBPOINT)), **views)
+    assert [(f["message"].split(":")[0], f["evidence"]) for f in findings] == [("entry 30", [_NOTE])]
+    assert _run([_NOTE], _p(_KEPT), subpoints=_subpoints((20, _SUBPOINT), placements=False), **views) == []
+    assert [f["message"].split(":")[0] for f in _run([_NOTE], _p(_KEPT), **views)] == ["entry 30"]
+
+
+def test_a_lines_own_sub_point_still_vouches_for_it():
+    """Entry 30's own sub-point holds its note; so does any sub-point for a
+    line no stage-3b entry holds, whose entry is unknown."""
+    views = {"deleted_blocks": _p(_SUBPOINT)}
+    assert _run([_NOTE], _p(_KEPT), subpoints=_subpoints((30, _SUBPOINT)),
+                stage3b=_entries_of((30, "S7", _NOTE)), **views) == []
+    assert _run([_NOTE], _p(_KEPT), subpoints=_subpoints((20, _SUBPOINT)), stage3b=_entries_of(), **views) == []
+
+
+def test_a_line_stage_3b_put_in_two_entries_reads_either_ones_sub_point():
+    """Stage 3b's entries overlap: entry 20's text holds entry 30's note too,
+    and its sub-point holds it word for word (OIYKZE 242, XWNZWW 730 on the
+    farm). The note is each entry's line, so either one's sub-point is its own."""
+    stage3b = _3b((30, "S7", _NOTE), (20, "S1", f"{_CITATION_20}\t{_NOTE}"))
+    assert _run([_NOTE], _p(_KEPT), deleted_blocks=_p(_NOTE), stage3b=stage3b,
+                subpoints=_subpoints((20, _NOTE))) == []
+    findings = _run([_NOTE], _p(_KEPT), deleted_blocks=_p(_NOTE), stage3b=_3b((30, "S7", _NOTE)),
+                    subpoints=_subpoints((20, _NOTE)))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
+
+
+def test_a_deletion_that_is_no_sub_point_vouches_for_the_entries_whose_text_holds_it():
+    """The enrichment's w:del is the CV's own line of the citation it
+    replaced; it was BMAMWE 1368's actual cover, another citation's, once a
+    sub-point took the claims that had held it. It vouches for the stage-3b
+    entries whose text holds it, the same record listed twice included, and
+    not for another entry's line. A deletion no entry's text holds, such as
+    a formatter's fragment, vouches for every line, as before."""
+    struck = f"{_CITATION_20} {_SUBPOINT}"
+    views = {"deleted_blocks": _p(struck), "subpoints": _subpoints()}
+
+    def found(*entries):
+        return [f["message"].split(":")[0] for f in _run([_NOTE], _p(_KEPT), stage3b=_3b(*entries), **views)]
+
+    assert found((20, "S1", struck), (30, "S7", _NOTE)) == ["entry 30"]
+    assert found((20, "S1", struck), (30, "S7", f"{_NOTE}\t{struck}")) == []
+    assert found((20, "S1", _CITATION_20), (30, "S7", _NOTE)) == []
+    assert found((None, "S1", struck), (30, "S7", _NOTE)) == []  # no index: no one's own
+    # A table line of nothing but cell joiners is no sub-point's, and no crash;
+    # nor is one whose cells hold a sub-point's words and more.
+    views["deleted_blocks"] = [("table", f" {TABLE_ROW_JOINER} "), *_p(struck)]
+    assert found((20, "S1", struck), (30, "S7", _NOTE)) == ["entry 30"]
+    more = f"{_SUBPOINT}, and more"
+    views = {"deleted_blocks": [("table", f"{more}{TABLE_ROW_JOINER}{more}")], "subpoints": _subpoints((20, _SUBPOINT))}
+    assert found((20, "S1", _SUBPOINT), (30, "S7", _NOTE)) == []
+
+
+def test_a_sub_point_the_sidecar_places_under_no_entry_vouches_for_no_entrys_line():
+    """The sidecar records the render's placements, and this sub-point is in
+    none of them (or the sidecar records none): it is no entry's own, so it
+    counts only for a line no entry holds."""
+    for subpoints in (_subpoints(lines=(_SUBPOINT,)), _subpoints((20, _KEPT), lines=(_SUBPOINT,))):
+        views = {"deleted_blocks": _p(_SUBPOINT), "subpoints": subpoints}
+        findings = _run([_NOTE], _p(_KEPT), stage3b=_entries_of((30, "S7", _NOTE)), **views)
+        assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
+        assert _run([_NOTE], _p(_KEPT), stage3b=_entries_of(), **views) == []
+
+
+def _sub_point_row(duties, *placements, elsewhere=()):
+    """A rendered one-row table and the sub-point row stage 6's writer puts
+    under it, spanning both columns; the doctor's three views of it.
+    `elsewhere` is (element_idx_start, paragraph) sub-points of the same
+    document outside the table."""
+    from docx import Document
+
+    from unified_pipeline.doctor.shared import (
+        docx_body_blocks,
+        docx_subpoint_lines,
+        subpoint_text,
+    )
+    from unified_pipeline.stage6.supplementary import (
+        Revision,
+        SubpointPlacement,
+        write_row_subpoint,
+    )
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text, table.rows[0].cells[1].text = "Lecturer", "Example College"
+    write_row_subpoint(table.rows[0]._tr, duties, Revision(1, "2026-01-01T00:00:00Z"))
+    lines = [*docx_subpoint_lines(doc), *(text for _, text in elsewhere)]
+    placed = (*placements, *(SubpointPlacement(idx, "K1", (text,)) for idx, text in elsewhere))
+    return docx_body_blocks(doc), {"deleted_blocks": docx_body_blocks(doc, deleted=True),
+                                   "subpoints": subpoint_text(lines, placed)}
+
+
+def test_a_sub_point_row_vouches_only_for_its_own_entry_in_every_line_the_table_view_has():
+    """A sub-point row spans the table: the deleted view repeats its cell
+    per column and joins the copies (TABLE_ROW_JOINER) on one line, the only
+    line that holds both of its paragraphs. Every one of them is entry 20's;
+    the joined line is the entries' whose own every paragraph is."""
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    duties = ("Supervised the regional sprocket audit", "Trained gizmo apprentices in flywheel repair")
+    line = "Supervised the regional sprocket audit and trained gizmo apprentices in flywheel repair, Example Guild"
+    blocks, views = _sub_point_row(duties, SubpointPlacement(20, "D1", duties))
+    assert " | ".join([" ".join(duties)] * 2) in views["deleted_blocks"][-1][1].split("\n")
+    findings = _run([line], blocks, stage3b=_entries_of((30, "D1", line)), **views)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
+    assert _run([line], blocks, stage3b=_3b((20, "D1", line)), **views) == []
+    # Another entry's sub-point elsewhere in the document is no part of the row.
+    blocks, views = _sub_point_row(duties, SubpointPlacement(20, "D1", duties), elsewhere=((40, _SUBPOINT),))
+    assert _run([line], blocks, stage3b=_3b((20, "D1", line)), **views) == []
+    # Entry 30 also placed the first paragraph, alone, under half of its line.
+    blocks, views = _sub_point_row(duties, SubpointPlacement(20, "D1", duties),
+                                   SubpointPlacement(30, "D1", duties[:1]))
+    findings = _run([line], blocks, stage3b=_entries_of((30, "D1", line)), **views)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
+
+
+def test_a_sub_point_row_whose_second_paragraph_holds_its_first_is_still_one_entrys():
+    """The joined line's cell is read longest paragraph first: taking the
+    shorter out first would also cut it out of the longer one, and leave the
+    row read as no sub-point's, every line's."""
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    duties = ("Trained gizmo apprentices", "Trained gizmo apprentices in flywheel repair at the sprocket audit")
+    line = "Trained gizmo apprentices in flywheel repair at the regional sprocket audit, Example Guild"
+    blocks, views = _sub_point_row(duties, SubpointPlacement(20, "D1", duties))
+    findings = _run([line], blocks, stage3b=_entries_of((30, "D1", line)), **views)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
+
+
+def test_a_sub_point_row_whose_paragraph_holds_the_cell_joiner_is_still_one_entrys():
+    """A duties paragraph typed with " | " (TABLE_ROW_JOINER) splits the
+    joined line mid-paragraph: read cell by cell, no paragraph empties a
+    cell, the row reads as no sub-point's, and it vouches for every line
+    again. Read whole, it is entry 20's row, as without the pipe: made of
+    that paragraph alone, not of another entry's sub-point elsewhere, and
+    not when a cell holds other text beside it."""
+    from unified_pipeline.core.text_norm import squash
+    from unified_pipeline.doctor.lints.coverage import _subpoint_paragraphs
+    from unified_pipeline.doctor.shared import subpoint_owners
+    from unified_pipeline.stage6.supplementary import SubpointPlacement
+
+    duties = (f"Supervised the regional sprocket audit{TABLE_ROW_JOINER}trained gizmo apprentices in flywheel repair",)
+    line = "Supervised the regional sprocket audit and trained gizmo apprentices in flywheel repair, Example Guild"
+    blocks, views = _sub_point_row(duties, SubpointPlacement(20, "D1", duties), elsewhere=((40, _SUBPOINT),))
+    joined = TABLE_ROW_JOINER.join(duties * 2)
+    assert joined in views["deleted_blocks"][-1][1].split("\n")
+    owners = subpoint_owners(views["subpoints"])
+    assert _subpoint_paragraphs(joined, owners) == [squash(duties[0])]
+    assert _subpoint_paragraphs(f"{duties[0]}{TABLE_ROW_JOINER}Example Guild", owners) is None
+    # A row of two paragraphs is made of both: its owners are the entries whose own each one is.
+    pair = (duties[0], "Kept the guild ledger")
+    _, pair_views = _sub_point_row(pair, SubpointPlacement(20, "D1", pair))
+    pair_joined = TABLE_ROW_JOINER.join([" ".join(pair)] * 2)
+    assert pair_joined in pair_views["deleted_blocks"][-1][1].split("\n")
+    pair_owners = subpoint_owners(pair_views["subpoints"])
+    assert sorted(_subpoint_paragraphs(pair_joined, pair_owners)) == sorted(map(squash, pair))
+    findings = _run([line], blocks, stage3b=_entries_of((30, "D1", line)), **views)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 30"]
+    assert _run([line], blocks, stage3b=_3b((20, "D1", line)), **views) == []
+
+
+def test_the_research_summary_is_no_record_of_a_lines_period():
+    """The research summary stage 4.5 wrote vouches for no line but a
+    research-activities one (`_Judged.narrative`), nor for one period of a
+    line listing several (`_group_covers`)."""
+    talk = "Grand rounds on widget torsion, Example Hospital, 2004 and 2009"
+    summary = "Grand rounds on widget torsion, Example Hospital, 2009"
+    stage_4_5 = {"research_summary": {"generation_method": GENERATION_METHOD_LLM, "text": summary}}
+    blocks, rows = _talk_rows({2004})
+    findings = _run([talk], [*blocks, *_p(summary)], table_rows=rows, stage_4_5=stage_4_5)
+    assert len(findings) == 1
+    assert _run([talk], [*blocks, *_p(summary)], table_rows=rows) == []  # an ordinary paragraph is a record
+
+
+def test_an_entry_index_written_as_a_float_is_the_entrys_index():
+    """Older runs wrote element_idx_start as a JSON float."""
+    findings = _run([_LOST], _p(_KEPT), stage3b=_3b((7.0, "D3", _LOST)))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 7"]
+
+
+def test_a_period_in_another_entrys_sub_point_is_not_one_of_a_lines_records():
+    """A line listing two periods is found in one unit per period
+    (`_group_covers`): the 2004 row is entry 30's, the 2009 talk only entry
+    20's sub-point, which is not one of them. Its own sub-point is."""
+    talk = "Grand rounds on widget torsion, Example Hospital, 2004 and 2009"
+    blocks, rows = _talk_rows({2004})
+    views = {"deleted_blocks": _p("Grand rounds on widget torsion, Example Hospital, 2009"), "table_rows": rows,
+             "stage3b": _entries_of((30, "R", talk))}
+    for owner, found in ((20, ["entry 30"]), (30, [])):
+        subpoints = _subpoints((owner, views["deleted_blocks"][0][1]))
+        assert [f["message"].split(":")[0] for f in _run([talk], blocks, subpoints=subpoints, **views)] == found
+
+
+#: Entry 20's sub-point names four of the authors entry 30's citation lists.
+_AUTHORS_SUBPOINT = "Presented with Jane Doe, Richard Roe, Mei-Lin Chan and Omar Example at the gizmo meeting"
+
+
+def test_an_author_list_another_entrys_sub_point_holds_is_not_rendered():
+    """A citation's leading author list is left out of its pairs when one
+    rendered line holds it (`_rendered_authors_end`): another entry's
+    sub-point is not that line. A short title past the list then no longer
+    leaves the citation unjudged, and a rendered title alone does not cover
+    a list nothing renders."""
+    short = "Jane A. Doe, Richard Roe, Mei-Lin Chan, Omar Q. Example. Sprocket wear notes."
+    titled = "Jane A. Doe, Richard Roe, Mei-Lin Chan, Omar Q. Example. Widget torsion in common laboratory gerbils of the north."
+    blocks = _p(_KEPT, "Widget torsion in common laboratory gerbils of the north")
+    for line in (short, titled):
+        views = {"deleted_blocks": _p(_AUTHORS_SUBPOINT), "stage3b": _entries_of((30, "S2", line))}
+        findings = _run([line], blocks, subpoints=_subpoints((20, _AUTHORS_SUBPOINT)), **views)
+        assert [f["message"].split(":")[0] for f in findings] == ["entry 30"], line
+        assert _run([line], blocks, subpoints=_subpoints((30, _AUTHORS_SUBPOINT)), **views) == []
+
+
+def test_stage2_text_break_reads_every_line_and_a_sub_point_only_for_its_own_entry():
+    """stage2_text_break builds `_Output` from the accepted view alone, so
+    every reader reads all of it, as before; a sub-point line among the
+    deleted lines is read by its own entry and by a line no entry holds."""
+    from unified_pipeline.doctor.lints.coverage import (
+        _DeletedLine,
+        _heading_texts,
+        _Output,
+        _rendered_share,
+    )
+
+    headings = _heading_texts(None)
+    accepted = _Output(_p("Visiting lecturer in comparative"))
+    assert [round(_rendered_share(_LOST, "", headings, accepted.read_by(frozenset(entries))), 2)
+            for entries in ((), {7})] == [0.33, 0.33]
+    deleted = _Output(_p(_KEPT), [_DeletedLine(0, _LOST, frozenset({7}))])
+    views = [deleted.read_by(frozenset(entries)) for entries in ((), {7}, {8}, {7, 8})]
+    assert [_rendered_share(_LOST, "", headings, view) for view in views] == [1.0, 1.0, 0.0, 1.0]
+    shared = _Output(_p(_KEPT), [_DeletedLine(0, _LOST, None)])
+    assert _rendered_share(_LOST, "", headings, shared.read_by(frozenset({8}))) == 1.0
