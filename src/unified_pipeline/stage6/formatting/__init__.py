@@ -64,6 +64,7 @@ from .docx import (  # noqa: F401
     is_cviche_box,
     is_entry_end,
     mark_entry_end,
+    mark_entry_end_properties,
     plain_entry_left_twips,
     plain_entry_level,
     space_around_cviche_box,

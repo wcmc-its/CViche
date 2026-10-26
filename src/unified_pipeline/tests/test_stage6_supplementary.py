@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml import OxmlElement  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 from docx.shared import Twips  # noqa: E402
 
@@ -2825,11 +2826,11 @@ def _gap_flags(anchor):
     return flags
 
 
-def test_sub_points_under_an_entrys_last_line_pass_the_entry_gap_to_the_last_one():
+def test_sub_points_under_an_entrys_last_line_move_the_entry_gap_to_the_last_one():
     # An entry's last line carries the gap to the next entry
-    # (`mark_entry_end`). Sub-points written under it stay tight to each
-    # other, and the last one carries the gap, so it still lands before the
-    # next entry; the anchor keeps it, for the document with changes accepted.
+    # (`mark_entry_end`). Sub-points written under it become the entry's last
+    # lines, so the gap moves to the last of them: none between the line and
+    # its sub-points, or between two sub-points.
     doc = Document()
     anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
     mark_entry_end(anchor)
@@ -2837,12 +2838,33 @@ def test_sub_points_under_an_entrys_last_line_pass_the_entry_gap_to_the_last_one
 
     revision = sp.Revision(0, _DATE)
     sp.write_subpoint(_subpoint(anchor, PROSE, OTHER_PROSE), revision)
-    assert _gap_flags(anchor) == [True, False, True, False]
+    assert _gap_flags(anchor) == [False, False, True, False]
 
     sp.write_subpoint(_subpoint(anchor, "A third sub-point of prose"), revision)
-    assert _gap_flags(anchor) == [True, False, False, True, False]
-    after = anchor._p.getnext().pPr
-    assert after.find(qn("w:spacing")) is None or after.find(qn("w:spacing")).get(qn("w:after")) is None
+    assert _gap_flags(anchor) == [False, False, False, True, False]
+    for p in [anchor._p, *list(anchor._p.itersiblings(qn("w:p")))[:2]]:
+        spacing = p.pPr.find(qn("w:spacing"))
+        assert spacing is None or spacing.get(qn("w:after")) is None
+        assert p.pPr.find(qn("w:contextualSpacing")) is None
+
+
+def test_a_template_heading_with_contextual_spacing_off_is_not_an_entry_end():
+    # The template turns contextual spacing off on some headings, with no
+    # space after; a sub-point under one copies its properties untouched.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    anchor.paragraph_format.space_after = Twips(0)
+    contextual = OxmlElement("w:contextualSpacing")
+    contextual.set(qn("w:val"), "0")
+    anchor._p.pPr.append(contextual)
+    doc.add_paragraph("Next line")
+
+    sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(0, _DATE))
+
+    for p in (anchor._p, anchor._p.getnext()):
+        assert not is_entry_end(p.pPr)
+        assert p.pPr.find(qn("w:contextualSpacing")).get(qn("w:val")) == "0"
+        assert p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "0"
 
 
 def test_sub_points_under_a_line_without_the_entry_gap_copy_its_properties_unchanged():
