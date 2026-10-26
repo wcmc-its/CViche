@@ -50,9 +50,14 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.shared import Pt  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_lines  # noqa: E402
-from unified_pipeline.stage6.formatting import plain_entry_level  # noqa: E402
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    ENTRY_GAP_AFTER_PT,
+    is_entry_end,
+    plain_entry_level,
+)
 from unified_pipeline.stage6.sections.clinical_practice import (
     _bullet_parts,  # noqa: E402
 )
@@ -755,6 +760,51 @@ def test_l3_bullet_open_start_year_still_renders_present():
                 start_date="2015")],
     )
     assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015-Present"]
+
+
+# --- the gap between entries (faculty-affairs feedback, 2026-10-26) ----------
+
+def _has_entry_gap(para):
+    return (is_entry_end(para._p.pPr)
+            and para.paragraph_format.space_after == Pt(ENTRY_GAP_AFTER_PT))
+
+
+def test_only_the_last_part_of_an_entry_carries_the_entry_gap():
+    # The parts of one entry stay tight (the List Paragraph style's contextual
+    # spacing); only the last part carries the gap to the next entry.
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Clinician, Clinic\t8 hours per week\t12/2016 to present",
+        entry=None, add_blank_before=True)
+
+    paras = scratch.gen.doc.paragraphs
+    gaps = {p.text: _has_entry_gap(p) for p in paras if p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    assert gaps == {"": False, "Clinician, Clinic": False, "8 hours per week": False,
+                    "12/2016 to present": True}
+    inner = [p for p in paras if p.text in ("Clinician, Clinic", "8 hours per week")]
+    assert all(p.paragraph_format.space_after is None for p in inner)
+
+
+def test_a_single_part_entry_carries_the_entry_gap():
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Attending Physician", entry=None, add_blank_before=False)
+
+    para = next(p for p in scratch.gen.doc.paragraphs if p.text == "Attending Physician")
+    assert _has_entry_gap(para)
+
+
+@pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
+def test_each_entry_ends_in_the_entry_gap_end_to_end(code, filler, header):
+    gen, added = _render_through_template(filler, [
+        _entry("First entry part a\tFirst entry part b"),
+        _entry("Second entry part a\tSecond entry part b"),
+    ])
+    assert added == ["", "First entry part a", "First entry part b",
+                     "Second entry part a", "Second entry part b"]
+    gaps = {p.text: _has_entry_gap(p) for p in gen.doc.paragraphs if p.text in added[1:]}
+    assert gaps == {"First entry part a": False, "First entry part b": True,
+                    "Second entry part a": False, "Second entry part b": True}
 
 
 if __name__ == "__main__":

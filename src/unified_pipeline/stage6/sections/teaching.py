@@ -132,6 +132,7 @@ from ..formatting import (
     envelope_date_spans,
     extra_date_spans,
     format_date_range,
+    mark_entry_end,
     normalize_iso_dates_in_text,
 )
 from ..normalization import _strip_markdown_for_word
@@ -704,14 +705,17 @@ class TeachingSection:
         # list backwards leaves it in source order on the page. Exactly one
         # bullet carries `entry` (the last in source order, inserted first), so
         # a multi-line entry is annotated once rather than N times, and the
-        # blank line goes above the bullet that ends up visually first.
+        # blank line goes above the bullet that ends up visually first. That
+        # same last line carries the gap to the next entry (`mark_entry_end`).
         for j, line_text in enumerate(reversed(lines)):
             # The loop is reversed, so bullet j is source line len-1-j; indexing
             # `levels` with j would invert the hierarchy.
             is_child = bool(levels and levels[len(lines) - 1 - j])
-            self._insert_bulleted_entry(
+            para = self._insert_bulleted_entry(
                 insert_idx, line_text, entry if j == 0 else None,
                 add_blank_before=is_first_visible and j == len(lines) - 1,
                 list_level=1 if is_child else 0,
                 bulleted=False,  # #1943: reviewers read unbulleted entries more easily
             )
+            if j == 0 and para is not None:
+                mark_entry_end(para)

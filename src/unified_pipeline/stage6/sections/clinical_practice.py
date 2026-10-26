@@ -97,6 +97,7 @@ from ..formatting import (
     _set_font,
     format_date_for_section,
     format_date_range,
+    mark_entry_end,
 )
 from ..normalization import _committee_cell_text
 from ..parsing import _is_structural_label, _refold_shattered
@@ -755,5 +756,7 @@ class ClinicalPracticeSection:
             )
             if para is not None:
                 inserted_paras.append(para)
+                if j == 0:  # the entry's last part: the gap to the next entry
+                    mark_entry_end(para)
 
         return len(lines) + (1 if add_blank_before else 0)
