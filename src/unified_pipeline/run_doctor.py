@@ -440,8 +440,9 @@ Lints, ranked by the severity of the failure class they catch:
                           one per entry. Reads stage 4 and the docx
 14ak. source_line_coverage a judged source line (six words or more, as
                           before) that is not found in its own place in the
-                          output, Appendix and tracked deletions included
-                          (#1588): aligned one-to-one to a rendered line, a
+                          output, Appendix and tracked deletions included,
+                          a deletion only for its own entry (#1588, #1205):
+                          aligned one-to-one to a rendered line, a
                           table's rows, two paragraphs, or one row per
                           period when it lists several, it holds under
                           half of its rarity-weighted facts and words, or
@@ -454,9 +455,10 @@ Lints, ranked by the severity of the failure class they catch:
                           summary are left out; a wrapped line is judged
                           with the one before it. INFO, one per stage-3b
                           entry, and a review-copy note only, never a
-                          run-page row (SLC-A3 in doctor/PRECISION.md).
+                          run-page row (SLC-A3 and YUY-SLCO in
+                          doctor/PRECISION.md).
                           Reads the source docx and the docx; stage 1a, 3b
-                          and 4.5 when present
+                          and 4.5 and the render sidecar when present
 14al. appointment_title_overlong a D1-D3 title role (one ';'-separated
                           part) over 150 characters: duty prose stage 4
                           packed into the role (#1205, YUYVIG DYLJXC
@@ -1907,9 +1909,11 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("citation_grounding", lint_citation_grounding, ("stage_5d",)),
     LintSpec("shattered_prose", lint_shattered_prose, ("stage_4", "blocks")),
     # `deleted_blocks` reads the same docx as `blocks`, as for
-    # protected_data_in_output.
+    # protected_data_in_output; `subpoints` (#1205) says whose each
+    # tracked-deleted sub-point among them is, so it counts for its own entry.
     LintSpec("source_line_coverage", lint_source_line_coverage, ("source_lines", "blocks"),
-             optional=("deleted_blocks", "stage_1a", "stage_3b", "table_rows", "stage_4_5")),
+             optional=("deleted_blocks", "stage_1a", "stage_3b", "table_rows", "stage_4_5",
+                       "subpoints")),
     LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
     # `blocks` and `subpoints` read the same docx as `table_rows`, as for
     # offschema_fields: where else a stated grant value reaches the reader.
