@@ -30,6 +30,10 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
 )
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    is_entry_end,
+    mark_entry_end,
+)
 
 _DATE = "2026-10-08T00:00:00Z"
 
@@ -2811,6 +2815,50 @@ def test_a_sub_point_under_an_off_grid_indent_keeps_the_anchor_indent():
     sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(40, _DATE))
 
     assert anchor._p.getnext().find(f"{qn('w:pPr')}/{qn('w:ind')}").get(qn("w:left")) == "720"
+
+
+def _gap_flags(anchor):
+    """Whether the anchor and each paragraph after it carry the entry gap."""
+    flags = []
+    for p in [anchor._p, *anchor._p.itersiblings(qn("w:p"))]:
+        flags.append(is_entry_end(p.pPr))
+    return flags
+
+
+def test_sub_points_under_an_entrys_last_line_pass_the_entry_gap_to_the_last_one():
+    # An entry's last line carries the gap to the next entry
+    # (`mark_entry_end`). Sub-points written under it stay tight to each
+    # other, and the last one carries the gap, so it still lands before the
+    # next entry; the anchor keeps it, for the document with changes accepted.
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    mark_entry_end(anchor)
+    doc.add_paragraph("Next entry")
+
+    revision = sp.Revision(0, _DATE)
+    sp.write_subpoint(_subpoint(anchor, PROSE, OTHER_PROSE), revision)
+    assert _gap_flags(anchor) == [True, False, True, False]
+
+    sp.write_subpoint(_subpoint(anchor, "A third sub-point of prose"), revision)
+    assert _gap_flags(anchor) == [True, False, False, True, False]
+    after = anchor._p.getnext().pPr
+    assert after.find(qn("w:spacing")) is None or after.find(qn("w:spacing")).get(qn("w:after")) is None
+
+
+def test_sub_points_under_a_line_without_the_entry_gap_copy_its_properties_unchanged():
+    doc = Document()
+    anchor = _plain_entry_paragraph(doc, "Course Director, Example Course", 1080)
+    anchor.paragraph_format.space_after = Twips(240)
+    doc.add_paragraph("Next line")
+
+    revision = sp.Revision(0, _DATE)
+    sp.write_subpoint(_subpoint(anchor, PROSE, OTHER_PROSE), revision)
+    sp.write_subpoint(_subpoint(anchor, "A third sub-point of prose"), revision)
+
+    subpoints = list(anchor._p.itersiblings(qn("w:p")))[:3]
+    for p in subpoints:
+        assert not is_entry_end(p.pPr)
+        assert p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "240"
 
 
 @pytest.mark.parametrize("anchor_kind", ["bullet", "citation"])

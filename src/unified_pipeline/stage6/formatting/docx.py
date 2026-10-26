@@ -193,6 +193,64 @@ PLAIN_ENTRY_LEFT_TWIPS = 1080
 PLAIN_ENTRY_LEVEL_STEP_TWIPS = 720
 
 
+#: The gap below the last line of an unbulleted K or L entry, so two
+#: multi-line entries do not run together (faculty-affairs feedback,
+#: 2026-10-26). Only an entry's LAST line gets it: its other lines stay tight,
+#: so the gap reads as the boundary between entries.
+ENTRY_GAP_AFTER_PT = 6
+
+#: The template's List Paragraph style sets `w:contextualSpacing`, which makes
+#: Word ignore the space after a list paragraph when the next one has the same
+#: style -- why the doc default's 8pt after never separated entries. An
+#: entry's last line overrides it with this value; the style's own setting
+#: still keeps its inner lines tight.
+_CONTEXTUAL_SPACING_OFF = "0"
+
+#: `w:contextualSpacing`'s successors in CT_PPr's schema order, so the
+#: override lands where Word expects it.
+_CONTEXTUAL_SPACING_SUCCESSORS = (
+    "w:mirrorIndents", "w:suppressOverlap", "w:jc", "w:textDirection",
+    "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl", "w:divId",
+    "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange",
+)
+
+
+def mark_entry_end(para: Paragraph) -> None:
+    """Give `para`, the last line of an unbulleted entry, the gap
+    (`ENTRY_GAP_AFTER_PT`) that separates it from the next entry."""
+    para.paragraph_format.space_after = Pt(ENTRY_GAP_AFTER_PT)
+    pPr = para._p.get_or_add_pPr()
+    for old in pPr.findall(qn("w:contextualSpacing")):
+        pPr.remove(old)
+    contextual = OxmlElement("w:contextualSpacing")
+    contextual.set(qn("w:val"), _CONTEXTUAL_SPACING_OFF)
+    pPr.insert_element_before(contextual, *_CONTEXTUAL_SPACING_SUCCESSORS)
+
+
+def is_entry_end(pPr: BaseOxmlElement | None) -> bool:
+    """Whether paragraph properties `pPr` carry `mark_entry_end`'s gap."""
+    if pPr is None:
+        return False
+    return any(old.get(qn("w:val")) == _CONTEXTUAL_SPACING_OFF
+               for old in pPr.findall(qn("w:contextualSpacing")))
+
+
+def clear_entry_end(pPr: BaseOxmlElement) -> None:
+    """Undo `mark_entry_end` on paragraph properties `pPr` (a copy made for
+    a line inside the entry), leaving the style's tight spacing. Properties
+    without that gap are left as they are."""
+    if not is_entry_end(pPr):
+        return
+    for old in pPr.findall(qn("w:contextualSpacing")):
+        if old.get(qn("w:val")) == _CONTEXTUAL_SPACING_OFF:
+            pPr.remove(old)
+    spacing = pPr.find(qn("w:spacing"))
+    if spacing is not None:
+        spacing.attrib.pop(qn("w:after"), None)
+        if not spacing.attrib:
+            pPr.remove(spacing)
+
+
 def plain_entry_left_twips(level: int) -> int:
     """The left indent of an unbulleted entry at list `level`."""
     return PLAIN_ENTRY_LEFT_TWIPS + PLAIN_ENTRY_LEVEL_STEP_TWIPS * level
