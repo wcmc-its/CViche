@@ -1213,6 +1213,8 @@ def test_normalize_still_rewrites_a_strict_iso_date(text, expected):
     ("2025-2026-09-15 Fictional course", "2025-September 2026 Fictional course"),
     # An en dash never blocked the end's own rewrite.
     ("2025–2026-09 Fictional course", "2025–September 2026 Fictional course"),
+    # Start and end in the same year is still a span (the guard is `<`).
+    ("2025-2025-09 Fictional course", "2025-September 2025 Fictional course"),
 ])
 def test_normalize_reads_a_year_to_iso_month_span(text, expected):
     assert normalize_iso_dates_in_text(text) == expected
@@ -1222,6 +1224,12 @@ def test_normalize_reads_a_year_to_iso_month_span(text, expected):
     # An end before the start is not a span: a reference number
     # (with "0999-0000-12" in the list above).
     "Fictional ref 2026-2025-09",
+    # An ISSN with a volume in a stored publication string: neither part
+    # is a plausible year, and the slash is not 5c's separator.
+    "J Am Coll Cardiol. ISSN 0735-1097/09",
+    "Fictional ref 0999-0000-12",
+    # A plausible-year shape but a slash before the month.
+    "Fictional ref 2025-2026/09",
     # Part of a longer numeric token on either side.
     "Fictional ref 12-2025-2026-09",
     "Fictional ref 2025-2026-09-123",

@@ -706,10 +706,13 @@ _ISO_RANGE_IN_TEXT_RE = re.compile(
 # 5c's fields line for a start of 2025 and an end of September 2026 (#2020,
 # `stage_5c_teaching_formatter._fields_date`). The mirror of the range above
 # with the month on the other end; the end's own guard refuses it for the
-# hyphen before it, so without this it rendered as written.
+# hyphen before it, so without this it rendered as written. Narrower than
+# `_iso_date_pattern`: both years 19xx/20xx and hyphens only, as 5c writes
+# it, so an ISSN with a volume ("0735-1097/09") is not read as a span.
+_PLAUSIBLE_YEAR = r'(?:19|20)\d{2}'
 _YEAR_TO_ISO_RANGE_IN_TEXT_RE = re.compile(
-    _NOT_AFTER_NUMBER + r'(?P<start_year>\d{4})-'
-    + _iso_date_pattern('year', 'month') + _NOT_BEFORE_NUMBER)
+    _NOT_AFTER_NUMBER + rf'(?P<start_year>{_PLAUSIBLE_YEAR})-(?P<year>{_PLAUSIBLE_YEAR})'
+    r'-(?P<month>0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?' + _NOT_BEFORE_NUMBER)
 
 
 def _iso_date_as_words(match: re.Match) -> str:
@@ -728,7 +731,7 @@ def _iso_range_as_words(match: re.Match) -> str:
 def _year_to_iso_range_as_words(match: re.Match) -> str:
     """One `_YEAR_TO_ISO_RANGE_IN_TEXT_RE` match as "<year>-<Month> <year>",
     the end in `_iso_date_as_words`' form. An end before its start is not a
-    span (a reference number such as "0999-0000-12") and stays as written."""
+    span (a reference number such as "2026-2025-09") and stays as written."""
     if int(match['year']) < int(match['start_year']):
         return match[0]
     return f"{match['start_year']}-{_iso_date_as_words(match)}"
