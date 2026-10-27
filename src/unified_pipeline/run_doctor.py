@@ -441,7 +441,9 @@ Lints, ranked by the severity of the failure class they catch:
 14ak. source_line_coverage a judged source line (six words or more, as
                           before) that is not found in its own place in the
                           output, Appendix and tracked deletions included,
-                          a deletion only for its own entry (#1588, #1205):
+                          a deletion only for its own entry, and a
+                          sub-point cut of its line's restatement read
+                          with that line (#1588, #1205):
                           aligned one-to-one to a rendered line, a
                           table's rows, two paragraphs, or one row per
                           period when it lists several, it holds under
@@ -833,6 +835,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _magnitude_severity,
     _output_section_header,
     _table_lines,
+    as_written_deletions,
     docx_body_blocks,
     docx_subpoint_lines,
     docx_table_rows,
@@ -1803,6 +1806,7 @@ _VIEW_LABELS = {
     "stage_6_report": "stage_6_report",
     "blocks": "stage_6_docx",
     "deleted_blocks": "stage_6_docx",
+    "deleted_as_written": "stage_6_docx",
     "subpoints": "stage_6_docx",
     "table_rows": "stage_6_docx",
 }
@@ -1908,11 +1912,14 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("owner_attribution", lint_owner_attribution, ("stage_4", "blocks")),
     LintSpec("citation_grounding", lint_citation_grounding, ("stage_5d",)),
     LintSpec("shattered_prose", lint_shattered_prose, ("stage_4", "blocks")),
-    # `deleted_blocks` reads the same docx as `blocks`, as for
-    # protected_data_in_output; `subpoints` (#1205) says whose each
-    # tracked-deleted sub-point among them is, so it counts for its own entry.
+    # `deleted_as_written` is the same docx's tracked deletions, as for
+    # protected_data_in_output, with each sub-point paragraph cut of its
+    # line's restatement read as the line it was written from (#1205), so a
+    # source line split between the two is found in one place;
+    # `subpoints` says whose each tracked-deleted sub-point among them is,
+    # so it counts for its own entry.
     LintSpec("source_line_coverage", lint_source_line_coverage, ("source_lines", "blocks"),
-             optional=("deleted_blocks", "stage_1a", "stage_3b", "table_rows", "stage_4_5",
+             optional=("deleted_as_written", "stage_1a", "stage_3b", "table_rows", "stage_4_5",
                        "subpoints")),
     LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
     # `blocks` and `subpoints` read the same docx as `table_rows`, as for
@@ -2153,6 +2160,8 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
                                                            views["stage_6_report"]),
                                "stage_6_docx", _note)
                           if paths["stage_6_docx"] else None)
+    views["deleted_as_written"] = as_written_deletions(views["deleted_blocks"],
+                                                       subpoint_placements(views["stage_6_report"]))
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                            if paths["stage_6_docx"] else None)
 
