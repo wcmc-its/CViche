@@ -21,9 +21,8 @@ try:
     from docx.document import Document
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    from docx.enum.text import WD_TAB_ALIGNMENT
     from docx.oxml.xmlchemy import BaseOxmlElement
-    from docx.shared import Emu, Inches, Pt, RGBColor, Twips
+    from docx.shared import Inches, Pt, RGBColor
     from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
 except ImportError:  # pragma: no cover - mirrors stage_6_word_template
@@ -186,11 +185,13 @@ def _set_cell_text(cell, text: str, bold: bool = False):
         _set_font(run, bold=bold)
 
 
-#: Where the WCM template's bullet list (numId 1, abstractNum 4) puts an item's
-#: TEXT: ilvl 0 at 1080 twips, each deeper level 720 further in. An unbulleted
-#: entry (#1943: Educational Contributions and Clinical Practice) sits at the
-#: same place, so dropping the glyph moves no text and a sub-item stays a step in.
-PLAIN_ENTRY_LEFT_TWIPS = 1080
+#: Where an unbulleted line of a K or L entry puts its text: level 0 under the
+#: text of the entry's bullet (#2019, `apply_entry_bullet`), each deeper level
+#: 720 twips further in. It was 1080, under the template's own bullet text,
+#: while #1943 dropped the bullet; one bullet per entry, its marker at the
+#: subsection heading's edge, brought the text back to the bullet's hang.
+ENTRY_BULLET_HANG_TWIPS = 360
+PLAIN_ENTRY_LEFT_TWIPS = ENTRY_BULLET_HANG_TWIPS
 PLAIN_ENTRY_LEVEL_STEP_TWIPS = 720
 
 
@@ -270,32 +271,148 @@ def plain_entry_level(left_twips: int) -> int | None:
     return steps if rest == 0 and steps >= 0 else None
 
 
-#: What joins an entry card's bold head and its organization on line 1
-#: (#2019): "**Attending Surgeon**, LSU Health Shreveport". The source's own
-#: separator there is a comma, a tab or a " | ", none of which reads well.
-CARD_ORG_SEPARATOR = ", "
+#: The numbering definition a K or L entry's bullet uses (#2019): one level,
+#: the template's own glyph, marker at the margin, text at
+#: `ENTRY_BULLET_HANG_TWIPS`. The template's only bullet list (numId 1,
+#: abstractNum 4) puts its marker 0.75in in, past the subsection heading the
+#: entry sits under; this one is found again by its name.
+ENTRY_BULLET_NAME = "CViche entry bullet"
+_ENTRY_BULLET_GLYPH = "\uf0b7"
+_ENTRY_BULLET_FONT = "Symbol"
 
 
-def text_width_twips(doc: Document) -> int:
-    """The width between the last section's margins, where a right tab stop
-    puts text flush with the right margin (the template sets none)."""
-    section = doc.sections[-1]
-    return Emu(section.page_width - section.left_margin - section.right_margin).twips
+def _entry_abstract_num(numbering: BaseOxmlElement) -> BaseOxmlElement | None:
+    """The `w:abstractNum` named `ENTRY_BULLET_NAME`, if the document has one."""
+    for abstract in numbering.findall(qn("w:abstractNum")):
+        name = abstract.find(qn("w:name"))
+        if name is not None and name.get(qn("w:val")) == ENTRY_BULLET_NAME:
+            return abstract
+    return None
 
 
-def write_card_line(para: Paragraph, head: str, org: str, date: str,
-                    right_tab_twips: int) -> None:
-    """Line 1 of an entry card (#2019): the head in bold, the organization
-    after it, and the date on a right tab stop at `right_tab_twips`."""
-    _set_font(para.add_run(head), bold=True)
-    if org:
-        _set_font(para.add_run(CARD_ORG_SEPARATOR + org))
-    if date:
-        para.paragraph_format.tab_stops.add_tab_stop(Twips(right_tab_twips), WD_TAB_ALIGNMENT.RIGHT)
-        run = para.add_run()
-        run.add_tab()
-        run.add_text(date)
-        _set_font(run)
+def entry_bullet_num_id(numbering: BaseOxmlElement) -> str | None:
+    """The `w:numId` of the entry bullet in `numbering` (the document's
+    `w:numbering`), or None when nothing has added it."""
+    abstract = _entry_abstract_num(numbering)
+    if abstract is None:
+        return None
+    abstract_id = abstract.get(qn("w:abstractNumId"))
+    for num in numbering.findall(qn("w:num")):
+        ref = num.find(qn("w:abstractNumId"))
+        if ref is not None and ref.get(qn("w:val")) == abstract_id:
+            return num.get(qn("w:numId"))
+    return None
+
+
+def _new_entry_abstract_num(abstract_id: int) -> BaseOxmlElement:
+    """A one-level bullet `w:abstractNum`: marker at 0, text at the hang."""
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+    for tag, val in (("w:multiLevelType", "singleLevel"), ("w:name", ENTRY_BULLET_NAME)):
+        child = OxmlElement(tag)
+        child.set(qn("w:val"), val)
+        abstract.append(child)
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), "0")
+    for tag, val in (("w:start", "1"), ("w:numFmt", "bullet"),
+                     ("w:lvlText", _ENTRY_BULLET_GLYPH), ("w:lvlJc", "left")):
+        child = OxmlElement(tag)
+        child.set(qn("w:val"), val)
+        lvl.append(child)
+    ppr, rpr = OxmlElement("w:pPr"), OxmlElement("w:rPr")
+    ppr.append(_entry_bullet_ind())
+    fonts = OxmlElement("w:rFonts")
+    for attr in ("w:ascii", "w:hAnsi"):
+        fonts.set(qn(attr), _ENTRY_BULLET_FONT)
+    fonts.set(qn("w:hint"), "default")
+    rpr.append(fonts)
+    lvl.append(ppr)
+    lvl.append(rpr)
+    abstract.append(lvl)
+    return abstract
+
+
+def ensure_entry_bullet_num_id(numbering: BaseOxmlElement) -> str:
+    """The entry bullet's `w:numId`, adding its definition to `numbering`
+    the first time: the `w:abstractNum` before every `w:num`, as the
+    schema orders them."""
+    num_id = entry_bullet_num_id(numbering)
+    if num_id is not None:
+        return num_id
+    abstract_ids = [int(a.get(qn("w:abstractNumId"))) for a in numbering.findall(qn("w:abstractNum"))]
+    abstract_id = max(abstract_ids, default=-1) + 1
+    abstract = _new_entry_abstract_num(abstract_id)
+    nums = numbering.findall(qn("w:num"))
+    if nums:
+        nums[0].addprevious(abstract)
+    else:
+        numbering.append(abstract)
+    return str(numbering.add_num(abstract_id).numId)
+
+
+def _entry_bullet_ind() -> BaseOxmlElement:
+    """`w:ind` for an entry bullet: text at the hang, marker at the margin."""
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), str(ENTRY_BULLET_HANG_TWIPS))
+    ind.set(qn("w:hanging"), str(ENTRY_BULLET_HANG_TWIPS))
+    return ind
+
+
+def apply_entry_bullet(para: Paragraph, num_id: str) -> None:
+    """Make `para` the first line of a K or L entry: a bullet of `num_id`
+    (`ensure_entry_bullet_num_id`) with the indent set on the paragraph too,
+    so the List Paragraph style's own indent never wins."""
+    pPr = para._p.get_or_add_pPr()
+    for tag in ("w:numPr", "w:ind"):
+        for old in pPr.findall(qn(tag)):
+            pPr.remove(old)
+    numPr = OxmlElement("w:numPr")
+    for tag, val in (("w:ilvl", "0"), ("w:numId", num_id)):
+        child = OxmlElement(tag)
+        child.set(qn("w:val"), val)
+        numPr.append(child)
+    pPr.insert_element_before(numPr, *_NUM_PR_SUCCESSORS)
+    pPr.insert_element_before(_entry_bullet_ind(), *_IND_SUCCESSORS)
+
+
+def is_entry_bullet(pPr: BaseOxmlElement | None, numbering: BaseOxmlElement | None) -> bool:
+    """Whether paragraph properties `pPr` are an entry bullet's."""
+    if pPr is None or numbering is None:
+        return False
+    num_id = pPr.find(f"{qn('w:numPr')}/{qn('w:numId')}")
+    return num_id is not None and num_id.get(qn("w:val")) == entry_bullet_num_id(numbering)
+
+
+def as_plain_entry(pPr: BaseOxmlElement, level: int) -> None:
+    """Turn an entry bullet's properties `pPr` (a copy, for a line under it)
+    into an unbulleted line at list `level`: no `w:numPr`, no hang."""
+    for tag in ("w:numPr", "w:ind"):
+        for old in pPr.findall(qn(tag)):
+            pPr.remove(old)
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), str(plain_entry_left_twips(level)))
+    pPr.insert_element_before(ind, *_IND_SUCCESSORS)
+
+
+#: `w:numPr`'s and `w:ind`'s successors in CT_PPr's schema order.
+_IND_SUCCESSORS = ("w:contextualSpacing",) + _CONTEXTUAL_SPACING_SUCCESSORS
+_NUM_PR_SUCCESSORS = (
+    "w:suppressLineNumbers", "w:pBdr", "w:shd", "w:tabs", "w:suppressAutoHyphens",
+    "w:kinsoku", "w:wordWrap", "w:overflowPunct", "w:topLinePunct", "w:autoSpaceDE",
+    "w:autoSpaceDN", "w:bidi", "w:adjustRightInd", "w:snapToGrid", "w:spacing", "w:ind",
+) + _IND_SUCCESSORS
+
+
+def write_entry_line(para: Paragraph, text: str, bold: tuple[int, int] | None) -> None:
+    """`text` into `para` in Arial, the span `bold` (an entry's title,
+    `parsing.entry_card.title_span`) in bold and nothing else."""
+    if not bold:
+        _set_font(para.add_run(text))
+        return
+    start, end = bold
+    for piece, is_bold in ((text[:start], False), (text[start:end], True), (text[end:], False)):
+        if piece:
+            _set_font(para.add_run(piece), bold=is_bold)
 
 
 #: CViche's voice to the submitter: a one-cell, light-gray, bordered table in

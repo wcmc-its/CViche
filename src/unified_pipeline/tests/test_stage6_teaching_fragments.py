@@ -1289,13 +1289,14 @@ def test_with_open_end_finds_the_lone_date_5c_wrote(text, expected):
 
 
 # --- #2019: a free-form entry as a card -------------------------------------------
-# Bold head (and organization) on line 1, the date on a right tab stop at the
-# text margin, the rest of the entry on the lines below, every word the
-# source's own. Names and places are invented.
+# One entry bullet on line 1, the title in bold, the date inline where the
+# source has it; the rest of the entry on the lines below, under the bullet's
+# text, every word the source's own. Names and places are invented.
 
 _CARD_TEXT = ("Attending Surgeon, Resident Teaching, Northfield Health\t2025–Sep 2026\t"
               "Orthopaedic Surgery Residency; clinical and operative teaching of PGY-5 residents")
 _CARD_5C = "**2025-2026** – Attending Surgeon (Northfield Health)"
+_CARD_LINE_1 = "Attending Surgeon, Resident Teaching, Northfield Health, 2025–Sep 2026"
 
 
 def _card_entry(**fields):
@@ -1312,25 +1313,28 @@ def _rendered_card(entry):
     return gen, [p for p in gen.doc.paragraphs[1:-1] if p.text.strip()]
 
 
-def test_a_free_form_entry_renders_as_a_card():
-    from docx.enum.text import WD_TAB_ALIGNMENT
+def _is_entry_bullet(gen, para):
+    from unified_pipeline.stage6.formatting import is_entry_bullet
+    return is_entry_bullet(para._p.pPr, gen.doc.part.numbering_part.element)
 
-    from unified_pipeline.stage6.formatting import is_entry_end, text_width_twips
+
+def test_a_free_form_entry_renders_as_a_card():
+    from unified_pipeline.stage6.formatting import is_entry_end
 
     gen, (line1, details) = _rendered_card(_card_entry())
-    assert line1.text == "Attending Surgeon, Resident Teaching, Northfield Health\t2025–Sep 2026"
-    head, org, date = line1.runs
-    assert (head.text, head.bold) == ("Attending Surgeon, Resident Teaching", True)
-    assert not org.bold and not date.bold
-    (stop,) = line1.paragraph_format.tab_stops
-    assert stop.alignment == WD_TAB_ALIGNMENT.RIGHT
-    assert stop.position.twips == text_width_twips(gen.doc)
+    assert line1.text == _CARD_LINE_1
+    assert [(run.text, bool(run.bold)) for run in line1.runs] == [
+        ("Attending Surgeon, Resident Teaching", True), (", Northfield Health, 2025–Sep 2026", False)]
     assert details.text == ("Orthopaedic Surgery Residency; clinical and operative teaching "
                             "of PGY-5 residents")
-    # The #2022 gap goes on the entry's last line only, and neither is a bullet.
+    assert not any(run.bold for run in details.runs)
+    # The #2022 gap goes on the entry's last line only; no tab stop anywhere.
     assert [is_entry_end(p._p.pPr) for p in (line1, details)] == [False, True]
-    assert all(p._p.pPr.numPr is None for p in (line1, details))
+    assert all(len(p.paragraph_format.tab_stops) == 0 for p in (line1, details))
+    # One bullet, on line 1; the detail line sits under the bullet's text.
+    assert _is_entry_bullet(gen, line1) and details._p.pPr.numPr is None
     assert line1.paragraph_format.left_indent == details.paragraph_format.left_indent
+    assert line1.paragraph_format.first_line_indent.twips == -360
 
 
 def test_a_card_prints_the_sources_words_not_5cs():
@@ -1346,25 +1350,30 @@ def test_a_card_entry_is_counted_and_commented_once():
     assert gen.stats["entries_inserted"] == len(paragraphs) == 2
 
 
-def test_an_entry_with_no_anchor_keeps_the_5c_line():
+def test_an_entry_with_no_anchor_keeps_the_5c_line_and_still_gets_its_bullet():
     entry = _card_entry()
     entry["extracted_fields"].update(role="Mentor", institution="Elsewhere")
-    _gen, paragraphs = _rendered_card(entry)
+    gen, paragraphs = _rendered_card(entry)
     assert len(paragraphs) == 1 and "\t" not in paragraphs[0].text
+    assert _is_entry_bullet(gen, paragraphs[0])
+    assert not any(run.bold for run in paragraphs[0].runs)
 
 
-def test_a_multi_line_entry_is_not_a_card():
+def test_a_multi_line_entry_is_not_a_card_but_bolds_its_title_on_line_1():
     entry = _card_entry()
     entry["text"] = _CARD_TEXT.replace("\t", "\n")
-    _gen, paragraphs = _rendered_card(entry)
-    assert all("\t" not in p.text for p in paragraphs)
-    assert all(not run.bold for p in paragraphs for run in p.runs)
+    del entry["extracted_fields"]["formatted_text"]
+    gen, paragraphs = _rendered_card(entry)
+    assert [p.text for p in paragraphs] == _CARD_TEXT.split("\t")
+    assert [r.text for p in paragraphs for r in p.runs if r.bold] == [
+        "Attending Surgeon, Resident Teaching"]
+    assert [_is_entry_bullet(gen, p) for p in paragraphs] == [True, False, False]
 
 
 def test_a_fanned_out_record_with_built_text_is_not_a_card(monkeypatch):
     monkeypatch.setattr("unified_pipeline.stage_6_word_template.has_built_text", lambda entry: True)
     _gen, paragraphs = _rendered_card(_card_entry())
-    assert all("\t" not in p.text for p in paragraphs)
+    assert [p.text for p in paragraphs] == [_CARD_5C.replace("**", "")]
 
 
 def test_card_source_drops_the_list_number_and_refuses_several_records():
@@ -1390,21 +1399,7 @@ def test_card_source_reads_one_wrapped_table_row_as_one_line():
             == "Attending Surgeon, Resident Teaching | 2025–Sep 2026")
 
 
-def test_a_cards_date_sits_at_the_right_margin_whatever_the_margins():
-    """The stop is the text width of the last section: page width less BOTH
-    margins, read from the document, not a constant."""
-    from docx.shared import Inches
-
-    gen = _generator("Didactic teaching", "SENTINEL-END")
-    section = gen.doc.sections[-1]
-    section.left_margin, section.right_margin = Inches(1), Inches(0.5)
-    gen._fill_teaching({"K1": [_card_entry()]})
-    (line1,) = [p for p in gen.doc.paragraphs if "\t" in p.text]
-    (stop,) = line1.paragraph_format.tab_stops
-    assert stop.position.twips == section.page_width.twips - 1440 - 720
-
-
-def test_a_cards_bold_head_is_never_taken_for_a_section_header():
+def test_a_cards_bold_title_is_never_taken_for_a_section_header():
     """`_find_header_paragraph` reads a bold first run as a header (#548): a
     card's line 1 opens with one, so a later section's anchor search must
     skip it as the entry it is."""
@@ -1426,42 +1421,57 @@ def test_the_first_card_of_a_subsection_has_the_blank_line_above_it():
     gen = _generator("Didactic teaching", "SENTINEL-END")
     gen._fill_teaching({"K1": [_card_entry()]})
     texts = [p.text for p in gen.doc.paragraphs]
-    assert texts[:3] == ["Didactic teaching", "",
-                         "Attending Surgeon, Resident Teaching, Northfield Health\t2025–Sep 2026"]
+    assert texts[:3] == ["Didactic teaching", "", _CARD_LINE_1]
+
+
+def test_a_presenter_list_is_never_in_the_bold():
+    """KH2YMW's K4 shape (#2019 review), names invented: the presenters
+    open the line, and only the stage-4 title's own span is bold."""
+    text = ("Avery Quill, Bram Ostrander.  Leadership Challenges in Rural Care\t"
+            "Example Society Annual Meeting\t2021")
+    entry = _entry("K4", text, activity_title="Leadership Challenges in Rural Care")
+    gen = _generator("Continuing education", "SENTINEL-END")
+    gen._fill_teaching({"K4": [entry]})
+    line1, line2 = [p for p in gen.doc.paragraphs[1:-1] if p.text.strip()]
+    assert line1.text == "Avery Quill, Bram Ostrander.  Leadership Challenges in Rural Care"
+    assert [r.text for r in line1.runs if r.bold] == ["Leadership Challenges in Rural Care"]
+    assert line2.text == "Example Society Annual Meeting, 2021"
 
 
 def test_a_cards_open_range_date_reads_present_as_the_field_path_prints_it():
-    """#1342 on the date slot only: "2013-" with no stage-4 end is the range
-    `format_date_range` prints "2013-Present"; the head and details stay the
-    source's words."""
+    """#1342 on the date only, where it stands: "2013-" with no stage-4 end
+    is the range `format_date_range` prints "2013-Present"; the rest stays
+    the source's words."""
     entry = _entry("K1", "Course Director, Estuarine Biology, 2013-\tWeekly seminar",
                    role="Course Director", start_date="2013")
     _gen, (line1, *details) = _rendered_card(entry)
-    assert line1.text == "Course Director\t2013-Present"
-    assert [p.text for p in details] == ["Estuarine Biology", "Weekly seminar"]
+    assert line1.text == "Course Director, Estuarine Biology, 2013-Present"
+    assert [p.text for p in details] == ["Weekly seminar"]
 
 
 def test_a_cards_date_closed_by_stage4_keeps_the_sources_dash():
     """Stage 4 records an end: the field path prints a closed range, so the
-    slot is not rewritten to "Present"."""
+    date is not rewritten to "Present"."""
     entry = _entry("K1", "Course Director, Estuarine Biology, 2013-\tWeekly seminar",
                    role="Course Director", start_date="2013", end_date="2015")
     _gen, paragraphs = _rendered_card(entry)
-    assert paragraphs[0].text == "Course Director\t2013-"
+    assert paragraphs[0].text == "Course Director, Estuarine Biology, 2013-"
 
 
 def test_a_cards_iso_date_reads_in_words():
     entry = _entry("K1", "Course Director, Estuarine Biology, 2021-03\tWeekly seminar",
                    role="Course Director", start_date="2021-03", end_date="2021-03")
     _gen, paragraphs = _rendered_card(entry)
-    assert paragraphs[0].text == "Course Director\tMarch 2021"
+    assert paragraphs[0].text == "Course Director, Estuarine Biology, March 2021"
 
 
 def test_an_entry_with_a_sub_list_label_keeps_its_old_rendering():
     """"Selected Initiatives:" labels the cells after it: a card would print
-    them as its peers."""
+    them as its peers. The old rendering still gets the entry's one bullet
+    and its title in bold."""
     entry = _entry("K1", "Course Director, Estuarine Biology, 2013-2015\tSelected work:\t"
                          "Built a lab\tWrote a manual", role="Course Director")
-    _gen, paragraphs = _rendered_card(entry)
-    assert all(not run.bold for p in paragraphs for run in p.runs)
+    gen, paragraphs = _rendered_card(entry)
     assert all("\t" not in p.text for p in paragraphs)
+    assert [r.text for p in paragraphs for r in p.runs if r.bold] == ["Course Director"]
+    assert _is_entry_bullet(gen, paragraphs[0])

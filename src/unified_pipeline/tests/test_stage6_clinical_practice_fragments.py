@@ -55,6 +55,7 @@ from docx.shared import Pt  # noqa: E402
 from unified_pipeline.core.render_check import entry_lines  # noqa: E402
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     ENTRY_GAP_AFTER_PT,
+    is_entry_bullet,
     is_entry_end,
     plain_entry_level,
 )
@@ -687,9 +688,14 @@ def test_negative_control_single_part_text_unchanged():
 
 
 def _entry_level(para):
-    """The level of an entry written without a bullet (#1943), read from its
-    left indent; None when it is a bullet (has numPr) or carries no indent."""
-    if para._p.pPr is None or para._p.pPr.numPr is not None:
+    """The level of a line of an L entry, read from its left indent: an
+    unbulleted line (#1943), or the entry bullet on the entry's first line
+    (#2019), whose text sits at level 0. None for a template bullet (has
+    numPr) or no indent."""
+    if para._p.pPr is None:
+        return None
+    if para._p.pPr.numPr is not None and not is_entry_bullet(
+            para._p.pPr, para.part.numbering_part.element):
         return None
     left = para.paragraph_format.left_indent
     if left is None:
@@ -750,8 +756,8 @@ def test_l3_bullet_bare_start_year_is_not_rendered_as_present():
                 start_date="2015")],
     )
     assert gen.stats["tables_populated"] == 0
-    # An entry card (#2019): the year on the line's right tab stop.
-    assert added == ["", "Clinic Lead, Harrowgate Hospital\t2015"]
+    # An entry card (#2019): the year inline, where the source has it.
+    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015"]
 
 
 def test_l3_bullet_open_start_year_still_renders_present():
@@ -814,10 +820,11 @@ if __name__ == "__main__":
 
 
 # --- #2019: an entry as a card ------------------------------------------------------
-# Line 1 is the role (bold) and its place, the dates on a right tab stop; the
-# rest of the entry follows, one line per cell. Every word is the source's.
+# Line 1 is the role (bold), its place and the dates inline, behind the
+# entry's one bullet; the rest of the entry follows, one line per cell. Every
+# word is the source's.
 
-_L_CARD_LINE = "Attending Physician, Example Hospital\t2015-2020"
+_L_CARD_LINE = "Attending Physician, Example Hospital, 2015-2020"
 _L_CARD_DETAIL = "Inpatient medicine service, 8 weeks per year"
 
 
@@ -831,7 +838,10 @@ def test_an_l1_or_l2_entry_renders_as_a_card(filler, role_field):
     gen, added = _render_through_template(filler, [entry])
     assert added == ["", _L_CARD_LINE, _L_CARD_DETAIL]
     line1 = next(p for p in gen.doc.paragraphs if p.text == _L_CARD_LINE)
-    assert [run.bold for run in line1.runs] == [True, False, False]
+    assert [(run.text, bool(run.bold)) for run in line1.runs] == [
+        ("Attending Physician", True), (", Example Hospital, 2015-2020", False)]
+    assert _entry_level(line1) == 0 and is_entry_bullet(
+        line1._p.pPr, gen.doc.part.numbering_part.element)
     last = next(p for p in gen.doc.paragraphs if p.text == _L_CARD_DETAIL)
     assert is_entry_end(last._p.pPr) and not is_entry_end(line1._p.pPr)
 
@@ -854,20 +864,33 @@ def test_an_l3_role_is_a_one_line_card_of_its_first_cell():
                    leadership_role="Director", institution="Example Wound Care Program",
                    start_date="2010", end_date="2015")
     _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
-    assert added == ["", "Director, Example Wound Care Program\t2010-2015"]
+    assert added == ["", "Director, Example Wound Care Program, 2010-2015"]
 
 
-@pytest.mark.parametrize("text", [
+def test_an_l3_role_whose_cell_lacks_a_composed_word_keeps_the_composed_line():
     # The cell lacks a word the composed line prints ("Present").
-    "Clinic Lead, Harrowgate Hospital, 2015-",
-    # The cell has details: an L3 card is one line or none.
-    "Clinic Lead, Harrowgate Hospital, 2015-2018, weekly huddles",
-])
-def test_an_l3_role_that_is_not_a_one_line_card_keeps_the_composed_line(text):
-    entry = _entry(text, leadership_role="Clinic Lead", institution="Harrowgate Hospital",
-                   start_date="2015", end_date="2018" if "2018" in text else None)
+    entry = _entry("Clinic Lead, Harrowgate Hospital, 2015-", leadership_role="Clinic Lead",
+                   institution="Harrowgate Hospital", start_date="2015")
     _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
-    assert all("\t" not in line for line in added)
+    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015-Present"]
+
+
+def test_an_l3_role_with_details_in_its_cell_keeps_the_composed_line():
+    """An L3 card is the role line alone: words after the head, organization
+    and date are the role's prose, which the composed line never printed."""
+    entry = _entry("Clinic Lead, Harrowgate Hospital, 2015-2018, weekly huddles",
+                   leadership_role="Clinic Lead", institution="Harrowgate Hospital",
+                   start_date="2015", end_date="2018")
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015-2018"]
+
+
+def test_an_l3_role_of_several_cells_is_no_card():
+    """An L3 card is one line or none: a second cell is the role's prose."""
+    entry = _entry("Clinic Lead | Harrowgate Hospital | 2015-2018", leadership_role="Clinic Lead")
+    gen, _added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert gen._insert_entry_card(len(gen.doc.paragraphs) - 1, entry["text"], entry,
+                                  one_line=True) == 0
 
 
 def test_a_card_is_weighed_whole_by_the_overflow_router():
@@ -893,7 +916,7 @@ def test_an_l3_role_read_from_the_text_is_a_card_when_another_field_anchors_it()
     entry = _entry("Wound Care Initiative, Example Hospital, 2010-2015",
                    project_name="Wound Care Initiative", institution="Example Hospital")
     _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
-    assert added == ["", "Wound Care Initiative, Example Hospital\t2010-2015"]
+    assert added == ["", "Wound Care Initiative, Example Hospital, 2010-2015"]
 
 
 def test_an_l3_card_source_drops_the_cvs_list_number():

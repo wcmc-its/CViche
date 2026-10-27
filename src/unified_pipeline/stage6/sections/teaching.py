@@ -14,8 +14,10 @@ the template wording has drifted across revisions ("Clinical teaching" vs
 A code whose headers all miss falls back to the parent "EDUCATIONAL
 CONTRIBUTIONS" heading rather than dropping its entries.
 
-Entries render as a FLAT list under the template's own header, without bullet
-glyphs since #1943 (WCM reviewers; a level is an indent step instead). The
+Entries render as a FLAT list under the template's own header: one entry
+bullet per entry since #2019, on its first line, its marker at the heading's
+edge (the template's per-line bullets went in #1943; a level is an indent
+step instead), and the entry's title in bold. The
 source CV's sub-headings are deliberately not carried over: the WCM subsections
 already are the taxonomy, and re-emitting the original hierarchy produced two
 competing levels of grouping.
@@ -732,11 +734,15 @@ class TeachingSection:
             # The loop is reversed, so bullet j is source line len-1-j; indexing
             # `levels` with j would invert the hierarchy.
             is_child = bool(levels and levels[len(lines) - 1 - j])
+            is_first_line = j == len(lines) - 1
             para = self._insert_bulleted_entry(
                 insert_idx, line_text, entry if j == 0 else None,
-                add_blank_before=is_first_visible and j == len(lines) - 1,
+                add_blank_before=is_first_visible and is_first_line,
                 list_level=1 if is_child else 0,
-                bulleted=False,  # #1943: reviewers read unbulleted entries more easily
+                bulleted=False,  # #1943: no template bullet on every line
+                # #2019: one bullet per entry, its title in bold
+                entry_bullet=is_first_line,
+                title_fields=fields if is_first_line else None,
             )
             if j == 0 and para is not None:
                 mark_entry_end(para)

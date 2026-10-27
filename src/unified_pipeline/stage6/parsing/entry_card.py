@@ -1,19 +1,20 @@
-"""One free-form K or L entry read as a card (#2019): head, organization, date
-and details, each a span of the entry's own source text.
+"""One free-form K or L entry read as a card (#2019): its cells as lines in
+source order, and the span of its title to bold.
 
 Partner feedback (2026-10-26) asked for the source CV's own layout in place of
-a run-on line:
+a run-on line; Paul's review of the first rendering (2026-10-27) asked for the
+date inline, where the source has it, and for only the title in bold:
 
-    **Attending Surgeon, Resident Teaching**, LSU Health Shreveport    2025-2026
-    Orthopaedic Surgery Residency; clinical and operative teaching
+    • Attending Surgeon, Resident Teaching, Northfield Health, 2025-Sep 2026
+      Orthopaedic Surgery Residency; clinical and operative teaching
 
 No model writes any of it. Stage 4's title and role fields are used only as
-ANCHORS: they say where in the text the entry's head is, and the card holds
-the text's own characters from there. So every slot is a substring of the
-source by construction, even when stage 4 changed a field's case or spacing.
-Dates come from the text alone, because stage 4 stores them ISO-normalized.
+ANCHORS: they say where in the text the entry's head is, and which span of
+its first line is the title. Every line holds the text's own characters, so
+every line is the source's words by construction. Dates come from the text
+alone, because stage 4 stores them ISO-normalized.
 
-The rule, in source order (only the date moves):
+The slot rule decides whether an entry is a card:
 
 1. Head. The first anchor that starts in the leading segment (no tab, " | "
    or ": " before it, at most `MAX_WORDS_BEFORE_ANCHOR` words before it). The
@@ -23,24 +24,30 @@ The rule, in source order (only the date moves):
    ICU...") is the card's date, and the head starts after it.
 2. Organization. An organization field whose span follows the head across
    nothing but separator punctuation.
-3. Date. The first whole-segment date after line 1, not inside brackets.
-4. Details. Everything else, in source order, one item per cell (a tab or
-   stage 2's " | " ends one).
+3. Date. The first whole-segment date after the head (and organization), not
+   inside brackets.
+4. Details. Everything else, one item per cell (a tab or stage 2's " | ").
 
 A head or an organization never crosses a cell break or a column gap.
 `entry_card` returns None, and the caller keeps its current rendering, when
 there is no head, when the head is the whole entry (one line already), when
 the details hold a second whole-segment date (a second record), when a
-detail cell ending in a colon labels a sub-list, when a head
-with no organization or date leads a list of peers, or when the
-slots' words are not exactly the text's words. That last check is what makes
-"no word lost or added" a guarantee rather than a property of the rule above.
+detail cell ending in a colon labels a sub-list, when a head with no
+organization or date leads a list of peers, or when the lines' words are not
+exactly the text's words. That last check is what makes "no word lost or
+added" a guarantee rather than a property of the rule above.
+
+The layout keeps the source's order (`_card_lines`): each cell is a line,
+except that the cells holding the head and organization share line 1, and a
+cell that is nothing but the date joins the line before it (or, leading the
+text, line 1), with `CELL_JOIN`. The bold is `title_span`: the verbatim span
+of a title or role field, never the words around it (a K4 presenter list).
 
 Pure: strings in, a frozen record out; no Word object is touched (§1.2).
 """
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 # Stage-4 fields that name an entry's title or role, tried as head anchors in
@@ -77,8 +84,10 @@ _CELL_BREAK = re.compile(r'\t| \| ')
 # entry keeps the old rendering, which indents them.
 _SUB_LIST_LABEL = re.compile(r'[^\W_][^\t|]*:[ ]*(?:\t| \| )')
 
-LAYOUT_WITH_DETAILS = 'card_with_details'
-LAYOUT_ONE_LINE = 'card_one_line'
+# What joins two cells that share a line: the head's cell and the
+# organization's, or a date cell and the line before it. The source's own
+# separator there is a tab or a " | ", which no line prints.
+CELL_JOIN = ', '
 
 _WORD = re.compile(r'[^\W_]+')
 _MONTH = (r'(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?'
@@ -113,16 +122,23 @@ _TRAILING_SEPARATORS = re.compile(r'[\s,;|:–—\-]+$')
 
 @dataclass(frozen=True)
 class EntryCard:
-    """The slots of one card, each a verbatim span of the entry's text."""
-    head: str
-    org: str
-    date: str
-    details: tuple[str, ...]
+    """An entry's lines in source order, the span of line 1 to bold, and
+    whether the slot rule found detail items beyond the head, organization
+    and date (an L3 role line takes a card only without them)."""
+    lines: tuple[str, ...]
+    title: tuple[int, int] | None
+    has_details: bool
 
-    @property
-    def layout(self) -> str:
-        """`LAYOUT_WITH_DETAILS` when lines follow line 1, else `LAYOUT_ONE_LINE`."""
-        return LAYOUT_WITH_DETAILS if self.details else LAYOUT_ONE_LINE
+
+@dataclass(frozen=True)
+class _Slots:
+    """Where the slot rule found the head, organization and date in the
+    text, and the detail items it left: what decides whether the entry is a
+    card at all."""
+    head: tuple[int, int]
+    org: tuple[int, int] | None
+    date: tuple[int, int] | None
+    details: tuple[str, ...]
 
 
 def words(text: str) -> Counter:
@@ -144,6 +160,17 @@ def _word_bounded(text: str, start: int, end: int) -> bool:
             and (end == len(text) or not text[end].isalnum()))
 
 
+def _verbatim_span(text: str, value: str, start: int = 0) -> tuple[int, int] | None:
+    """Where `value` sits in `text` at or after `start`, character for
+    character and word-bounded."""
+    at = text.find(value, start)
+    while at >= 0:
+        if _word_bounded(text, at, at + len(value)):
+            return at, at + len(value)
+        at = text.find(value, at + 1)
+    return None
+
+
 def find_span(text: str, value: str, start: int = 0) -> tuple[int, int] | None:
     """Where `value` sits in `text` at or after `start`, word-bounded:
     exactly, else as the same words joined by any non-word characters
@@ -152,11 +179,9 @@ def find_span(text: str, value: str, start: int = 0) -> tuple[int, int] | None:
     tokens = _WORD.findall(value)
     if not tokens:
         return None
-    at = text.find(value, start)
-    while at >= 0:
-        if _word_bounded(text, at, at + len(value)):
-            return at, at + len(value)
-        at = text.find(value, at + 1)
+    exact = _verbatim_span(text, value, start)
+    if exact:
+        return exact
     pattern = r'(?<![^\W_])' + r'[\W_]+'.join(map(re.escape, tokens)) + r'(?![^\W_])'
     match = re.compile(pattern, re.IGNORECASE).search(text, start)
     return match.span() if match else None
@@ -305,28 +330,104 @@ def _leading_date(text: str, dates: list[tuple[int, int]]) -> tuple[int, int] | 
     return dates[0] if dates and dates[0][0] == start else None
 
 
-def entry_card(text: str, fields: Mapping | None) -> EntryCard | None:
-    """`text` as a card, or None when it does not read as one (module docstring)."""
-    if not text or '\n' in text:
-        return None
+def _slots(text: str, fields: Mapping) -> _Slots | None:
+    """The slot rule (module docstring) on `text`, or None when it is not a card."""
     dates = _segment_dates(text)
     date = _leading_date(text, dates)
     start = len(text) - len(text.lstrip())
     if date:
         start = len(text) - len(_LEADING_SEPARATORS.sub('', text[date[1]:]))
-    head = _head(text, fields or {}, start)
+    head = _head(text, fields, start)
     if head is None:
         return None
-    org = _org(text, fields or {}, head[1])
+    org = _org(text, fields, head[1])
     line_end = org[1] if org else head[1]
     date = date or next((span for span in dates if span[0] >= line_end), None)
     items = _detail_items(text, line_end, date)
-    card = EntryCard(head=text[slice(*head)], org=text[slice(*org)] if org else '',
-                     date=text[slice(*date)] if date else '', details=tuple(items))
-    if (not (card.org or card.date or card.details) or _holds_second_record(items)
+    if (not (org or date or items) or _holds_second_record(items)
             or _SUB_LIST_LABEL.search(text, line_end)):
         return None
-    if not (card.org or card.date) and len(items) > MAX_UNDATED_DETAIL_ITEMS:
+    if not (org or date) and len(items) > MAX_UNDATED_DETAIL_ITEMS:
         return None
-    slots = ' '.join([card.head, card.org, card.date, *card.details])
-    return card if words(slots) == words(text) else None
+    return _Slots(head=head, org=org, date=date, details=tuple(items))
+
+
+def _cells(text: str) -> list[tuple[int, int]]:
+    """The spans of `text` between its cell breaks (`_CELL_BREAK`)."""
+    spans, at = [], 0
+    for brk in _CELL_BREAK.finditer(text):
+        spans.append((at, brk.start()))
+        at = brk.end()
+    spans.append((at, len(text)))
+    return spans
+
+
+def _trimmed_span(text: str, start: int, end: int,
+                  keep: tuple[int, int] | None) -> tuple[int, int]:
+    """`text[start:end]` without separator punctuation at either end, but
+    never cut into `keep` (the date, whose open-range dash is part of it)."""
+    cell = text[start:end]
+    lead = len(cell) - len(_LEADING_SEPARATORS.sub('', cell))
+    trail = _TRAILING_SEPARATORS.search(cell)
+    first, last = start + lead, start + trail.start() if trail else end
+    if keep and start <= keep[0] and keep[1] <= end:
+        first, last = min(first, keep[0]), max(last, keep[1])
+    return first, last
+
+
+def _unchanged(date: str) -> str:
+    """The date as the source writes it."""
+    return date
+
+
+def _card_lines(text: str, slots: _Slots, date_text: Callable[[str], str]) -> list[str]:
+    """The card's lines in source order (module docstring), the date slot
+    written as `date_text` returns it."""
+    line1_end = (slots.org or slots.head)[1]
+    groups: list[list[str]] = []
+    for start, end in _cells(text):
+        first, last = _trimmed_span(text, start, end, slots.date)
+        if not _WORD.search(text, first, last):
+            continue
+        piece = text[first:last]
+        if slots.date and first <= slots.date[0] and slots.date[1] <= last:
+            piece = (text[first:slots.date[0]] + date_text(text[slice(*slots.date)])
+                     + text[slots.date[1]:last])
+        if start < line1_end or (groups and (first, last) == slots.date):
+            groups = groups or [[]]
+            groups[-1].append(piece)
+        else:
+            groups.append([piece])
+    return [CELL_JOIN.join(group) for group in groups]
+
+
+def title_span(line: str, fields: Mapping | None) -> tuple[int, int] | None:
+    """The span of `line` to bold: the first title or role field, in
+    `HEAD_ANCHOR_FIELDS` order (titles before roles), found in `line`
+    character for character. Never a field longer than a title
+    (`MAX_HEAD_WORDS`), a date, or one crossing a cell break; never the words
+    around the field, such as a K4 workshop's presenter list."""
+    for key in HEAD_ANCHOR_FIELDS:
+        value = _field_value(fields or {}, key)
+        if (not value or len(_WORD.findall(value)) > MAX_HEAD_WORDS
+                or _DATE_TOKEN.match(value.strip())):
+            continue
+        span = _verbatim_span(line, value.strip())
+        if span and _is_one_cell(line[slice(*span)]):
+            return span
+    return None
+
+
+def entry_card(text: str, fields: Mapping | None,
+               date_text: Callable[[str], str] | None = None) -> EntryCard | None:
+    """`text` as a card, or None when it does not read as one (module
+    docstring). `date_text` rewrites the date slot where it stands (the
+    writer's `card_date`); the word check reads the source's date."""
+    if not text or '\n' in text:
+        return None
+    slots = _slots(text, fields or {})
+    if slots is None or words(' '.join(_card_lines(text, slots, _unchanged))) != words(text):
+        return None
+    lines = _card_lines(text, slots, date_text or _unchanged)
+    return EntryCard(lines=tuple(lines), title=title_span(lines[0], fields),
+                     has_details=bool(slots.details))

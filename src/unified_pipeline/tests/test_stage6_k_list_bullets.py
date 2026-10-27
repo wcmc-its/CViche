@@ -45,6 +45,8 @@ from docx.shared import Pt  # noqa: E402
 
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     ENTRY_GAP_AFTER_PT,
+    entry_bullet_num_id,
+    is_entry_bullet,
     is_entry_end,
     plain_entry_level,
 )
@@ -89,10 +91,14 @@ def _num_level(para):
 
 
 def _plain_level(para):
-    """The level of an entry written WITHOUT a bullet (#1943), read from its
-    left indent, or None when the paragraph is a bullet or has no indent."""
+    """The level of a line of a K or L entry, read from its left indent: an
+    unbulleted line (#1943), or the entry bullet on its first line (#2019),
+    whose text sits at level 0. None for a template bullet or no indent."""
     pPr = para._p.pPr
-    if pPr is None or pPr.find(qn("w:numPr")) is not None:
+    if pPr is None:
+        return None
+    if (pPr.find(qn("w:numPr")) is not None
+            and not is_entry_bullet(pPr, para.part.numbering_part.element)):
         return None
     left = para.paragraph_format.left_indent
     if left is None:
@@ -143,10 +149,10 @@ def test_without_list_level_still_emits_a_word_list_paragraph_at_level_0():
     assert para.text == "A non-K bullet"
 
 
-def test_unbulleted_entry_has_no_numbering_and_keeps_the_bullet_text_indent():
+def test_unbulleted_entry_has_no_numbering_and_sits_under_the_entry_bullets_text():
     # #1943: the same helper, bulleted=False. No w:numPr and no glyph, the
-    # List Paragraph style a bullet gets, and the text where that level's
-    # bullet text sat: level 0 at the template's 1080 twips, level 1 a step in.
+    # List Paragraph style a bullet gets; #2019 moved the text under an entry
+    # bullet's: level 0 at 360 twips, level 1 a 720-twip step in.
     gen = _generator()
     idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
     child = gen._insert_bulleted_entry(idx + 1, "A sub-item", None, list_level=1, bulleted=False)
@@ -155,13 +161,27 @@ def test_unbulleted_entry_has_no_numbering_and_keeps_the_bullet_text_indent():
         assert _num_level(para) is None
         assert para.style.name == "List Paragraph"
         assert para.paragraph_format.first_line_indent is None
-    assert title.paragraph_format.left_indent.twips == 1080
-    assert child.paragraph_format.left_indent.twips == 1800
+    assert title.paragraph_format.left_indent.twips == 360
+    assert child.paragraph_format.left_indent.twips == 1080
     assert title.text == "A title"
 
 
-def test_teaching_entries_render_without_bullets_end_to_end():
-    # #1943 (WCM reviewer feedback): section K entries carry no bullet.
+def _ooxml(para):
+    """`para`'s `w:numPr` and `w:ind` as literal (ilvl, numId, left, hanging)."""
+    pPr = para._p.pPr
+    num = pPr.find(qn("w:numPr"))
+    ind = pPr.find(qn("w:ind"))
+    return (num.find(qn("w:ilvl")).get(qn("w:val")) if num is not None else None,
+            num.find(qn("w:numId")).get(qn("w:val")) if num is not None else None,
+            ind.get(qn("w:left")) if ind is not None else None,
+            ind.get(qn("w:hanging")) if ind is not None else None)
+
+
+def test_a_k_entry_is_one_bullet_at_the_headings_edge_end_to_end():
+    """#2019 (Paul, 2026-10-27): one bullet per entry, its marker at the
+    subsection heading's left edge (left 360 less a 360 hang = 0) and its text
+    at the hang; the definition is the document's own, a bullet glyph, not a
+    "•" typed into the text. The numbers are literal OOXML on purpose."""
     gen = _generator()
     gen._fill_teaching({"K1": [{
         "taxonomy_code": "K1",
@@ -170,9 +190,49 @@ def test_teaching_entries_render_without_bullets_end_to_end():
     }]})
     rendered = [p for p in gen.doc.paragraphs if "PA Student Lectures" in p.text]
     assert len(rendered) == 1
-    assert _num_level(rendered[0]) is None
+    numbering = gen.doc.part.numbering_part.element
+    num_id = entry_bullet_num_id(numbering)
+    assert num_id is not None and num_id != "1", "not the template's 0.75in bullet"
+    assert _ooxml(rendered[0]) == ("0", num_id, "360", "360")
     assert _plain_level(rendered[0]) == "0"
     assert "•" not in rendered[0].text
+    lvl = numbering.xpath(
+        'w:abstractNum[w:name/@w:val="CViche entry bullet"]/w:lvl[@w:ilvl="0"]')[0]
+    assert lvl.find(qn("w:numFmt")).get(qn("w:val")) == "bullet"
+    ind = lvl.find(f'{qn("w:pPr")}/{qn("w:ind")}')
+    assert (ind.get(qn("w:left")), ind.get(qn("w:hanging"))) == ("360", "360")
+    # The schema puts every w:abstractNum before the first w:num.
+    tags = [child.tag for child in numbering]
+    assert max(i for i, t in enumerate(tags) if t == qn("w:abstractNum")) \
+        < min(i for i, t in enumerate(tags) if t == qn("w:num"))
+
+
+def test_every_entry_shares_one_numbering_definition():
+    gen = _generator()
+    gen._fill_teaching({"K1": [
+        {"taxonomy_code": "K1", "text": f"2018-2022 - Lecture {n}, Lecturer",
+         "extracted_fields": {"formatted_text": f"2018-2022 - Lecture {n}, Lecturer"}}
+        for n in "AB"]})
+    numbering = gen.doc.part.numbering_part.element
+    assert len(numbering.xpath('w:abstractNum[w:name/@w:val="CViche entry bullet"]')) == 1
+    ids = {_ooxml(p)[1] for p in gen.doc.paragraphs if "Lecture " in p.text}
+    assert ids == {entry_bullet_num_id(numbering)}
+
+
+def test_a_k_entrys_title_is_bold_and_its_presenter_list_is_not():
+    """KH2YMW's shape (#2019 review), names invented: bold covers only the
+    stage-4 title's verbatim span, on the 5c-line path too."""
+    gen = _generator()
+    line = ("Avery Quill, Bram Ostrander, Cleo Marchetti. Leadership Challenges in "
+            "Rural Care. Example Society Annual Meeting, 2021")
+    gen._fill_teaching({"K4": [{
+        "taxonomy_code": "K4", "text": line,
+        "extracted_fields": {"formatted_text": line,
+                             "activity_title": "Leadership Challenges in Rural Care"},
+    }]})
+    (para,) = [p for p in gen.doc.paragraphs if "Leadership Challenges" in p.text]
+    assert [r.text for r in para.runs if r.bold] == ["Leadership Challenges in Rural Care"]
+    assert para.text == line
 
 
 # --- and _add_remaining_to_appendix renders the same way ---------------------

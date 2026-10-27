@@ -2833,6 +2833,31 @@ def test_a_sub_point_under_an_unbulleted_entry_goes_one_indent_step_deeper(ancho
     assert anchor._p.pPr.find(qn("w:ind")).get(qn("w:left")) == str(anchor_left)
 
 
+def test_a_sub_point_under_a_k_entry_bullet_is_an_unbulleted_line_a_level_in():
+    # #2019: a K or L entry's first line carries the entry bullet (marker at
+    # the margin, text at 360). Its sub-point drops the bullet and the hang
+    # and sits one level in, at 1080, as the entry's own sub-lines do; the
+    # anchor keeps its bullet.
+    from unified_pipeline.stage6.formatting import (
+        apply_entry_bullet,
+        ensure_entry_bullet_num_id,
+        is_entry_bullet,
+    )
+    doc = Document()
+    anchor = doc.add_paragraph("Course Director, Example Course")
+    numbering = doc.part.numbering_part.element
+    apply_entry_bullet(anchor, ensure_entry_bullet_num_id(numbering))
+    doc.add_paragraph("Next line")
+
+    sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(40, _DATE))
+
+    new = anchor._p.getnext()
+    assert new.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
+    ind = new.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+    assert (ind.get(qn("w:left")), ind.get(qn("w:hanging"))) == ("1080", None)
+    assert is_entry_bullet(anchor._p.pPr, numbering)
+
+
 def test_a_sub_point_under_an_off_grid_indent_keeps_the_anchor_indent():
     # Only the unbulleted-entry grid deepens; any other indent is copied as is.
     doc = Document()
