@@ -474,6 +474,23 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
     return [text] if text else []
 
 
+def _card_source(entry: _TeachingEntry, raw_lines: list[str], levels: list[bool] | None) -> str:
+    """The raw text a teaching entry is tried as a card from (#2019): its one
+    raw line, or one table row whose cells wrap (`wrapped_row_text`), without
+    the CV's own list number. '' for an entry of several raw lines or several
+    stage-4 records, or a row whose source cell has sub-bullets (`levels`):
+    those keep their line-per-item rendering.
+
+    The card renders the SOURCE's words, not stage 5c's `formatted_text`:
+    5c's line carries exactly the source's words for about a quarter of K
+    entries (the #2019 scout), so it cannot supply verbatim slots.
+    """
+    if levels or _record_count(entry.get('extracted_fields') or {}) > 1:
+        return ''
+    line = wrapped_row_text(entry) or (raw_lines[0] if len(raw_lines) == 1 else '')
+    return _LEADING_LIST_NUMBER_RE.sub('', line, count=1)
+
+
 # What can go wrong opening the source CV or indexing into it. Anything else is
 # a code bug and must surface, not read as "this CV has no hierarchy" (§5.4).
 _SOURCE_READ_ERRORS = (OSError, KeyError, IndexError, zipfile.BadZipFile, PackageNotFoundError)
@@ -688,6 +705,10 @@ class TeachingSection:
         raw_lines = entry_lines(original_text)
         levels = (self._source_cell_levels.flags_for(entry, raw_lines)
                   if self._source_cell_levels else None)
+        card_text = _card_source(entry, raw_lines, levels)
+        if card_text and self._insert_entry_card(insert_idx, card_text, entry,
+                                                 add_blank_before=is_first_visible):
+            return
         # A row whose source cell is a title plus bullets is a hierarchy, not one
         # course whose cells wrap (#987): `wrapped_row_text` cannot tell them
         # apart from the text alone, and would weld the bullets into one line.

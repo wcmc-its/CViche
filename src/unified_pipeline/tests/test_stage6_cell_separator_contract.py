@@ -171,6 +171,9 @@ class _ClinicalProbe(ClinicalPracticeSection):
     def _insert_bulleted_entry(self, insert_idx, text, entry=None, **kwargs):
         self.bullets.append(text)
 
+    def _insert_entry_card(self, insert_idx, text, entry, **kwargs):
+        return 0  # not a card (#2019): the bullet path below is under test
+
 
 class _PassthroughProbe(PassthroughSection):
     """Records the bullets `_fill_hospital_affiliation` would insert."""

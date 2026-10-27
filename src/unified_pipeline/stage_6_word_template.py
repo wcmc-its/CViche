@@ -96,6 +96,7 @@ from unified_pipeline.stage6.fan_out import (
     LAST_STAGE4_RECORD,
     DeclinedList,
     fan_out_multi_record_entries,
+    has_built_text,
     record_scope,
     record_text,
     unrendered_list_warnings,
@@ -125,8 +126,11 @@ from unified_pipeline.stage6.formatting import (  # noqa: F401
     format_date_for_section,
     format_date_range,
     is_cviche_box,
+    mark_entry_end,
     normalize_iso_dates_in_text,
     plain_entry_left_twips,
+    text_width_twips,
+    write_card_line,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: F401
     _ALL_PHONE_SLOT_KEYS,
@@ -173,6 +177,7 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     names_teaching_or_authorship_role,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
+from unified_pipeline.stage6.parsing.entry_card import entry_card
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     DATE_LED_SOURCE_TEXT,
@@ -2939,6 +2944,41 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self.stats['entries_inserted'] += 1
         return entry_para
 
+
+    def _insert_entry_card(self, insert_idx: int, text: str, entry: dict,
+                           add_blank_before: bool = False, one_line: bool = False) -> int:
+        """Insert `text` as an entry card (#2019, `parsing.entry_card`):
+        line 1 holds the bold head, the organization and a right-tabbed
+        date; each detail item is a line under it, at the same indent.
+
+        Returns the number of paragraphs inserted, the blank spacer
+        included, or 0 when `text` does not read as a card (or, with
+        `one_line`, reads as one with detail lines), a fanned-out
+        record's text was built from its fields rather than taken from the
+        CV, or there is nothing to insert before; the caller then renders
+        the entry as it did before. Inserted BEFORE `insert_idx`, in page
+        order, so a caller walking its entries backwards is unaffected.
+        The entry's comments ride line 1 and weigh every line of the card;
+        the last line carries the gap to the next entry (`mark_entry_end`).
+        """
+        text = _strip_taxonomy_code(text or '')
+        card = None if has_built_text(entry) else entry_card(text, entry.get('extracted_fields'))
+        if card is None or (one_line and card.details) or insert_idx >= len(self.doc.paragraphs):
+            return 0
+        anchor = self.doc.paragraphs[insert_idx]
+        paras = [anchor.insert_paragraph_before('') for _ in range(1 + len(card.details))]
+        write_card_line(paras[0], card.head, card.org, card.date, text_width_twips(self.doc))
+        for para, item in zip(paras[1:], card.details, strict=True):
+            _set_font(para.add_run(item))
+        for para in paras:
+            self._bullet_paras.add(para._p)
+            self._apply_plain_list_indent(para, level=0)
+        if add_blank_before:
+            paras[0].insert_paragraph_before('')
+        self._add_entry_comments(paras[0], entry, entry_paras=paras)
+        mark_entry_end(paras[-1])
+        self.stats['entries_inserted'] += len(paras)
+        return len(paras) + (1 if add_blank_before else 0)
 
     def _apply_list_bullet(self, para: Paragraph, level: int = 0) -> None:
         """Apply Word native list bullet formatting using the WCM template's numbering.

@@ -749,7 +749,8 @@ def test_l3_bullet_bare_start_year_is_not_rendered_as_present():
                 start_date="2015")],
     )
     assert gen.stats["tables_populated"] == 0
-    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015"]
+    # An entry card (#2019): the year on the line's right tab stop.
+    assert added == ["", "Clinic Lead, Harrowgate Hospital\t2015"]
 
 
 def test_l3_bullet_open_start_year_still_renders_present():
@@ -809,3 +810,60 @@ def test_each_entry_ends_in_the_entry_gap_end_to_end(code, filler, header):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# --- #2019: an entry as a card ------------------------------------------------------
+# Line 1 is the role (bold) and its place, the dates on a right tab stop; the
+# rest of the entry follows, one line per cell. Every word is the source's.
+
+_L_CARD_LINE = "Attending Physician, Example Hospital\t2015-2020"
+_L_CARD_DETAIL = "Inpatient medicine service, 8 weeks per year"
+
+
+@pytest.mark.parametrize("filler, role_field", [
+    ("_fill_clinical_practice_l1", "clinical_role"),
+    ("_fill_clinical_practice_l2", "project_name"),
+])
+def test_an_l1_or_l2_entry_renders_as_a_card(filler, role_field):
+    entry = _entry(f"Attending Physician, Example Hospital\t2015-2020\t{_L_CARD_DETAIL}",
+                   **{role_field: "Attending Physician"}, institution="Example Hospital")
+    gen, added = _render_through_template(filler, [entry])
+    assert added == ["", _L_CARD_LINE, _L_CARD_DETAIL]
+    line1 = next(p for p in gen.doc.paragraphs if p.text == _L_CARD_LINE)
+    assert [run.bold for run in line1.runs] == [True, False, False]
+    last = next(p for p in gen.doc.paragraphs if p.text == _L_CARD_DETAIL)
+    assert is_entry_end(last._p.pPr) and not is_entry_end(line1._p.pPr)
+
+
+def test_cards_and_bullets_in_one_subsection_keep_their_order():
+    """The L callers advance their insertion index by what the writer
+    returns: a miscount interleaves one entry's lines into the next's (#476)."""
+    card = _entry(f"Attending Physician, Example Hospital\t2015-2020\t{_L_CARD_DETAIL}",
+                  clinical_role="Attending Physician", institution="Example Hospital",
+                  start_date="2015")
+    plain = _entry("Volunteer Clinic\tWeekend shifts", start_date="2010")
+    _gen, added = _render_through_template("_fill_clinical_practice_l1", [plain, card])
+    assert added == ["", _L_CARD_LINE, _L_CARD_DETAIL, "Volunteer Clinic", "Weekend shifts"]
+
+
+def test_an_l3_role_is_a_one_line_card_of_its_first_cell():
+    """What follows the first cell is the role's prose: the composed line
+    never printed it, and the sub-point pass (#1205) offers it."""
+    entry = _entry("Director, Example Wound Care Program, 2010-2015\tOversaw the clinic",
+                   leadership_role="Director", institution="Example Wound Care Program",
+                   start_date="2010", end_date="2015")
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert added == ["", "Director, Example Wound Care Program\t2010-2015"]
+
+
+@pytest.mark.parametrize("text", [
+    # The cell lacks a word the composed line prints ("Present").
+    "Clinic Lead, Harrowgate Hospital, 2015-",
+    # The cell has details: an L3 card is one line or none.
+    "Clinic Lead, Harrowgate Hospital, 2015-2018, weekly huddles",
+])
+def test_an_l3_role_that_is_not_a_one_line_card_keeps_the_composed_line(text):
+    entry = _entry(text, leadership_role="Clinic Lead", institution="Harrowgate Hospital",
+                   start_date="2015", end_date="2018" if "2018" in text else None)
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert all("\t" not in line for line in added)

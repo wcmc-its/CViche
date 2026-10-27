@@ -33,6 +33,7 @@ from .dates import (  # noqa: F401
     with_extra_date_spans,
 )
 from .docx import (  # noqa: F401
+    CARD_ORG_SEPARATOR,
     CVICHE_BOX_BORDER,
     CVICHE_BOX_BORDER_SIZE,
     CVICHE_BOX_FILL,
@@ -67,6 +68,8 @@ from .docx import (  # noqa: F401
     plain_entry_left_twips,
     plain_entry_level,
     space_around_cviche_box,
+    text_width_twips,
+    write_card_line,
 )
 from .values import (  # noqa: F401
     _format_citation,

@@ -101,6 +101,7 @@ from ..formatting import (
 )
 from ..normalization import _committee_cell_text
 from ..parsing import _is_structural_label, _refold_shattered
+from ..parsing.entry_card import words as card_words
 from ..sorting import sort_entries_reverse_chronological
 from ..supplementary import clinical_leadership_cell_values
 
@@ -219,6 +220,23 @@ def _with_unit_program(institution: str, unit_program: str, role: str) -> str:
     if not institution:
         return unit_program
     return f"{unit_program}, {institution}"
+
+
+# Where an L3 source line's first cell ends: a tab, or the " | " stage 2
+# joins a table row's cells with.
+_FIRST_CELL_END_RE = re.compile(r'\t| \| ')
+
+
+def _l3_card_source(text: str, composed: str) -> str:
+    """The source text an L3 role is tried as a card from (#2019): its first
+    cell (`_FIRST_CELL_END_RE`), without the CV's list number, or '' when that cell does not
+    hold every word of the `composed` "role, institution, dates" line, so a
+    card never prints less than the line it replaces. What follows the first
+    tab is the role's prose, which the composed line never printed either:
+    the sub-point pass (#1205) offers it under the line, card or not."""
+    cell = _without_list_numbers(_FIRST_CELL_END_RE.split(text, maxsplit=1)[0])
+    return cell if not (card_words(composed) - card_words(cell)) else ''
+
 
 # Section L taxonomy codes (docs/CODING_STANDARDS.md §8.2): L1 Clinical
 # Practice, L2 Clinical Innovations, L3 Clinical Leadership.
@@ -462,8 +480,8 @@ class ClinicalPracticeSection:
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
-                        inserted = self._insert_multiline_as_bullets(
-                            section_idx + 1 + bullet_count, bullet_text, entry,
+                        inserted = self._insert_card_or_bullets(
+                            section_idx + 1 + bullet_count, entry, bullet_text, bullet_text,
                             add_blank_before=(bullet_count == 0)
                         )
                         bullet_count += inserted
@@ -546,8 +564,8 @@ class ClinicalPracticeSection:
                     if bullet_text:
                         # Use multiline helper so a multi-line entry becomes
                         # one bullet per line, matching L1 and L3 (#572)
-                        inserted = self._insert_multiline_as_bullets(
-                            section_idx + 1 + bullet_count, bullet_text, entry,
+                        inserted = self._insert_card_or_bullets(
+                            section_idx + 1 + bullet_count, entry, bullet_text, bullet_text,
                             add_blank_before=(bullet_count == 0)
                         )
                         bullet_count += inserted
@@ -658,6 +676,7 @@ class ClinicalPracticeSection:
                     # writer instead, keeping their own '\t'/'\n' structure so
                     # `_bullet_parts` gives each fragment its own bullet.
                     role_remainder = ''
+                    role_from_fields = bool(role)
                     if not role and original_text:
                         role, _, role_remainder = original_text.partition('\t')
                         role = role.strip()
@@ -692,13 +711,28 @@ class ClinicalPracticeSection:
                     elif role_remainder.strip() and self.verbose:
                         logger.info("L3 bullet already carries every fragment after the role")
 
+                    card_text = _l3_card_source(original_text, bullet_text) if role_from_fields else ''
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
-                        inserted = self._insert_multiline_as_bullets(
-                            section_idx + 1 + bullet_count, bullet_text, entry,
-                            add_blank_before=(bullet_count == 0)
+                        inserted = self._insert_card_or_bullets(
+                            section_idx + 1 + bullet_count, entry, card_text, bullet_text,
+                            add_blank_before=(bullet_count == 0), one_line=True
                         )
                         bullet_count += inserted
+
+    def _insert_card_or_bullets(self, insert_idx: int, entry: dict, card_text: str,
+                                bullet_text: str, add_blank_before: bool = False,
+                                one_line: bool = False) -> int:
+        """Insert `entry` as a card read from its source text `card_text`
+        (#2019, `_insert_entry_card`; `one_line` takes only a card with no
+        detail lines), or, when that text is not one, as the bullets of
+        `bullet_text`. Returns the paragraphs inserted, which every caller
+        advances its insertion index by."""
+        inserted = self._insert_entry_card(insert_idx, card_text, entry,
+                                           add_blank_before=add_blank_before,
+                                           one_line=one_line)
+        return inserted or self._insert_multiline_as_bullets(
+            insert_idx, bullet_text, entry, add_blank_before=add_blank_before)
 
     def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: dict | None = None,
                                        add_blank_before: bool = False) -> int:

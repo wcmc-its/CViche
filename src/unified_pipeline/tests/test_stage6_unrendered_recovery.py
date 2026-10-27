@@ -7023,8 +7023,10 @@ def _clinical_role_table_row():
     return entry
 
 
-_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010-2015"
-_LATER_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2016-Present"
+# The role's line is an entry card (#2019): the source's own words, the
+# years on a right tab stop.
+_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}\t2010-2015"
+_LATER_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}\t2016-present"
 
 
 def _subpoint_paragraphs(gen):
@@ -7035,7 +7037,11 @@ def _subpoint_paragraphs(gen):
 
 
 def _paragraph_text(p):
-    return "".join(t.text or "" for t in p.iter(qn("w:t"), qn("w:delText")))
+    """Its run text, a run's tab (an entry card's date, #2019) as '\t'; a
+    tab STOP (`w:pPr/w:tabs/w:tab`) is no text."""
+    return "".join(("\t" if t.getparent().tag == qn("w:r") else "") if t.tag == qn("w:tab")
+                   else t.text or ""
+                   for t in p.iter(qn("w:t"), qn("w:delText"), qn("w:tab")))
 
 
 def _left_indent(p):
@@ -7098,13 +7104,13 @@ def test_clinical_leadership_prose_goes_under_its_own_line_among_roles_of_one_ho
 
     (para,) = _subpoint_paragraphs(gen)
     assert _paragraph_text(para.getprevious()) == _CLINICAL_LINE
-    assert _paragraph_text(para.getprevious().getprevious()) == f"{later}, {_CLINICAL_SITE}, 2016-Present"
+    assert _paragraph_text(para.getprevious().getprevious()) == f"{later}, {_CLINICAL_SITE}\t2016-present"
     # Words alone would have taken the later role's line.
     lines = list(supplementary.anchor_candidates(_render_clinical_roles(
         [_later_clinical_role(later), _clinical_role()], supplementary_subpoints=False).doc))
-    roles = [line for line in lines if line.text.endswith(("2015", "Present"))]
+    roles = [line for line in lines if line.text.endswith(("2015", "present"))]
     assert supplementary.best_anchor(supplementary._value_tokens(_clinical_role(), "L3"), roles) is roles[0]
-    assert roles[0].text.startswith(later) and roles[0].text.endswith("Present")
+    assert roles[0].text.startswith(later) and roles[0].text.endswith("present")
 
 
 def test_roles_at_one_hospital_each_take_their_own_prose():
@@ -7166,7 +7172,7 @@ def test_a_short_roles_prose_goes_under_its_own_line():
     gen = _render_clinical_roles([_clinical_role(name="MD", site="NGH")], supplementary_subpoints=True)
 
     (para,) = _subpoint_paragraphs(gen)
-    assert _paragraph_text(para.getprevious()) == "MD, NGH, 2010-2015"
+    assert _paragraph_text(para.getprevious()) == "MD, NGH\t2010-2015"
     assert _deleted_texts(gen) == _CLINICAL_PROSE
 
 
@@ -7581,7 +7587,7 @@ def test_a_role_whose_entry_the_pii_pass_withheld_gets_no_sub_point():
     withheld["_pii_withheld"] = True
     gen = _render_clinical_roles([_later_clinical_role(), withheld], supplementary_subpoints=True)
 
-    assert _CLINICAL_LINE in _texts_of(gen.doc.element.body)
+    assert _CLINICAL_LINE in [_paragraph_text(p) for p in gen.doc.element.body.iter(qn("w:p"))]
     assert _subpoint_paragraphs(gen) == [] and _deleted_texts(gen) == ""
 
 

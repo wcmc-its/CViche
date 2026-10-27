@@ -1286,3 +1286,89 @@ def test_with_open_end_finds_the_lone_date_5c_wrote(text, expected):
     what it leaves alone because 5c already wrote the range."""
     assert teaching._with_open_end(text, {"start_date": "2014"},
                                    "2014 – Fictional Course", "K1") == expected
+
+
+# --- #2019: a free-form entry as a card -------------------------------------------
+# Bold head (and organization) on line 1, the date on a right tab stop at the
+# text margin, the rest of the entry on the lines below, every word the
+# source's own. Names and places are invented.
+
+_CARD_TEXT = ("Attending Surgeon, Resident Teaching, Northfield Health\t2025–Sep 2026\t"
+              "Orthopaedic Surgery Residency; clinical and operative teaching of PGY-5 residents")
+_CARD_5C = "**2025-2026** – Attending Surgeon (Northfield Health)"
+
+
+def _card_entry(**fields):
+    return _entry("K1", _CARD_TEXT, formatted_text=_CARD_5C,
+                  role="Attending Surgeon, Resident Teaching", institution="Northfield Health",
+                  **fields)
+
+
+def _rendered_card(entry):
+    """The entry's paragraphs between the heading and the sentinel, blank
+    spacer dropped."""
+    gen = _generator("Didactic teaching", "SENTINEL-END")
+    gen._fill_teaching({"K1": [entry]})
+    return gen, [p for p in gen.doc.paragraphs[1:-1] if p.text.strip()]
+
+
+def test_a_free_form_entry_renders_as_a_card():
+    from docx.enum.text import WD_TAB_ALIGNMENT
+
+    from unified_pipeline.stage6.formatting import is_entry_end, text_width_twips
+
+    gen, (line1, details) = _rendered_card(_card_entry())
+    assert line1.text == "Attending Surgeon, Resident Teaching, Northfield Health\t2025–Sep 2026"
+    head, org, date = line1.runs
+    assert (head.text, head.bold) == ("Attending Surgeon, Resident Teaching", True)
+    assert not org.bold and not date.bold
+    (stop,) = line1.paragraph_format.tab_stops
+    assert stop.alignment == WD_TAB_ALIGNMENT.RIGHT
+    assert stop.position.twips == text_width_twips(gen.doc)
+    assert details.text == ("Orthopaedic Surgery Residency; clinical and operative teaching "
+                            "of PGY-5 residents")
+    # The #2022 gap goes on the entry's last line only, and neither is a bullet.
+    assert [is_entry_end(p._p.pPr) for p in (line1, details)] == [False, True]
+    assert all(p._p.pPr.numPr is None for p in (line1, details))
+    assert line1.paragraph_format.left_indent == details.paragraph_format.left_indent
+
+
+def test_a_card_prints_the_sources_words_not_5cs():
+    from unified_pipeline.stage6.parsing.entry_card import words
+
+    _gen, paragraphs = _rendered_card(_card_entry())
+    assert words(" ".join(p.text for p in paragraphs)) == words(_CARD_TEXT)
+    assert _CARD_5C not in [p.text for p in paragraphs]
+
+
+def test_a_card_entry_is_counted_and_commented_once():
+    gen, paragraphs = _rendered_card(_card_entry())
+    assert gen.stats["entries_inserted"] == len(paragraphs) == 2
+
+
+def test_an_entry_with_no_anchor_keeps_the_5c_line():
+    entry = _card_entry()
+    entry["extracted_fields"].update(role="Mentor", institution="Elsewhere")
+    _gen, paragraphs = _rendered_card(entry)
+    assert len(paragraphs) == 1 and "\t" not in paragraphs[0].text
+
+
+def test_a_multi_line_entry_is_not_a_card():
+    entry = _card_entry()
+    entry["text"] = _CARD_TEXT.replace("\t", "\n")
+    _gen, paragraphs = _rendered_card(entry)
+    assert all("\t" not in p.text for p in paragraphs)
+    assert all(not run.bold for p in paragraphs for run in p.runs)
+
+
+def test_a_fanned_out_record_with_built_text_is_not_a_card(monkeypatch):
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.has_built_text", lambda entry: True)
+    _gen, paragraphs = _rendered_card(_card_entry())
+    assert all("\t" not in p.text for p in paragraphs)
+
+
+def test_card_source_drops_the_list_number_and_refuses_several_records():
+    entry = _card_entry()
+    assert teaching._card_source(entry, ["3. " + _CARD_TEXT], None) == _CARD_TEXT
+    assert teaching._card_source(entry, ["a", "b"], None) == ""
+    assert teaching._card_source(entry, [_CARD_TEXT], [False]) == ""

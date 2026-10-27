@@ -21,8 +21,9 @@ try:
     from docx.document import Document
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+    from docx.enum.text import WD_TAB_ALIGNMENT
     from docx.oxml.xmlchemy import BaseOxmlElement
-    from docx.shared import Inches, Pt, RGBColor
+    from docx.shared import Emu, Inches, Pt, RGBColor, Twips
     from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
 except ImportError:  # pragma: no cover - mirrors stage_6_word_template
@@ -267,6 +268,34 @@ def plain_entry_level(left_twips: int) -> int | None:
     when the indent is not on that grid."""
     steps, rest = divmod(left_twips - PLAIN_ENTRY_LEFT_TWIPS, PLAIN_ENTRY_LEVEL_STEP_TWIPS)
     return steps if rest == 0 and steps >= 0 else None
+
+
+#: What joins an entry card's bold head and its organization on line 1
+#: (#2019): "**Attending Surgeon**, LSU Health Shreveport". The source's own
+#: separator there is a comma, a tab or a " | ", none of which reads well.
+CARD_ORG_SEPARATOR = ", "
+
+
+def text_width_twips(doc: Document) -> int:
+    """The width between the last section's margins, where a right tab stop
+    puts text flush with the right margin (the template sets none)."""
+    section = doc.sections[-1]
+    return Emu(section.page_width - section.left_margin - section.right_margin).twips
+
+
+def write_card_line(para: Paragraph, head: str, org: str, date: str,
+                    right_tab_twips: int) -> None:
+    """Line 1 of an entry card (#2019): the head in bold, the organization
+    after it, and the date on a right tab stop at `right_tab_twips`."""
+    _set_font(para.add_run(head), bold=True)
+    if org:
+        _set_font(para.add_run(CARD_ORG_SEPARATOR + org))
+    if date:
+        para.paragraph_format.tab_stops.add_tab_stop(Twips(right_tab_twips), WD_TAB_ALIGNMENT.RIGHT)
+        run = para.add_run()
+        run.add_tab()
+        run.add_text(date)
+        _set_font(run)
 
 
 #: CViche's voice to the submitter: a one-cell, light-gray, bordered table in
