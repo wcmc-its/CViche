@@ -97,31 +97,22 @@ def _with_abstract_status(code: str, citation: str, pub: Mapping) -> str:
 
 # #1573 (NECRGC): a source heading that says the owner is not an author of
 # what it lists was lost in render, so each paper under it read as the owner's
-# own: consortium papers headed "(not a listed author)" (RBPXCD, S1/S2), and
-# papers whose heading says the owner's participation is cited "but not by
-# authorship" (GNONHA, S5). So were the contents of volumes the owner edited
-# (LFFKVV: "Edited/Co-Edited" books and journal special issues, whose
-# chapters and papers are mostly other authors'). The heading now
-# travels with every citation under it, in the source's own words. Under an
-# edited-volume heading the volume itself (S3, a book) keeps its line: the
-# owner did edit it. A heading that only names authors ("Papers as senior
-# author") or editing work ("Editorial board") is not either shape, and nor
-# is a level that marks some of its papers with a legend ("Original research
-# (<mark> marks papers on which I am not a listed author)") or that also lists the
-# owner's own chapters or papers ("Edited Volumes and Book Chapters").
+# own: consortium papers under a heading saying the owner is not on their
+# author lists (RBPXCD, S1/S2), and papers under a heading saying they cite the
+# owner's participation rather than authorship (GNONHA, S5). That heading now
+# travels with every citation under it, in the source's own words. A heading
+# that only names the owner's author position or editing work disclaims
+# nothing, and nor does a level that flags just some of its papers with a
+# legend mark or word: the rest of that level is the owner's own. The contents
+# of volumes the owner edited are deliberately not annotated, because a note
+# neither disclaims other authors' chapters nor helps the owner's own (#1573
+# residual).
 _DISCLAIMED_AUTHORSHIP_HEADING = re.compile(
     r"\bnot\s+(?:(?:a|an|the|as(?:\s+an?)?)\s+)?(?:listed\s+)?(?:co-?)?author\b"
     r"|\bnot\s+by\s+authorship\b|\bnon-?author(?:ed|ship)?\b|\bwithout\s+authorship\b",
     re.IGNORECASE)
 _LEGEND_HEADING = re.compile(r"[*\u00a7\u2020\u2021#]|\b(?:marks?|marked|denot\w*|indicat\w*|designat\w*)\b",
                              re.IGNORECASE)
-_EDITED_VOLUME_HEADING = re.compile(
-    r"^\W*(?:co-?)?edited(?:\s*/\s*co-?edited)?\b.*"
-    r"\b(?:special\s+issues?|issues|books?|volumes?|supplements?)\b",
-    re.IGNORECASE)
-_OWN_WORK_HEADING = re.compile(
-    r"\b(?:chapters?|articles?|papers?|publications?|reviews?|abstracts?|monographs?)\b", re.IGNORECASE)
-_EDITED_VOLUME_CODE = 'S3'
 #: The note `_with_source_heading` writes after a citation, and the pattern the
 #: doctor strips off a rendered line before pairing it with its source: the
 #: note's words would otherwise push a short source below the pairing share,
@@ -130,35 +121,32 @@ SOURCE_HEADING_NOTE = ' (listed under "{label}")'
 SOURCE_HEADING_NOTE_RE = re.compile(r' \(listed under "[^"]*"\)$')
 
 
-def _source_heading_label(code: str, pub: Mapping) -> str:
-    """The most specific heading above `pub` that says its papers are not the
-    owner's own (`_DISCLAIMED_AUTHORSHIP_HEADING`, `_EDITED_VOLUME_HEADING`),
-    as the source wrote it, else ''."""
+def _source_heading_label(pub: Mapping) -> str:
+    """The most specific heading above `pub` that disclaims the owner's
+    authorship of what it lists (`_DISCLAIMED_AUTHORSHIP_HEADING`, unless it is
+    a legend level), as the source wrote it, else ''."""
     hierarchy = pub.get('hierarchy') or []
     levels = [hierarchy] if isinstance(hierarchy, str) else [str(level) for level in hierarchy]
     for level in reversed(levels):
-        disclaimed = _DISCLAIMED_AUTHORSHIP_HEADING.search(level) and not _LEGEND_HEADING.search(level)
-        edited_volume = (code != _EDITED_VOLUME_CODE and _EDITED_VOLUME_HEADING.match(level)
-                         and not _OWN_WORK_HEADING.search(level))
-        if disclaimed or edited_volume:
+        if _DISCLAIMED_AUTHORSHIP_HEADING.search(level) and not _LEGEND_HEADING.search(level):
             return level.strip().rstrip(':').strip()
     return ''
 
 
-def _with_source_heading(code: str, citation: str, pub: Mapping) -> str:
-    """`citation` followed by the heading that says it is not the owner's own
-    paper (`_source_heading_label`), unless the citation already says it."""
-    label = _source_heading_label(code, pub).replace('"', "'")
+def _with_source_heading(citation: str, pub: Mapping) -> str:
+    """`citation` followed by the heading that disclaims the owner's authorship
+    of it (`_source_heading_label`), unless the citation already says it."""
+    label = _source_heading_label(pub).replace('"', "'")
     if not label or norm(label) in norm(citation):
         return citation
     return citation + SOURCE_HEADING_NOTE.format(label=label)
 
 
-def _source_heading_note(code: str, citation: str, pub: Mapping) -> str:
+def _source_heading_note(citation: str, pub: Mapping) -> str:
     """The note `_with_source_heading` adds after `citation`, or ''. It is
     written as its own plain run after the citation, so rejecting a PubMed
     enrichment's tracked insertion does not take the note with it."""
-    return _with_source_heading(code, citation, pub)[len(citation):]
+    return _with_source_heading(citation, pub)[len(citation):]
 
 # Tracked-insertion citation runs are built as raw w:r XML -- python-docx has
 # no API to add a run *into* a w:ins element, so this path cannot call
@@ -763,7 +751,7 @@ class BibliographySection:
                 citation_num += 1
                 citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
                 citation_text = _with_abstract_status(code, citation_text, pub)
-                source_heading_note = _source_heading_note(code, citation_text, pub)
+                source_heading_note = _source_heading_note(citation_text, pub)
                 original_text = enrichment.text
                 enrichment_status = enrichment.enrichment_status
 

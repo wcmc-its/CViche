@@ -1461,14 +1461,20 @@ BODY = "Doe J, Roe R. An example trial. Example J. 2031;1:2-9."
     # GNONHA: papers that cite the owner's participation, not as an author (S5).
     ("S5", ("PUBLICATIONS", "Studies citing my participation, not by authorship:"),
      "Studies citing my participation, not by authorship"),
-    # LFFKVV: the contents of volumes the owner edited (S1, S4).
-    ("S1", ("PUBLICATIONS", "Co-Edited Special Issues"),
-     "Co-Edited Special Issues"),
-    ("S4", ("PUBLICATIONS", "Edited Volumes"), "Edited Volumes"),
-    ("S2", ("PUBLICATIONS", "Edited Books"), "Edited Books"),
 ])
 def test_a_disclaiming_heading_is_printed_after_each_citation_under_it(code, hierarchy, label):
     assert _headed_paragraphs(code, hierarchy, BODY) == [f'1. {BODY} (listed under "{label}")']
+
+
+@pytest.mark.parametrize("code,hierarchy", [
+    # LFFKVV (#1573 residual): the contents of volumes the owner edited get no note. A
+    # note neither disclaims the other authors' chapters nor helps the owner's own.
+    ("S1", ("PUBLICATIONS", "Co-Edited Special Issues")),
+    ("S4", ("PUBLICATIONS", "Edited Volumes")),
+    ("S2", ("PUBLICATIONS", "Edited Books")),
+])
+def test_the_contents_of_an_edited_volume_get_no_note(code, hierarchy):
+    assert _headed_paragraphs(code, hierarchy, BODY) == [f"1. {BODY}"]
 
 
 @pytest.mark.parametrize("code,hierarchy", [
@@ -1490,13 +1496,18 @@ def test_a_citation_that_already_says_its_heading_is_unchanged():
 
 def test_a_string_hierarchy_is_read_as_one_level():
     entry = {"hierarchy": "Group papers (not a listed author)"}
-    assert bibliography._source_heading_label("S1", entry) == "Group papers (not a listed author)"
-    assert bibliography._source_heading_label("S1", {}) == ""
+    assert bibliography._source_heading_label(entry) == "Group papers (not a listed author)"
+    assert bibliography._source_heading_label({}) == ""
 
 
 def test_the_most_specific_disclaiming_heading_is_the_one_printed():
+    hierarchy = ("Papers, not as an author", "Group papers (not a listed author)")
+    assert _headed_paragraphs("S4", hierarchy, BODY) == [f'1. {BODY} (listed under "Group papers (not a listed author)")']
+
+
+def test_a_disclaiming_level_above_an_edited_volume_level_is_the_one_printed():
     hierarchy = ("Papers, not as an author", "Edited Volumes")
-    assert _headed_paragraphs("S4", hierarchy, BODY) == [f'1. {BODY} (listed under "Edited Volumes")']
+    assert _headed_paragraphs("S4", hierarchy, BODY) == [f'1. {BODY} (listed under "Papers, not as an author")']
 
 
 def test_a_quote_in_the_heading_is_printed_as_an_apostrophe():
