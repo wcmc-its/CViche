@@ -589,21 +589,21 @@ def test_two_listed_grants_are_not_chained_into_one_by_a_title_spanning_both():
 # ----------------------------------------------------------- per-claim checks, residual (#1554)
 
 def test_a_current_claim_on_the_cvs_current_research_is_supported():
-    """IZIXVF (clean): "Current projects examine <title words>" over a grant
-    that ended before the CV is the CV's own present research statement when an
-    undated research-activities entry names the same words. Without that
-    entry, with a dated one that ended, with an entry that is no research
-    statement or names only some of the words, the claim is still reported;
-    so is "completed", and a claim on an agency's grants."""
-    sentence = f"Current projects examine {_TITLE}."
+    """IZIXVF (clean): a "current" claim over a grant that ended before the CV
+    restates the CV's own present research statement when an undated
+    research-activities entry holds the naming words. Without that entry,
+    with a dated one that ended, with an entry that is no research statement
+    or holds only some of the words, the claim is still reported; so is
+    "completed", and a claim on an agency's grants."""
+    sentence = f"Ongoing projects now cover {_TITLE}."
     ended = _grant("M2B", start_date="2010", end_date="2015", role="PI")
-    undated_research = _entry("M1", f"Specific projects: 1. {_TITLE}; 2. Sprocket studies.")
+    undated_research = _entry("M1", f"Present aims: {_TITLE}, and sprocket studies.")
     assert _per_claim(lint_summary_unsupported_claim(
         _dated_summary(sentence), _stage4(ended, undated_research, _cv_year(2026)))) == {}
     unsupported = (
         _entry("M1", f"{_TITLE}, 2010-2015."),
         _entry("K1", f"Lectures on {_TITLE}.", start_date="2016", end_date="present"),
-        _entry("M1", "Specific projects: widget folding in gadget models."),
+        _entry("M1", "Present aims: widget folding in gadget models."),
     )
     for stage4 in (_stage4(ended, _cv_year(2026)), *(_stage4(ended, other, _cv_year(2026)) for other in unsupported)):
         assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), stage4)) == {
@@ -622,26 +622,26 @@ def test_a_current_claim_on_the_cvs_current_research_is_supported():
 
 def test_completed_against_a_study_its_own_line_says_runs_on_or_closed_early():
     """MFJRKW-09 and HVSKET-03: the owner's dates ended, but the line says the
-    study is still active under another PI, or closed for lack of enrollment.
-    A line saying the study is now closed states it finished."""
-    sentence = f"I served as PI on a completed study of {_TITLE}."
+    study runs on under another PI, or stopped early for lack of enrollment.
+    A line saying the study closed as planned, or naming an open-label
+    design, states nothing against "completed"."""
+    sentence = f"I was PI on a completed study of {_TITLE}."
     dates = {"start_date": "2003", "end_date": "2006", "role": "PI"}
-    for note in ("The study is currently active under a new PI.",
-                 "Study closed due to insufficient enrollment."):
+    for note in ("Enrolment is still open under a successor PI.",
+                 "Accrual stopped early for slow recruitment."):
         grant = _entry("M2B", f"{_TITLE}. {note}", title=_TITLE, **dates)
         assert _per_claim(lint_summary_unsupported_claim(
             _dated_summary(sentence), _stage4(grant, _cv_year(2026)))) == {CLAIM_GRANT_STATUS: [sentence]}, note
-    for words in ("The study is now closed.", "An open-label, active-comparator design."):
+    for words in ("The widget arm closed to accrual in 2006 as planned.", "An open-label, active-comparator design."):
         finished = _entry("M2B", f"{_TITLE}. {words}", title=_TITLE, **dates)
         assert _per_claim(lint_summary_unsupported_claim(
             _dated_summary(sentence), _stage4(finished, _cv_year(2026)))) == {}, words
 
 
 def test_earlier_against_a_publication_in_press():
-    """QZCHAG-13: "my earlier work" for the CV's newest, in-press paper. A
-    dated paper, a talk that mentions a paper in press, or a current claim is
-    left alone."""
-    sentence = f"My earlier work addressed {_TITLE}."
+    """QZCHAG-13: "earlier" for the CV's newest, in-press paper. A dated paper,
+    a talk that mentions a paper in press, or a current claim is left alone."""
+    sentence = f"Before that, my earlier studies covered {_TITLE}."
     in_press = _entry("S1", f"Roe J. {_TITLE}. Widget Journal (in press).", title=_TITLE, year="in press")
     assert _per_claim(lint_summary_unsupported_claim(
         _dated_summary(sentence), _stage4(in_press, _cv_year(2026)))) == {CLAIM_GRANT_STATUS: [sentence]}
@@ -649,48 +649,46 @@ def test_earlier_against_a_publication_in_press():
     talk = _entry("R", f"{_TITLE}. Widget Society, 2014; the paper is in press.", title=_TITLE, date="2014")
     for stage4 in (_stage4(dated, _cv_year(2026)), _stage4(talk, _cv_year(2026))):
         assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), stage4)) == {}
-    current = f"My current work addresses {_TITLE} in new settings."
+    current = f"My current studies cover {_TITLE} in new settings."
     assert _per_claim(lint_summary_unsupported_claim(
         _dated_summary(current), _stage4(in_press, _cv_year(2026)))) == {}
 
 
-_LONG_TITLE = ("A Phase 2 multicenter randomized double-blind placebo-controlled study to assess the efficacy, "
-               "safety and tolerability of widget gel (sprocketine hydrobromide and leverine sulfate) for the "
-               "treatment of sprocket disinhibition including aggression, agitation and irritability in "
-               "outpatients with gadget joint injury")
+_LONG_TITLE = ("A Phase 2 multicenter randomized double-blind placebo-controlled study of the efficacy, safety and "
+               "tolerability of widget gel and lever oil in adults for the relief of sprocket tremor with gadget "
+               "stiffness, cog fatigue and pulley strain after gadget joint repair at coastal clinics")
 
 
 def test_a_status_word_reaches_a_long_trial_title_by_eight_of_its_words():
     """HVSKET-03: a protocol title is never restated whole; eight of its words
-    name it for a status claim, six do not. The funder check keeps the share rule."""
-    grant = _entry("M2B", f"{_LONG_TITLE}. Study closed due to insufficient enrollment.", title=_LONG_TITLE,
+    name it for a status claim, five do not. The funder check keeps the share rule."""
+    grant = _entry("M2B", f"{_LONG_TITLE}. Accrual stopped early for slow recruitment.", title=_LONG_TITLE,
                    start_date="2017", end_date="2020", role="Coinvestigator", agency="Lever Trust")
-    status = ("I served as a coinvestigator on a completed multicenter, double-blind study of the efficacy "
-              "of widget gel for sprocket disinhibition in gadget joint injury.")
+    status = ("I was a coinvestigator on a completed multicenter, double-blind study of the efficacy of "
+              "widget gel for sprocket tremor following gadget joint repair.")
     assert _per_claim(lint_summary_unsupported_claim(
         _dated_summary(status), _stage4(grant, _cv_year(2026)))) == {CLAIM_GRANT_STATUS: [status]}
-    six_words = "I served as a coinvestigator on a completed multicenter study of widget gel for gadget joint injury."
+    five_words = "I was a coinvestigator on a completed multicenter study of widget gel for gadget joint repair."
     assert _per_claim(lint_summary_unsupported_claim(
-        _dated_summary(six_words), _stage4(grant, _cv_year(2026)))) == {}
-    funder = ("I served on a multicenter, double-blind study of the efficacy of widget gel for sprocket "
-              "disinhibition in gadget joint injury, funded by Gadget Charities.")
+        _dated_summary(five_words), _stage4(grant, _cv_year(2026)))) == {}
+    funder = ("I worked on a multicenter, double-blind study of the efficacy of widget gel for sprocket "
+              "tremor following gadget joint repair, funded by Gadget Charities.")
     assert _per_claim(lint_summary_unsupported_claim(
         _dated_summary(funder), _stage4(grant, _cv_year(2026)))) == {}
 
 
 def test_a_funder_the_cv_names_only_as_a_collaborator():
-    """DYLJXC-16: stage 4 put the collaborating network in the grant's agency;
-    the line itself says "in collaboration with". A text that names it as a
+    """DYLJXC-16: stage 4 put the collaborating body in the grant's agency; the
+    line itself names it after a collaboration cue. A text that names it as a
     funder anywhere, or no text naming it, leaves the sentence alone; the
     findings keep the summary's order."""
-    sentence = f"I served as Co-PI on a Widget Hypertension Network-funded study of {_TITLE}."
-    grant = _entry("M2B", f"Agency grant in collaboration with the Widget Hypertension Network. {_TITLE}.",
-                   title=_TITLE, agency="Agency, Widget Hypertension Network", role="Co-PI",
-                   start_date="2016", end_date="2018")
-    service = _entry("Q2", "Collaborative research with the Widget Hypertension Network and the Agency.")
+    sentence = f"I was Co-PI on a Lever Alliance-funded study of {_TITLE}."
+    grant = _entry("M2B", f"Agency award in collaboration with the Lever Alliance. {_TITLE}.",
+                   title=_TITLE, agency="Agency, Lever Alliance", role="Co-PI", start_date="2016", end_date="2018")
+    service = _entry("Q2", "Joint gauge survey, collaborating with the Lever Alliance.")
     assert _per_claim(lint_summary_unsupported_claim(
         _dated_summary(sentence), _stage4(grant, service))) == {CLAIM_FUNDER_LINK: [sentence]}
-    funded = _entry("M2B", "Pilot award funded by the Widget Hypertension Network.", title="Pilot award")
+    funded = _entry("M2B", "Pilot award funded by the Lever Alliance.", title="Pilot award")
     assert _per_claim(lint_summary_unsupported_claim(
         _dated_summary(sentence), _stage4(grant, service, funded))) == {}
     unnamed = "I lead Sprocket Society-funded work on several topics."
@@ -702,37 +700,38 @@ def test_a_funder_the_cv_names_only_as_a_collaborator():
 
 
 def test_a_founder_or_director_alongside_someone_did_not_do_it_alone():
-    """XNWSZN-15: "I founded" a study whose line says "Founder along with" a
-    colleague, reached across the comma that opens its quoted title; "I direct"
-    as a co-director. A founder the line names alone, "I co-founded", a
-    director whose line names another person's co-role, or a PI claim on a
-    grant directed along with someone, holds."""
+    """XNWSZN-15: "I founded" a study whose line says the founding was joint,
+    reached across the comma that opens its quoted title; "I direct" as a
+    co-director. A founder the line names alone, "I co-founded", a director
+    whose line names another person's co-role, or a PI claim on a grant
+    directed jointly with someone, holds."""
+    joint = _entry("M2A", f'"{_TITLE}." Founder jointly with Dr. Roe.', title=_TITLE, pi_role="Founder",
+                   start_date="1997", end_date="present")
     reported = (
-        (f'I founded and continue to lead a long-running study, "{_TITLE}," supported by widget makers.',
-         _entry("M2A", f'"{_TITLE}." Founder along with Professor Roe.', title=_TITLE, pi_role="Founder",
-                start_date="1997", end_date="present")),
+        (f'I founded a multi-site study, "{_TITLE}," with widget makers.', joint),
         (f"I direct {_TITLE} across three sites.", _grant(role="Co-Director")),
+        (f"I direct {_TITLE} across three sites.",
+         _entry("M2A", f"{_TITLE}. Clinic directed along with Dr. Roe.", title=_TITLE, role="Director")),
     )
     for sentence, grant in reported:
         assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), _stage4(grant))) == {
             CLAIM_LEAD_ROLE: [sentence]}, sentence
     held = (
-        (f'I founded and continue to lead a long-running study, "{_TITLE}."',
+        (f'I founded a multi-site study, "{_TITLE}."',
          _entry("M2A", f'"{_TITLE}." Founder and director of the program.', title=_TITLE, pi_role="Founder",
                 start_date="1997", end_date="present")),
-        (f"I co-founded {_TITLE}.",
-         _entry("M2A", f'"{_TITLE}." Founder along with Professor Roe.', title=_TITLE, pi_role="Founder")),
+        (f"I co-founded {_TITLE}.", joint),
         (f"I direct {_TITLE} across three sites.", _grant(role="Director")),
         (f"I direct {_TITLE} across three sites.",
          _entry("M2A", f"{_TITLE}. Co-Director: Dr. Roe.", title=_TITLE, role="Director")),
         (f"I serve as PI on {_TITLE}.",
-         _entry("M2A", f"{_TITLE}. Program directed along with Dr. Roe.", title=_TITLE, role="PI")),
+         _entry("M2A", f"{_TITLE}. Program directed jointly with Dr. Roe.", title=_TITLE, role="PI")),
     )
     for sentence, grant in held:
         assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), _stage4(grant))) == {}, sentence
 
 
-_EVENT = "Widget Resuscitation Symposium"
+_EVENT = "Gadget Lever Forum"
 
 
 def _lead_findings(sentence, *entries):
@@ -740,21 +739,21 @@ def _lead_findings(sentence, *entries):
 
 
 def test_a_lead_role_on_a_named_entry_needs_that_role_on_an_entry_holding_the_name():
-    """OKRTPJ-13: "I founded and direct" a symposium the CV names the owner the
-    founder of, never the director. A director entry, a director's heading, a
-    founding claim alone, or a name no entry holds leaves the sentence alone;
-    a co-director entry does not give "direct"."""
-    talks = (_entry("R", f"Widget talk. First Annual {_EVENT}, 2019. Founder and Invited Speaker.",
-                    role="Founder and Invited Speaker"),
-             _entry("R", f"Gadget talk. {_EVENT}, 2019. Invited Speaker.", role="Invited Speaker"))
-    sentence = f"I founded and direct the {_EVENT}, and I chair a widget society."
+    """OKRTPJ-13: a founding and a directing claim on an event the CV names
+    the owner the founder of, never the director. A director entry, a
+    director's heading, a founding claim alone, or a name no entry holds
+    leaves the sentence alone; a co-director entry does not give "direct"."""
+    talks = (_entry("R", f"Gadget talk at the inaugural {_EVENT}, 2019; role: founder and speaker.",
+                    role="Founder and Speaker"),
+             _entry("R", f"Widget talk, {_EVENT}, 2019; role: speaker.", role="Speaker"))
+    sentence = f"I founded and directed the {_EVENT} each spring."
     assert _lead_findings(sentence, *talks) == {CLAIM_ENTRY_ROLE: [sentence]}
     assert _lead_findings(sentence, *talks, _entry("O", f"Director, {_EVENT}, 2019-present.")) == {}
     assert _lead_findings(sentence, *talks, _entry("O", f"{_EVENT}, 2019-present.", hierarchy=("Directorships",))) == {}
     assert _lead_findings(sentence, *talks, _entry("O", f"Co-Director, {_EVENT}, 2019-present.")) == {
         CLAIM_ENTRY_ROLE: [sentence]}
     assert _lead_findings(f"I founded the {_EVENT}.", *talks) == {}
-    assert _lead_findings("I founded and direct the Marine Sprocket Torque Workshop.", *talks) == {}
+    assert _lead_findings("I founded and directed the Marine Sprocket Torque Workshop.", *talks) == {}
 
 
 def test_led_needs_any_lead_role_and_a_name_needs_three_title_words():
@@ -764,18 +763,18 @@ def test_led_needs_any_lead_role_and_a_name_needs_three_title_words():
     short = "I direct the Widget Rounds every month."
     assert _lead_findings(short, _entry("R", "Widget Rounds, 2019. Speaker.")) == {}
     for unnamed, holder in ((f"I led several {_EVENT} sessions.", f"Member, {_EVENT}, 2010-2020."),
-                            (f"I led multicenter {_EVENT} sessions.", f"Member, multicenter {_EVENT}, 2010-2020.")):
+                            (f"I led coastal {_EVENT} sessions.", f"Member, coastal {_EVENT}, 2010-2020.")):
         assert _lead_findings(unnamed, _entry("O", holder)) == {}, unnamed
     founded = f"I founded the {_EVENT} in 2010."
     assert _lead_findings(founded, _entry("O", f"Chair, {_EVENT}, 2010-2020.")) == {CLAIM_ENTRY_ROLE: [founded]}
 
 
 def test_a_pi_role_dated_before_the_earliest_grant_that_could_give_it():
-    """WWRSAL-02: "as Principal Investigator since 2007" when the earliest grant
-    the owner may lead starts in 2010. An earlier or same-year PI grant, or no
-    dated grant, leaves it alone; a co-investigator grant or a pending
-    application does not date a PI role."""
-    sentence = "My research focuses on widget folding, a program I have pursued as Principal Investigator since 2007."
+    """WWRSAL-02: a PI role "since" a year before the earliest grant the owner
+    may lead. An earlier or same-year PI grant, or no dated grant, leaves it
+    alone; a co-investigator grant, a pending application or an undated PI
+    grant does not date a PI role."""
+    sentence = "I have worked on widget folding as Principal Investigator since 2007."
     later = _grant(start_date="2010-06", agency="Widget Fund")
     co_i = _grant(title=_OTHER_TITLE, start_date="2005", role="Co-Investigator")
     pending = _grant("M2C", title="Marine Pylon Corrosion Assays", start_date="2004", role="PI")
@@ -793,18 +792,17 @@ def test_a_design_agent_another_grants_line_holds():
     """TJDPJE-01: one trial given another trial's co-therapy. The named trial's
     own line holding the agent, no line holding it, a comparator that is no
     agent, or an agent far past the trial's name leaves it alone."""
-    trial = _grant("M2B", title="WGT (Widgetamab in Gadget Coronary Syndromes)", start_date="2012", end_date="2012")
-    other = _grant("M2B", title="SPROCKET (Phase III trial of sprocketin and heparin versus placebo for gadget angina)",
+    trial = _grant("M2B", title="WGT (Widgetamab in Gadget Valve Stenosis)", start_date="2012", end_date="2012")
+    other = _grant("M2B", title="SPROCKET (Phase III trial of sprocketin and leverol versus placebo for gadget wear)",
                    start_date="1995", end_date="1996")
-    sentence = "I participated in the WGT trial examining widgetamab in combination with heparin in gadget coronary syndromes."
+    sentence = "I took part in the WGT trial of widgetamab in combination with leverol in gadget valve stenosis."
     assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), _stage4(trial, other))) == {
         CLAIM_DESIGN_DETAIL: [sentence]}
-    own = _entry("M2B", "WGT (Widgetamab and heparin in Gadget Coronary Syndromes).",
-                 title="WGT (Widgetamab in Gadget Coronary Syndromes)", start_date="2012", end_date="2012")
+    own = _entry("M2B", "WGT (Widgetamab and leverol in Gadget Valve Stenosis).",
+                 title="WGT (Widgetamab in Gadget Valve Stenosis)", start_date="2012", end_date="2012")
     assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), _stage4(own, other))) == {}
     assert _per_claim(lint_summary_unsupported_claim(_dated_summary(sentence), _stage4(trial))) == {}
-    for held in ("I participated in the WGT trial examining widgetamab in combination with placebo in gadget "
-                 "coronary syndromes.",
-                 "I participated in the WGT trial examining widgetamab in gadget coronary syndromes and, in "
-                 "separate laboratory work over many years, sprocketin combined with heparin."):
+    for held in ("I took part in the WGT trial of widgetamab in combination with placebo in gadget valve stenosis.",
+                 "I took part in the WGT trial of widgetamab in gadget valve stenosis and, in separate bench "
+                 "work over many years, sprocketin combined with leverol."):
         assert _per_claim(lint_summary_unsupported_claim(_dated_summary(held), _stage4(trial, other))) == {}, held

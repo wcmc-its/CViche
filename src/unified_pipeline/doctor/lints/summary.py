@@ -336,9 +336,8 @@ _MIN_SHARED_TITLE_WORDS = 3
 _MIN_TITLE_SHARE = 0.5
 _MAX_WORD_GAP = 4
 #: For a status word, a long trial title is named by this many of its words:
-#: a 25-word protocol title is never restated whole ("a completed multicenter,
-#: randomized, double-blind ... study assessing <drug> for <condition>",
-#: HVSKET-03). The funder and role checks keep the share rule: at this cap a
+#: a protocol title of 25 words is never restated whole (HVSKET-03). The
+#: funder and role checks keep the share rule: at this cap a
 #: description of one grant named a neighbour's title and took its funder (a
 #: clean NECRGC run, UHBORP), and a cap of 6 merged WPJHYT-05's projects (#1554).
 _STATUS_TITLE_WORDS_CAP = 8
@@ -397,19 +396,18 @@ _TOPICAL_NOUN_RE = re.compile(
 #: work (ZDOAZO-01), not a topic.
 _CONTINUE_VERB_RE = re.compile(r"continue[sd]?", re.IGNORECASE)
 #: A grant's own text saying the study has not finished, whatever its dates
-#: say about the owner's part in it: it runs on under another PI ("currently
-#: active under a new PI", MFJRKW-09), or it stopped before it was done
-#: ("closed due to insufficient enrollment", HVSKET-03). Either contradicts
-#: "completed". A bare "now closed" is how a CV says a study finished, so it
-#: does not count.
+#: say about the owner's part in it: it runs on under another PI (MFJRKW-09),
+#: or it stopped early for lack of enrollment (HVSKET-03). Either contradicts
+#: "completed". A study the line calls closed, with no reason given, has
+#: finished, so a bare "closed" does not count.
 _STILL_RUNNING_RE = re.compile(
     r"\b(?:is|are|remains?|still|currently)\s+(?:currently\s+|still\s+)?(?:active|ongoing|open|enrolling|recruiting)\b",
     re.IGNORECASE)
 _CLOSED_EARLY_RE = re.compile(
     r"\b(?:closed|terminated|stopped|halted|ended|discontinued)\s+(?:early|prematurely|due\s+to|because\s+of|for\s+lack)\b"
     r"|\b(?:insufficient|inadequate|poor|low|slow)\s+(?:enrollment|accrual|recruitment)\b", re.IGNORECASE)
-#: A publication the CV lists as not yet published is current work: "my earlier
-#: work addressed <its title words>" got the newest paper wrong (QZCHAG-13).
+#: A publication the CV lists as not yet published is current work: calling
+#: the CV's newest, in-press paper earlier work got it wrong (QZCHAG-13).
 _IN_PRESS_RE = re.compile(r"\b(?:in\s+press|forthcoming|accepted\s+for\s+publication)\b", re.IGNORECASE)
 _CLAIM_CONTRADICTED_BY = {
     GRANT_STATUS_CURRENT: frozenset((GRANT_STATUS_COMPLETED, GRANT_STATUS_NOT_STATED,
@@ -445,9 +443,9 @@ _PRE_FUNDED_RE = re.compile(rf"(?P<funder>{_NAME})-(?:funded|supported|sponsored
 _LEAD_VERBS = r"(?:led|lead|direct(?:ed)?|founded|coordinate[ds]?)"
 _LEAD_VERB_RE = re.compile(rf"\bI\s+(?:have\s+)?{_LEAD_VERBS}\b")
 #: The same claim over an entry the CV names, not a grant, with a second verb
-#: it may chain: "I founded and direct the <Name>" (OKRTPJ-13). Its object is
-#: a capitalised name; the role each verb needs is its own: founding needs a
-#: founder, directing a director, coordinating a coordinator.
+#: it may chain, a founding and a directing claim over one name (OKRTPJ-13).
+#: Its object is a capitalised name; the role each verb needs is its own:
+#: founding needs a founder, directing a director, coordinating a coordinator.
 _ENTRY_LEAD_CLAIM_RE = re.compile(
     rf"\bI\s+(?:have\s+)?(?P<first>{_LEAD_VERBS})(?:\s+and\s+(?:continue\s+to\s+)?(?P<second>{_LEAD_VERBS}))?\b")
 _NAMED_OBJECT_RE = re.compile(
@@ -469,31 +467,30 @@ _LEAD_ROLE_RE = re.compile(
 _PI_ROLE_RE = re.compile(r"(?<![-\w])(?:PI|MPI|princip(?:al|le)\s+investigator)\b", re.IGNORECASE)
 #: The words between a lead-role claim and the grant that is its object hold
 #: no clause punctuation: "I served as PI on a study of <title>". A comma that
-#: opens a quoted title is the object itself ("I lead a study, "<title>"").
+#: opens a quoted title is the object itself (XNWSZN-15).
 _ROLE_OBJECT_RE = re.compile(r"(?:[^,;:.]|,\s*[\"“])*\Z")
 _NOT_OWN_PI_RE = re.compile(r"\b(?:co|sub|site)[-\s]*(?:PI|principal|investigator)", re.IGNORECASE)
 #: A lead role the grant gives as shared: a co-founder or co-director (its
-#: role), or "Founder along with <a colleague>" (its own text), did not do it
-#: alone, so "I founded" or "I direct" overstates it (XNWSZN-15). Only the
-#: role is read for a "co-" title: the text may name another person's.
+#: role), or a role its own text says was held jointly with a colleague, was
+#: not held alone, so "I founded" or "I direct" overstates it (XNWSZN-15). Only
+#: the role is read for a "co-" title: the text may name another person's.
 _CO_LEAD_ROLE_RE = re.compile(r"\bco-?(?:found\w*|direct\w*|chair\w*|lead\w*)", re.IGNORECASE)
 _LEAD_ROLE_SHARED_WITH_RE = re.compile(
     r"\b(?:found|direct|chair|lead)\w*\s+(?:along|together|jointly)\s+with\b", re.IGNORECASE)
-#: A name the CV gives only as a collaborator, never as a funder: "an FDA grant
-#: in collaboration with the <network>" is not the network's funding, although
+#: A name the CV gives only as a collaborator, never as a funder: a grant line
+#: naming a body after a collaboration cue is not that body's funding, although
 #: stage 4 put both names in the grant's agency (DYLJXC-16). The name follows
 #: the cue directly, after an optional "the".
 _COLLABORATION_CUE_RE = re.compile(
     r"\b(?:in\s+(?:collaboration|partnership)\s+with|collaborat\w*\s+(?:research\s+)?with)\s+(?:the\s+)?",
     re.IGNORECASE)
-#: A PI role with a start year: "a program I have pursued as Principal
-#: Investigator since 2007", where the CV's earliest grant the owner may lead
-#: starts in 2010 and the 2007 work was a fellowship under another PI (WWRSAL-02).
+#: A PI role dated by "since <year>": WWRSAL-02 dated it three years before
+#: the CV's earliest grant the owner may lead, to a fellowship under another PI.
 _PI_SINCE_RE = re.compile(r"\b(?:Principal\s+Investigator|PI)\s+since\s+(?P<year>(?:19|20)\d{2})\b")
-#: A design detail a sentence adds to the grant it names: the agent of "<drug>
-#: in combination with <agent>". TJDPJE-01 gave one trial the heparin of
-#: another; the agent names a grant's design only when that grant's own line
-#: holds it. Not a comparator that is no agent of its own.
+#: A design detail a sentence adds to the grant it names: the agent a drug is
+#: combined with. TJDPJE-01 gave one trial another trial's co-therapy; the
+#: agent names a grant's design only when that grant's own line holds it. Not
+#: a comparator that is no agent of its own.
 _COMBINED_AGENT_RE = re.compile(
     r"\b(?:in\s+combination\s+with|combined\s+with|plus)\s+(?P<agent>[A-Za-z][\w-]{3,})", re.IGNORECASE)
 _NO_AGENT_WORDS = frozenset(("placebo", "standard", "usual", "conventional", "other", "others"))
@@ -741,8 +738,8 @@ def _claimed_status(sentence: str, group: _MentionGroup) -> str | None:
 def _named_by_current_research(sentence: str, group: _MentionGroup,
                                research: Sequence[frozenset[str]]) -> bool:
     """Every word the sentence names the group's title by is in one current
-    research-activities entry: "Current projects examine <title words>" over a
-    grant that has ended is the CV's own present research statement (IZIXVF)."""
+    research-activities entry: a "current" claim over a grant that has ended
+    restates the CV's own present research statement (IZIXVF)."""
     words = list(_WORD_RE.finditer(sentence))
     stems = frozenset(_stem(words[i].group()) for m in group for i in m.words)
     return bool(stems) and any(stems <= entry for entry in research)
@@ -950,9 +947,9 @@ def _gives_entry_role(verb: str, words: str) -> bool:
 
 
 def _entry_role_sentences(sentences: Sequence[str], entries: Sequence[_FieldsEntry]) -> tuple[str, ...]:
-    """A lead-role claim on a named entry ("I founded and direct the <Name>")
-    when entries hold the name and none gives a verb's role (OKRTPJ-13: the
-    CV names the owner the symposium's founder, never its director). Every
+    """A lead-role claim on a named entry when entries hold the name and none
+    gives a verb's role (OKRTPJ-13: the CV names the owner the event's
+    founder, never its director). Every
     entry holding the name is a candidate; with none, nothing is judged, and
     a name a grant holds is the grant check's (`_lead_role_sentences`)."""
     words = [(_title_stems(_entry_words(entry)), _entry_words(entry), entry.code in _GRANT_CODES)
@@ -1004,8 +1001,8 @@ def _foreign_agent(sentence: str, group: _MentionGroup, grants: Sequence[_Grant]
 
 
 def _design_detail_sentences(sentences: Sequence[str], grants: Sequence[_Grant]) -> tuple[str, ...]:
-    """A sentence giving the grant it names another grant's agent ("<drug> in
-    combination with <agent>", TJDPJE-01)."""
+    """A sentence giving the grant it names another grant's combined agent
+    (TJDPJE-01)."""
     return tuple(s for s in sentences if any(
         _foreign_agent(s, group, grants) for group in _title_groups(s, grants)))
 

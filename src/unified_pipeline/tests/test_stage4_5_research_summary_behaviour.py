@@ -769,7 +769,7 @@ def test_end_date_state_reads_ended_ongoing_or_unstated(end_date, expected):
     ("2026-11-30", False),
     ("2026", False),          # a bare year may name any month of it
     ("2026 - present", False),
-    ("2019; 2020; 2021; 2026", None),  # a fused record's list of ends states no one end
+    ("2014; 2018; 2026", None),        # a fused record's list of ends states no one end
     ("2019, 2026", None),
     ("June 30, 2026", False),          # a comma inside one date is not a list
 ])
@@ -782,11 +782,11 @@ def test_end_date_state_judges_the_end_date_at_its_own_precision(end_date, expec
 
 
 def test_end_date_state_reads_a_one_digit_end_year_against_the_start():
-    """Stage 6's reading of a truncated end year ("9/1/07" to "8/30/1" is 2011,
+    """Stage 6's reading of a truncated end year ("3/1/04" to "2/28/9" is 2009,
     #1343) reaches the context line too: the year-only check read no year."""
-    entry = {"extracted_fields": {"start_date": "9/1/07", "end_date": "8/30/1"}, "text": ""}
+    entry = {"extracted_fields": {"start_date": "3/1/04", "end_date": "2/28/9"}, "text": ""}
     assert end_date_state(entry, AS_OF_2026) is True
-    assert end_date_state({"extracted_fields": {"end_date": "8/30/1"}, "text": ""}, AS_OF_2026) is None
+    assert end_date_state({"extracted_fields": {"end_date": "2/28/9"}, "text": ""}, AS_OF_2026) is None
 
 
 def test_resolve_as_of_keeps_a_given_date_and_reads_the_clock_without_one(monkeypatch):

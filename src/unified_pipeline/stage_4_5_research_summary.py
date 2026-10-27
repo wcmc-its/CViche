@@ -226,12 +226,12 @@ def end_date_state(entry: dict, as_of: date) -> bool | None:
 
 
 def names_several_dates(end_date: str) -> bool:
-    """True for an end date listing more than one dated item ("2019; 2020; 2021;
+    """True for an end date listing more than one dated item ("2014; 2018;
     2026"): stage 4 fused several grants into one record, so it states no one
     end. Its first year (stage 6's reading) called the fused record's last,
-    still-running study completed; its latest called the three ended ones
-    current (9MKVDA, #1554). A date with a comma inside ("June 30, 2026")
-    names one year and is one date."""
+    still-running study completed; its latest called the ended ones current
+    (9MKVDA, #1554). A date with a comma inside ("June 30, 2026") names one
+    year and is one date."""
     return sum(bool(YEAR_PATTERN.search(item)) for item in END_DATE_LIST_SEPARATOR.split(end_date)) > 1
 
 
