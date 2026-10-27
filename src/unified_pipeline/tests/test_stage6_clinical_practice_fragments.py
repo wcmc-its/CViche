@@ -703,6 +703,21 @@ def _entry_level(para):
     return plain_entry_level(left.twips)
 
 
+def test_a_multi_part_entry_has_one_bullet_and_its_role_bold_on_the_first_part():
+    """#2019: the first part carries the entry's one bullet and the stage-4
+    role in bold; the later parts are unbulleted, even where the role recurs."""
+    scratch = _scratch_document()
+    entry = {"taxonomy_code": "L1", "text": "x",
+             "extracted_fields": {"clinical_role": "Clinician"}}
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Clinician, Clinic\tClinician 8 hours per week", entry=entry)
+
+    numbering = scratch.gen.doc.part.numbering_part.element
+    paras = [p for p in scratch.gen.doc.paragraphs if "Clinician" in p.text]
+    assert [is_entry_bullet(p._p.pPr, numbering) for p in paras] == [True, False]
+    assert [[r.text for r in p.runs if r.bold] for p in paras] == [["Clinician"], []]
+
+
 def test_first_part_is_level_0_and_later_parts_are_level_1():
     """#984: a title / hours / dates entry keeps its facts under the title."""
     scratch = _scratch_document()

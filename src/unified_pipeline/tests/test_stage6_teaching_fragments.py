@@ -1370,6 +1370,16 @@ def test_a_multi_line_entry_is_not_a_card_but_bolds_its_title_on_line_1():
     assert [_is_entry_bullet(gen, p) for p in paragraphs] == [True, False, False]
 
 
+def test_only_line_1_of_a_multi_line_entry_bolds_its_title():
+    """The title may recur on a later line; only the entry's first line,
+    the one with the bullet, carries the bold (#2019)."""
+    entry = _entry("K1", "Course Director, Estuarine Biology, Example University, 2019\n"
+                         "Course Director for the weekly laboratory section, 2020",
+                   role="Course Director")
+    gen, paragraphs = _rendered_card(entry)
+    assert [[r.text for r in p.runs if r.bold] for p in paragraphs] == [["Course Director"], []]
+
+
 def test_a_fanned_out_record_with_built_text_is_not_a_card(monkeypatch):
     monkeypatch.setattr("unified_pipeline.stage_6_word_template.has_built_text", lambda entry: True)
     _gen, paragraphs = _rendered_card(_card_entry())
