@@ -189,7 +189,10 @@ _MEMBERSHIP_BODY_RE = re.compile(
 
 def _default_board_role(entry: dict) -> str:
     """'Member' when the headings above `entry` or its own text name a
-    committee-like body; '' otherwise."""
+    committee-like body; '' otherwise, and when the entry's role was another
+    person's title (`_ANOTHER_PERSONS_ROLE_KEY`, #1573)."""
+    if entry.get(_ANOTHER_PERSONS_ROLE_KEY):
+        return ''
     headings = entry.get('hierarchy') or []
     if isinstance(headings, str):
         headings = [headings]
@@ -231,15 +234,32 @@ def _board_committee_text(fields: dict) -> str:
 # keeps its organization alone. A word in between ("Co-Director with Dr. A.
 # Name") or no person at all ("Visiting Professor, <university>") keeps the
 # owner's role. An undotted "MD" is not read as a degree: it is also Maryland.
-_PERSON_NAME = r"(?:[A-Z]\.\s?){0,3}[A-Z][a-z'\u2019-]+(?:\s+(?:(?:and|&)\s+)?[A-Z][a-z'\u2019-]+){0,3}"
-_HONORIFIC_NAME = (r"(?:Dr\.?|Prof\.|Professor)\s+"
-                   r"(?:(?:[A-Z]\.\s?){1,3}[A-Z][a-z'\u2019-]+|[A-Z][a-z'\u2019-]+\s+[A-Z][a-z'\u2019-]+)")
-_DEGREE_AFTER_NAME = r",\s*(?:M\.\s?D\.?|Ph\.?\s?D\.?|D\.\s?O\.)"
-_ANOTHER_PERSON = rf"(?:{_HONORIFIC_NAME}|{_PERSON_NAME}{_DEGREE_AFTER_NAME})"
+# A name is a person only where it ends (a comma, tab, semicolon, bracket or
+# the line's end follows): "Dr. A. Name Memorial Prize Committee" and "Co-Chair,
+# Dr. First Last Day Committee" name a committee after a person. A spelled-out
+# "Professor" is an honorific only before initials: "Assistant Professor Search
+# Committee", or a rank before a committee's name (GDGSWJ 335), is a rank. A
+# degree followed by "candidate" or "student" is not held ("Thesis Examiner,
+# <Name>, Ph.D. candidate"), and a run of capitalised words holding an
+# organisation word ("Graduate Studies Program, PhD") is not a person's name.
+_NAME_WORD = (r"(?!(?:Program(?:me)?|Department|Dept|University|Institute|School|College|Cent(?:er|re)"
+              r"|Committee|Board|Council|Society|Hospital|Clinic|Foundation|Association|Graduate"
+              r"|Studies|Division|Faculty|Section|Panel|Group|Laborator(?:y|ies)|Unit)\b)"
+              r"[A-Z][a-z'\u2019-]+")
+_PERSON_NAME = rf"(?:[A-Z]\.\s?){{0,3}}{_NAME_WORD}(?:\s+(?:(?:and|&)\s+)?{_NAME_WORD}){{0,3}}"
+_INITIALS_NAME = rf"(?:[A-Z]\.\s?){{1,3}}{_NAME_WORD}"
+_HONORIFIC_NAME = (rf"(?:(?:Dr\.?|Prof\.)\s+(?:{_INITIALS_NAME}|{_NAME_WORD}\s+{_NAME_WORD})"
+                   rf"|Professor\s+{_INITIALS_NAME})")
+_NAME_END = r"(?=\s*(?:[,;(\t]|$))"
+_DEGREE_AFTER_NAME = (r",\s*(?:M\.\s?D\.?|Ph\.?\s?D\.?|D\.\s?O\.)"
+                      r"(?!\.?\s*(?:candidate|student)s?\b)")
+_ANOTHER_PERSON = rf"(?:{_HONORIFIC_NAME}{_NAME_END}|{_PERSON_NAME}{_DEGREE_AFTER_NAME})"
 _PERSON_BEFORE_ROLE = re.compile(rf"{_ANOTHER_PERSON}(?:{_DEGREE_AFTER_NAME})?[\s,]*$")
 _PERSON_AFTER_ROLE = re.compile(rf"s?,?\s*{_ANOTHER_PERSON}")
-_OPENS_WITH_PERSON = re.compile(
-    r"\W*(?:Dr\.?|Prof\.|Professor)\s+(?:[A-Z]\.\s?){1,3}[A-Z][a-z'\u2019-]+")
+_OPENS_WITH_PERSON = re.compile(rf"\W*(?:Dr\.?|Prof\.|Professor)\s+{_INITIALS_NAME}{_NAME_END}")
+# Set on an entry whose stage-4 role was cleared here: the Role cell stays
+# blank, not the default board role ('Member' would be a new claim).
+_ANOTHER_PERSONS_ROLE_KEY = 'role_is_another_persons'
 
 
 def _role_is_another_persons(role: str, text: str) -> bool:
@@ -255,12 +275,13 @@ def _role_is_another_persons(role: str, text: str) -> bool:
 
 
 def _without_another_persons_role(entry: dict) -> dict:
-    """`entry` with its stage-4 role cleared when the source gives that title to
-    another person (`_role_is_another_persons`); the entry itself otherwise."""
+    """`entry` with its stage-4 role cleared, and marked so
+    (`_ANOTHER_PERSONS_ROLE_KEY`), when the source gives that title to another
+    person (`_role_is_another_persons`); the entry itself otherwise."""
     fields = entry.get('extracted_fields') or {}
     if not _role_is_another_persons(_cell_text(fields.get('role')), str(entry.get('text') or '')):
         return entry
-    return {**entry, 'extracted_fields': {**fields, 'role': None}}
+    return {**entry, 'extracted_fields': {**fields, 'role': None}, _ANOTHER_PERSONS_ROLE_KEY: True}
 
 
 def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:

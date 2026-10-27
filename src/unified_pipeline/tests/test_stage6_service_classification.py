@@ -771,3 +771,44 @@ def test_fill_service_drops_the_hosts_title_and_keeps_the_owners_role():
     assert ["Example University", "Visiting Professor", "", ""] in rows
     assert not any("Chief Physician" in cell for row in rows for cell in row)
     assert host["extracted_fields"]["role"] == "Chief Physician"  # the caller's entry is not mutated
+
+
+@pytest.mark.parametrize("role,text", [
+    # a committee, prize or symposium named after a person: the role is the owner's
+    ("Co-Chair", "Co-Chair, Dr. Alex Example Remembrance Day Committee, Example Society"),
+    ("Chair", "Dr. J. Example Founders Prize Committee, Chair"),
+    ("Organizer", "Professor A. Example Memorial Symposium, Organizer"),
+    # a spelled-out Professor with no initials is a rank (GDGSWJ 335's shape)
+    ("Chair", "Assistant Professor Search Committee, Chair"),
+    ("Chair", "Visiting Professor Selection Panel, Chair"),
+    ("Chair", "Associate Professor Promotions Review, Chair"),
+    ("Member", "Clinical Assistant Professor Hiring   Committee member, Example University 2031"),
+    # a candidate does not hold the degree; a program is not a person
+    ("Thesis Examiner", "Thesis Examiner, Alex Example, Ph.D. candidate"),
+    ("Thesis Examiner", "Thesis Examiner, Alex Example, PhD candidate"),
+    ("Director", "Example Program\tDirector, Graduate Studies Program, PhD"),
+])
+def test_a_name_that_is_not_another_persons_keeps_the_owners_role(role, text):
+    assert not _role_is_another_persons(role, text)
+
+
+def test_another_persons_title_after_an_examiners_line_is_still_theirs():
+    # KUUKNJ 533's shape: the supervisor named after the owner's examining line.
+    line = "2031 External examiner, Alex Example's doctoral defence, Supervisor Dr Sam Example\tExample Department"
+    assert _role_is_another_persons("Supervisor", line)
+
+
+def test_a_cleared_role_is_not_filled_with_the_default_board_role():
+    # 'Member' would be a new claim: the row names a committee, but the role was the host's title.
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    host = _q2("Example Hospital\tDr. Alex Example, Chief Physician", "Service on Committees",
+               role="Chief Physician", organization="Example Hospital")
+    roleless = {**_q2("Example Advisory Committee, Example Society", "Service on Committees",
+                      organization="Example Society"), "element_idx_start": 9}
+
+    gen._fill_service({"Q2": [host, roleless]})
+
+    rows = [[cell.text for cell in row.cells] for table in gen.doc.tables for row in table.rows]
+    assert ["Example Hospital", "", "", ""] in rows
+    assert ["Example Society", "Member", "", ""] in rows  # the default still fills a role-less committee row

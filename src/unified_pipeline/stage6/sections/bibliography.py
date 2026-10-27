@@ -105,15 +105,22 @@ def _with_abstract_status(code: str, citation: str, pub: Mapping) -> str:
 # travels with every citation under it, in the source's own words. Under an
 # edited-volume heading the volume itself (S3, a book) keeps its line: the
 # owner did edit it. A heading that only names authors ("Papers as senior
-# author") or editing work ("Editorial board") is not either shape.
+# author") or editing work ("Editorial board") is not either shape, and nor
+# is a level that marks some of its papers with a legend ("Original research
+# (<mark> marks papers on which I am not a listed author)") or that also lists the
+# owner's own chapters or papers ("Edited Volumes and Book Chapters").
 _DISCLAIMED_AUTHORSHIP_HEADING = re.compile(
-    r"\bnot\s+(?:(?:a|an|the|as\s+an?)\s+)?(?:listed\s+)?(?:co-?)?author\b"
-    r"|\bnot\s+by\s+authorship\b|\bnon-?author\b|\bwithout\s+authorship\b",
+    r"\bnot\s+(?:(?:a|an|the|as(?:\s+an?)?)\s+)?(?:listed\s+)?(?:co-?)?author\b"
+    r"|\bnot\s+by\s+authorship\b|\bnon-?author(?:ed|ship)?\b|\bwithout\s+authorship\b",
     re.IGNORECASE)
+_LEGEND_HEADING = re.compile(r"[*\u00a7\u2020\u2021#]|\b(?:marks?|marked|denot\w*|indicat\w*|designat\w*)\b",
+                             re.IGNORECASE)
 _EDITED_VOLUME_HEADING = re.compile(
     r"^\W*(?:co-?)?edited(?:\s*/\s*co-?edited)?\b.*"
     r"\b(?:special\s+issues?|issues|books?|volumes?|supplements?)\b",
     re.IGNORECASE)
+_OWN_WORK_HEADING = re.compile(
+    r"\b(?:chapters?|articles?|papers?|publications?|reviews?|abstracts?|monographs?)\b", re.IGNORECASE)
 _EDITED_VOLUME_CODE = 'S3'
 #: The note `_with_source_heading` writes after a citation, and the pattern the
 #: doctor strips off a rendered line before pairing it with its source: the
@@ -130,8 +137,10 @@ def _source_heading_label(code: str, pub: Mapping) -> str:
     hierarchy = pub.get('hierarchy') or []
     levels = [hierarchy] if isinstance(hierarchy, str) else [str(level) for level in hierarchy]
     for level in reversed(levels):
-        edited_volume = code != _EDITED_VOLUME_CODE and _EDITED_VOLUME_HEADING.match(level)
-        if _DISCLAIMED_AUTHORSHIP_HEADING.search(level) or edited_volume:
+        disclaimed = _DISCLAIMED_AUTHORSHIP_HEADING.search(level) and not _LEGEND_HEADING.search(level)
+        edited_volume = (code != _EDITED_VOLUME_CODE and _EDITED_VOLUME_HEADING.match(level)
+                         and not _OWN_WORK_HEADING.search(level))
+        if disclaimed or edited_volume:
             return level.strip().rstrip(':').strip()
     return ''
 
@@ -143,6 +152,13 @@ def _with_source_heading(code: str, citation: str, pub: Mapping) -> str:
     if not label or norm(label) in norm(citation):
         return citation
     return citation + SOURCE_HEADING_NOTE.format(label=label)
+
+
+def _source_heading_note(code: str, citation: str, pub: Mapping) -> str:
+    """The note `_with_source_heading` adds after `citation`, or ''. It is
+    written as its own plain run after the citation, so rejecting a PubMed
+    enrichment's tracked insertion does not take the note with it."""
+    return _with_source_heading(code, citation, pub)[len(citation):]
 
 # Tracked-insertion citation runs are built as raw w:r XML -- python-docx has
 # no API to add a run *into* a w:ins element, so this path cannot call
@@ -747,7 +763,7 @@ class BibliographySection:
                 citation_num += 1
                 citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
                 citation_text = _with_abstract_status(code, citation_text, pub)
-                citation_text = _with_source_heading(code, citation_text, pub)
+                source_heading_note = _source_heading_note(code, citation_text, pub)
                 original_text = enrichment.text
                 enrichment_status = enrichment.enrichment_status
 
@@ -768,6 +784,8 @@ class BibliographySection:
                     # No enrichment - add citation normally with target name bolded
                     self._add_citation_with_bold_author(para, citation_text, target_name,
                                                         cv_owner_last_name, owner_alias)
+                if source_heading_note:
+                    _set_font(para.add_run(self._sanitize_run_text(source_heading_note)))
 
                 # Add comment explaining enrichment (no inline text)
                 if enriched_fields:
