@@ -676,7 +676,6 @@ class ClinicalPracticeSection:
                     # writer instead, keeping their own '\t'/'\n' structure so
                     # `_bullet_parts` gives each fragment its own bullet.
                     role_remainder = ''
-                    role_from_fields = bool(role)
                     if not role and original_text:
                         role, _, role_remainder = original_text.partition('\t')
                         role = role.strip()
@@ -711,11 +710,11 @@ class ClinicalPracticeSection:
                     elif role_remainder.strip() and self.verbose:
                         logger.info("L3 bullet already carries every fragment after the role")
 
-                    card_text = _l3_card_source(original_text, bullet_text) if role_from_fields else ''
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
                         inserted = self._insert_card_or_bullets(
-                            section_idx + 1 + bullet_count, entry, card_text, bullet_text,
+                            section_idx + 1 + bullet_count, entry,
+                            _l3_card_source(original_text, bullet_text), bullet_text,
                             add_blank_before=(bullet_count == 0), one_line=True
                         )
                         bullet_count += inserted

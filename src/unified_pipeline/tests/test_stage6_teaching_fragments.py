@@ -1372,3 +1372,33 @@ def test_card_source_drops_the_list_number_and_refuses_several_records():
     assert teaching._card_source(entry, ["3. " + _CARD_TEXT], None) == _CARD_TEXT
     assert teaching._card_source(entry, ["a", "b"], None) == ""
     assert teaching._card_source(entry, [_CARD_TEXT], [False]) == ""
+
+
+def test_card_source_refuses_an_entry_of_several_stage4_records():
+    entry = _card_entry(stage4_records=[{"role": "Attending Surgeon"}, {"role": "Lecturer"}])
+    assert teaching._card_source(entry, [_CARD_TEXT], None) == ""
+
+
+def test_card_source_reads_one_wrapped_table_row_as_one_line():
+    """A row whose title cell wraps is several raw lines but ONE entry (#987)."""
+    entry = _card_entry()
+    entry.update(text="Attending Surgeon,\nResident Teaching | 2025–Sep 2026",
+                 element_type="table_row", element_idx_start=4, element_idx_end=4)
+    raw_lines = entry_lines(entry["text"])
+    assert len(raw_lines) == 2
+    assert (teaching._card_source(entry, raw_lines, None)
+            == "Attending Surgeon, Resident Teaching | 2025–Sep 2026")
+
+
+def test_a_cards_date_sits_at_the_right_margin_whatever_the_margins():
+    """The stop is the text width of the last section: page width less BOTH
+    margins, read from the document, not a constant."""
+    from docx.shared import Inches
+
+    gen = _generator("Didactic teaching", "SENTINEL-END")
+    section = gen.doc.sections[-1]
+    section.left_margin, section.right_margin = Inches(1), Inches(0.5)
+    gen._fill_teaching({"K1": [_card_entry()]})
+    (line1,) = [p for p in gen.doc.paragraphs if "\t" in p.text]
+    (stop,) = line1.paragraph_format.tab_stops
+    assert stop.position.twips == section.page_width.twips - 1440 - 720

@@ -867,3 +867,29 @@ def test_an_l3_role_that_is_not_a_one_line_card_keeps_the_composed_line(text):
                    start_date="2015", end_date="2018" if "2018" in text else None)
     _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
     assert all("\t" not in line for line in added)
+
+
+def test_a_card_is_weighed_whole_by_the_overflow_router():
+    """The card's comments ride line 1, but the router must weigh every line
+    of it: measuring line 1 alone read a fully rendered card as under-rendered
+    and re-emitted its details a second time (#476's trap)."""
+    details = ("Inpatient medicine service covering the general wards, the step-down unit "
+               "and the overnight admissions team, with supervision of residents and students "
+               "on every rotation and a weekly teaching conference for the whole department "
+               "of medicine and its affiliated clinics")
+    entry = _low_coverage_entry(f"Attending Physician, Example Hospital\t2015-2020\t{details}", "L1")
+    entry["extracted_fields"] = {"clinical_role": "Attending Physician",
+                                 "institution": "Example Hospital"}
+    assert len(entry["text"]) > 300, "fixture no longer reaches the router's length threshold"
+    gen, added = _render_through_template("_fill_clinical_practice_l1", [entry], route_overflow=True)
+    assert added == ["", _L_CARD_LINE, details]
+    assert gen._overflow_entries == [] and gen.stats["overflow_bullets_added"] == 0
+
+
+def test_an_l3_role_read_from_the_text_is_a_card_when_another_field_anchors_it():
+    """No role field: the line's role is the text's first cell, and a title
+    field still anchors the card's head there."""
+    entry = _entry("Wound Care Initiative, Example Hospital, 2010-2015",
+                   project_name="Wound Care Initiative", institution="Example Hospital")
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert added == ["", "Wound Care Initiative, Example Hospital\t2010-2015"]
