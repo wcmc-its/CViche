@@ -133,6 +133,10 @@ def test_a_punctuation_only_cell_is_not_a_detail_line():
                  {"activity_title": "Topics"}, id="undated_head_of_a_list_of_peers"),
     pytest.param(" ".join(["Word"] * MAX_HEAD_WORDS) + " Preceptor more, Example Clinic, 2019",
                  {"role": "Preceptor"}, id="head_too_long"),
+    pytest.param("Preceptor " + " ".join(["word"] * 30) + ", Example Clinic, 2019",  # 31 > 25
+                 {"role": "Preceptor"}, id="head_too_long_after_its_anchor"),
+    pytest.param("Head Preceptor) Example, Clinic, 2019", {"role": "Preceptor"},
+                 id="head_closes_a_bracket_it_never_opened"),
     pytest.param("", {"role": "Preceptor"}, id="empty_text"),
 ])
 def test_text_that_is_not_a_card_returns_none(text, fields):
@@ -162,3 +166,8 @@ def test_the_word_check_refuses_a_rule_that_drops_a_word(monkeypatch):
     assert _card(text, role="Preceptor") is not None
     monkeypatch.setattr(entry_card_module, "_trimmed", lambda cell: cell.strip().rsplit(" ", 1)[0])
     assert _card(text, role="Preceptor") is None
+
+
+def test_an_org_further_than_the_gap_limit_from_the_head_stays_in_the_details():
+    card = _card("Preceptor, - ; Example Clinic\t2019", role="Preceptor", institution="Example Clinic")
+    assert (card.head, card.org, card.date, card.details) == ("Preceptor", "", "2019", ("Example Clinic",))

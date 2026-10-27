@@ -1411,3 +1411,10 @@ def test_a_cards_bold_head_is_never_taken_for_a_section_header():
     gen, (line1, _details) = _rendered_card(_card_entry())
     assert line1.runs[0].bold
     assert gen._find_header_paragraph("Attending Surgeon") is None
+
+
+def test_a_card_drops_a_leading_taxonomy_code_as_every_entry_line_does():
+    entry = _card_entry()
+    entry["text"] = "[K1] " + _CARD_TEXT
+    _gen, (line1, _details) = _rendered_card(entry)
+    assert line1.runs[0].text == "Attending Surgeon, Resident Teaching"
