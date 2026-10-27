@@ -127,7 +127,11 @@ from unified_pipeline.stage6.normalization.pii import (
 )
 from unified_pipeline.stage6.normalization.publication import resolve_publication
 from unified_pipeline.stage6.parsing import split_appointment_title
-from unified_pipeline.stage6.parsing.dates import _MONTH_NAME_TO_NUM
+from unified_pipeline.stage6.parsing.dates import (
+    _MONTH_NAME_TO_NUM,
+    grant_end_year,
+    year_at_or_after,
+)
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage6.sections.positions import POSITION_TAXONOMY_CODES
@@ -142,8 +146,6 @@ from unified_pipeline.stage6.sections.research_support import (
     TOTAL_REQUESTED_LABEL,
     YOUR_ROLE_LABEL,
     _is_person_name_capture,
-    grant_end_year,
-    year_at_or_after,
 )
 from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES

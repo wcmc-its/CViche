@@ -18,6 +18,7 @@ Run with:
 
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,10 @@ from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
 # Placeholder EntryRecency for build_context_string tests that exercise the
 # char-budget/filtering logic and do not care about the [CURRENT] tag.
 _NOT_CURRENT = EntryRecency(is_current=False, latest_year=None, score=0.0)
+
+# The date most tests judge recency and end dates at: the first day of 2026, so
+# no end date in 2026 has passed yet, as when the tests compared years only.
+AS_OF_2026 = date(2026, 1, 1)
 
 # The scoring call is the only prompt that says this (stage_4_5 score_existing_m1).
 _SCORE_PROMPT_MARKER = "CONTENT TO SCORE"
@@ -203,7 +208,7 @@ def test_prioritize_entries_orders_by_combined_score_and_applies_limit():
     ]
 
     # M2B, not M2A: M2A is current by definition, which would flatten recency.
-    result = prioritize_entries(entries, "M2B", limit=2, current_year=2026)
+    result = prioritize_entries(entries, "M2B", limit=2, as_of=AS_OF_2026)
 
     assert len(result) == 2
     assert result[0]["text"].startswith("New PI grant")
@@ -212,7 +217,7 @@ def test_prioritize_entries_orders_by_combined_score_and_applies_limit():
 
 
 def test_prioritize_entries_empty_list_returns_empty():
-    assert prioritize_entries([], "M2A", current_year=2026) == []
+    assert prioritize_entries([], "M2A", as_of=AS_OF_2026) == []
 
 
 @pytest.mark.parametrize("call", [
@@ -220,11 +225,11 @@ def test_prioritize_entries_empty_list_returns_empty():
     lambda: gather_context_entries({"M2A": [{"text": "x", "extracted_fields": {}}]}),
     lambda: is_current_entry({"text": "x", "extracted_fields": {}}, "M2A"),
 ])
-def test_current_year_is_a_required_argument(call):
-    """current_year must be required, not left to a per-function
+def test_as_of_is_a_required_argument(call):
+    """as_of (once current_year) must be required, not left to a per-function
     default -- a caller that omits it is a bug, not a silently-resolved wall
     clock. Guards against a regression that reintroduces `= None` here.
-    build_context_string is not in this list: it takes no current_year
+    build_context_string is not in this list: it takes no date
     parameter at all (it never resolved a year itself, so
     the earlier "signature parity" parameter was unused)."""
     with pytest.raises(TypeError):
@@ -236,7 +241,7 @@ def test_prioritize_entries_uses_taxonomy_default_limit_when_unspecified():
     explicit ``limit`` must return all 10 (proves the taxonomy-keyed default
     is actually consulted, not some other constant)."""
     entries = [{"text": str(i), "extracted_fields": {"year": str(2000 + i)}} for i in range(10)]
-    result = prioritize_entries(entries, "H", current_year=2026)
+    result = prioritize_entries(entries, "H", as_of=AS_OF_2026)
     assert len(result) == 10
 
 
@@ -244,7 +249,7 @@ def test_prioritize_entries_default_limit_for_unlisted_code():
     """A code absent from ENTRY_LIMITS falls back to ENTRY_LIMITS['default']
     == 5, not to "no limit"."""
     entries = [{"text": str(i), "extracted_fields": {}} for i in range(8)]
-    result = prioritize_entries(entries, "Q1", current_year=2026)
+    result = prioritize_entries(entries, "Q1", as_of=AS_OF_2026)
     assert len(result) == 5
 
 
@@ -257,7 +262,7 @@ def test_prioritize_entries_ongoing_entry_outranks_older_senior_entry():
         {"text": "Ongoing co-I grant", "extracted_fields": {"role": "Co-Investigator",
                                                              "start_date": "2012", "end_date": "present"}},
     ]
-    result = prioritize_entries(entries, "M2B", limit=1, current_year=2026)
+    result = prioritize_entries(entries, "M2B", limit=1, as_of=AS_OF_2026)
     assert [e["text"] for e in result] == ["Ongoing co-I grant"]
 
 
@@ -268,7 +273,7 @@ def test_prioritize_entries_ranks_by_latest_year_not_start_year():
         {"text": "Single 2016", "extracted_fields": {"start_date": "2016"}},
         {"text": "Long range", "extracted_fields": {"start_date": "2004", "end_date": "2024"}},
     ]
-    result = prioritize_entries(entries, "O", limit=1, current_year=2026)
+    result = prioritize_entries(entries, "O", limit=1, as_of=AS_OF_2026)
     assert [e["text"] for e in result] == ["Long range"]
 
 
@@ -281,16 +286,16 @@ def test_prioritize_entries_recency_weight_beats_content_length():
         {"text": "u" * 500, "extracted_fields": {}},
         {"text": "", "extracted_fields": {"year": "2012"}},
     ]
-    result = prioritize_entries(entries, "O", limit=1, current_year=2026)
+    result = prioritize_entries(entries, "O", limit=1, as_of=AS_OF_2026)
     assert result[0]["extracted_fields"] == {"year": "2012"}
 
 
-# #947: current_year is now required on prioritize_entries / gather_context_entries /
-# is_current_entry -- there is no more per-function wall-clock default to test.
-# build_context_string takes no current_year at all: it never
+# #947: the date (current_year, now as_of) is required on prioritize_entries /
+# gather_context_entries / is_current_entry -- there is no more per-function
+# wall-clock default to test. build_context_string takes no date at all: it never
 # resolved a year itself. Only run_stage_4_5 still resolves the wall clock, and
 # only once, at the top of the run; that is covered by
-# test_run_stage_4_5_resolves_current_year_once below, near the other
+# test_run_stage_4_5_resolves_as_of_once below, near the other
 # run_stage_4_5 end-to-end tests.
 
 
@@ -372,7 +377,7 @@ def test_latest_entry_year_none_when_no_year_anywhere():
     ("S1", {"year": "2024"}, "A paper on the present state", False),  # bare 'present' is not a range
 ])
 def test_is_current_entry(code, fields, text, expected):
-    assert is_current_entry({"extracted_fields": fields, "text": text}, code, current_year=2026) is expected
+    assert is_current_entry({"extracted_fields": fields, "text": text}, code, as_of=AS_OF_2026) is expected
 
 
 @pytest.mark.parametrize("code, fields, text, expected", [
@@ -391,17 +396,17 @@ def test_is_current_entry(code, fields, text, expected):
 def test_is_current_entry_current_by_definition_codes_honour_end_date(code, fields, text, expected):
     """Verifier finding on #946 item 6: every M2A counted as current, so a
     grant that ended in 2024 still got the tag and recency 1.0."""
-    assert is_current_entry({"extracted_fields": fields, "text": text}, code, current_year=2026) is expected
+    assert is_current_entry({"extracted_fields": fields, "text": text}, code, as_of=AS_OF_2026) is expected
 
 
-def _frozen_datetime(year):
-    """A stand-in for stage_4_5.datetime whose now() is 1 January of `year`,
-    so the wall-clock default is testable."""
+def _frozen_datetime(year, month=1, day=1):
+    """A stand-in for stage_4_5.datetime whose now() is the given day (1 January
+    of `year` by default), so the wall-clock default is testable."""
     class _Frozen:
         @staticmethod
         def now():
             from datetime import datetime as real
-            return real(year, 1, 1)
+            return real(year, month, day)
     return _Frozen
 
 
@@ -430,7 +435,7 @@ def test_ongoing_end_date_shapes(end_date, expected):
     ongoing. Uses K1 (neither current-by-definition nor M1) to isolate
     ONGOING_PATTERN from the other is_current_entry branches."""
     entry = {"extracted_fields": {"end_date": end_date}, "text": "x"}
-    assert is_current_entry(entry, "K1", current_year=2026) is expected
+    assert is_current_entry(entry, "K1", as_of=AS_OF_2026) is expected
 
 
 def test_ongoing_pattern_matches_spaced_dash_range_directly():
@@ -443,12 +448,12 @@ def test_ongoing_pattern_matches_spaced_dash_range_directly():
 
 def test_score_entry_recency_current_entry_scores_one():
     entry = {"extracted_fields": {"start_date": "1995", "end_date": "present"}, "text": "x"}
-    assert score_entry_recency(entry, "O", current_year=2026) == 1.0
+    assert score_entry_recency(entry, "O", as_of=AS_OF_2026) == 1.0
 
 
 def test_score_entry_recency_decays_linearly_and_clamps():
     def rec(year):
-        return score_entry_recency({"extracted_fields": {"year": str(year)}, "text": "x"}, "S1", 2026)
+        return score_entry_recency({"extracted_fields": {"year": str(year)}, "text": "x"}, "S1", AS_OF_2026)
     assert rec(2026) == 1.0
     assert rec(2016) == pytest.approx(0.5)
     assert rec(2006) == 0.0
@@ -457,16 +462,16 @@ def test_score_entry_recency_decays_linearly_and_clamps():
 
 
 def test_score_entry_recency_judges_end_date_against_its_own_year(monkeypatch):
-    """The ended-grant check must use the caller's current_year, not the
+    """The ended-grant check must use the caller's as_of, not the
     wall clock (frozen at 2020 here): at 2040 a grant that ended in 2030
     scores by decay, although at the wall-clock year it would be current."""
     monkeypatch.setattr(stage_4_5, "datetime", _frozen_datetime(2020))
     grant = {"extracted_fields": {"end_date": "2030"}, "text": "x"}
-    assert score_entry_recency(grant, "M2A", current_year=2040) == pytest.approx(0.5)
+    assert score_entry_recency(grant, "M2A", as_of=date(2040, 1, 1)) == pytest.approx(0.5)
 
 
 def test_score_entry_recency_undated_scores_zero():
-    assert score_entry_recency({"extracted_fields": {}, "text": "x"}, "S1", 2026) == 0.0
+    assert score_entry_recency({"extracted_fields": {}, "text": "x"}, "S1", AS_OF_2026) == 0.0
 
 
 def test_open_range_in_text_only_makes_m1_current_not_other_codes():
@@ -475,9 +480,9 @@ def test_open_range_in_text_only_makes_m1_current_not_other_codes():
     1.0. Only M1 (whose project lines carry their dates in the text) checks
     it; the same text on S1 must not."""
     entry = {"extracted_fields": {"year": "2005"}, "text": "Ongoing since 2005-present in this field."}
-    assert is_current_entry(entry, "M1", current_year=2026) is True
-    assert is_current_entry(entry, "S1", current_year=2026) is False
-    assert score_entry_recency(entry, "S1", 2026) != 1.0
+    assert is_current_entry(entry, "M1", as_of=AS_OF_2026) is True
+    assert is_current_entry(entry, "S1", as_of=AS_OF_2026) is False
+    assert score_entry_recency(entry, "S1", AS_OF_2026) != 1.0
 
 
 def test_compute_entry_recency_agrees_with_is_current_entry_and_score_entry_recency():
@@ -486,15 +491,15 @@ def test_compute_entry_recency_agrees_with_is_current_entry_and_score_entry_rece
     score_entry_recency's decay calc). compute_entry_recency computes it
     once and its fields must match what the two separate functions return."""
     entry = {"extracted_fields": {"narrative": "x"}, "text": "Studies airway immunology"}  # undated M1
-    recency = compute_entry_recency(entry, "M1", 2026)
+    recency = compute_entry_recency(entry, "M1", AS_OF_2026)
     assert recency.is_current is True
     assert recency.latest_year is None
     assert recency.score == 1.0
-    assert recency.is_current == is_current_entry(entry, "M1", current_year=2026)
-    assert recency.score == score_entry_recency(entry, "M1", 2026)
+    assert recency.is_current == is_current_entry(entry, "M1", as_of=AS_OF_2026)
+    assert recency.score == score_entry_recency(entry, "M1", AS_OF_2026)
 
     dated = {"extracted_fields": {"year": "2016"}, "text": "x"}
-    dated_recency = compute_entry_recency(dated, "S1", 2026)
+    dated_recency = compute_entry_recency(dated, "S1", AS_OF_2026)
     assert dated_recency.latest_year == 2016
     assert dated_recency.is_current is False
     assert dated_recency.score == pytest.approx(0.5)
@@ -503,16 +508,16 @@ def test_compute_entry_recency_agrees_with_is_current_entry_and_score_entry_rece
 def test_compute_entry_recency_dated_closed_m1_entry_is_not_current():
     """the undated-M1 test above never exercises compute_entry_recency's
     M1 wire when the entry IS dated. A mutant changing compute_entry_recency's
-    `is_current_entry(entry, taxonomy_code, current_year, latest_year=year)` call to
+    `is_current_entry(entry, taxonomy_code, as_of, latest_year=year)` call to
     pass `latest_year=None` instead makes is_current_entry recompute nothing, see
     a None year, and wrongly return True (its "undated M1" branch) for every M1
     entry, dated or not -- with the module suite still green, since no test pinned
     a dated M1 entry through compute_entry_recency/score_entry_recency."""
     entry = {"extracted_fields": {}, "text": "Studied X, 2010-2015"}
-    recency = compute_entry_recency(entry, "M1", 2026)
+    recency = compute_entry_recency(entry, "M1", AS_OF_2026)
     assert recency.is_current is False
     assert recency.score < 1.0
-    assert score_entry_recency(entry, "M1", 2026) < 1.0
+    assert score_entry_recency(entry, "M1", AS_OF_2026) < 1.0
 
 
 # --- gather_context_entries -----------------------------------------------------
@@ -530,7 +535,7 @@ def test_gather_context_entries_skips_low_value_sections_and_keeps_boundary():
         "S2": [{"text": "review", "extracted_fields": {}}],
     }
 
-    result = gather_context_entries(entries_by_code, current_year=2026)
+    result = gather_context_entries(entries_by_code, as_of=AS_OF_2026)
 
     codes = [code for code, _entry, _weight, _recency in result]
     assert codes == ["M1", "S2"]
@@ -543,7 +548,7 @@ def test_gather_context_entries_adds_seniority_bonus_to_weight():
     entries_by_code = {
         "M2B": [{"text": "R01 study", "extracted_fields": {"pi_role": "Principal Investigator"}}],
     }
-    result = gather_context_entries(entries_by_code, current_year=2026)
+    result = gather_context_entries(entries_by_code, as_of=AS_OF_2026)
     assert len(result) == 1
     _code, _entry, weight, _recency = result[0]
     assert weight == stage_4_5.SECTION_WEIGHTS["M2B"] + PI_BONUS
@@ -552,19 +557,31 @@ def test_gather_context_entries_adds_seniority_bonus_to_weight():
 def test_gather_context_entries_adds_recency_bonus_to_weight():
     """An ongoing entry's weight is base + RECENCY_WEIGHT (x1.0)."""
     entries_by_code = {"O": [{"text": "Chair", "extracted_fields": {"start_date": "2020", "end_date": "present"}}]}
-    (_code, _entry, weight, _recency), = gather_context_entries(entries_by_code, current_year=2026)
+    (_code, _entry, weight, _recency), = gather_context_entries(entries_by_code, as_of=AS_OF_2026)
     assert weight == pytest.approx(stage_4_5.SECTION_WEIGHTS["O"] + RECENCY_WEIGHT)
 
 
-def test_gather_context_entries_passes_current_year_to_section_selection():
-    """current_year must reach prioritize_entries' per-section cut, not only
-    the final weight. At current_year=2045 all six 2020-2025 entries are past
+def test_gather_context_entries_passes_as_of_to_section_selection():
+    """as_of must reach prioritize_entries' per-section cut, not only
+    the final weight. As of 2045 all six 2020-2025 entries are past
     the 20-year window (recency 0), so text length decides and the shortest
     (2025) entry is cut; at the wall-clock year it would be the 2020 one."""
     entries = [{"text": "x" * (100 - 10 * i), "extracted_fields": {"year": str(2020 + i)}} for i in range(6)]
-    result = gather_context_entries({"O": entries}, current_year=2045)
+    result = gather_context_entries({"O": entries}, as_of=date(2045, 1, 1))
     years = sorted(e["extracted_fields"]["year"] for _c, e, _w, _r in result)
     assert years == ["2020", "2021", "2022", "2023", "2024"]
+
+
+def test_prioritize_and_recency_read_the_given_date_for_text_dates_and_ranking():
+    """prioritize_entries scores an entry it was given no recency for at its own
+    as_of, and a range dated only in the text is capped at as_of's year: at 2045
+    the 2025 entry is cut, at 2026 the 2020 one; "Project 2030-2035" ended by 2040."""
+    entries = [{"text": "x" * (100 - 10 * i), "extracted_fields": {"year": str(2020 + i)}} for i in range(6)]
+    for as_of, cut in ((date(2045, 1, 1), "2025"), (AS_OF_2026, "2020")):
+        kept = [e["extracted_fields"]["year"] for e in prioritize_entries(entries, "O", as_of=as_of)]
+        assert cut not in kept and len(kept) == 5, as_of
+    recency = compute_entry_recency({"text": "Project 2030-2035", "extracted_fields": {}}, "O", date(2040, 1, 1))
+    assert (recency.latest_year, recency.score) == (2035, pytest.approx(0.75))
 
 
 def test_gather_context_entries_current_project_leads_old_first_author_paper():
@@ -578,20 +595,20 @@ def test_gather_context_entries_current_project_leads_old_first_author_paper():
         "title": "T", "authors": "Roe R, Poe P, Moe M", "target_name": "Jane Doe", "year": "2024"}}
     project = {"text": "Current project 2025-present: aims", "extracted_fields": {"narrative": "x"}}
     result = gather_context_entries({"S1": [old_paper, recent_paper], "M1": [project]},
-                                    cv_owner_name="Jane Doe", current_year=2026)
+                                    cv_owner_name="Jane Doe", as_of=AS_OF_2026)
     assert [e["text"] for _c, e, _w, _r in result] == ["Current project 2025-present: aims", "Recent paper", "Old paper"]
 
 
-def test_gather_context_entries_weight_and_tag_use_given_current_year_not_2026():
-    """a mutant hardcoding current_year=2026 inside gather's own
-    recency computation (rather than threading through the current_year
+def test_gather_context_entries_weight_and_tag_use_given_as_of_not_2026():
+    """a mutant hardcoding the year 2026 inside gather's own
+    recency computation (rather than threading through the as_of
     parameter) left the suite green, because every other direct
     gather_context_entries test in this file also happens to use 2026. A
     grant ending in 2035 is current-by-definition at 2026 (score 1.0, weight
     0.4) but has passed at 2040 (score 0.75, weight 0.3) -- the two years
     must give different weight and recency.is_current."""
     entries_by_code = {"M2A": [{"text": "Grant", "extracted_fields": {"end_date": "2035"}}]}
-    (_code, _entry, weight, recency), = gather_context_entries(entries_by_code, current_year=2040)
+    (_code, _entry, weight, recency), = gather_context_entries(entries_by_code, as_of=date(2040, 1, 1))
     assert recency.is_current is False
     assert weight == pytest.approx(0.3)
 
@@ -612,9 +629,9 @@ def test_gather_and_build_compute_recency_exactly_once_per_entry(monkeypatch):
     compute_calls = []
     real_compute = stage_4_5.compute_entry_recency
 
-    def counting_compute(entry, taxonomy_code, current_year):
+    def counting_compute(entry, taxonomy_code, as_of):
         compute_calls.append(id(entry))
-        return real_compute(entry, taxonomy_code, current_year)
+        return real_compute(entry, taxonomy_code, as_of)
 
     year_calls = []
     real_latest_year = stage_4_5.latest_entry_year
@@ -631,7 +648,7 @@ def test_gather_and_build_compute_recency_exactly_once_per_entry(monkeypatch):
         "S1": [{"text": "Paper", "extracted_fields": {"title": "T", "year": "2018"}}],
         "M1": [{"text": "Undated research narrative", "extracted_fields": {}}],
     }
-    weighted = gather_context_entries(entries_by_code, current_year=2026)
+    weighted = gather_context_entries(entries_by_code, as_of=AS_OF_2026)
     build_context_string(weighted)
 
     assert len(compute_calls) == 3
@@ -720,7 +737,7 @@ def test_format_entry_for_context_grant_line_carries_its_period(code, dates, seg
     the status; a blank or literal 'None' date adds nothing."""
     entry = {"extracted_fields": {"title": "Gadget study", "pi_role": "PI", "agency": "Example Fund", **dates},
              "hierarchy": ["Current Funding" if code == "M2A" else "Completed Funding"], "text": ""}
-    ended = end_date_state(entry, 2026)
+    ended = end_date_state(entry, AS_OF_2026)
     assert format_entry_for_context(code, entry, ended) == (
         f"[GRANT-{code}] Gadget study | Status: {GRANT_STATUS_BY_CODE[code]}{segment} | Role: PI | Agency: Example Fund")
 
@@ -740,7 +757,62 @@ def test_end_date_state_reads_ended_ongoing_or_unstated(end_date, expected):
     """#1554: a grant line's status follows its end date; an end date with no year
     and no ongoing word states nothing (None), which is not the same as ongoing."""
     entry = {"extracted_fields": {"end_date": end_date}, "text": ""}
-    assert end_date_state(entry, 2026) is expected
+    assert end_date_state(entry, AS_OF_2026) is expected
+
+
+@pytest.mark.parametrize("end_date, expected", [
+    ("2026-04-30", True),     # ended earlier in the year: UAURFU-05 read "currently PI"
+    ("4/30/26", True),        # a two-digit year, read as stage 6 reads it
+    ("2025-12-31", True),
+    ("2026-10", False),       # the month of the as-of date has not ended
+    ("2026-10-27", False),    # nor has the as-of date itself
+    ("2026-11-30", False),
+    ("2026", False),          # a bare year may name any month of it
+    ("2026 - present", False),
+    ("2019; 2020; 2021; 2026", None),  # a fused record's list of ends states no one end
+    ("2019, 2026", None),
+    ("June 30, 2026", False),          # a comma inside one date is not a list
+])
+def test_end_date_state_judges_the_end_date_at_its_own_precision(end_date, expected):
+    """#1554 (comment 6125259955): end_date_state compared years only, so a grant
+    that ended in April still read as current in October. It now judges the date
+    the way stage 6's Current/Past rebucket does (grant_has_ended, #1713)."""
+    entry = {"extracted_fields": {"end_date": end_date}, "text": ""}
+    assert end_date_state(entry, date(2026, 10, 27)) is expected
+
+
+def test_end_date_state_reads_a_one_digit_end_year_against_the_start():
+    """Stage 6's reading of a truncated end year ("9/1/07" to "8/30/1" is 2011,
+    #1343) reaches the context line too: the year-only check read no year."""
+    entry = {"extracted_fields": {"start_date": "9/1/07", "end_date": "8/30/1"}, "text": ""}
+    assert end_date_state(entry, AS_OF_2026) is True
+    assert end_date_state({"extracted_fields": {"end_date": "8/30/1"}, "text": ""}, AS_OF_2026) is None
+
+
+def test_resolve_as_of_keeps_a_given_date_and_reads_the_clock_without_one(monkeypatch):
+    monkeypatch.setattr(stage_4_5, "datetime", _frozen_datetime(2031, 5, 4))
+    assert stage_4_5.resolve_as_of(None) == date(2031, 5, 4)
+    assert stage_4_5.resolve_as_of(date(2020, 2, 3)) == date(2020, 2, 3)
+
+
+def test_a_grant_that_ended_earlier_in_the_year_reads_completed_and_untagged():
+    """The UAURFU-05 shape through the context line: an M2A grant that ended in
+    May reads completed with no [CURRENT] tag by October, while one ending in
+    December is still current and tagged."""
+    as_of = date(2026, 10, 27)
+    ended = {"extracted_fields": {"title": "Widget cohort", "pi_role": "PI", "agency": "Example Fund",
+                                  "start_date": "2021-06-01", "end_date": "2026-05-31"}, "text": "x"}
+    running = {"extracted_fields": {"title": "Gizmo trial", "pi_role": "PI", "agency": "Example Fund",
+                                    "start_date": "2022-01-01", "end_date": "2026-12-31"}, "text": "y"}
+    context = build_context_string(
+        [("M2A", ended, 0.0, compute_entry_recency(ended, "M2A", as_of)),
+         ("M2A", running, -0.1, compute_entry_recency(running, "M2A", as_of))], max_tokens=200)
+    assert context.splitlines() == [
+        "[GRANT-M2A] Widget cohort | Status: completed | Period: 2021-06-01 to 2026-05-31"
+        " | Role: PI | Agency: Example Fund",
+        f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] Gizmo trial | Status: current | Period: 2022-01-01 to 2026-12-31"
+        " | Role: PI | Agency: Example Fund",
+    ]
 
 
 @pytest.mark.parametrize("code, ended, hierarchy, expected", [
@@ -833,8 +905,8 @@ def test_build_context_string_grant_tag_and_status_agree():
     ongoing = {"extracted_fields": {"title": "Cohort study", "start_date": "2017", "end_date": "present",
                                     "pi_role": "Co-I", "agency": "Fund"},
                "hierarchy": ["Research Projects"], "text": "y"}
-    weighted = [("M2A", undated, 0.0, compute_entry_recency(undated, "M2A", 2026)),
-                ("M2B", ongoing, -0.1, compute_entry_recency(ongoing, "M2B", 2026))]
+    weighted = [("M2A", undated, 0.0, compute_entry_recency(undated, "M2A", AS_OF_2026)),
+                ("M2B", ongoing, -0.1, compute_entry_recency(ongoing, "M2B", AS_OF_2026))]
 
     assert build_context_string(weighted, max_tokens=200) == (
         f"[GRANT-M2A] Consensus grant | Status: {GRANT_STATUS_NOT_STATED} | Period: from 2007 "
@@ -920,21 +992,21 @@ def test_build_context_string_includes_every_entry_that_fits():
 def test_build_context_string_tags_current_entries():
     current_entry = {"extracted_fields": {"end_date": "present"}, "text": "Teaching"}
     past_entry = {"extracted_fields": {"end_date": "2019"}, "text": "Old teaching"}
-    current = ("K1", current_entry, -0.1, compute_entry_recency(current_entry, "K1", 2026))
-    past = ("K1", past_entry, -0.2, compute_entry_recency(past_entry, "K1", 2026))
+    current = ("K1", current_entry, -0.1, compute_entry_recency(current_entry, "K1", AS_OF_2026))
+    past = ("K1", past_entry, -0.2, compute_entry_recency(past_entry, "K1", AS_OF_2026))
     result = build_context_string([current, past], max_tokens=100)
     assert result == f"{CURRENT_CONTEXT_TAG} [K1] Teaching\n[K1] Old teaching"
 
 
 def test_build_context_string_tag_follows_recency_computed_at_a_year_other_than_2026():
     """the [CURRENT] tag must come from each entry's own
-    already-computed EntryRecency (gather's 4th tuple element), exercised at
-    current_year=2040 so a regression that only happens to tag correctly at
+    already-computed EntryRecency (gather's 4th tuple element), exercised as
+    of 2040 so a regression that only happens to tag correctly at
     2026 (every other direct build_context_string test's year) cannot hide."""
     current_grant = {"extracted_fields": {"title": "R01", "end_date": "2045"}, "text": "x"}
     past_grant = {"extracted_fields": {"title": "R21", "end_date": "2035"}, "text": "y"}
-    current_recency = compute_entry_recency(current_grant, "M2A", 2040)
-    past_recency = compute_entry_recency(past_grant, "M2A", 2040)
+    current_recency = compute_entry_recency(current_grant, "M2A", date(2040, 1, 1))
+    past_recency = compute_entry_recency(past_grant, "M2A", date(2040, 1, 1))
     assert current_recency.is_current is True
     assert past_recency.is_current is False
 
@@ -1137,6 +1209,13 @@ def test_generate_research_summary_prompt_without_grants_or_mentees_asks_for_non
     (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] Gizmo trial | Status: current | Role: Co-I | Agency: Example Fund",
      {"funding"}),
     (_PENDING_LINE, {"pending"}),
+    # A funded code under a pending heading reads pending (grant_status), and the
+    # pending rule follows the Status, not the tag (#1628 review, #1554).
+    ("[GRANT-M2B] Gizmo renewal | Status: pending application (not funded) | Period: 2027 to 2031"
+     " | Role: PI | Agency: Example Fund", {"funding", "pending"}),
+    # An M2C the CV marks declined is not pending.
+    ("[GRANT-M2C] Widget R21 | Status: not received (declined, withdrawn or not funded) | Submitted: 2023"
+     " | Role: PI | Agency: Example Fund", set()),
     (_MENTEE_LINE, {"mentoring"}),
     ("[N3B] Former student, widget assays", {"mentoring"}),
     ("[N4] Mentee awards and outputs", {"mentoring"}),
@@ -1484,9 +1563,9 @@ def test_run_stage_4_5_derives_owner_name_from_document_uid(monkeypatch, tmp_pat
     captured = {}
     real_gather = stage_4_5.gather_context_entries
 
-    def spy_gather(entries_by_code, current_year, cv_owner_name=''):
+    def spy_gather(entries_by_code, as_of, cv_owner_name=''):
         captured["cv_owner_name"] = cv_owner_name
-        return real_gather(entries_by_code, current_year, cv_owner_name=cv_owner_name)
+        return real_gather(entries_by_code, as_of, cv_owner_name=cv_owner_name)
     monkeypatch.setattr(stage_4_5, "gather_context_entries", spy_gather)
 
     def fake_call_llm(*, messages, **_kwargs):
@@ -1530,11 +1609,11 @@ def test_run_stage_4_5_raises_file_not_found_for_missing_input(monkeypatch, tmp_
     assert not missing_output.exists()
 
 
-def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, tmp_path):
-    """current_year must be required and resolved once at the
+def test_run_stage_4_5_resolves_as_of_once_from_wall_clock(monkeypatch, tmp_path):
+    """as_of must be required and resolved once at the
     top of the run, not left to each function's own default. Frozen at 2030,
-    a grant that ended in 2028 is not current -- proving resolve_current_year
-    actually ran and its result (not the real wall-clock year) reached
+    a grant that ended in 2028 is not current -- proving resolve_as_of
+    actually ran and its result (not the real wall-clock date) reached
     is_current_entry via gather/build. end_date 2028 is chosen so the two
     candidate years disagree: at the real wall clock the grant would still
     be current (not ended), at the frozen 2030 it is not -- an end_date
@@ -1562,6 +1641,30 @@ def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, t
     # check the CV CONTEXT entry itself is not tagged.
     assert f"{CURRENT_CONTEXT_TAG} [GRANT-M2A]" not in captured["prompt"]
     assert "[GRANT-M2A]" in captured["prompt"]
+
+
+def test_run_stage_4_5_resolves_the_wall_clock_date_not_only_its_year(monkeypatch, tmp_path):
+    """The run reads the date, not just the year (#1554): frozen at 1 June 2030,
+    a grant that ended in March 2030 reads completed and untagged, though it ends
+    in the run's own year."""
+    monkeypatch.setattr(stage_4_5, "datetime", _frozen_datetime(2030, 6, 1))
+    captured = {}
+
+    def fake_call_llm(*, messages, **_kwargs):
+        captured["prompt"] = messages[0]["content"]
+        return {"content": "Summary.", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    inp = _write_fields_json(
+        tmp_path, "TEST06",
+        [{"taxonomy_code": "M2A", "text": "Grant",
+          "extracted_fields": {"title": "R01", "end_date": "2030-03-31"}}],
+        cv_owner={"first_name": "Jane", "last_name": "Doe"},
+    )
+    run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)
+
+    assert f"{CURRENT_CONTEXT_TAG} [GRANT-M2A]" not in captured["prompt"]
+    assert "[GRANT-M2A] R01 | Status: completed | Period: until 2030-03-31" in captured["prompt"]
 
 
 def test_run_stage_4_5_generation_prompt_carries_no_owner_name(monkeypatch, tmp_path):

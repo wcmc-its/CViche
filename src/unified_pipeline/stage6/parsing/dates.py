@@ -13,10 +13,16 @@ Read-only, like the rest of `parsing/`: a string or a record in, an answer about
 it out. Deciding how a date should *look* on the page is `formatting/dates.py`;
 deciding what order records go in is `sorting/`. Both import from here, so
 nothing in this file may import from either.
+
+A grant's end date is read here too (`grant_end_date`, `grant_has_ended`):
+stage 6's Current/Past rebucket, stage 4.5's grant status line and the
+doctor's grant and summary lints all ask whether a grant has ended, and they
+used to answer at different precisions (#1713, #1554).
 """
 import datetime
 import re
 from types import MappingProxyType
+from typing import NamedTuple
 
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
@@ -345,3 +351,105 @@ def _dates_overlap_or_match(entry_a: dict, entry_b: dict) -> bool:
         return True
     return not (_ends_strictly_before(end_a_b, start_b_b)
                 or _ends_strictly_before(end_b_b, start_a_b))
+
+
+# The first four-digit run in an end date: the year both date rebuckets have
+# always read ("2016-10-21", "June 2015", "2015-16").
+END_DATE_FOUR_DIGIT_YEAR_RE = re.compile(r'(\d{4})')
+# A grant's end date lies at most this many years after the current year: the
+# horizon that picks the century of a two-digit end year ("6/30/31" is 2031,
+# "6/30/95" is 1995). Grant end dates run into the future, so the shared
+# past-leaning pivot (core/two_digit_year.py) misreads them (EBYSBC E7).
+GRANT_END_YEAR_HORIZON = 10
+# mm/dd/yy or mm-dd-yy: an end date whose year is two digits -- or one, a
+# truncated year ("8/30/1", RCBKFG CAOACN 589, #1343) that only the grant's
+# start date can place.
+TWO_DIGIT_YEAR_DATE_RE = re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{1,2})')
+
+
+def year_at_or_after(digits: str, start_year: int) -> int:
+    """The first year at or after `start_year` whose last `len(digits)`
+    digits are `digits`: a truncated end year read against the start year
+    ("9/1/07" to "8/30/1" is 2011). Shared with the doctor's grant_bucket lint,
+    so the stage-6 rebucket and the check that judges it read it alike."""
+    modulus = 10 ** len(digits)
+    year = start_year - start_year % modulus + int(digits)
+    return year if year >= start_year else year + modulus
+
+
+def grant_end_year(end_date: str | None, current_year: int,
+                   start_date: str | None = None) -> int | None:
+    """The year a grant's stage-4 end date names, or None when none reads.
+
+    The first four-digit run, as before; failing that, a valid mm/dd/yy date
+    (EBYSBC E7: three ended grants stayed under Current because the rebucket
+    found no four-digit year in their end dates). Its century is read against
+    `current_year`, not the shared past-leaning pivot: a grant's end date can
+    lie in the future, so yy is 20yy up to `GRANT_END_YEAR_HORIZON` years past
+    `current_year`, else 19yy. A one-digit year ("8/30/1") reads only against
+    the year of `start_date` (`year_at_or_after`, #1343); with no readable
+    start it reads as nothing."""
+    text = str(end_date or '').strip()
+    year_match = END_DATE_FOUR_DIGIT_YEAR_RE.search(text)
+    if year_match:
+        return int(year_match.group(1))
+    short = TWO_DIGIT_YEAR_DATE_RE.fullmatch(text)
+    if not short:
+        return None
+    digits = short.group(1)
+    if len(digits) == 1:
+        # `_parse_date_components` reads no one-digit year, so the month and
+        # day are checked on the start year's own calendar instead.
+        start = grant_end_year(start_date, current_year) if start_date else None
+        if start is None:
+            return None
+        year = year_at_or_after(digits, start)
+        return year if _parse_date_components(f'{text[:-1]}{year}')[0] else None
+    if _parse_date_components(text)[0] is None:
+        return None
+    year = 2000 + int(digits)
+    return year if year <= current_year + GRANT_END_YEAR_HORIZON else year - 100
+
+
+class GrantEndDate(NamedTuple):
+    """A grant's end date at the precision its stage-4 text states (#1713):
+    `month` and `day` are None where the source gave none."""
+    year: int
+    month: int | None
+    day: int | None
+
+
+def grant_end_date(end_date: str | None, as_of: datetime.date,
+                   start_date: str | None = None) -> GrantEndDate | None:
+    """The year, month and day a grant's stage-4 end date names, or None when
+    no year reads.
+
+    The year is `grant_end_year`'s, read against `as_of.year`; the month and
+    day are `_parse_date_components`'s. A two-digit or one-digit year is first
+    written out as the year `grant_end_year` read, so "6/30/31" carries its
+    month and day into 2031, not the shared pivot's 1931. A shape that parses
+    to no month ("2026", "Fall 2026", "2015-16") is year-only."""
+    year = grant_end_year(end_date, as_of.year, start_date)
+    if year is None:
+        return None
+    text = str(end_date or '').strip()
+    short = TWO_DIGIT_YEAR_DATE_RE.fullmatch(text)
+    if short:
+        text = f'{text[:short.start(1)]}{year}'
+    _, month, day = _parse_date_components(text)
+    return GrantEndDate(year, month, day)
+
+
+def grant_has_ended(end: GrantEndDate, as_of: datetime.date) -> bool:
+    """True when `end` is before `as_of` at the precision `end` states (#1713).
+
+    A full date compares as a date, a year and month as a year and month, and
+    a bare year as a year. A bare year equal to `as_of.year` has not ended: it
+    may name any month of it, so a grant whose source gives only "2026" stays
+    Current all of 2026, as it always has. A grant that ends on `as_of` itself
+    has not ended either."""
+    if end.month is None:
+        return end.year < as_of.year
+    if end.day is None:
+        return (end.year, end.month) < (as_of.year, as_of.month)
+    return (end.year, end.month, end.day) < (as_of.year, as_of.month, as_of.day)

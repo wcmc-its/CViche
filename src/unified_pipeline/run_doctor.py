@@ -397,11 +397,15 @@ Lints, ranked by the severity of the failure class they catch:
                           mentoring with no mentoring, or a funder (NIH, NSF,
                           DoD, ...) no entry or source line names. WARN, one
                           per kind. And at INFO, one per kind, a sentence
-                          its named grant's own record contradicts (#1554,
+                          its named record's own words contradict (#1554,
                           YUYVIG/NECRGC): a status against the grant's end
-                          date or heading, a declined award counted, a
-                          funder the grant's line does not name, a lead
-                          role it does not give. No score cap. Reads stage
+                          date, heading or stated status (or "earlier" for
+                          a paper in press), a declined award counted, a
+                          funder the grant's line does not name or names
+                          only as a collaborator, a lead role the grant or
+                          a named entry does not give, a PI role dated
+                          before any grant gives it, another grant's agent
+                          in a grant's design. No score cap. Reads stage
                           4.5 and 4, and the source when present
 14ah. owner_attribution   other people's content rendered as the CV owner's
                           (#1573, YUYVIG): mentee entries (N3, N3A, N3B)
