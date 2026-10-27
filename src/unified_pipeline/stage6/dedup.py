@@ -403,6 +403,33 @@ def _month_spans_overlap(span: tuple[_MonthDate, _MonthDate | None],
                 or (other_end is not None and _month_date_before(other_end, start)))
 
 
+# #666 (LTTYWI 297, 307, 311, 351): a teaching award a class votes names the
+# class ("Teacher of the Year (Class of 2031)"), and that year is no date of
+# the award. So two awards of another class are two awards, in the same year
+# or not, and a class year in the kept text does not vouch for the dropped
+# award's year ("... 2031" beside "(Class of 2031) ... 2029"). Only for an
+# award: a degree's "Class of" year is its date. And only when the kept text
+# states a year outside its class labels: when the class year is its one year,
+# it dates the award ("Gizmo Honor Society, Class of 2031" beside "Gizmo Honor
+# Society, 2031" is one honor).
+_CLASS_YEAR_RE = re.compile(rf'\bclass\s+of\s+({_YEAR_PATTERN})\b', re.IGNORECASE)
+_CLASS_YEAR_CODES = frozenset({'H'})
+
+
+def _class_year_apart(dropped_text: str, kept_text: str, code: str | None) -> bool:
+    """True, for an award code, when the dropped text names a class year the
+    kept text does not, or, when the kept text states a year outside its class
+    labels, the dropped text states a date the kept text does not carry once
+    every "Class of <year>" is cut out of both (`_dates_compatible`)."""
+    if code not in _CLASS_YEAR_CODES:
+        return False
+    if not set(_CLASS_YEAR_RE.findall(dropped_text)) <= set(_CLASS_YEAR_RE.findall(kept_text)):
+        return True
+    kept_dates = _CLASS_YEAR_RE.sub(' ', kept_text)
+    return bool(_YEAR_RE.search(kept_dates)) and not _dates_compatible(
+        _CLASS_YEAR_RE.sub(' ', dropped_text), kept_dates)
+
+
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
     """False when the dropped text states a date the kept text does not carry.
 
@@ -546,15 +573,18 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
       (`_dates_overlap_or_match`): the kept entry renders its fields' date, so
       a fused kept text vouches for no other date it holds (#666, EBYSBC
       VNUAHA-02: a 2013 award against a fused row whose fields are 2012's).
+    - either branch, and the two award names are apart (`_other_award_name`,
+      #666 CYOFWJ 40).
 
     Each shape also needs that no other entry of `document` carries the
-    record (`_carries_record`: the name, on the dropped record's dates or on
-    none), so keeping this copy cannot print it twice. Entries in
+    record (`_record_carried`: the name, on the dropped record's dates or on
+    none; a bare name only by listing it), so keeping this copy cannot print
+    it twice. Entries in
     `dropped_ids` (dropped already, this group or an earlier one) carry
     nothing: two identical copies must not each vouch for the other's drop.
     One more shape needs no such check: the fields say it is another record
-    (`_distinct_record_label`: another institution, venue, rank or book, a
-    companion title, a grant's title alone, a bare place; or
+    (`_distinct_record_label`: another institution, venue, society, rank or
+    book, a companion title, a grant's title alone, a bare place; or
     `_bare_occasion_apart`; or `_narrower_committee`, a committee name the
     kept one qualifies). Doubt drops, as it did before.
     """
@@ -576,8 +606,9 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
         return True
     if ((verbatim and not _significant_words(name) <= _rendered_words(kept_fields, rendered))
             or _names_a_sibling(kept_entry, kept_fields, rendered, name)
-            or not _dates_overlap_or_match(dropped_entry, kept_entry)):
-        return not any(_carries_record(entry.get('text') or '', name, dropped_text)
+            or not _dates_overlap_or_match(dropped_entry, kept_entry)
+            or _other_award_name(code, dropped_fields, kept_fields)):
+        return not any(_record_carried(entry, name, name_key, code, dropped_text)
                        for entry in others)
     if (_distinct_bare_names(dropped_entry, kept_entry,
                              name, _record_name(kept_fields, rendered))
@@ -594,8 +625,12 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
 # The field that tells two records of an appointment code apart: the same title
 # ("Senior Fellow") at two hospitals is two appointments. For a talk (R) it is
 # the venue: one lecture given in two towns is two talks (#666, EBYSBC RNKYST-01).
+# For a membership (I) it is the society: "Widget Society on Gizmos" beside
+# "International Society for Applied Widget Gizmos" over the same years is two
+# memberships, the shorter name's words all inside the longer, out of order
+# (#666, LFFKVV 112).
 _INSTITUTION_FIELD_BY_CODE = {'D1': 'institution', 'D2': 'institution', 'D3': 'organization',
-                              'R': 'location'}
+                              'I': 'organization', 'R': 'location'}
 
 
 def _ordered_words(text: str) -> list[str]:
@@ -617,21 +652,56 @@ def _different_institution(code: str | None, dropped_fields: dict,
     One name is the other reworded (cut short, a city or a word inserted, a
     one-letter initial spelled out) when its words occur in the other's, in
     order. "Acme Regional Clinic" and "Gadget Clinic for Children at Acme
-    Regional" share every word and are still two clinics. A longer
-    abbreviation ("Univ." for "University"), a name split in two ("North
-    Shore", "Northshore") and one half of a dual name are not recognised:
-    they keep both rows (the safe side).
+    Regional" share every word and are still two clinics. For a society (I),
+    its words reordered are the same name too (`_REORDERED_NAME_CODES`). A
+    longer abbreviation ("Univ." for "University"), a name split in two
+    ("North Shore", "Northshore") and one half of a dual name are not
+    recognised: they keep both rows (the safe side).
     """
     key = _INSTITUTION_FIELD_BY_CODE.get(code or '')
     dropped, kept = dropped_fields.get(key), kept_fields.get(key)
     if not (isinstance(dropped, str) and isinstance(kept, str)):
         return None
-    dropped_words, kept_words = _ordered_words(dropped), _ordered_words(kept)
-    if (not dropped_words or not kept_words
-            or _is_subsequence(dropped_words, kept_words)
-            or _is_subsequence(kept_words, dropped_words)):
-        return None
-    return dropped
+    return dropped if _names_apart(dropped, kept, code) else None
+
+
+# A society's or an award's name restated with its words in another order is
+# the same name: "ASWG - American Society of Widget Gizmos" beside "American
+# Society of Widget Gizmos (ASWG)", "Dean's Gizmo Award" beside "Gizmo Award
+# (Dean's)". Not for a hospital, a university or a venue, whose word order is
+# part of the name: "University of Acme Medical Center" and "Acme University
+# Medical Center" are two hospitals.
+_REORDERED_NAME_CODES = frozenset({'I', 'H'})
+
+
+def _names_apart(name: str, other: str, code: str | None) -> bool:
+    """True when neither name's words occur in the other's in order
+    (`_different_institution`), and, for a `_REORDERED_NAME_CODES` code, the
+    two names are not the same words reordered. A name with no words occurs
+    in any."""
+    words, other_words = _ordered_words(name), _ordered_words(other)
+    if code in _REORDERED_NAME_CODES and set(words) == set(other_words):
+        return False
+    return not _is_subsequence(words, other_words) and not _is_subsequence(other_words, words)
+
+
+# #666 (CYOFWJ 40): an award's name tells two awards of one year apart:
+# "1990 Gizmo Scholar, Acme Gizmo University" beside "1990 Jane Roe Scholar,
+# Acme Gizmo University", the shorter name's other word coming from the
+# university's name. A name holding the other's words in order is the same
+# award reworded ("Gizmo Scholar Award"). Unlike an institution, an award
+# named apart still drops when another entry carries it on its date: the
+# kept row may be a fused list of awards whose fields name one of them, and
+# another listing of the dropped award prints it (EBYSBC VNUAHA-02).
+_AWARD_NAME_FIELD_BY_CODE = MappingProxyType({'H': 'award_name'})
+
+
+def _other_award_name(code: str | None, dropped_fields: dict, kept_fields: dict) -> bool:
+    """True when the code names an award and the two award names are apart
+    (`_names_apart`)."""
+    key = _AWARD_NAME_FIELD_BY_CODE.get(code or '')
+    dropped, kept = dropped_fields.get(key), kept_fields.get(key)
+    return isinstance(dropped, str) and isinstance(kept, str) and _names_apart(dropped, kept, code)
 
 
 # A word that makes a title another rank, or a name another award or body:
@@ -1010,8 +1080,18 @@ def _other_journal_same_row(dropped_entry: dict, kept_entry: dict,
                 and _journal_core_words(name) != _journal_core_words(kept_name))
 
 
-# `_lists_name`: the separators between the items of a listed text.
+# `_lists_name`: the separators between the items of a listed text. A title in
+# double quotation marks is one item, whatever separators it holds: the row of
+# a reviewed book titled “Widgets: Gizmos, Sprockets and Cogs” lists no
+# journal "Widgets" (#666, LFFKVV 1487).
 _LIST_ITEM_SEPARATOR_RE = re.compile(r'[,;:|\t\n]')
+_QUOTED_TITLE_RE = re.compile(r'“[^”]*”|"[^"]*"')
+
+
+def _list_items(text: str) -> list[str]:
+    """The items of `text` (`_LIST_ITEM_SEPARATOR_RE`), a quoted title one item."""
+    unsplit = _QUOTED_TITLE_RE.sub(lambda title: _LIST_ITEM_SEPARATOR_RE.sub(' ', title.group()), text)
+    return _LIST_ITEM_SEPARATOR_RE.split(unsplit)
 
 
 def _lists_name(entry: dict, name: str, key: str, code: str | None,
@@ -1022,8 +1102,8 @@ def _lists_name(entry: dict, name: str, key: str, code: str | None,
     `degree` or a citation's journal vouched for a reviewer row that only
     shared a word with them):
 
-    - an item of its text is exactly that name, and the entry is of the same
-      code (the record's own list: "Gizmo Review, Widgets");
+    - an item of its text (`_list_items`) is exactly that name, and the entry
+      is of the same code (the record's own list: "Gizmo Review, Widgets");
     - its `key` field, the one that named the dropped record, holds exactly
       that name and the row says the same about it as the dropped row
       (`_same_row`). A longer name holding it ("Widgets Quarterly") is
@@ -1031,22 +1111,25 @@ def _lists_name(entry: dict, name: str, key: str, code: str | None,
     """
     target = _alnum(name)
     text = entry.get('text') or ''
-    if entry.get('taxonomy_code') == code and any(
-            _alnum(item) == target for item in _LIST_ITEM_SEPARATOR_RE.split(text)):
+    same_code = entry.get('taxonomy_code') == code
+    if same_code and any(_alnum(item) == target for item in _list_items(text)):
         return True
     fields = entry.get('extracted_fields') or {}
     return (_alnum(str(fields.get(key) or '')) == target
-            and _same_row(text, dropped_text, name))
+            and _same_row(text, dropped_text, name, same_code))
 
 
-def _same_row(text: str, dropped_text: str, name: str) -> bool:
+def _same_row(text: str, dropped_text: str, name: str, same_code: bool) -> bool:
     """True when `text` says no more about `name` than the dropped row does: the
     letters left of each once the name is cut out are the same (role and
-    status; the dates may differ), or `text` is the bare name. "Widgets,
-    Editorial Board" is not "Widgets, Associate Editor"."""
+    status; the dates may differ), or `text` is the bare name in the dropped
+    row's own code. "Widgets, Editorial Board" is not "Widgets, Associate
+    Editor", and a bare "Widgets" under another code is that code's record:
+    an ad hoc reviewer list's "Widgets" is not the editorial board's
+    "Widgets, Review Editor" (#666, LFFKVV 1434)."""
     residue = _row_residue(text, name)
-    return residue == '' or (residue is not None
-                             and residue == _row_residue(dropped_text, name))
+    return (residue == '' and same_code) or (residue is not None
+                                             and residue == _row_residue(dropped_text, name))
 
 
 # `_names_record`: a long name counts as named by a text that holds this share
@@ -1078,6 +1161,20 @@ def _carries_record(text: str, name: str, dropped_text: str) -> bool:
     where four other years of one award vouched for a dropped fifth)."""
     return _names_record(text, name) and (
         not _YEAR_RE.search(text) or _dates_compatible(dropped_text, text))
+
+
+def _record_carried(entry: dict, name: str, key: str, code: str | None,
+                    dropped_text: str) -> bool:
+    """True when `entry` carries the dropped record called `name`: by
+    `_carries_record`, or, when the dropped text is the bare name and nothing
+    else, only by listing that name itself (`_lists_name`). A bare name's
+    words stand in longer names of other records, so naming it is not
+    carrying it (#666, ZASOTV Q4D: the journal "Widgets" dropped against its
+    lead-in line "Reviewer for widgets journals:", then vouched for by the
+    "Journal of Widgets" listed under it)."""
+    if _alnum(dropped_text) == _alnum(name):
+        return _lists_name(entry, name, key, code, dropped_text)
+    return _carries_record(entry.get('text') or '', name, dropped_text)
 
 
 def _alnum(text: str) -> str:
@@ -1153,6 +1250,98 @@ def _group_header_between(dropped_entry: dict, kept_entry: dict,
                and entry.get('hierarchy') == hierarchy
                and _GROUP_HEADER_RE.fullmatch((entry.get('text') or '').strip())
                for entry in document or ())
+
+
+# #666 (LTTYWI 175, 179): a dated list whose year heads a group's first row
+# ("1997-2002 Member, Gadget Committee", then "Member, Widget Committee" on a
+# line of its own) gives the undated rows below it that first row's years. So
+# an undated row and a row of the same name under another year head are two
+# terms of one committee, not two copies: "Member, Widget Committee" under
+# 1997-2002 beside "2002-2003 Member, Widget Committee". The head of a row is
+# the row itself when its text opens with a year, else the nearest earlier row
+# of its source section that states a year, when that row opens with it and
+# the lines from it down to the row run on with no line between them that is
+# not a row of the section: a blank line ends a group, and an undated line
+# after one is a heading of the rows below it ("Acme Society" above "2000-03
+# Member, Acme Society"), not a row of the group above. A row stating a year
+# anywhere else heads no group (`_YEAR_LED_RE`), and an undated row of a
+# dated list is the shape only when it names a record its section renders: a
+# fragment of a row names none. This is the "year sits on the group's first
+# row" case `_group_header_between` cannot see.
+_YEAR_LED_RE = re.compile(rf'^\W*{_YEAR_PATTERN}\b')
+
+
+def _states_no_date(entry: dict) -> bool:
+    """True when neither the entry's text nor its date fields state a year."""
+    return not _YEAR_RE.search(entry.get('text') or '') and not _field_dates_text(entry)
+
+
+def _year_head(entry: dict, section: list[dict]) -> dict | None:
+    """The row whose leading year dates `entry` (see `_YEAR_LED_RE` above):
+    the entry itself, or the nearest earlier row of `section` stating a year,
+    reached through rows each ending on the line before the next; None when
+    that row does not open with its year or a line between is no row."""
+    row = entry
+    while not _YEAR_RE.search(row.get('text') or ''):
+        start = row['element_idx_start']
+        row = max((other for other in section if other['element_idx_start'] < start),
+                  key=lambda other: other['element_idx_start'], default=None)
+        if row is None or row.get('element_idx_end', row['element_idx_start']) != start - 1:
+            return None
+    return row if _YEAR_LED_RE.match(row.get('text') or '') else None
+
+
+def _under_another_year_head(dropped_entry: dict, kept_entry: dict,
+                             code: str | None, document: list[dict] | None) -> bool:
+    """True when the dropped row states no date, names a record its section
+    renders, and its year head (`_year_head`) is not the kept row's, both
+    rows in one source section."""
+    hierarchy = dropped_entry.get('hierarchy')
+    rendered = _RENDERED_FIELDS.get(code or '', frozenset())
+    if (not hierarchy or kept_entry.get('hierarchy') != hierarchy
+            or not all(isinstance(entry.get('element_idx_start'), int)
+                       for entry in (dropped_entry, kept_entry))
+            or not _states_no_date(dropped_entry)
+            or _record_name(dropped_entry.get('extracted_fields') or {}, rendered) is None):
+        return False
+    section = [entry for entry in document or ()
+               if entry.get('hierarchy') == hierarchy
+               and isinstance(entry.get('element_idx_start'), int)]
+    dropped_head = _year_head(dropped_entry, section)
+    kept_head = _year_head(kept_entry, section)
+    return dropped_head is not None and kept_head is not None and dropped_head is not kept_head
+
+
+# #666 (BLBVPD 213, IXJMKS 866): an ad hoc review for a panel and a standing
+# seat on it are two records, and nothing else in the two rows need differ:
+# "1990 Widget Review Committee" beside "1990 Ad hoc Reviewer, Widget Review
+# Committee, Special Panel", or an agency listed under an "Ad Hoc Widget
+# Reviews" heading beside that agency's study-section row under "Standing
+# Widget Panels". A row is ad hoc when its text, its role or a heading it is listed
+# under says so. Only a row naming an agency or a panel: a role line alone is
+# a fragment. A panel listed twice in one year, once as ad hoc, cannot be told
+# from these two records, so it prints twice: doubt keeps.
+_AD_HOC_CODES = frozenset({'Q3'})
+_AD_HOC_RE = re.compile(r'\bad[\s-]*hoc\b', re.IGNORECASE)
+_REVIEW_RECORD_FIELDS = ('agency', 'panel_name')
+
+
+def _is_ad_hoc(entry: dict) -> bool:
+    """True when the entry's text, role or a source heading says "ad hoc"."""
+    role = (entry.get('extracted_fields') or {}).get('role')
+    sources = [entry.get('text') or '', role if isinstance(role, str) else '',
+               *(heading for heading in entry.get('hierarchy') or () if isinstance(heading, str))]
+    return any(_AD_HOC_RE.search(source) for source in sources)
+
+
+def _ad_hoc_apart(dropped_entry: dict, kept_entry: dict, code: str | None) -> bool:
+    """True when a review row naming an agency or a panel is ad hoc and the
+    kept row is not, or the other way round (`_is_ad_hoc`)."""
+    fields = dropped_entry.get('extracted_fields') or {}
+    return (code in _AD_HOC_CODES
+            and any(isinstance(fields.get(key), str) and fields[key].strip()
+                    for key in _REVIEW_RECORD_FIELDS)
+            and _is_ad_hoc(dropped_entry) != _is_ad_hoc(kept_entry))
 
 
 def _split_record_family(entry: dict, document: list[dict] | None) -> list[dict]:
@@ -1241,7 +1430,12 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
 
     #666 (WZSMUO): a short unnamed entry whose words are fewer than the kept
     entry's journal name and all inside it is another journal
-    (`_shorter_journal_than_kept`): "Cell" beside "Cell Reports"."""
+    (`_shorter_journal_than_kept`): "Cell" beside "Cell Reports".
+
+    #666 (LTTYWI, BLBVPD, IXJMKS): an undated row under another year head
+    than the kept row is another term (`_under_another_year_head`), an ad
+    hoc review beside a standing seat is another record (`_ad_hoc_apart`),
+    and an award of another class is another award (`_class_year_apart`)."""
     dropped_text = dropped_entry.get('text') or ''
     kept_text = kept_entry.get('text') or ''
     verbatim = _verbatim_contained(dropped_text, kept_text)
@@ -1261,6 +1455,10 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
                              == kept_entry.get('extracted_fields'))
     if _group_header_between(dropped_entry, kept_entry, code, document):
         return False  # #666: listed under two group lines, so two records
+    if _under_another_year_head(dropped_entry, kept_entry, code, document):
+        return False  # #666: an undated row takes another year head's years
+    if _ad_hoc_apart(dropped_entry, kept_entry, code):
+        return False  # #666: an ad hoc review and a standing seat are two records
     if _undated_split_record_absorbs_date(dropped_entry, kept_entry, document):
         return False  # #666: an undated split record does not vouch for a date
     if _shorter_journal_than_kept(dropped_entry, kept_entry, code):
@@ -1272,6 +1470,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #1181: a different mentee is a different record
     if not _dates_compatible(dropped_text, kept_text):
         return False  # #666: a different date is a different record
+    if _class_year_apart(dropped_text, kept_text, code):
+        return False  # #666: another class's award, or a class year is no date
     if not _trial_phases(dropped_text) <= _trial_phases(kept_text):
         return False  # #1106: a different trial phase is a different trial
     if not _part_numbers(dropped_text) <= _part_numbers(kept_text):
