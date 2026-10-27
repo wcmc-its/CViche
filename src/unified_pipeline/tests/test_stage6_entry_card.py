@@ -15,11 +15,14 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.parsing import entry_card as entry_card_module  # noqa: E402
+from unified_pipeline.stage6.parsing import (  # noqa: E402
+    entry_card as entry_card_module,
+)
 from unified_pipeline.stage6.parsing.entry_card import (  # noqa: E402
     LAYOUT_ONE_LINE,
     LAYOUT_WITH_DETAILS,
     MAX_HEAD_WORDS,
+    MAX_ORG_GAP_CHARS,
     MAX_UNDATED_DETAIL_ITEMS,
     MAX_WORDS_BEFORE_ANCHOR,
     EntryCard,
@@ -133,8 +136,22 @@ def test_a_punctuation_only_cell_is_not_a_detail_line():
                  {"activity_title": "Topics"}, id="undated_head_of_a_list_of_peers"),
     pytest.param(" ".join(["Word"] * MAX_HEAD_WORDS) + " Preceptor more, Example Clinic, 2019",
                  {"role": "Preceptor"}, id="head_too_long"),
-    pytest.param("Preceptor " + " ".join(["word"] * 30) + ", Example Clinic, 2019",  # 31 > 25
+    pytest.param("Preceptor " + " ".join(["word"] * MAX_HEAD_WORDS) + ", Example Clinic, 2019",
                  {"role": "Preceptor"}, id="head_too_long_after_its_anchor"),
+    pytest.param("Course Director\tIntro Biology\tExample University\t2019",
+                 {"course_title": "Course Director Intro Biology"}, id="head_anchor_across_a_tab"),
+    pytest.param("Course\tDirector of things, Example U, 2019", {"role": "Course Director"},
+                 id="head_anchor_split_by_a_tab"),
+    pytest.param("Course Director | Intro Biology | 2019",
+                 {"course_title": "Course Director Intro Biology"},
+                 id="head_anchor_across_a_cell_join"),
+    pytest.param("Lead, Example Initiatives, 2022-2024\tSelected Initiatives:\t"
+                 "Built a referral workflow\tWrote a clinic manual",
+                 {"project_name": "Lead"}, id="detail_label_heads_a_sub_list"),
+    pytest.param("Lead, Example Initiatives, 2022-2024 | Scope: | Oversaw two clinics",
+                 {"project_name": "Lead"}, id="detail_label_heads_a_sub_list_across_a_cell_join"),
+    pytest.param("2019\tLecturer, Topic A", {"course_title": "2019 Lecturer"},
+                 id="anchor_starts_inside_the_leading_date"),
     pytest.param("Head Preceptor) Example, Clinic, 2019", {"role": "Preceptor"},
                  id="head_closes_a_bracket_it_never_opened"),
     pytest.param("", {"role": "Preceptor"}, id="empty_text"),
@@ -171,3 +188,71 @@ def test_the_word_check_refuses_a_rule_that_drops_a_word(monkeypatch):
 def test_an_org_further_than_the_gap_limit_from_the_head_stays_in_the_details():
     card = _card("Preceptor, - ; Example Clinic\t2019", role="Preceptor", institution="Example Clinic")
     assert (card.head, card.org, card.date, card.details) == ("Preceptor", "", "2019", ("Example Clinic",))
+
+
+# --- boundaries and cells (#2019 review) -------------------------------------------
+
+def _words(n):
+    return " ".join(f"word{i}" for i in range(n))
+
+
+def test_a_head_of_twelve_words_is_a_card_and_thirteen_is_not():
+    """A head over 12 words is a sentence, not a title (#2019 review). The
+    numbers are literal so a change to the cap fails here."""
+    assert MAX_HEAD_WORDS == 12
+    for n, is_card in [(12, True), (13, False)]:
+        head = "Preceptor " + _words(n - 1)
+        assert (_card(f"{head}, Example Clinic, 2019", role="Preceptor") is not None) is is_card, n
+
+
+def test_an_org_four_separator_characters_from_the_head_is_line_1s_and_five_is_not():
+    assert MAX_ORG_GAP_CHARS == 4
+    for gap, org in [(",   ", "Example Clinic"), (",    ", "")]:
+        card = _card(f"Preceptor{gap}Example Clinic\t2019", role="Preceptor",
+                     institution="Example Clinic")
+        assert card.org == org, repr(gap)
+
+
+def test_an_org_after_a_word_in_the_gap_stays_in_the_details():
+    """Only separator punctuation may sit between head and organization."""
+    card = _card("Preceptor,Q, Example Clinic\t2019", role="Preceptor", institution="Example Clinic")
+    assert (card.org, card.details) == ("", ("Q, Example Clinic",))
+
+
+def test_an_org_never_spans_a_cell_break():
+    card = _card("Preceptor, Example\tClinic\t2019", role="Preceptor", institution="Example Clinic")
+    assert (card.org, card.details) == ("", ("Example", "Clinic"))
+
+
+def test_an_undated_head_takes_three_detail_items_and_no_more():
+    def text(n):
+        return "Topics\t" + "\t".join(f"Topic {chr(65 + i)}" for i in range(n))
+    assert MAX_UNDATED_DETAIL_ITEMS == 3
+    assert len(_card(text(3), activity_title="Topics").details) == 3
+    assert _card(text(4), activity_title="Topics") is None
+
+
+def test_a_bracketed_date_is_a_detail_not_the_cards_date():
+    """"(2015-2019)" is the source's aside; lifting it out would drop its brackets."""
+    card = _card("Preceptor, Example Clinic, (2015-2019)", role="Preceptor",
+                 institution="Example Clinic")
+    assert (card.date, card.details) == ("", ("(2015-2019)",))
+
+
+def test_stage2s_cell_join_splits_details_and_ends_the_head():
+    """Stage 2 joins a table row's cells with " | ": each cell is one detail
+    line, as a tab cell is, and the join never prints."""
+    card = _card("Lecturer of Topic A | Example Clinic | 2019 | Two lectures a year",
+                 role="Lecturer")
+    assert card == EntryCard("Lecturer of Topic A", "", "2019",
+                             ("Example Clinic", "Two lectures a year"))
+
+
+def test_a_leading_date_after_leading_whitespace_is_still_the_cards_date():
+    card = _card("  2020\tStaff Nurse, Example ICU", clinical_role="Staff Nurse")
+    assert (card.head, card.date, card.details) == ("Staff Nurse", "2020", ("Example ICU",))
+
+
+def test_a_colon_ending_the_head_does_not_read_as_a_sub_list_label():
+    card = _card("Course Director:\tIntro Biology\t2019", role="Course Director")
+    assert (card.head, card.date, card.details) == ("Course Director", "2019", ("Intro Biology",))

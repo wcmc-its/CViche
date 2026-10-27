@@ -22,6 +22,7 @@ from .dates import (  # noqa: F401
     PRESENTATION_DATE_FIELDS,
     PRESENTATION_END_DATE_FIELD,
     _source_leaves_year_open,
+    card_date,
     envelope_date_spans,
     extra_date_spans,
     format_date_for_section,

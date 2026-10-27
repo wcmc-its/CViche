@@ -1418,3 +1418,50 @@ def test_a_card_drops_a_leading_taxonomy_code_as_every_entry_line_does():
     entry["text"] = "[K1] " + _CARD_TEXT
     _gen, (line1, _details) = _rendered_card(entry)
     assert line1.runs[0].text == "Attending Surgeon, Resident Teaching"
+
+
+def test_the_first_card_of_a_subsection_has_the_blank_line_above_it():
+    """The first visible entry under a heading opens with the section's
+    spacer paragraph, card or not."""
+    gen = _generator("Didactic teaching", "SENTINEL-END")
+    gen._fill_teaching({"K1": [_card_entry()]})
+    texts = [p.text for p in gen.doc.paragraphs]
+    assert texts[:3] == ["Didactic teaching", "",
+                         "Attending Surgeon, Resident Teaching, Northfield Health\t2025–Sep 2026"]
+
+
+def test_a_cards_open_range_date_reads_present_as_the_field_path_prints_it():
+    """#1342 on the date slot only: "2013-" with no stage-4 end is the range
+    `format_date_range` prints "2013-Present"; the head and details stay the
+    source's words."""
+    entry = _entry("K1", "Course Director, Estuarine Biology, 2013-\tWeekly seminar",
+                   role="Course Director", start_date="2013")
+    _gen, (line1, *details) = _rendered_card(entry)
+    assert line1.text == "Course Director\t2013-Present"
+    assert [p.text for p in details] == ["Estuarine Biology", "Weekly seminar"]
+
+
+def test_a_cards_date_closed_by_stage4_keeps_the_sources_dash():
+    """Stage 4 records an end: the field path prints a closed range, so the
+    slot is not rewritten to "Present"."""
+    entry = _entry("K1", "Course Director, Estuarine Biology, 2013-\tWeekly seminar",
+                   role="Course Director", start_date="2013", end_date="2015")
+    _gen, paragraphs = _rendered_card(entry)
+    assert paragraphs[0].text == "Course Director\t2013-"
+
+
+def test_a_cards_iso_date_reads_in_words():
+    entry = _entry("K1", "Course Director, Estuarine Biology, 2021-03\tWeekly seminar",
+                   role="Course Director", start_date="2021-03", end_date="2021-03")
+    _gen, paragraphs = _rendered_card(entry)
+    assert paragraphs[0].text == "Course Director\tMarch 2021"
+
+
+def test_an_entry_with_a_sub_list_label_keeps_its_old_rendering():
+    """"Selected Initiatives:" labels the cells after it: a card would print
+    them as its peers."""
+    entry = _entry("K1", "Course Director, Estuarine Biology, 2013-2015\tSelected work:\t"
+                         "Built a lab\tWrote a manual", role="Course Director")
+    _gen, paragraphs = _rendered_card(entry)
+    assert all(not run.bold for p in paragraphs for run in p.runs)
+    assert all("\t" not in p.text for p in paragraphs)

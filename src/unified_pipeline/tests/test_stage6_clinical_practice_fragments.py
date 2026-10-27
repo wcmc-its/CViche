@@ -58,8 +58,9 @@ from unified_pipeline.stage6.formatting import (  # noqa: E402
     is_entry_end,
     plain_entry_level,
 )
-from unified_pipeline.stage6.sections.clinical_practice import (
-    _bullet_parts,  # noqa: E402
+from unified_pipeline.stage6.sections.clinical_practice import (  # noqa: E402
+    _bullet_parts,
+    _l3_card_source,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -893,3 +894,30 @@ def test_an_l3_role_read_from_the_text_is_a_card_when_another_field_anchors_it()
                    project_name="Wound Care Initiative", institution="Example Hospital")
     _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
     assert added == ["", "Wound Care Initiative, Example Hospital\t2010-2015"]
+
+
+def test_an_l3_card_source_drops_the_cvs_list_number():
+    composed = "Clinic Lead, Harrowgate Hospital, 2015-2018"
+    assert _l3_card_source(f"3. {composed}\tweekly huddles", composed) == composed
+    assert _l3_card_source(f"3. {composed} | weekly huddles", composed) == composed
+
+
+def test_an_l2_entry_whose_details_label_a_sub_list_keeps_its_indented_lines():
+    """"Selected Initiatives:" heads the cells after it (the 038WKA L2 shape):
+    no card, and the old rendering indents the lines under the title (#984)."""
+    entry = _entry("Practice Lead, Example Residency\tJanuary 2022 – May 2024\t"
+                   "Selected Initiatives:\tBuilt a referral workflow\tWrote a clinic manual",
+                   project_name="Practice Lead")
+    gen, added = _render_through_template("_fill_clinical_practice_l2", [entry])
+    assert added == ["", "Practice Lead, Example Residency", "January 2022 – May 2024",
+                     "Selected Initiatives:", "Built a referral workflow", "Wrote a clinic manual"]
+    levels = [_entry_level(p) for p in gen.doc.paragraphs if p.text in added[1:]]
+    assert levels == [0, 1, 1, 1, 1]
+
+
+def test_an_l1_card_splits_stage2s_cell_join_into_detail_lines():
+    entry = _entry("Attending Physician, Example Hospital | 2015-2020 | Inpatient service | "
+                   "8 weeks per year", clinical_role="Attending Physician",
+                   institution="Example Hospital")
+    _gen, added = _render_through_template("_fill_clinical_practice_l1", [entry])
+    assert added == ["", _L_CARD_LINE, "Inpatient service", "8 weeks per year"]

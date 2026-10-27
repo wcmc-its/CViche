@@ -123,6 +123,7 @@ from unified_pipeline.stage6.formatting import (  # noqa: F401
     _set_font,
     _set_paragraph_spacing,
     _set_table_border,
+    card_date,
     format_date_for_section,
     format_date_range,
     is_cviche_box,
@@ -2967,7 +2968,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return 0
         anchor = self.doc.paragraphs[insert_idx]
         paras = [anchor.insert_paragraph_before('') for _ in range(1 + len(card.details))]
-        write_card_line(paras[0], card.head, card.org, card.date, text_width_twips(self.doc))
+        date = card_date(card.date, entry.get('extracted_fields') or {},
+                         str(entry.get('taxonomy_code') or ''), text)
+        write_card_line(paras[0], card.head, card.org, date, text_width_twips(self.doc))
         for para, item in zip(paras[1:], card.details, strict=True):
             _set_font(para.add_run(item))
         for para in paras:

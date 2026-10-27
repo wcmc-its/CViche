@@ -760,3 +760,41 @@ def normalize_iso_dates_in_text(text: str) -> str:
     text = _YEAR_TO_ISO_RANGE_IN_TEXT_RE.sub(_year_to_iso_range_as_words, text)
     text = _ISO_DATE_IN_TEXT_RE.sub(_iso_date_as_words, text)
     return _SAME_VALUE_RANGE_RE.sub(r'\1', text)
+
+
+# The dash an entry card's date slot ends on when the source leaves the range
+# open: "2013-", "Sept 2013 –" (#2019).
+_OPEN_DASH_AT_END_RE = re.compile(r'\s*[-–—]+\s*$')
+_OPEN_RANGE_END = 'Present'
+
+
+def _field_path_leaves_open(fields: Mapping[str, Any], taxonomy_code: str,
+                            source_text: str) -> int | None:
+    """The start year when the field path would print the record's dates as
+    a range still running ("2013-Present", `format_date_range`): stage 4's
+    end is "present" or the like, or there is no end and `source_text`
+    leaves the start year open (#1342). None otherwise."""
+    start = fields.get('start_date') or fields.get('date')
+    end = fields.get('end_date') or ''
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    if not format_date_range(start, end, taxonomy_code, source_text).endswith('-' + _OPEN_RANGE_END):
+        return None
+    return _parse_date_components(start.strip())[0]
+
+
+def card_date(date: str, fields: Mapping[str, Any], taxonomy_code: str,
+              source_text: str) -> str:
+    """An entry card's date slot (#2019) as the text path prints the same
+    date: ISO dates in words (`normalize_iso_dates_in_text`), and an open
+    range the source writes with a trailing dash ("2013-") closed with
+    "Present" when the field path reads the record as still running
+    (`_field_path_leaves_open`) and the slot names its start year. Only the
+    date slot is rewritten; the head and details stay the source's words."""
+    date = normalize_iso_dates_in_text(date)
+    dash = _OPEN_DASH_AT_END_RE.search(date)
+    year = _field_path_leaves_open(fields, taxonomy_code, source_text) if dash else None
+    if year is None or str(year) not in date:
+        return date
+    spacer = ' ' if dash.group()[:1].isspace() else ''
+    return date.rstrip() + spacer + _OPEN_RANGE_END

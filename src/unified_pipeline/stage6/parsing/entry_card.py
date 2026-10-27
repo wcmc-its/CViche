@@ -24,11 +24,14 @@ The rule, in source order (only the date moves):
 2. Organization. An organization field whose span follows the head across
    nothing but separator punctuation.
 3. Date. The first whole-segment date after line 1, not inside brackets.
-4. Details. Everything else, in source order, one item per tab cell.
+4. Details. Everything else, in source order, one item per cell (a tab or
+   stage 2's " | " ends one).
 
+A head or an organization never crosses a cell break or a column gap.
 `entry_card` returns None, and the caller keeps its current rendering, when
 there is no head, when the head is the whole entry (one line already), when
-the details hold a second whole-segment date (a second record), when a head
+the details hold a second whole-segment date (a second record), when a
+detail cell ending in a colon labels a sub-list, when a head
 with no organization or date leads a list of peers, or when the
 slots' words are not exactly the text's words. That last check is what makes
 "no word lost or added" a guarantee rather than a property of the rule above.
@@ -53,8 +56,9 @@ ORG_ANCHOR_FIELDS = ('institution', 'location', 'unit_program', 'setting')
 # <course_title>"). The scout measured 0 against 6: 0 halves K1 and K4
 # coverage, because most heads are "Role of Title" or "Title Role".
 MAX_WORDS_BEFORE_ANCHOR = 6
-# A head longer than this is a sentence, not a title; the entry stays one line.
-MAX_HEAD_WORDS = 25
+# A head longer than this is a sentence, not a title, and the entry keeps its
+# old rendering (#2019 review: 78 farm cards had a bold head of 13-25 words).
+MAX_HEAD_WORDS = 12
 # The most separator characters between the head and its organization (", ",
 # " | ", " - ").
 MAX_ORG_GAP_CHARS = 4
@@ -64,6 +68,14 @@ MAX_ORG_GAP_CHARS = 4
 MAX_UNDATED_DETAIL_ITEMS = 3
 # Three spaces in a head is a column gap the reader flattened, not one title.
 COLUMN_GAP = '   '
+# Where one cell of the entry ends and the next begins: a tab, or the " | "
+# stage 2 joins a table row's cells with. A head or an organization never
+# spans one, and each detail line is one cell.
+_CELL_BREAK = re.compile(r'\t| \| ')
+# A detail cell ending in a colon ("Selected Initiatives:") labels the cells
+# after it as its own sub-list. A card would print them as its peers, so the
+# entry keeps the old rendering, which indents them.
+_SUB_LIST_LABEL = re.compile(r'[^\W_][^\t|]*:[ ]*(?:\t| \| )')
 
 LAYOUT_WITH_DETAILS = 'card_with_details'
 LAYOUT_ONE_LINE = 'card_one_line'
@@ -209,10 +221,9 @@ def _segment_end(text: str, start: int, scan_from: int) -> int:
 
 def _separates(text: str, at: int) -> bool:
     """Whether the character at `at` ends a segment."""
-    char = text[at]
-    if char == '\t' or text[at:at + 3] == ' | ':
+    if _CELL_BREAK.match(text, at):
         return True
-    return char in _SOFT_SEPARATORS and (at + 1 == len(text) or text[at + 1] in ' \t')
+    return text[at] in _SOFT_SEPARATORS and (at + 1 == len(text) or text[at + 1] in ' \t')
 
 
 def _balanced(text: str) -> bool:
@@ -221,10 +232,15 @@ def _balanced(text: str) -> bool:
             and text.count('“') == text.count('”') and text.count('"') % 2 == 0)
 
 
+def _is_one_cell(text: str) -> bool:
+    """`text` crosses no cell break and no column gap."""
+    return not _CELL_BREAK.search(text) and COLUMN_GAP not in text
+
+
 def _is_head(text: str) -> bool:
     """Whether `text` can be a card's bold head."""
     count = len(_WORD.findall(text))
-    return (_balanced(text) and 0 < count <= MAX_HEAD_WORDS and COLUMN_GAP not in text
+    return (_balanced(text) and 0 < count <= MAX_HEAD_WORDS and _is_one_cell(text)
             and not _DATE_TOKEN.match(text.strip()))
 
 
@@ -256,7 +272,7 @@ def _org(text: str, fields: Mapping, head_end: int) -> tuple[int, int] | None:
         span = find_span(text, value, head_end) if value else None
         if (span and span[0] - head_end <= MAX_ORG_GAP_CHARS
                 and _SEPARATORS_ONLY.fullmatch(text, head_end, span[0])
-                and _is_segment(text, *span)):
+                and _is_segment(text, *span) and _is_one_cell(text[slice(*span)])):
             return span
     return None
 
@@ -267,12 +283,12 @@ def _trimmed(text: str) -> str:
 
 
 def _detail_items(text: str, line_end: int, date: tuple[int, int] | None) -> list[str]:
-    """The text after line 1, the date cut out, one item per tab cell."""
+    """The text after line 1, the date cut out, one item per cell."""
     if date and date[0] >= line_end:
         pieces = [text[line_end:date[0]], text[date[1]:]]
     else:
         pieces = [text[line_end:]]
-    return [item for piece in pieces for cell in piece.split('\t')
+    return [item for piece in pieces for cell in _CELL_BREAK.split(piece)
             if _WORD.search(item := _trimmed(cell))]
 
 
@@ -307,7 +323,8 @@ def entry_card(text: str, fields: Mapping | None) -> EntryCard | None:
     items = _detail_items(text, line_end, date)
     card = EntryCard(head=text[slice(*head)], org=text[slice(*org)] if org else '',
                      date=text[slice(*date)] if date else '', details=tuple(items))
-    if not (card.org or card.date or card.details) or _holds_second_record(items):
+    if (not (card.org or card.date or card.details) or _holds_second_record(items)
+            or _SUB_LIST_LABEL.search(text, line_end)):
         return None
     if not (card.org or card.date) and len(items) > MAX_UNDATED_DETAIL_ITEMS:
         return None
