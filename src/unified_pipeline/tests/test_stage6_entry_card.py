@@ -15,6 +15,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.parsing import entry_card as entry_card_module  # noqa: E402
 from unified_pipeline.stage6.parsing.entry_card import (  # noqa: E402
     LAYOUT_ONE_LINE,
     LAYOUT_WITH_DETAILS,
@@ -121,6 +122,8 @@ def test_a_punctuation_only_cell_is_not_a_detail_line():
                  id="anchor_after_a_strong_separator"),
     pytest.param("A " * (MAX_WORDS_BEFORE_ANCHOR + 1) + "Preceptor, Example Clinic, 2019",
                  {"role": "Preceptor"}, id="too_many_words_before_the_anchor"),
+    pytest.param("One two three four five six seven Preceptor, Example Clinic, 2019",
+                 {"role": "Preceptor"}, id="seven_words_before_the_anchor"),
     pytest.param("Grand  Rounds   Preceptor, 2019", {"role": "Preceptor"}, id="column_gap_in_head"),
     pytest.param("Preceptor (Example Clinic, 2019", {"role": "Preceptor"}, id="unbalanced_head"),
     pytest.param("Course Director, Estuarine Biology, 2010-2018\t"
@@ -150,3 +153,12 @@ def test_an_anchor_glued_inside_a_word_is_not_found():
 ])
 def test_date_runs_merge_adjacent_tokens(text, runs):
     assert [text[a:b] for a, b in date_runs(text)] == runs
+
+
+def test_the_word_check_refuses_a_rule_that_drops_a_word(monkeypatch):
+    """The last word on "no word lost or added": whatever the slot rule
+    does, a card whose slots' words are not the text's is not a card."""
+    text = "Preceptor, Example Clinic, 2019\tWeekly clinic sessions"
+    assert _card(text, role="Preceptor") is not None
+    monkeypatch.setattr(entry_card_module, "_trimmed", lambda cell: cell.strip().rsplit(" ", 1)[0])
+    assert _card(text, role="Preceptor") is None

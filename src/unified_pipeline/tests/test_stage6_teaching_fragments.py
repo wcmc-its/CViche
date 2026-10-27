@@ -1402,3 +1402,12 @@ def test_a_cards_date_sits_at_the_right_margin_whatever_the_margins():
     (line1,) = [p for p in gen.doc.paragraphs if "\t" in p.text]
     (stop,) = line1.paragraph_format.tab_stops
     assert stop.position.twips == section.page_width.twips - 1440 - 720
+
+
+def test_a_cards_bold_head_is_never_taken_for_a_section_header():
+    """`_find_header_paragraph` reads a bold first run as a header (#548): a
+    card's line 1 opens with one, so a later section's anchor search must
+    skip it as the entry it is."""
+    gen, (line1, _details) = _rendered_card(_card_entry())
+    assert line1.runs[0].bold
+    assert gen._find_header_paragraph("Attending Surgeon") is None
