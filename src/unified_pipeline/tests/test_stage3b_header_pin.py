@@ -22,6 +22,7 @@ from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     leaf_header_code,
     mentee_pin_code,
     pinned_header_code,
+    someone_elses_pin_code,
 )
 
 
@@ -1315,3 +1316,365 @@ def test_reviewer_pin_is_not_flipped_back_by_the_reasoning_check():
     (corrected,), _ = apply_reasoning_corrections([{**out[-1], "taxonomy_confidence": 0.95}], min_confidence=0.80)
     assert corrected["taxonomy_code"] == "Q4D"
 
+
+
+# --- #1573: rows a heading says are someone else's -------------------------------
+
+ACK_LEAD = "ACKNOWLEDGMENTS (selected)"
+COLLAPSED = ("Personal Data",)  # a run whose headings stage 1b lost (ECXGAT placed none)
+
+
+def _codes(out):
+    return [e["taxonomy_code"] for e in out]
+
+
+def test_papers_under_an_acknowledgements_lead_line_go_to_the_appendix():
+    # ECXGAT 2154-2204: other groups' papers listed under an acknowledgements line.
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("S1", "Doe, J., and A. Roe. 2031. An example virus study. J. Example Biol. 12, 34-56.",
+                  confidence=0.9, hierarchy=COLLAPSED),
+             _row("S4", "Roe, A. 2032. An example chapter, in: Example Methods. Example Press.",
+                  confidence=0.9, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 2 and _codes(out) == ["T", "T", "T"]
+    assert [e.get("pre_pin_code") for e in out[1:]] == ["S1", "S4"]
+    assert "acknowledgements" in out[1]["classification_reasoning"]
+
+
+@pytest.mark.parametrize("heading", [
+    ("Acknowledgments", "Journal articles"),
+    ("PUBLICATIONS", "C. Acknowledgements"),
+])
+def test_a_paper_under_an_acknowledgements_level_goes_to_the_appendix(heading):
+    paper = _row("S1", "Doe J. An example study. Example J. 2031;1:2-9.", hierarchy=heading)
+    (out,), n = apply_header_pin([paper], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "T"
+
+
+@pytest.mark.parametrize("heading", [
+    ("PUBLICATIONS", "Peer-reviewed articles (acknowledging grant support marked *)"),
+    ("PUBLICATIONS", "Reviewer Acknowledgements"),
+])
+def test_the_owners_paper_under_a_heading_that_only_mentions_acknowledgements_stays(heading):
+    paper = _row("S1", "Owner A, Doe J. An example study. Example J. 2031;1:2-9.", hierarchy=heading)
+    out, n = apply_header_pin([paper], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["S1"]
+
+
+def test_an_acknowledgements_list_ends_at_a_row_it_does_not_head():
+    # A dated teaching row after the acknowledged papers: the papers below it are the owner's.
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("K1", "2031 Lecturer, Example Course, Example University", hierarchy=COLLAPSED),
+             _row("S1", "Owner A. An example study. Example J. 2031;1:2-9.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "K1", "S1"]
+
+
+def test_a_new_lead_line_ends_the_acknowledgements_list():
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("T", "PUBLICATIONS", hierarchy=COLLAPSED),
+             _row("S1", "Owner A. An example study. Example J. 2031;1:2-9.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "T", "S1"]
+
+
+@pytest.mark.parametrize("lead", [
+    "Reviewers:", "Grant reviewing (partial list)", "Applicants", "Example Foundation Panel",
+    "Technical staff", "Laboratory technicians", "Lab managers",
+])
+def test_a_mentee_row_under_a_reviewing_or_staff_lead_line_is_not_a_mentee(lead):
+    group = [_row("T", lead, hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example \u2013 An example proposal.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["T", "T"]
+
+
+def test_staff_under_a_staff_heading_are_not_mentees():
+    # IZIXVF 284-305: a laboratory's technical staff, coded N3B and N3.
+    heading = ("4. Laboratory Members: Students and Staff.",
+               "B. Laboratory Technicians and Managers.")
+    group = [_row("N3B", "1. Alex Example, Laboratory technician", hierarchy=heading),
+             _row("N3", "2. Sam Example, Lab manager", hierarchy=heading)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 2 and _codes(out) == ["T", "T"]
+    assert "reviewed or employed" in out[0]["classification_reasoning"]
+
+
+def test_grant_review_applicants_under_a_review_lead_line_are_not_mentees():
+    # ECXGAT 1288-1299: the lead line, two P rows, then applicants coded N3B.
+    group = [_row("T", "Internal pilot grant review (selected)", hierarchy=COLLAPSED),
+             _row("P", "Alex Example – An example proposal (18 Dec-2031).", hierarchy=COLLAPSED),
+             _row("N3B", "Sam Example – Another example proposal (18 Dec-2031).", hierarchy=COLLAPSED),
+             _row("N3A", "Kim Example – A third example proposal (18 Dec-2031).", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 2 and _codes(out) == ["T", "P", "T", "T"]
+
+
+def test_a_thesis_under_a_bare_reviewer_lead_line_is_not_a_mentee():
+    # DYLJXC 401-403: a thesis the owner reviewed for another university.
+    group = [_row("Q4D", "Reviewer:", hierarchy=("Service", "International")),
+             _row("N3B", 'Alex Example 2031 "An example thesis title" Example University',
+                  hierarchy=("Service", "International"))]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["Q4D", "T"]
+
+
+@pytest.mark.parametrize("heading", [
+    ("MENTORING", "Research Trainees (annual progress review)"),   # names trainees
+    ("TEACHING", "Trainees", "Technicians the owner trained"),        # staff the owner trained
+    ("MENTORING", "Postdoctoral fellows and staff"),
+    ("MENTORING", "Supervision of research staff"),                    # kept: supervision is mentoring work
+    ("MENTORING", "Dissertation committees and staff"),
+    # stage 1b's hierarchy drift: a student-thesis list under a sibling review level (wave-1 2030_*)
+    ("SERVICE", "Professional Service", "Manuscript Reviewer"),
+    ("SERVICE", "Professional Service", "Review Panels and Advisory Boards"),
+])
+def test_the_owners_mentee_under_a_heading_that_mentions_review_or_staff_stays(heading):
+    mentee = _row("N3B", "2031 Alex Example. An example thesis title.", hierarchy=heading)
+    out, n = apply_header_pin([mentee], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["N3B"]
+
+
+def test_a_mentee_under_a_trainee_lead_line_stays():
+    group = [_row("T", "Thesis review committees", hierarchy=COLLAPSED),
+             _row("N3B", "2031 Alex Example. An example thesis title.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "N3B"]
+
+
+def test_a_review_list_ends_at_a_row_it_does_not_head():
+    # web26: a "Reviewer:" line far above a postdoc list, with a training row in between.
+    group = [_row("Q4D", "Reviewer (about eighty manuscripts)", hierarchy=COLLAPSED),
+             _row("C", "2031-2032 Example Fellowship, Example University", hierarchy=COLLAPSED),
+             _row("N3B", "2031-2032 Alex Example, PhD (Example University)", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["Q4D", "C", "N3B"]
+
+
+def test_a_mentee_row_is_never_a_lead_line():
+    # An undated named-mentee line naming review does not head the rows after it.
+    group = [_row("N3B", "Alex Example, grant reviewer", hierarchy=COLLAPSED),
+             _row("N3B", "2031 Sam Example. An example thesis title.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["N3B", "N3B"]
+
+
+def test_a_dated_or_numbered_line_is_not_a_lead_line():
+    for lead in ("Grant review panel, 2031", "1. Grant review panel"):
+        group = [_row("Q3", lead, hierarchy=COLLAPSED),
+                 _row("N3B", "Alex Example – An example proposal.", hierarchy=COLLAPSED)]
+        out, n = apply_header_pin(group, NO_PIN_CTX)
+        assert n == 0 and _codes(out) == ["Q3", "N3B"], lead
+
+
+def test_a_long_line_is_not_a_lead_line():
+    long_lead = "Grant review panel for the example program of the example foundation and its many partners"
+    group = [_row("T", long_lead, hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example – An example proposal.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "N3B"]
+
+
+ABSTRACTS = ("PUBLICATIONS", "Abstracts")
+
+
+@pytest.mark.parametrize("text", [
+    # ULHCAP 1415: a trainee's abstract that names the prize it won.
+    "Doe, JD. An example antidote study. Winner, Example Early Career Prize. "
+    "Example Symposium 2031. Oral abstract.",
+    "Doe J, Roe K. An example study. Best Poster, Example Meeting 2031.",
+])
+def test_an_abstract_naming_its_award_under_an_abstracts_heading_is_an_abstract(text):
+    (out,), n = apply_header_pin([_row("H", text, confidence=0.75, hierarchy=ABSTRACTS)], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "S8" and out["pre_pin_code"] == "H"
+    assert out["classification_reasoning"].startswith("An abstract listed under the CV's abstracts")
+
+
+@pytest.mark.parametrize("code,text,heading", [
+    ("H", "Best Abstract Award, Example Society Annual Meeting, 2031", ABSTRACTS),       # the owner's own award
+    ("H", "Doe, JD. An example study. Winner, Example Prize 2031.", ("HONORS AND AWARDS",)),
+    ("K4", "Doe, JD. An example study. Example Symposium 2031.", ABSTRACTS),            # not an H
+])
+def test_an_award_line_or_another_heading_keeps_its_code(code, text, heading):
+    out, n = apply_header_pin([_row(code, text, hierarchy=heading)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == [code]
+
+
+def test_someone_elses_pins_are_not_flipped_back_by_the_reasoning_check():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("S1", "Doe, J. 2031. An example study. J. Example Biol. 12, 34-56.", hierarchy=COLLAPSED),
+             _row("N3B", "1. Alex Example, Laboratory technician", hierarchy=("Technical Staff",)),
+             _row("H", "Doe, JD. An example study. Winner, Example Prize 2031.", hierarchy=ABSTRACTS)]
+    out, _ = apply_header_pin(group, NO_PIN_CTX)
+    corrected, _ = apply_reasoning_corrections([{**e, "taxonomy_confidence": 0.95} for e in out[1:]],
+                                               min_confidence=0.80)
+    assert _codes(corrected) == ["T", "T", "S8"]
+
+
+def test_someone_elses_pin_code_reads_the_lead_it_is_given():
+    staff = _row("N3B", "Alex Example, Example role", hierarchy=COLLAPSED)
+    assert someone_elses_pin_code(staff, "") is None
+    assert someone_elses_pin_code(staff, "Technical staff")[0] == "T"
+    assert someone_elses_pin_code(staff, "Grant applicants reviewed")[0] == "T"
+
+
+# --- #1573 review round: where a lead line's list ends, and what may be a lead line ---
+
+OTHER_PAPER = "Doe J, Roe K. Another example study. Example J. 2031;1:2-9."
+OWN_PAPER = "Owner A, Doe J. An example study. Example J. 2032;3:4-9."
+OWN_STUDENT = "2031 Alex Example, PhD student. An example thesis title."
+
+
+@pytest.mark.parametrize("heading", [
+    "PUBLICATIONS (2010-2032)",                     # dated
+    "5. Publications",                              # numbered
+    "C. Peer-reviewed publications",                # lettered
+    "Publications in peer reviewed journals listed in reverse chronological order, most recent first",
+])
+def test_an_acknowledgements_list_ends_at_a_section_heading_that_is_not_a_lead_line(heading):
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED), _row("S1", OTHER_PAPER, hierarchy=COLLAPSED),
+             _row("T", heading, hierarchy=COLLAPSED), _row("S1", OWN_PAPER, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["T", "T", "T", "S1"]
+
+
+@pytest.mark.parametrize("heading", ["5. Mentoring", "MENTORING (2015-2032)"])
+def test_a_review_list_ends_at_a_section_heading_that_is_not_a_lead_line(heading):
+    group = [_row("T", "Grant Review Committees", hierarchy=COLLAPSED),
+             _row("Q3", "2031 Member, Example Study Section", hierarchy=COLLAPSED),
+             _row("T", heading, hierarchy=COLLAPSED), _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "Q3", "T", "N3B"]
+
+
+@pytest.mark.parametrize("record", [
+    ("Q3", "Ad hoc grant reviewer, Example Foundation"),
+    ("Q4D", "Reviewer, Example Journal"),
+    ("Q3", "Grant reviewer; Example Foundation"),
+])
+def test_a_line_punctuated_as_a_record_is_not_a_lead_line(record):
+    group = [_row(*record, hierarchy=COLLAPSED), _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == [record[0], "N3B"]
+
+
+@pytest.mark.parametrize("lead", [
+    ("T", "Technical staff, laboratory"),               # a note line may hold a comma
+    ("Q3", "Grant review panels, internal:"),           # so may a line that ends in a colon
+])
+def test_a_note_or_colon_line_with_a_comma_is_still_a_lead_line(lead):
+    group = [_row(*lead, hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example \u2013 An example proposal.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == [lead[0], "T"]
+
+
+@pytest.mark.parametrize("group,expected", [
+    # undated, short staff rows: each moved row would otherwise read as a new lead line
+    ([("T", "Technical staff"), ("N3B", "Alex Example, lab assistant"),
+      ("N3B", "Sam Example, lab assistant"), ("N3", "Kim Example, lab assistant")], ["T", "T", "T", "T"]),
+    # an undated acknowledged book, then two more acknowledged papers
+    ([("T", ACK_LEAD), ("S3", "Doe J. An example book. Example Press."),
+      ("S1", OTHER_PAPER), ("S1", OTHER_PAPER)], ["T", "T", "T", "T"]),
+    ([("T", "Internal grant review (partial list)"), ("N3B", "Alex Example - An example proposal"),
+      ("N3B", "Sam Example - Another example proposal")], ["T", "T", "T"]),
+])
+def test_a_row_the_pin_moves_does_not_split_its_list(group, expected):
+    out, _ = apply_header_pin([_row(code, text, hierarchy=COLLAPSED) for code, text in group], NO_PIN_CTX)
+    assert _codes(out) == expected
+
+
+def test_a_review_list_runs_on_through_its_service_rows():
+    group = [_row("T", "Grant reviewing (partial list)", hierarchy=COLLAPSED),
+             _row("Q3", "2031 Example Foundation pilot awards", hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example \u2013 An example proposal (2031).", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["T", "Q3", "T"]
+
+
+@pytest.mark.parametrize("service_code", ["P", "Q2"])
+def test_an_acknowledgements_list_ends_at_a_service_row(service_code):
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row(service_code, "2031 Member, Example Committee", hierarchy=COLLAPSED),
+             _row("S1", OWN_PAPER, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", service_code, "S1"]
+
+
+def test_a_mentees_abstract_under_a_students_level_is_the_mentees():
+    # The mentee pin (#1251) is read before the abstracts rule: the row is the trainee's.
+    abstract = _row("H", "Doe J, Roe K. An example title. First place, Example Meeting 2031.",
+                    hierarchy=("Trainees", "Abstracts presented by students"))
+    (out,), n = apply_header_pin([abstract], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "N4"
+
+
+def test_an_acknowledged_metrics_line_is_someone_elses_not_the_owners_bibliometric():
+    stub = _row("S1", "Doe 2031 Example Journal. Times cited 12", hierarchy=("ACKNOWLEDGEMENTS",))
+    assert content_pin_code(stub)[0] == "S0"
+    (out,), n = apply_header_pin([stub], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "T"
+
+
+@pytest.mark.parametrize("text", [
+    "Winner, AHA Abstract Achievement Award, 2031",
+    "Recipient, AHA Travel Award for abstract, 2031",
+    "Finalist, ATS. Abstract Scholarship 2031",
+    "Selected, ASH Abstract Achievement Award, 2031",   # an acronym, not initials: no period or comma after it
+])
+def test_an_award_line_with_an_award_word_or_a_societys_acronym_keeps_its_h(text):
+    out, n = apply_header_pin([_row("H", text, hierarchy=ABSTRACTS)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["H"]
+
+
+def test_an_abstracts_parent_over_an_honors_leaf_keeps_the_h():
+    award = _row("H", "Doe, JD. An example study. Example Prize 2031.", hierarchy=("ABSTRACTS", "Honors and awards"))
+    out, n = apply_header_pin([award], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["H"]
+
+
+@pytest.mark.parametrize("heading", [
+    ("MENTORING", "Staff"),
+    ("Mentees", "Research staff"),
+    ("Supervised personnel", "Technicians"),
+])
+def test_staff_under_a_mentoring_parent_stay_mentees(heading):
+    out, n = apply_header_pin([_row("N3B", "1. Alex Example, Laboratory technician", hierarchy=heading)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["N3B"]
+
+
+@pytest.mark.parametrize("code,heading", [
+    ("S1", ("Acknowledgements and Publications",)),
+    ("S9", ("Acknowledgements in the press",)),
+    ("S1", ("PUBLICATIONS", "Acknowledgments of support (grants)")),
+])
+def test_a_level_that_says_more_than_acknowledgements_keeps_its_papers(code, heading):
+    out, n = apply_header_pin([_row(code, OWN_PAPER, hierarchy=heading)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == [code]
+
+
+def test_a_lead_line_that_says_more_than_acknowledgements_keeps_its_papers():
+    group = [_row("T", "Acknowledgements and publications", hierarchy=COLLAPSED),
+             _row("S1", OWN_PAPER, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "S1"]
+
+
+def test_a_staff_list_ends_at_a_service_row():
+    # Only a reviewing line's list runs on through service rows (ECXGAT 1289-1291).
+    group = [_row("T", "Technical staff", hierarchy=COLLAPSED),
+             _row("Q2", "2031 Member, Example Committee", hierarchy=COLLAPSED),
+             _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "Q2", "N3B"]
+
+
+def test_a_review_list_ends_at_a_publication_row():
+    group = [_row("T", "Grant reviewing (partial list)", hierarchy=COLLAPSED),
+             _row("S1", OWN_PAPER, hierarchy=COLLAPSED),
+             _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "S1", "N3B"]
