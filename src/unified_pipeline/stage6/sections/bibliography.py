@@ -58,7 +58,7 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
-from unified_pipeline.core.text_norm import is_placeholder_title
+from unified_pipeline.core.text_norm import is_placeholder_title, norm
 from unified_pipeline.log_redaction import redacted_error_label
 
 from ..fan_out import fallback_text
@@ -93,6 +93,56 @@ def _with_abstract_status(code: str, citation: str, pub: Mapping) -> str:
     if code not in _EVENT_STATUS_CODES or '\n' in source.strip():
         return citation
     return with_event_status(citation, source)
+
+
+# #1573 (NECRGC): a source heading that says the owner is not an author of
+# what it lists was lost in render, so each paper under it read as the owner's
+# own: consortium papers headed "(not a listed author)" (RBPXCD, S1/S2), and
+# papers whose heading says the owner's participation is cited "but not by
+# authorship" (GNONHA, S5). So were the contents of volumes the owner edited
+# (LFFKVV: "Edited/Co-Edited" books and journal special issues, whose
+# chapters and papers are mostly other authors'). The heading now
+# travels with every citation under it, in the source's own words. Under an
+# edited-volume heading the volume itself (S3, a book) keeps its line: the
+# owner did edit it. A heading that only names authors ("Papers as senior
+# author") or editing work ("Editorial board") is not either shape.
+_DISCLAIMED_AUTHORSHIP_HEADING = re.compile(
+    r"\bnot\s+(?:(?:a|an|the|as\s+an?)\s+)?(?:listed\s+)?(?:co-?)?author\b"
+    r"|\bnot\s+by\s+authorship\b|\bnon-?author\b|\bwithout\s+authorship\b",
+    re.IGNORECASE)
+_EDITED_VOLUME_HEADING = re.compile(
+    r"^\W*(?:co-?)?edited(?:\s*/\s*co-?edited)?\b.*"
+    r"\b(?:special\s+issues?|issues|books?|volumes?|supplements?)\b",
+    re.IGNORECASE)
+_EDITED_VOLUME_CODE = 'S3'
+#: The note `_with_source_heading` writes after a citation, and the pattern the
+#: doctor strips off a rendered line before pairing it with its source: the
+#: note's words would otherwise push a short source below the pairing share,
+#: and that citation would go unjudged (RBPXCD: 9 group_credit_dropped WARNs).
+SOURCE_HEADING_NOTE = ' (listed under "{label}")'
+SOURCE_HEADING_NOTE_RE = re.compile(r' \(listed under "[^"]*"\)$')
+
+
+def _source_heading_label(code: str, pub: Mapping) -> str:
+    """The most specific heading above `pub` that says its papers are not the
+    owner's own (`_DISCLAIMED_AUTHORSHIP_HEADING`, `_EDITED_VOLUME_HEADING`),
+    as the source wrote it, else ''."""
+    hierarchy = pub.get('hierarchy') or []
+    levels = [hierarchy] if isinstance(hierarchy, str) else [str(level) for level in hierarchy]
+    for level in reversed(levels):
+        edited_volume = code != _EDITED_VOLUME_CODE and _EDITED_VOLUME_HEADING.match(level)
+        if _DISCLAIMED_AUTHORSHIP_HEADING.search(level) or edited_volume:
+            return level.strip().rstrip(':').strip()
+    return ''
+
+
+def _with_source_heading(code: str, citation: str, pub: Mapping) -> str:
+    """`citation` followed by the heading that says it is not the owner's own
+    paper (`_source_heading_label`), unless the citation already says it."""
+    label = _source_heading_label(code, pub).replace('"', "'")
+    if not label or norm(label) in norm(citation):
+        return citation
+    return citation + SOURCE_HEADING_NOTE.format(label=label)
 
 # Tracked-insertion citation runs are built as raw w:r XML -- python-docx has
 # no API to add a run *into* a w:ins element, so this path cannot call
@@ -697,6 +747,7 @@ class BibliographySection:
                 citation_num += 1
                 citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
                 citation_text = _with_abstract_status(code, citation_text, pub)
+                citation_text = _with_source_heading(code, citation_text, pub)
                 original_text = enrichment.text
                 enrichment_status = enrichment.enrichment_status
 

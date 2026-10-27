@@ -220,6 +220,49 @@ def _board_committee_text(fields: dict) -> str:
     return ''
 
 
+# #1573 (DYLJXC 444-534): sabbatical site-visit lines name each host and the
+# host's title ("<Hospital>\tDirector, A. Name, M.D."; "<Hospital>\tDr. First
+# Last, Chief Physician"), and stage 4 read the host's title as the
+# owner's role, so the International committee rows read as roles the owner
+# held. A role written right against another person -- after or before
+# "Dr./Prof./Professor <name>" or "<name>, M.D./Ph.D." -- or on a line that
+# opens with a professor or doctor named by initials ("Professor A. B. Name,
+# <dept>,\tResearch Lead, <hospital>") is that person's title: the row
+# keeps its organization alone. A word in between ("Co-Director with Dr. A.
+# Name") or no person at all ("Visiting Professor, <university>") keeps the
+# owner's role. An undotted "MD" is not read as a degree: it is also Maryland.
+_PERSON_NAME = r"(?:[A-Z]\.\s?){0,3}[A-Z][a-z'\u2019-]+(?:\s+(?:(?:and|&)\s+)?[A-Z][a-z'\u2019-]+){0,3}"
+_HONORIFIC_NAME = (r"(?:Dr\.?|Prof\.|Professor)\s+"
+                   r"(?:(?:[A-Z]\.\s?){1,3}[A-Z][a-z'\u2019-]+|[A-Z][a-z'\u2019-]+\s+[A-Z][a-z'\u2019-]+)")
+_DEGREE_AFTER_NAME = r",\s*(?:M\.\s?D\.?|Ph\.?\s?D\.?|D\.\s?O\.)"
+_ANOTHER_PERSON = rf"(?:{_HONORIFIC_NAME}|{_PERSON_NAME}{_DEGREE_AFTER_NAME})"
+_PERSON_BEFORE_ROLE = re.compile(rf"{_ANOTHER_PERSON}(?:{_DEGREE_AFTER_NAME})?[\s,]*$")
+_PERSON_AFTER_ROLE = re.compile(rf"s?,?\s*{_ANOTHER_PERSON}")
+_OPENS_WITH_PERSON = re.compile(
+    r"\W*(?:Dr\.?|Prof\.|Professor)\s+(?:[A-Z]\.\s?){1,3}[A-Z][a-z'\u2019-]+")
+
+
+def _role_is_another_persons(role: str, text: str) -> bool:
+    """Whether the source line writes `role` as another person's title (#1573),
+    everywhere it writes it: "Panellist, <forum>. Moderator: Dr. A Name,
+    Panellists: ..." opens with the owner's own (web210 408). A role the line
+    does not hold is stage 4's own reading and is left alone."""
+    spans = [match.span() for match in re.finditer(re.escape(role), text, re.IGNORECASE)] if role else []
+    if spans and _OPENS_WITH_PERSON.match(text):
+        return True
+    return bool(spans) and all(_PERSON_BEFORE_ROLE.search(text[:start]) or _PERSON_AFTER_ROLE.match(text[end:])
+                               for start, end in spans)
+
+
+def _without_another_persons_role(entry: dict) -> dict:
+    """`entry` with its stage-4 role cleared when the source gives that title to
+    another person (`_role_is_another_persons`); the entry itself otherwise."""
+    fields = entry.get('extracted_fields') or {}
+    if not _role_is_another_persons(_cell_text(fields.get('role')), str(entry.get('text') or '')):
+        return entry
+    return {**entry, 'extracted_fields': {**fields, 'role': None}}
+
+
 def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
     """True when any keyword/phrase in `keywords` matches `text_lower` as a
     whole word or phrase, not merely as a run of characters inside a larger
@@ -826,6 +869,11 @@ class ServiceSection:
         - Grant Reviewing/Study Sections: Table with Role, Organization, Dates
         - Editorial Activities: Multiple tables for Editor, Editorial Board, Journal Reviewing
         """
+        # A host's title on a site-visit line is not the owner's role (#1573).
+        # Every read below is of a Q code, so the other codes are not carried.
+        entries_by_code = {
+            code: [_without_another_persons_role(entry) for entry in entries_by_code.get(code, [])]
+            for code in SERVICE_TAXONOMY_CODES}
         # Collect all Q entries
         q_entries = []
         for code in SERVICE_TAXONOMY_CODES:

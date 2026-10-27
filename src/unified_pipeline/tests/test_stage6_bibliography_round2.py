@@ -1434,3 +1434,71 @@ def test_citation_note_is_a_comment_on_a_stub_citation_even_with_comments_off():
     para = next(p for p in gen.doc.paragraphs[header_idx:header_idx + 4] if "Rodd" in p.text)
     assert para._p.find(qn("w:commentRangeStart")) is not None
     assert [c["text"] for c in gen._comments] == [note]
+
+
+# --- #1573: a heading that disclaims the owner's authorship travels with each citation ---
+
+
+def _headed_paragraphs(code, hierarchy, citation_body):
+    """The citation paragraphs `_fill_bibliography` writes for one entry under `hierarchy`."""
+    gen = _generator()
+    entry = _citation_entry(citation_body, "Doe J", 2031)
+    entry["hierarchy"] = list(hierarchy)
+    gen._fill_bibliography({code: [entry]}, cv_owner={}, document_uid="")
+    return [p.text for p in gen.doc.paragraphs if p.text.startswith("1. ")]
+
+
+BODY = "Doe J, Roe R. An example trial. Example J. 2031;1:2-9."
+
+
+@pytest.mark.parametrize("code,hierarchy,label", [
+    # RBPXCD: consortium papers the owner is not a listed author of (S1, S2).
+    ("S1", ("BIBLIOGRAPHY", "Group papers (not a listed author)"),
+     "Group papers (not a listed author)"),
+    ("S2", ("BIBLIOGRAPHY", "Group papers (not a listed author)", "Other"),
+     "Group papers (not a listed author)"),
+    ("S1", ("BIBLIOGRAPHY", "GROUP PAPERS (NOT A LISTED AUTHOR)"), "GROUP PAPERS (NOT A LISTED AUTHOR)"),
+    # GNONHA: papers that cite the owner's participation, not as an author (S5).
+    ("S5", ("PUBLICATIONS", "Studies citing my participation, not by authorship:"),
+     "Studies citing my participation, not by authorship"),
+    # LFFKVV: the contents of volumes the owner edited (S1, S4).
+    ("S1", ("PUBLICATIONS", "Co-Edited Special Issues"),
+     "Co-Edited Special Issues"),
+    ("S4", ("PUBLICATIONS", "Edited Volumes"), "Edited Volumes"),
+    ("S2", ("PUBLICATIONS", "Edited Books"), "Edited Books"),
+])
+def test_a_disclaiming_heading_is_printed_after_each_citation_under_it(code, hierarchy, label):
+    assert _headed_paragraphs(code, hierarchy, BODY) == [f'1. {BODY} (listed under "{label}")']
+
+
+@pytest.mark.parametrize("code,hierarchy", [
+    ("S1", ("BIBLIOGRAPHY", "Papers published in peer-reviewed journals")),
+    ("S1", ("PUBLICATIONS", "Papers as senior author")),                       # names authors, disclaims nothing
+    ("S2", ("PUBLICATIONS", "Editorials")),
+    ("S3", ("PUBLICATIONS", "Edited Volumes")),                                # the book the owner edited
+    ("S4", ("PUBLICATIONS", "Chapters in edited books")),                       # "edited" not opening the level
+])
+def test_the_owners_own_papers_keep_their_citation(code, hierarchy):
+    assert _headed_paragraphs(code, hierarchy, BODY) == [f"1. {BODY}"]
+
+
+def test_a_citation_that_already_says_its_heading_is_unchanged():
+    body = "Example Consortium. An example trial. Example J. 2031;1:2-9. Group papers (not a listed author)."
+    hierarchy = ("BIBLIOGRAPHY", "Group papers (not a listed author)")
+    assert _headed_paragraphs("S1", hierarchy, body) == [f"1. {body}"]
+
+
+def test_a_string_hierarchy_is_read_as_one_level():
+    entry = {"hierarchy": "Group papers (not a listed author)"}
+    assert bibliography._source_heading_label("S1", entry) == "Group papers (not a listed author)"
+    assert bibliography._source_heading_label("S1", {}) == ""
+
+
+def test_the_most_specific_disclaiming_heading_is_the_one_printed():
+    hierarchy = ("Papers, not as an author", "Edited Volumes")
+    assert _headed_paragraphs("S4", hierarchy, BODY) == [f'1. {BODY} (listed under "Edited Volumes")']
+
+
+def test_a_quote_in_the_heading_is_printed_as_an_apostrophe():
+    hierarchy = ("PUBLICATIONS", 'Papers "not as an author"')
+    assert _headed_paragraphs("S1", hierarchy, BODY) == [f'1. {BODY} (listed under "Papers \'not as an author\'")']
