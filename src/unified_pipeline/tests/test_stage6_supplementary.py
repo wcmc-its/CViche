@@ -220,10 +220,29 @@ def test_plan_records_the_code_each_entry_is_planned_under_and_its_index():
 
 def test_a_placement_reads_back_from_its_sidecar_record():
     placement = sp.SubpointPlacement(1477, "N3B", (PROSE, OTHER_PROSE))
-    assert sp.SubpointPlacement.from_record(json.loads(json.dumps(placement._asdict()))) == placement
+    assert sp.SubpointPlacement.from_record(json.loads(json.dumps(placement.to_record()))) == placement
     # A record missing a key, or holding a stray shape, reads as empty, not as text.
     assert sp.SubpointPlacement.from_record({"paragraphs": PROSE}) == sp.SubpointPlacement(None, "", ())
     assert sp.SubpointPlacement.from_record({"paragraphs": [7]}).paragraphs == ("7",)
+
+
+def test_a_placement_records_the_line_each_cut_paragraph_was_written_from():
+    # A placement written as the CV wrote it is recorded as before; one with
+    # a paragraph cut of its line's restatement also records the lines,
+    # paragraph for paragraph, and reads back with them.
+    line = f"Associate Professor, Example University, 2010-2015. {PROSE}"
+    assert json.loads(json.dumps(sp.SubpointPlacement(7, "D1", (PROSE,)).to_record())) == {
+        "element_idx_start": 7, "code": "D1", "paragraphs": [PROSE]}
+    cut = sp.SubpointPlacement(7, "D1", (PROSE, OTHER_PROSE), (line, OTHER_PROSE))
+    assert json.loads(json.dumps(cut.to_record())) == {
+        "element_idx_start": 7, "code": "D1", "paragraphs": [PROSE, OTHER_PROSE], "lines": [line, OTHER_PROSE]}
+    assert sp.SubpointPlacement.from_record(json.loads(json.dumps(cut.to_record()))) == cut
+    # Only a paragraph that differs from its line was cut.
+    assert cut.as_written() == ((PROSE, line),)
+    assert sp.SubpointPlacement(7, "D1", (PROSE,)).as_written() == ()
+    # Lines that do not pair with the paragraphs are none.
+    assert sp.SubpointPlacement.from_record({"paragraphs": [PROSE], "lines": [line, line]}).lines == ()
+    assert sp.SubpointPlacement(7, "D1", (PROSE,), (line, line)).as_written() == ()
 
 
 def test_plan_finds_no_anchor_outside_the_section():
@@ -333,10 +352,12 @@ def test_plan_reads_the_last_record_of_a_paired_line_from_its_own_segment():
     spans = {"N3B": sp.SectionSpan(0, None)}
     last = _record_of_line("Casey Sample", f"{first_line}\t{last_line}", 1, 2)
     assert sp.plan_subpoints({"N3B": [first, last]}, _haystack(), lines, spans) == []
-    # Prose in its own segment, the line's last, is its own.
+    # Prose in its own segment, the line's last, is its own. The name its
+    # table prints is cut; "Postdoc", which the table does not print, stays.
     last = _record_of_line("Casey Sample", f"{first_line}\t{last_line}, {OTHER_PROSE}", 1, 2)
     (planned,) = sp.plan_subpoints({"N3B": [first, last]}, _haystack(), lines, spans)
-    assert planned.anchor is lines[2] and planned.paragraphs == (f"{last_line}, {OTHER_PROSE}",)
+    assert planned.anchor is lines[2] and planned.paragraphs == (f"Postdoc, {OTHER_PROSE}",)
+    assert planned.lines == (f"{last_line}, {OTHER_PROSE}",)
 
 
 def _degree_rows(*rows):
@@ -2610,17 +2631,19 @@ def test_a_publication_fragment_that_is_no_other_papers_citation_is_offered(frag
     assert [p.paragraphs for p in _plan_paper(entry)] == [(fragment,)]
 
 
-def test_a_publication_line_restating_its_own_citation_in_another_form_is_offered_as_written():
+def test_a_publication_line_restating_its_own_citation_in_another_form_is_offered_without_it():
     # The CV's own line, list number, author markers and journal abbreviation
     # and all, then what the owner did: it opens like a citation and holds
-    # the entry's title, so it is the entry's own (#1205 comment 6282590626,
-    # option 1), not another paper's.
+    # the entry's title, so it is the entry's own, not another paper's. The
+    # authors and title the citation prints are cut (owner decision
+    # 2026-10-25, #1205); the list number, and the journal and date written
+    # in a form the citation does not print, stay with the note.
+    note = "*Designed the sampling study, analysed the sediment cores, drafted every figure and wrote the manuscript"
     line = ("39. Quill AM*, Rook BT, Marblegate Q. Sediment Budgets of Restored Tidal Marshes. J Estuar "
-            "Sediment Stud. 2014 Mar;12(3):45-52. *Designed the sampling study, analysed the sediment "
-            "cores, drafted every figure and wrote the manuscript")
+            f"Sediment Stud. 2014 Mar;12(3):45-52. {note}")
     entry = _paper(line)
     assert sp._opens_with_author_list(line) and not sp._cites_another_paper(line, entry)
-    assert [p.paragraphs for p in _plan_paper(entry)] == [(line,)]
+    assert [p.paragraphs for p in _plan_paper(entry)] == [(f"39. J Estuar Sediment Stud. 2014 Mar;12(3):45-52. {note}",)]
 
 
 @pytest.mark.parametrize("fragment, offered", [
@@ -2644,8 +2667,10 @@ def test_an_author_marker_legend_fused_onto_a_publication_is_not_prose(fragment,
 
 def test_a_publication_line_restating_its_citation_with_a_note_is_offered_as_written():
     # The CV's own citation format, with where it was presented: the note is
-    # the paper's prose, and the line is offered as written (#1205 comment
-    # 6282590626, option 1).
+    # the paper's prose. The authors are joined by an "and" the citation
+    # does not print, and the title follows it, so the restatement runs on
+    # past any cut (`SUBPOINT_RESTATEMENT_RUN_ON_WORDS`) and the line is
+    # offered as written (#1205 comment 6282590626, option 1).
     line = ("Quill, A. M., Rook, B. T. and Marblegate, Q.: Sediment Budgets of Restored Tidal Marshes "
             "(Presented at the Example Coastal Ecology Congress, Norvale, May 2013; winner of the "
             "Congress Student Paper Prize and featured in the Congress newsletter)")
@@ -3068,3 +3093,484 @@ def test_a_table_whose_rows_are_not_all_labels_is_not_a_label_table():
     doc = Document()
     table = _appointments_table(doc)
     assert sp._is_label_table(table._tbl) is False
+
+
+# --- a line restating the line it goes under (#1205, owner decision 2026-10-25) ---
+# A fragment splits only on tabs, line breaks and pipes, so prose sharing its
+# entry's line arrives with the line. Each family's line is written here the
+# way its writer prints it (a table row's cells joined by spaces, as an
+# anchor candidate reads them), and the fragment the way a CV writes it.
+
+_HONORS = "summa cum laude, with departmental honors for the thesis on estuarine nitrogen budgets"
+
+
+@pytest.mark.parametrize("family, line, fragment, written", [
+    ("B1 degree, then honors", "Ph.D., Example Marine Studies Norvale University 2005",
+     f"Ph.D., Example Marine Studies, Norvale University, 2005 ({_HONORS})", f"({_HONORS})"),
+    ("H award, then what it was for", "Example Teaching Award Norvale University 2016",
+     "2016 Example Teaching Award, Norvale University; given each year to one faculty member for "
+     "excellence in bedside teaching",
+     "given each year to one faculty member for excellence in bedside teaching"),
+    ("Q4C journal, then a role", "Journal of Estuarine Sediment Studies 2012-2016",
+     "Journal of Estuarine Sediment Studies, Honorary Editorial Board Member, 2012-2016",
+     "Honorary Editorial Board Member, 2012-2016"),
+    ("S1 citation, then an award", _PAPER_CITATION,
+     f"{_PAPER_CITATION} Winner of the Example Coastal Society best paper prize",
+     "Winner of the Example Coastal Society best paper prize"),
+    ("L3 role line, then what it built", _CLINICAL_LINE,
+     f"{_CLINICAL_LINE}: built the limb preservation service and trained its four wound nurses",
+     "built the limb preservation service and trained its four wound nurses"),
+    ("D appointment, then duties", "Associate Professor Example University 2010-2015",
+     f"Associate Professor, Example University, 2010-2015. {PROSE}", PROSE),
+    ("K course, after the line's dates, then its description",
+     "2012-2017 - Hydrogels in Estuarine Engineering, Instructor (Norvale University)",
+     "Hydrogels in Estuarine Engineering (Norvale University): a graduate course on hydrogel design "
+     "taught every spring", "a graduate course on hydrogel design taught every spring"),
+    ("C residency, then its director", f"{_RESIDENCY} Norvale General Hospital 07/09-06/10",
+     f"{_RESIDENCY}, Norvale General Hospital. Program director: Doctor Bramwell Fenn",
+     "Program director: Doctor Bramwell Fenn"),
+    ("O role, then what it oversaw", f"{_ROLE} Norvale University 2008-2012",
+     f"{_ROLE}, Norvale University, 2008-2012. Oversaw a budget of four million and twelve staff",
+     "Oversaw a budget of four million and twelve staff"),
+    ("P committee, then its remit", " ".join(_COMMITTEE_ROW),
+     f"Member, {_COMMITTEE}, Norvale University (2008-2012); reviewed every change to the clerkship "
+     "curriculum", "reviewed every change to the clerkship curriculum"),
+    ("R talk, then its audience", " ".join(_TALK_ROW),
+     f"{_TALK}, Example Grand Rounds, Norvale University, 2016. Delivered to about two hundred residents",
+     "Delivered to about two hundred residents"),
+    ("Q2 service, then what it did", "Example Advisory Panel Member Example Water Authority 2015",
+     "Member, Example Advisory Panel, Example Water Authority, 2015: reviewed the regional drought plan",
+     "reviewed the regional drought plan"),
+    ("I membership, then an office", " ".join(_SOCIETY_ROW),
+     f"Member, {_SOCIETY}, 2009-2014; chaired its sediment working group", "chaired its sediment working group"),
+])
+def test_a_line_restating_its_row_is_written_as_its_new_words(family, line, fragment, written):
+    # Every word cut is one the line prints, so Reject All, which prints the
+    # line above, still holds each word of the fragment.
+    assert sp.unrestated(fragment, line) == written, family
+    printed = set(sp._LINE_WORD_RE.findall(line.lower()))
+    assert set(sp._LINE_WORD_RE.findall(fragment.lower())) <= printed | set(
+        sp._LINE_WORD_RE.findall(written.lower()))
+
+
+def test_a_mentee_line_restating_its_table_is_written_as_its_new_words():
+    # N3: a label/value table's line is the whole table, and it opens with
+    # its first value, not its "Name:" label (`_printed_line`).
+    table = "Name: Ana Li Site/Position: Postdoctoral Associate Mentoring Period: 2014-2017"
+    fragment = "Ana Li, Postdoctoral Associate, 2014-2017. Won the departmental travel award and published two papers"
+    assert sp.unrestated(fragment, table, "Ana Li Postdoctoral Associate 2014-2017") == (
+        "Won the departmental travel award and published two papers")
+    # Read from the table's own first words, the labels, the opening is not held.
+    assert sp.unrestated(fragment, table) == fragment
+
+
+@pytest.mark.parametrize("fragment, written", [
+    # The line inside, new words on both sides: the words before it stay,
+    # with their own marks; the separators after it go.
+    ("1. Undergraduate: Ph.D., Example Marine Studies, 2005 (first class honors)",
+     "1. Undergraduate: (first class honors)"),
+    ("Education: 2005 Ph.D., Example Marine Studies, Norvale University, summa cum laude",
+     "Education: summa cum laude"),
+    # A bullet before the line is no word: the line opens the fragment.
+    ("• Ph.D., Example Marine Studies, Norvale University, 2005 - thesis on estuarine nitrogen",
+     "thesis on estuarine nitrogen"),
+])
+def test_a_line_inside_a_fragment_is_cut_from_its_middle(fragment, written):
+    assert sp.unrestated(fragment, "Ph.D., Example Marine Studies Norvale University 2005") == written
+
+
+@pytest.mark.parametrize("fragment", [
+    # Not contiguous: a word the line does not print ("at") parts its words.
+    "Associate Professor at Example University, 2010-2015, taught the graduate biostatistics sequence",
+    # The line's words inside a sentence, with no mark parting them from it.
+    "Awarded the Associate Professor Example University fellowship for the graduate biostatistics sequence",
+    # Only a later cell of the line: its opening words (the title) are not held.
+    "Example University, 2010-2015: taught the graduate biostatistics sequence",
+    # The line's words after a word that closes no part ("the"): a span opens
+    # the fragment or follows a mark, so a sentence is not cut in two.
+    "Named the Associate Professor, Example University, in its first year of the chair",
+    # The line closes the fragment: only a span opening it or inside it is cut,
+    # with a lone mark after it or not.
+    "Taught the graduate biostatistics sequence; Associate Professor, Example University, 2010-2015",
+    "Taught the graduate biostatistics sequence; Associate Professor, Example University, 2010-2015 )",
+    # ... or closes a bracket it did not open: stopped short of the bracket,
+    # the line's words still run on to the fragment's end.
+    "Taught the graduate biostatistics sequence (interim; Associate Professor, Example University, 2010-2015)",
+    # The restatement runs on past the cut, through one word the line does not print:
+    # two more of the line's distinctive words (SUBPOINT_RESTATEMENT_RUN_ON_WORDS).
+    "Associate Professor, Example University, and Example University 2010-2015 consult service",
+    # ... or past a dash, then one word the line does not print.
+    "Associate Professor, Example University – and Example University 2010-2015 consult service",
+    # ... or within its own run, cut only at the first comma.
+    "Associate Professor, Example University Hospital consult service and teaching rounds",
+])
+def test_a_fragment_not_restating_its_line_as_a_cut_span_is_written_as_the_cv_wrote_it(fragment):
+    assert sp.unrestated(fragment, "Associate Professor Example University Hospital 2010-2015") == fragment
+
+
+def test_a_fragment_only_restating_its_line_writes_nothing():
+    # Every word is one the line prints, in another order and form.
+    line = "Associate Professor of Marsh Ecology Example University School of Tidal Studies 2010-2015"
+    assert sp.unrestated("Associate Professor of Marsh Ecology, Example University School of Tidal Studies "
+                         "(2010-2015).", line) == ""
+
+
+def test_the_lines_opening_words_are_read_after_any_date_it_opens_with():
+    # "2012-2017 - " names no record: the course title does.
+    line = "2012-2017 - Hydrogels in Estuarine Engineering, Instructor"
+    assert sp.unrestated("Hydrogels in Estuarine Engineering: taught every spring to graduate students",
+                         line) == "taught every spring to graduate students"
+    # "April 2015 - " is the date, and "Presenter" no open end of it.
+    assert sp.unrestated("Example Grand Rounds: delivered to two hundred residents and nursing staff",
+                         "April 2015 - Presenter, Example Grand Rounds") == (
+        "Example Grand Rounds: delivered to two hundred residents and nursing staff")
+    # A mark before the date is read with it.
+    assert sp.unrestated("Marsh Ecology Seminar: a lecture on receptor kinases for first-year students",
+                         "– September 1998 - Marsh Ecology Seminar, Lecturer") == (
+        "a lecture on receptor kinases for first-year students")
+    # The opening is the line's first two distinct words: a repeated one counts once.
+    assert sp.unrestated("Seminar: taught each spring to forty first-year students",
+                         "2016 - Seminar: Seminar Series in Coastal Ecology, Lecturer") == (
+        "Seminar: taught each spring to forty first-year students")
+    # A line with no distinctive word gives no opening, and nothing is cut.
+    assert sp.unrestated("PhD, Vaux, 2010, with a thesis on estuarine nitrogen budgets",
+                         "PhD Vaux 2010") == "PhD, Vaux, 2010, with a thesis on estuarine nitrogen budgets"
+
+
+def test_one_word_of_the_line_after_the_cut_is_the_new_words_own():
+    # "member" opens the note, and the line prints it: one of its distinctive
+    # words is under SUBPOINT_RESTATEMENT_RUN_ON_WORDS, so the cut stands.
+    assert sp.unrestated("Member, Example Coastal Academy, member of the panel that drafted its charter, "
+                         "2020 to present", "Example Coastal Academy Member 2020-Present") == (
+        "member of the panel that drafted its charter, 2020 to present")
+
+
+@pytest.mark.parametrize("fragment", [
+    "Example Teaching Award (2016) given each year to one faculty member",       # a closing bracket
+    "“Example Teaching Award” given each year to one faculty member",            # a closing double quote
+    "‘Example Teaching Award.’ given each year to one faculty member",           # a stop, then a single quote
+    "Example Teaching Award- Norvale University- given each year to one faculty member",  # a dash
+])
+def test_a_span_ends_after_a_word_closing_a_part(fragment):
+    assert sp.unrestated(fragment, "Example Teaching Award Norvale University 2016") == (
+        "given each year to one faculty member")
+
+
+@pytest.mark.parametrize("fragment, written", [
+    # The marks a cut leaves are trimmed: a lone comma or bracket after the
+    # span, an opening bracket or a dash before it.
+    ("Example Teaching Award, Norvale University 2016 , given each year to one faculty member",
+     "given each year to one faculty member"),
+    ("Best paper ( Example Teaching Award, Norvale University, 2016 ) given each year to one faculty member",
+     "Best paper given each year to one faculty member"),
+    ("Best paper – Example Teaching Award, Norvale University, 2016 – given each year to one faculty member",
+     "Best paper given each year to one faculty member"),
+    # A mark the cut does not trim stays with the new words: a span ends on a
+    # word the line prints.
+    ("Example Teaching Award, Norvale University * given each year to one faculty member",
+     "* given each year to one faculty member"),
+    # A dash parts the line's words, inside a span and before it.
+    ("Example Teaching Award – Norvale University, 2016; given each year to one faculty member",
+     "given each year to one faculty member"),
+    ("Graduated – Example Teaching Award, Norvale University, 2016, with highest honors",
+     "Graduated with highest honors"),
+    # The line restated twice: the first span is cut (the second is another
+    # occasion of the same record, XELRLZ 625's shape).
+    ("Example Teaching Award, Norvale University; given in 2016. Example Teaching Award, Norvale "
+     "University; given again in 2019",
+     "given in 2016. Example Teaching Award, Norvale University; given again in 2019"),
+])
+def test_the_marks_left_at_a_cut_are_trimmed_and_the_first_restatement_is_cut(fragment, written):
+    assert sp.unrestated(fragment, "Example Teaching Award Norvale University 2016") == written
+
+
+@pytest.mark.parametrize("fragment, written", [
+    # A mark joined to a letter or a digit is part of the word the CV wrote:
+    # only a separator word goes with the cut, on either side of it.
+    ("Example Teaching Award, Norvale University, 2016. .5 FTE protected time for bedside teaching",
+     ".5 FTE protected time for bedside teaching"),
+    ("Example Teaching Award, Norvale University, 2016; -40% of the prize went to the residents",
+     "-40% of the prize went to the residents"),
+    ("Example Teaching Award, Norvale University, 2016: /s/ signed by the dean of bedside teaching",
+     "/s/ signed by the dean of bedside teaching"),
+    ("Since 2019- Example Teaching Award, Norvale University, 2016; given for bedside teaching",
+     "Since 2019- given for bedside teaching"),
+    # Separator words, one after another, go with it.
+    ("Example Teaching Award, Norvale University, 2016 | / given for bedside teaching",
+     "given for bedside teaching"),
+    ("Shared • – Example Teaching Award, Norvale University, 2016; given for bedside teaching",
+     "Shared given for bedside teaching"),
+])
+def test_a_cut_leaves_every_other_word_as_the_cv_wrote_it(fragment, written):
+    assert sp.unrestated(fragment, "Example Teaching Award Norvale University 2016") == written
+
+
+@pytest.mark.parametrize("fragment, written", [
+    # The restatement ends inside a bracket: no cut is left holding its
+    # closing half, so the fragment is written as the CV wrote it.
+    ("Example Teaching Award (Norvale University, 2016; shared with two colleagues) for bedside teaching",
+     "Example Teaching Award (Norvale University, 2016; shared with two colleagues) for bedside teaching"),
+    ("Example Teaching Award “Norvale University, 2016; shared with two colleagues” for bedside teaching",
+     "Example Teaching Award “Norvale University, 2016; shared with two colleagues” for bedside teaching"),
+    ('Example Teaching Award "Norvale University, 2016; shared with two colleagues" for bedside teaching',
+     'Example Teaching Award "Norvale University, 2016; shared with two colleagues" for bedside teaching'),
+    # ... or opens inside one and would close it: the span stops before.
+    ("Finalist (2015; Example Teaching Award, Norvale University, 2016) for bedside teaching",
+     "Finalist (2015; 2016) for bedside teaching"),
+    ("Finalist [2015; Example Teaching Award, Norvale University, 2016] for bedside teaching",
+     "Finalist [2015; 2016] for bedside teaching"),
+    # A bracket the span opens and closes goes with it, and so does one the
+    # CV opened and never closed.
+    ("Example Teaching Award (Norvale University, 2016); given for bedside teaching",
+     "given for bedside teaching"),
+    ("Example Teaching Award (Norvale University, 2016; given for bedside teaching",
+     "given for bedside teaching"),
+    ("Example Teaching Award “Norvale University, 2016. “Bedside” teaching prize",
+     "“Bedside” teaching prize"),
+    ('"Example Teaching Award, Norvale University, 2016; given for bedside teaching',
+     "given for bedside teaching"),
+    # One the CV never closed, after the span, stays as it was.
+    ("Example Teaching Award, Norvale University, 2016; given for bedside teaching (and the residents",
+     "given for bedside teaching (and the residents"),
+])
+def test_a_cut_leaves_no_bracket_open(fragment, written):
+    assert sp.unrestated(fragment, "Example Teaching Award Norvale University 2016") == written
+
+
+def test_a_span_ends_before_a_word_opening_a_quote():
+    assert sp.unrestated("Example Teaching Award, Norvale University “for excellence in bedside teaching”",
+                         "Example Teaching Award Norvale University 2016") == (
+        "“for excellence in bedside teaching”")
+
+
+def test_a_cut_never_falls_inside_a_word():
+    # "Co-Director" holds "Director", which the line prints, but also "Co",
+    # which it does not: the word is new and stays whole.
+    assert sp.unrestated("Co-Director, Example Outreach Programme, Norvale University; ran the summer school",
+                         f"{_ROLE} Norvale University 2008-2012") == (
+        "Co-Director, Example Outreach Programme, Norvale University; ran the summer school")
+
+
+_AWARD_LINE = "Example Teaching Award Norvale University 2016"
+
+
+@pytest.mark.parametrize("line, fragment", [
+    # The words after the cut open with SUBPOINT_RESTATED_RUN_WORDS words the
+    # line prints: the cut stopped inside the line's own phrase.
+    ("Example Teaching Award Norvale Graduation Ceremony, NVU Class of 2019 2019",
+     "Example Teaching Award, Norvale Graduation Ceremony, NVU Class of 2016, chosen by the senior residents"),
+    # ... with a bracket closed by a colon, the tail of the label the span opened.
+    ("2012-2017 - BIO 210: Hydrogels in Estuarine Engineering, Lecturer (Norvale University)",
+     "B. ENG 301: Hydrogels in Estuarine Engineering (2009-2011): a graduate course on hydrogel design"),
+    # ... with the line's dates or pages, in full or in a short form, which
+    # would read as the next record's.
+    ("Example Advisory Panel Member Example Water Authority 2003-2004",
+     "Member, Example Advisory Panel, Example Water Authority, 2003-04. Chair, Norvale Drought Board, 2005-2008."),
+    ("Associate Professor Example University, Norvale 2010-2015",
+     "Associate Professor, Example University, Norvale, 2010-2015 Visiting Lecturer, Norvale Marine Institute, "
+     "2016-2017"),
+    ("3. Quill R, Marsh T. Example tidal budgets. J Estuar Stud. 2014;12(3):212-219.",
+     "7. Quill R*, Marsh T. Example tidal budgets. J Estuar Stud. 2014; 12(3): 212-9. Reply to a letter on the "
+     "same budgets."),
+    # ... with a function word the cut runs straight into, no mark but a
+    # closing bracket parting them.
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) for the best bedside teaching of the year"),
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) and the bedside teaching prize of the year"),
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) with the bedside teaching prize of the year"),
+    (_AWARD_LINE, "Quill, R. Example Teaching Award (2016) without the bedside teaching prize of the year"),
+    # ... with a relative pronoun, or an appositive, whose noun the span held.
+    (_AWARD_LINE, "Example Teaching Award, Norvale University, 2016, which is given each year to one faculty member"),
+    (_AWARD_LINE, "Example Teaching Award, Norvale University, 2016, which, since 2010, is given to one faculty member"),
+    (_AWARD_LINE, "Example Teaching Award: Norvale University, a coastal research school, names one teacher each year"),
+    # A cut inside the line leaves the words before it open: a lower-case
+    # word ending in a colon, which the span completes ...
+    (_AWARD_LINE, "Organized a symposium titled: Example Teaching Award, Norvale University, held at the harbour hall"),
+    # ... or a comma, the cut closing the sentence it began ahead of a new one,
+    # its stop outside a closing quote or inside it.
+    ("2016 - Hydrogels in Estuarine Engineering, Lecturer (Norvale University)",
+     "(c) Teaching at Norvale University: Spring, 2016, “Hydrogels in Estuarine Engineering”. This course pairs "
+     "hydrogel design with field work"),
+    ("2016 - Hydrogels in Estuarine Engineering, Lecturer (Norvale University)",
+     "(c) Teaching at Norvale University: Spring, 2016, “Hydrogels in Estuarine Engineering.” This course pairs "
+     "hydrogel design with field work"),
+])
+def test_a_cut_whose_words_left_would_not_start_cleanly_is_written_as_the_cv_wrote_it(line, fragment):
+    # Owner decision 2026-10-25 (#1205): when in doubt, the line is written as
+    # the CV wrote it, the approved fallback (`_starts_cleanly`).
+    assert sp.unrestated(fragment, line) == fragment
+
+
+@pytest.mark.parametrize("fragment, written", [
+    # Two words the line prints open the new words.
+    ("Example Teaching Award, Norvale University; Award 2016 shared with two colleagues",
+     "Award 2016 shared with two colleagues"),
+    # A single year of the line, or a range it does not print or that ends
+    # past its numbers, opens them.
+    ("Example Teaching Award, Norvale University, 2016 Example Research Prize, Norvale Marine Institute",
+     "2016 Example Research Prize, Norvale Marine Institute"),
+    ("Example Teaching Award, Norvale University; 30-31 residents each year", "30-31 residents each year"),
+    ("Example Teaching Award, Norvale University; 2015-16 cohort of residents", "2015-16 cohort of residents"),
+    ("Example Teaching Award, Norvale University; 2016-19 cohort of residents", "2016-19 cohort of residents"),
+    # A label of the new words' own, not a bracket's tail.
+    ("Example Teaching Award, Norvale University, 2016. Duties: ran the bedside teaching rounds",
+     "Duties: ran the bedside teaching rounds"),
+    # A capitalized label before the cut.
+    ("Prize: Example Teaching Award, Norvale University, given each year to one faculty member",
+     "Prize: given each year to one faculty member"),
+    # A comma before the cut, and the new words go on from it: after a stop,
+    # with a date; after a comma, with a capital.
+    ("Judge, Coastal Prize Board, Example Teaching Award, Norvale University. 2016 to 2019.",
+     "Judge, Coastal Prize Board, 2016 to 2019."),
+    ("Judge, Coastal Prize Board, Example Teaching Award, Norvale University, Bedside teaching rounds",
+     "Judge, Coastal Prize Board, Bedside teaching rounds"),
+    # A stop before the cut, and a new sentence after it.
+    ("Judged in 2015. Example Teaching Award, Norvale University. Shared with two colleagues",
+     "Judged in 2015. Shared with two colleagues"),
+    # A function word after a cut ending in a comma, inside a closing quote or not.
+    ("Graduated – Example Teaching Award, Norvale University, 2016, with highest honors",
+     "Graduated with highest honors"),
+    ("“Example Teaching Award, Norvale University,” for excellence in bedside teaching",
+     "for excellence in bedside teaching"),
+    # An article-led note with no comma, one closed by another mark or before
+    # a quote, or a new sentence.
+    ("Example Teaching Award, Norvale University, a prize for bedside teaching given each year",
+     "a prize for bedside teaching given each year"),
+    ("Example Teaching Award, Norvale University, a prize for residents; given each year",
+     "a prize for residents; given each year"),
+    ("Example Teaching Award, Norvale University, a prize for residents,", "a prize for residents,"),
+    ("Example Teaching Award, Norvale University, a prize of the dean, “for bedside teaching”",
+     "a prize of the dean, “for bedside teaching”"),
+    ("Example Teaching Award, Norvale University. The prize, given each year, names one teacher",
+     "The prize, given each year, names one teacher"),
+])
+def test_a_cut_whose_words_left_start_cleanly_still_stands(fragment, written):
+    assert sp.unrestated(fragment, _AWARD_LINE) == written
+
+
+def test_a_range_of_the_lines_numbers_is_read_from_its_numbers_only():
+    # "19" ends a run the line prints, but not a number: the range is not the line's.
+    assert sp.unrestated("Example Teaching Award, Norvale University, COVID19; 2016-19 cohort of residents",
+                         "Example Teaching Award Norvale University COVID19 2016") == "2016-19 cohort of residents"
+    # Two of the line's words joined by a dash are no range.
+    assert sp.unrestated("Example Teaching Award, Norvale University; ad-hoc panels met twice each year",
+                         "Example Teaching Award ad hoc panel Norvale University 2016") == (
+        "ad-hoc panels met twice each year")
+
+
+def test_the_planner_writes_a_degree_line_restating_its_row_as_its_honors_under_the_same_row():
+    table, lines = _degree_rows(["Ph.D., Example Marine Studies", "Norvale University", "2005"])
+    line = f"Ph.D., Example Marine Studies, Norvale University, 2005 ({_HONORS})"
+    entry = _entry(line, code="B1", degree="Ph.D.", discipline="Example Marine Studies",
+                   institution="Norvale University", year="2005")
+    (planned,) = sp.plan_subpoints({"B1": [entry]}, _haystack(), lines, {"B1": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.anchor is lines[1]
+    assert planned.paragraphs == (f"({_HONORS})",) and planned.lines == (line,)
+    assert planned.source_lines() == (line,) and planned.written_from == (line,)
+
+
+def test_the_planner_offers_a_short_remainder_though_it_is_under_the_prose_threshold():
+    # "cum laude" holds one distinctive word, under SUBPOINT_MIN_TOKENS, but
+    # dropped it would be in neither document.
+    table, lines = _degree_rows(["Ph.D., Example Marine Studies", "Norvale University", "2005"])
+    entry = _entry("Ph.D., Example Marine Studies, Norvale University, 2005, cum laude, with distinction",
+                   code="B1", degree="Ph.D.", institution="Norvale University", year="2005")
+    assert len(sp._tokens("cum laude, with distinction")) < sp.SUBPOINT_MIN_TOKENS
+    (planned,) = sp.plan_subpoints({"B1": [entry]}, _haystack(), lines, {"B1": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[0]._tr])
+    assert planned.paragraphs == ("cum laude, with distinction",)
+
+
+def test_the_planner_keeps_a_sub_point_whose_every_line_restates_its_row_and_writes_no_paragraph():
+    # The row prints more than the entry's fields hold, so the line is not
+    # the row by its field values (`_restates_row`) and is offered; every
+    # word of it is the row's, so nothing is written. The sub-point stays
+    # planned, with its line, for the overflow and the #221 recovery.
+    row = ("Associate Professor of Marsh Ecology and Hydrology | Example University School of Marsh Ecology and "
+           "Tidal Studies, Norvale Campus | 2010-2015")
+    line = ("Associate Professor of Marsh Ecology and Hydrology, Example University School of Marsh Ecology and "
+            "Tidal Studies, Norvale Campus (2010-2015).")
+    candidate = _candidate(row, position=1)
+    entry = _entry(f"{line}\tAssociate Professor\tExample University", title="Associate Professor",
+                   institution="Example University")
+    (planned,) = sp.plan_subpoints({"D1": [entry]}, _haystack("Unrelated rendered line"), [candidate],
+                                   {"D1": sp.SectionSpan(0, None)})
+    assert planned.anchor is candidate and planned.paragraphs == () and planned.lines == (line,)
+    assert planned.written_from == ()
+    # With a line that adds words, that line's paragraph is written, and the
+    # line it was cut from is recorded with it, paragraph for paragraph.
+    noted = f"Associate Professor of Marsh Ecology and Hydrology, Example University: {PROSE}"
+    entry = _entry(f"{line}\t{noted}\tAssociate Professor\tExample University", title="Associate Professor",
+                   institution="Example University")
+    (planned,) = sp.plan_subpoints({"D1": [entry]}, _haystack("Unrelated rendered line"), [candidate],
+                                   {"D1": sp.SectionSpan(0, None)})
+    assert planned.paragraphs == (PROSE,) and planned.lines == (line, noted)
+    assert planned.written_from == (noted,)
+
+
+def test_the_planner_writes_a_line_not_restating_its_row_as_written():
+    line = ("Associate Professor at Example University, 2010-2015, taught the graduate biostatistics "
+            "sequence and supervised doctoral dissertations")
+    candidate = _candidate("Associate Professor | Example University | 2010-2015", position=1)
+    entry = _entry(f"Associate Professor\tExample University\t{line}", title="Associate Professor",
+                   institution="Example University", start_date="2010", end_date="2015")
+    (planned,) = sp.plan_subpoints({"D1": [entry]}, _haystack(), [candidate], {"D1": sp.SectionSpan(0, None)})
+    assert planned.paragraphs == (line,) and planned.lines == (line,) and planned.written_from == ()
+
+
+def test_a_label_tables_line_reads_each_cell_and_each_paragraph_in_it():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    for row, (label, value) in zip(table.rows, [("Name:", "Ana Li"), ("Site/Position:", "Postdoctoral")],
+                                   strict=True):
+        row.cells[0].text, row.cells[1].text = label, value
+    table.rows[1].cells[1].add_paragraph("Associate")
+    sp.write_subpoint(_subpoint(table.rows[0].cells[0].paragraphs[0], PROSE), sp.Revision(0, _DATE))
+    candidate = next(c for c in sp.anchor_candidates(doc) if c.text.startswith("Name:"))
+    # The sub-point row's text is all w:delText: no part of the line.
+    assert sp._printed_line(candidate) == ("Name: Ana Li Site/Position: Postdoctoral Associate",
+                                           "Ana Li Postdoctoral Associate")
+
+
+def test_the_planner_reads_a_mentees_whole_table_as_its_line():
+    # A label/value table holds one mentee, and its sub-point goes at the
+    # table's end: the line is the whole table, opening with its first value.
+    lines = _mentee_tables("Ana Li")
+    line = f"Ana Li, Postdoctoral Associate. {OTHER_PROSE}"
+    (planned,) = sp.plan_subpoints({"N3B": [_postdoc() | {"text": line}]}, _haystack(), lines,
+                                   {"N3B": sp.SectionSpan(0, None)})
+    assert planned.anchor is lines[1] and planned.paragraphs == (OTHER_PROSE,)
+    assert sp._printed_line(planned.anchor) == ("Name: Ana Li Site/Position: Postdoctoral Associate",
+                                                "Ana Li Postdoctoral Associate")
+
+
+def test_the_planner_writes_a_citation_restated_with_an_award_as_the_award():
+    # The CV's own citation format (a colon after the authors, the volume
+    # before the year), so the document does not hold the line verbatim.
+    award = ("Winner of the Example Coastal Society best paper prize, presented at its annual congress "
+             "in Norvale and featured in the society newsletter and on its podcast")
+    line = (f"{_PAPER_AUTHORS}: {_PAPER_TITLE}, {_PAPER_JOURNAL} 12(3):45-52, 2014. {award}")
+    (planned,) = _plan_paper(_paper(line))
+    assert planned.paragraphs == (award,) and planned.lines == (line,)
+
+
+def test_a_stripped_clinical_leadership_sub_point_stands_for_its_overflow_as_its_whole_line_did():
+    # The overflow reads the line as the CV wrote it (`source_lines`): its
+    # line prints the role, the paragraph the rest.
+    line = f"{_CLINICAL_LINE}: {PROSE}"
+    subpoint = _clinical_subpoint(PROSE)._replace(lines=(line,))
+    assert not sp.yields_to_overflow(subpoint, line)
+    assert sp.yields_to_overflow(subpoint, f"{line}\t12 nurses")
+    assert subpoint.source_lines() == (line,) and _clinical_subpoint(PROSE).source_lines() == (PROSE,)
+
+
+def test_a_sub_point_with_no_paragraph_writes_nothing():
+    doc = Document()
+    table = _appointments_table(doc)
+    before = copy.deepcopy(doc.element.body)
+    sp.write_subpoint(_subpoint(table.rows[1].cells[0].paragraphs[0])._replace(paragraphs=()),
+                      sp.Revision(0, _DATE))
+    paragraph = doc.add_paragraph("Associate Professor")
+    sp.write_subpoint(_subpoint(paragraph)._replace(paragraphs=()), sp.Revision(0, _DATE))
+    assert _texts(doc.element.body) == _texts(before) + ["Associate Professor"]
+    assert _deleted_marks(doc.element.body) == []
