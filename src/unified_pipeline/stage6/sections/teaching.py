@@ -14,20 +14,21 @@ the template wording has drifted across revisions ("Clinical teaching" vs
 A code whose headers all miss falls back to the parent "EDUCATIONAL
 CONTRIBUTIONS" heading rather than dropping its entries.
 
-Entries render as a FLAT list under the template's own header: one entry
-bullet per entry since #2019, on its first line, its marker at the heading's
-edge (the template's per-line bullets went in #1943; a level is an indent
-step instead), and the entry's title in bold. The
+Entries render as a FLAT list under the template's own header: since #2019
+each entry is one entry bullet, its marker at the heading's edge, holding
+its lines inline with the title in bold (the template's per-line bullets
+went in #1943); only a source cell's own sub-bullets (#423) stay a sub-level
+under it. The
 source CV's sub-headings are deliberately not carried over: the WCM subsections
 already are the taxonomy, and re-emitting the original hierarchy produced two
 competing levels of grouping.
 
 The one exception is INSIDE an entry (#423): a table row whose source cell is a
-title followed by bullets renders the bullets one list level in. The reader
+title followed by bullets renders the bullets as sub-bullets of the entry. The reader
 flattens the cell, so `SourceCellLevels` re-reads the level from the source
 docx; see its docstring for how a row is found and when it is refused.
 
-Insertion runs backwards. `_insert_bulleted_entry` inserts BEFORE the index it
+Insertion runs backwards. `_insert_entry_lines` inserts BEFORE the index it
 is given, so the list is walked in reverse and each entry lands above the one
 inserted before it, leaving reverse-chronological order on the page. That is
 also why `is_first_visible` is computed as the LAST index of the reversed list
@@ -66,7 +67,7 @@ DELIMITER CONTRACT
 reconstructs as TWO items, not four. Newlines always separate items. Tabs
 separate items only in Stage 5c's own `formatted_text` (`_item_parts`).
 
-The reason a separator can be left in place is that `_insert_bulleted_entry`
+The reason a separator can be left in place is that `_insert_entry_lines`
 already renders both of them readably: `_clean_inline_tabs`
 (`normalization/text.py:258`) rejoins a residual "|" with " — " and a residual
 tab as "Label: Value — Value". So in RAW source text a tab marks the CELLS of
@@ -134,12 +135,12 @@ from ..formatting import (
     envelope_date_spans,
     extra_date_spans,
     format_date_range,
-    mark_entry_end,
     normalize_iso_dates_in_text,
 )
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..parsing.dates import _MONTH_NAME_TO_NUM, _SEASON_TOKENS, _parse_date_components
+from ..parsing.entry_card import sub_list_parts
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -476,6 +477,14 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
     return [text] if text else []
 
 
+def _lines_are_records(fields: _TeachingFields, lines: list[str], raw_lines: list[str]) -> bool:
+    """`lines` are stage 5c's one line per stage-4 record of a one-line
+    entry (`_record_bullets`, #1556 c): separate records, so each is an entry
+    bullet of its own rather than a part of one entry's line (#2019)."""
+    return (bool(fields.get('formatted_text')) and len(raw_lines) <= 1
+            and len(lines) == _record_count(fields) > 1)
+
+
 def _card_source(entry: _TeachingEntry, raw_lines: list[str], levels: list[bool] | None) -> str:
     """The raw text a teaching entry is tried as a card from (#2019): its one
     raw line, or one table row whose cells wrap (`wrapped_row_text`), without
@@ -711,6 +720,12 @@ class TeachingSection:
         if card_text and self._insert_entry_card(insert_idx, card_text, entry,
                                                  add_blank_before=is_first_visible):
             return
+        if card_text and (parts := sub_list_parts(card_text)):
+            # A cell ending in a colon heads the cells after it (#2019): the
+            # entry's line, and that sub-list under it, in the source's words.
+            self._insert_entry_lines(insert_idx, parts, entry, add_blank_before=is_first_visible,
+                                     receipt_on_last=True)
+            return
         # A row whose source cell is a title plus bullets is a hierarchy, not one
         # course whose cells wrap (#987): `wrapped_row_text` cannot tell them
         # apart from the text alone, and would weld the bullets into one line.
@@ -724,25 +739,22 @@ class TeachingSection:
                            entry.get('taxonomy_code'), original_text[:80])
             return
 
-        # `_insert_bulleted_entry` inserts BEFORE insert_idx, so walking the
-        # list backwards leaves it in source order on the page. Exactly one
-        # bullet carries `entry` (the last in source order, inserted first), so
-        # a multi-line entry is annotated once rather than N times, and the
-        # blank line goes above the bullet that ends up visually first. That
-        # same last line carries the gap to the next entry (`mark_entry_end`).
-        for j, line_text in enumerate(reversed(lines)):
-            # The loop is reversed, so bullet j is source line len-1-j; indexing
-            # `levels` with j would invert the hierarchy.
-            is_child = bool(levels and levels[len(lines) - 1 - j])
-            is_first_line = j == len(lines) - 1
-            para = self._insert_bulleted_entry(
-                insert_idx, line_text, entry if j == 0 else None,
-                add_blank_before=is_first_visible and is_first_line,
-                list_level=1 if is_child else 0,
-                bulleted=False,  # #1943: no template bullet on every line
-                # #2019: one bullet per entry, its title in bold
-                entry_bullet=is_first_line,
-                title_fields=fields if is_first_line else None,
-            )
-            if j == 0 and para is not None:
-                mark_entry_end(para)
+        if not levels and _lines_are_records(fields, lines, raw_lines):
+            self._insert_record_entries(insert_idx, entry, lines, is_first_visible)
+            return
+        # One entry bullet holding the lines inline, a source cell's
+        # sub-bullets (#423) a sub-level under it (#2019). The entry rides its
+        # last paragraph, so a sub-point (#1205) follows its sub-bullets.
+        self._insert_entry_lines(insert_idx, lines, entry, add_blank_before=is_first_visible,
+                                 children=levels, receipt_on_last=True)
+
+    def _insert_record_entries(self, insert_idx: int, entry: _TeachingEntry,
+                               lines: list[str], is_first_visible: bool) -> None:
+        """One entry bullet per stage-4 record of `entry`, each of `lines`
+        (`_lines_are_records`, #1556 c), its own title in bold. Inserted
+        backwards, so they land in source order; the entry rides the last."""
+        records = (entry.get('extracted_fields') or {}).get(_STAGE4_RECORDS_KEY)
+        for j, (line, record) in enumerate(reversed(list(zip(lines, records, strict=True)))):
+            self._insert_entry_lines(insert_idx, [line], entry if j == 0 else None,
+                                     add_blank_before=is_first_visible and j == len(lines) - 1,
+                                     title_fields=record if isinstance(record, dict) else None)

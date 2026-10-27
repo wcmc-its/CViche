@@ -410,20 +410,20 @@ class TestL2FallbackMatchesL1AndL3:
         "Published outcomes 2023"
     )
 
-    def test_multiline_l2_entry_renders_one_bullet_per_line(self):
+    def test_multiline_l2_entry_renders_its_lines_inline_in_one_bullet(self):
         gen = _generator(_NoClinicalTableGenerator)
         entry = {"text": self.THREE_LINES, "extracted_fields": {}, "taxonomy_code": "L2"}
         gen._fill_clinical_practice({"L2": [entry]})
 
-        # add_blank_before inserts one spacer, then three list paragraphs
-        paras = _list_paragraphs_after(gen, "Clinical Innovations", 4)
+        # add_blank_before inserts one spacer, then the entry's one paragraph,
+        # its lines inline (#2019)
+        paras = _list_paragraphs_after(gen, "Clinical Innovations", 2)
         bullets = [p for p in paras if _is_entry(gen, p)]
         assert [p.text for p in bullets] == [
-            "Developed a new triage protocol",
-            "Piloted it at NYP Weill Cornell",
+            "Developed a new triage protocol, Piloted it at NYP Weill Cornell, "
             "Published outcomes 2023",
         ]
-        # No line hides inside a soft break: each is its own list item
+        # No line hides inside a soft break
         assert all(_soft_breaks(p) == 0 for p in bullets)
 
     def test_l2_rejects_a_funding_table_and_falls_back_to_bullets(self):
@@ -453,7 +453,8 @@ class TestL2FallbackMatchesL1AndL3:
 
         def shape(gen, section_idx):
             assert section_idx is not None
-            paras = gen.doc.paragraphs[section_idx + 1: section_idx + 6]
+            # The spacer and the two entries, one paragraph each (#2019).
+            paras = gen.doc.paragraphs[section_idx + 1: section_idx + 4]
             return [(p.text, _has_numbering(p), _soft_breaks(p)) for p in paras]
 
         # Locate each subsection the way its own filler does

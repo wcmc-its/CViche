@@ -2833,11 +2833,11 @@ def test_a_sub_point_under_an_unbulleted_entry_goes_one_indent_step_deeper(ancho
     assert anchor._p.pPr.find(qn("w:ind")).get(qn("w:left")) == str(anchor_left)
 
 
-def test_a_sub_point_under_a_k_entry_bullet_is_an_unbulleted_line_a_level_in():
-    # #2019: a K or L entry's first line carries the entry bullet (marker at
-    # the margin, text at 360). Its sub-point drops the bullet and the hang
-    # and sits one level in, at 1080, as the entry's own sub-lines do; the
-    # anchor keeps its bullet.
+def test_a_sub_point_under_a_k_entry_bullet_is_its_sub_bullet():
+    # #2019: a K or L entry is one entry bullet (marker at the margin, text
+    # at 360). Its sub-point is a sub-bullet of the same list, as a sub-list
+    # the source wrote is: level 1, marker at 360 under the entry's text,
+    # text at 720. The anchor keeps its bullet.
     from unified_pipeline.stage6.formatting import (
         apply_entry_bullet,
         ensure_entry_bullet_num_id,
@@ -2852,10 +2852,30 @@ def test_a_sub_point_under_a_k_entry_bullet_is_an_unbulleted_line_a_level_in():
     sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(40, _DATE))
 
     new = anchor._p.getnext()
-    assert new.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
+    assert is_entry_bullet(new.find(qn("w:pPr")), numbering)
+    assert new.find(f"{qn('w:pPr')}/{qn('w:numPr')}/{qn('w:ilvl')}").get(qn("w:val")) == "1"
     ind = new.find(f"{qn('w:pPr')}/{qn('w:ind')}")
-    assert (ind.get(qn("w:left")), ind.get(qn("w:hanging"))) == ("1080", None)
+    assert (ind.get(qn("w:left")), ind.get(qn("w:hanging"))) == ("720", "360")
     assert is_entry_bullet(anchor._p.pPr, numbering)
+    ilvl = anchor._p.pPr.find(f"{qn('w:numPr')}/{qn('w:ilvl')}")
+    assert ilvl.get(qn("w:val")) == "0"
+
+
+def test_a_sub_point_under_an_entry_sub_bullet_goes_one_level_deeper_and_no_further():
+    from unified_pipeline.stage6.formatting import (
+        ENTRY_BULLET_MAX_LEVEL,
+        apply_entry_bullet,
+        ensure_entry_bullet_num_id,
+    )
+    for level, expected in [(1, "2"), (ENTRY_BULLET_MAX_LEVEL, str(ENTRY_BULLET_MAX_LEVEL))]:
+        doc = Document()
+        anchor = doc.add_paragraph("Lab A")
+        apply_entry_bullet(anchor, ensure_entry_bullet_num_id(doc.part.numbering_part.element),
+                           level=level)
+        doc.add_paragraph("Next line")
+        sp.write_subpoint(_subpoint(anchor, PROSE), sp.Revision(40, _DATE))
+        new = anchor._p.getnext()
+        assert new.find(f"{qn('w:pPr')}/{qn('w:numPr')}/{qn('w:ilvl')}").get(qn("w:val")) == expected
 
 
 def test_a_sub_point_under_an_off_grid_indent_keeps_the_anchor_indent():

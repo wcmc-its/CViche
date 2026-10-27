@@ -179,7 +179,12 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     names_teaching_or_authorship_role,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
-from unified_pipeline.stage6.parsing.entry_card import entry_card, title_span
+from unified_pipeline.stage6.parsing.entry_card import (
+    EntryLayout,
+    EntryParagraph,
+    entry_card,
+    entry_layout,
+)
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     DATE_LED_SOURCE_TEXT,
@@ -682,9 +687,8 @@ OVERFLOW_OTHER_MIN_CHARS = 1000
 _NO_OVERFLOW_CODE = 'M1'
 # Sections whose entries carry no template bullet (#1943, WCM reviewers): K
 # Educational Contributions and L Clinical Practice, Innovation and Leadership.
-# Each of their entries gets one entry bullet on its first line instead
-# (#2019, `_apply_entry_bullet`). Their own writers pass bulleted=False; the
-# recovery and overflow writers read this.
+# Each of their entries is one entry bullet instead (#2019, `_insert_entry`),
+# which their own writers write; the recovery and overflow writers read this.
 UNBULLETED_CODE_PREFIXES = ('K', 'L')
 
 
@@ -2892,9 +2896,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                 add_blank_before: bool = False,
                                 list_level: int | None = None,
                                 entry_sibling_paras: list[Paragraph] | None = None,
-                                bulleted: bool = True,
-                                entry_bullet: bool = False,
-                                title_fields: Mapping[str, Any] | None = None) -> Paragraph | None:
+                                bulleted: bool = True) -> Paragraph | None:
         """Insert a SINGLE bulleted entry paragraph as a real Word list item.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -2916,16 +2918,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 to weigh everything the entry rendered rather than this single
                 paragraph (#476 review). A caller that renders an entry as one
                 paragraph leaves it None and the check is unchanged.
-            bulleted: False writes the entry without the template's bullet,
-                at the indent of an entry bullet's text
-                (`_apply_plain_list_indent`). The teaching and
-                clinical-practice writers pass False (#1943) for every line.
-            entry_bullet: with `bulleted` False, the first line of a K or L
-                entry: one entry bullet, its marker at the subsection
-                heading's edge (#2019, `_apply_entry_bullet`).
-            title_fields: the entry's stage-4 fields, when this line may
-                carry its title: the title's verbatim span is bold
-                (`parsing.entry_card.title_span`), nothing else is.
+            bulleted: False writes the entry without a bullet, at the indent
+                the bullet's text would have had (`_apply_plain_list_indent`).
+                The teaching and clinical-practice writers pass False (#1943).
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -2943,13 +2938,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             entry_para.insert_paragraph_before("")
 
         body = _clean_inline_tabs(_strip_taxonomy_code(text))
-        write_entry_line(entry_para, body,
-                         title_span(body, title_fields) if title_fields else None)
+        run = entry_para.add_run(body)
+        _set_font(run)
         level = list_level if list_level is not None else 0
         if bulleted:
             self._apply_list_bullet(entry_para, level=level)
-        elif entry_bullet and level == 0:
-            self._apply_entry_bullet(entry_para)
         else:
             self._apply_plain_list_indent(entry_para, level=level)
 
@@ -2963,10 +2956,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
     def _insert_entry_card(self, insert_idx: int, text: str, entry: dict,
                            add_blank_before: bool = False, one_line: bool = False) -> int:
-        """Insert `text` as an entry card (#2019, `parsing.entry_card`): its
-        lines in source order, the date where the source has it; line 1 an
-        entry bullet with its title in bold, each later line under the
-        bullet's text.
+        """Insert `text` as an entry card (#2019, `parsing.entry_card`): one
+        entry bullet holding its cells inline in source order, the date where
+        the source has it, the title in bold.
 
         Returns the number of paragraphs inserted, the blank spacer
         included, or 0 when `text` does not read as a card (or, with
@@ -2974,43 +2966,98 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         organization and date), a fanned-out record's
         text was built from its fields rather than taken from the CV, or
         there is nothing to insert before; the caller then renders the
-        entry as it did before. Inserted BEFORE `insert_idx`, in page
-        order, so a caller walking its entries backwards is unaffected.
-        The entry's comments ride line 1 and weigh every line of the card;
-        the last line carries the gap to the next entry (`mark_entry_end`).
+        entry as it did before. Inserted BEFORE `insert_idx`, so a caller
+        walking its entries backwards is unaffected.
         """
         text = _strip_taxonomy_code(text or '')
         fields = entry.get('extracted_fields') or {}
         code = str(entry.get('taxonomy_code') or '')
         card = None if has_built_text(entry) else entry_card(
             text, fields, date_text=lambda date: card_date(date, fields, code, text))
-        if (card is None or (one_line and card.has_details)
-                or insert_idx >= len(self.doc.paragraphs)):
+        if card is None or (one_line and card.has_details):
             return 0
-        anchor = self.doc.paragraphs[insert_idx]
-        paras = [anchor.insert_paragraph_before('') for _ in card.lines]
-        for number, (para, line) in enumerate(zip(paras, card.lines, strict=True)):
-            write_entry_line(para, line, card.title if number == 0 else None)
-            self._bullet_paras.add(para._p)
-            if number == 0:
-                self._apply_entry_bullet(para)
-            else:
-                self._apply_plain_list_indent(para, level=0)
+        layout = EntryLayout(paragraphs=(EntryParagraph(0, card.text),), title=card.title)
+        return self._insert_entry(insert_idx, layout, entry, add_blank_before=add_blank_before)
+
+    def _insert_entry_lines(self, insert_idx: int, lines: list[str], entry: dict | None,
+                            add_blank_before: bool = False, children: list[bool] | None = None,
+                            receipt_on_last: bool = False,
+                            title_fields: Mapping[str, Any] | None = None) -> int:
+        """Insert a K or L entry's `lines` (or cells) as its layout (#2019,
+        `parsing.entry_card.entry_layout`): one entry bullet holding them
+        inline, and a sub-level only for a sub-list the source wrote
+        (`children`, a source cell's sub-bullet flags, or a colon-led
+        label). Each line is cleaned for print first, as a line of its own
+        was. A line's own line breaks (stage 5c's sub-lines) split it into
+        parts too, so none prints as a `w:br`; `children` aligns with the
+        source cell's lines, which hold none. The title is read from
+        `title_fields`, else the entry's fields. Returns the paragraphs
+        inserted (`_insert_entry`)."""
+        if not children:
+            lines = [part for line in lines for part in line.split('\n')]
+        cleaned = [_clean_inline_tabs(_strip_taxonomy_code(line)) for line in lines]
+        fields = (title_fields if title_fields is not None
+                  else (entry or {}).get('extracted_fields') or {})
+        layout = entry_layout(cleaned, fields, children=children)
+        return self._insert_entry(insert_idx, layout, entry, add_blank_before=add_blank_before,
+                                  receipt_on_last=receipt_on_last)
+
+    def _insert_entry(self, insert_idx: int, layout: EntryLayout, entry: dict | None,
+                      add_blank_before: bool = False, receipt_on_last: bool = False) -> int:
+        """Insert one K or L entry's `layout` BEFORE `insert_idx`, in page
+        order: the blank spacer when asked, the entry's comments, and the gap
+        to the next entry on its last paragraph (`mark_entry_end`).
+
+        The comments, and with them the row receipt a sub-point anchors to
+        (#1205), ride the first paragraph, or the last with
+        `receipt_on_last` (K's writer, so a sub-point follows the entry's
+        own sub-bullets); either way the overflow router weighs every
+        paragraph (#476). Returns the paragraphs inserted, the spacer
+        included, which every caller advances its insertion index by; 0
+        when there is nothing to insert, or nothing to insert before."""
+        paras = self._insert_entry_layout(insert_idx, layout)
+        if not paras:
+            return 0
         if add_blank_before:
             paras[0].insert_paragraph_before('')
-        self._add_entry_comments(paras[0], entry, entry_paras=paras)
+        if entry:
+            self._add_entry_comments(paras[-1] if receipt_on_last else paras[0], entry,
+                                     entry_paras=paras)
         mark_entry_end(paras[-1])
         self.stats['entries_inserted'] += len(paras)
         return len(paras) + (1 if add_blank_before else 0)
 
-    def _apply_entry_bullet(self, para: Paragraph) -> None:
-        """Make `para` the first line of a K or L entry (#2019): the List
-        Paragraph style, and one bullet whose marker sits at the subsection
-        heading's edge and whose text hangs at `ENTRY_BULLET_HANG_TWIPS`
-        (`formatting.docx.apply_entry_bullet`). The numbering definition is
-        added to the document the first time."""
+    def _insert_entry_layout(self, insert_idx: int, layout: EntryLayout) -> list[Paragraph]:
+        """`layout`'s paragraphs written BEFORE `insert_idx`, in page order,
+        and returned so: the first an entry bullet with the title in bold,
+        each sub-level a sub-bullet of the same list, and a top-level line
+        after a sub-list under the bullet's text, unbulleted. [] when there
+        is nothing to insert before."""
+        if not layout.paragraphs or insert_idx >= len(self.doc.paragraphs):
+            return []
+        anchor = self.doc.paragraphs[insert_idx]
+        paras = []
+        for number, item in enumerate(layout.paragraphs):
+            para = anchor.insert_paragraph_before('')
+            write_entry_line(para, item.text, layout.title if number == 0 else None)
+            self._bullet_paras.add(para._p)
+            if item.bulleted:
+                self._apply_entry_bullet(para, level=item.level)
+            else:
+                self._apply_plain_list_indent(para, level=item.level)
+            paras.append(para)
+        return paras
+
+    def _apply_entry_bullet(self, para: Paragraph, level: int = 0) -> None:
+        """Make `para` a K or L entry's bullet (#2019): the List Paragraph
+        style, and at `level` 0 one bullet whose marker sits at the
+        subsection heading's edge and whose text hangs at
+        `ENTRY_BULLET_HANG_TWIPS`; a sub-level's marker sits where the level
+        above puts its text (`formatting.docx.apply_entry_bullet`). The
+        numbering definition is added to the document the first time."""
         self._set_list_paragraph_style(para)
-        apply_entry_bullet(para, ensure_entry_bullet_num_id(self.doc.part.numbering_part.element))
+        apply_entry_bullet(para, ensure_entry_bullet_num_id(self.doc.part.numbering_part.element),
+                           level=level)
 
     def _apply_list_bullet(self, para: Paragraph, level: int = 0) -> None:
         """Apply Word native list bullet formatting using the WCM template's numbering.
@@ -3701,8 +3748,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
           - Content after a label: ilvl=2 (detail content)
           - Everything else: ilvl=1 (dates, institution context)
 
-        `bulleted=False` writes the same levels without bullets, on the indent
-        grid of the section's own unbulleted entries (#1943).
+        `bulleted=False` (K and L, #1943) writes the entry as those sections'
+        own writers do (#2019, `_insert_entry_layout`): one entry bullet
+        holding the segments inline, a sub-level only under a colon-led
+        label.
 
         Returns the first created paragraph, or None if insertion failed.
         """
@@ -3719,6 +3768,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # A paragraph whose printed lines arrived as separate source
             # paragraphs is joined back at each mid-sentence tab (#1583).
             clean_segments = _refold_shattered(clean_segments)
+            if not bulleted:
+                # K and L (#2019): one entry bullet holding the segments
+                # inline (a segment's own line breaks too, never a `w:br`),
+                # a sub-level only under a colon-led label.
+                parts = [line for segment in clean_segments for line in segment.split('\n')]
+                paras = self._insert_entry_layout(insert_idx, entry_layout(parts, None))
+                return paras[0] if paras else None
 
             # Assign levels using a state machine that mirrors the original CV structure:
             #   ilvl=0: title (first segment)
@@ -3751,27 +3807,18 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             first_para = None
             for idx, (seg_text, level) in enumerate(reversed(list(zip(clean_segments, levels)))):
                 para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-                if bulleted:
-                    self._apply_list_bullet(para, level=level)
+                self._apply_list_bullet(para, level=level)
 
-                    # Override indentation so ilvl=0 bullet sits at the left margin.
-                    pPr = para._p.get_or_add_pPr()
-                    existing_ind = pPr.find(qn('w:ind'))
-                    if existing_ind is not None:
-                        pPr.remove(existing_ind)
-                    ind = OxmlElement('w:ind')
-                    left = INDENT_PER_LEVEL * (level + 1)
-                    ind.set(qn('w:left'), str(left))
-                    ind.set(qn('w:hanging'), str(HANGING))
-                    pPr.append(ind)
-                elif idx == len(clean_segments) - 1:
-                    # The title: K and L entries' one bullet (#2019).
-                    self._apply_entry_bullet(para)
-                    self._bullet_paras.add(para._p)
-                else:
-                    self._apply_plain_list_indent(para, level=level)
-                    # No bullet to recognise it by: register it (#1943).
-                    self._bullet_paras.add(para._p)
+                # Override indentation so ilvl=0 bullet sits at the left margin.
+                pPr = para._p.get_or_add_pPr()
+                existing_ind = pPr.find(qn('w:ind'))
+                if existing_ind is not None:
+                    pPr.remove(existing_ind)
+                ind = OxmlElement('w:ind')
+                left = INDENT_PER_LEVEL * (level + 1)
+                ind.set(qn('w:left'), str(left))
+                ind.set(qn('w:hanging'), str(HANGING))
+                pPr.append(ind)
 
                 run = para.add_run(seg_text)
                 _set_font(run)

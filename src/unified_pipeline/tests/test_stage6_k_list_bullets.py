@@ -91,15 +91,15 @@ def _num_level(para):
 
 
 def _plain_level(para):
-    """The level of a line of a K or L entry, read from its left indent: an
-    unbulleted line (#1943), or the entry bullet on its first line (#2019),
-    whose text sits at level 0. None for a template bullet or no indent."""
+    """The level of a line of a K or L entry: an entry bullet's `w:ilvl`
+    (#2019), or an unbulleted line's read from its left indent (#1943).
+    None for a template bullet or no indent."""
     pPr = para._p.pPr
     if pPr is None:
         return None
-    if (pPr.find(qn("w:numPr")) is not None
-            and not is_entry_bullet(pPr, para.part.numbering_part.element)):
-        return None
+    if pPr.find(qn("w:numPr")) is not None:
+        return (_num_level(para) if is_entry_bullet(pPr, para.part.numbering_part.element)
+                else None)
     left = para.paragraph_format.left_indent
     if left is None:
         return None
@@ -294,18 +294,16 @@ def test_appendix_noise_only_batch_still_adds_no_paragraphs():
 
 # --- and the K call site actually asks for it --------------------------------
 
-def test_every_teaching_call_site_requests_a_list_level():
-    # Guards the wire, not the helper: dropping list_level from the K call site
-    # silently restores the glyph for section K. The count was 7 until #476
-    # moved the text reconstruction into `_teaching_entry_lines`, leaving
-    # `_insert_teaching_entry` with one insertion loop instead of seven
-    # per-branch calls; the count still has to be pinned, so a new emitter
-    # added beside it fails here rather than in a render.
-    calls = _bullet_calls_by_function()[K_CALLER]
-    assert len(calls) == 1, f"expected 1 K call site, found {len(calls)}"
-    for call in calls:
-        kwargs = {kw.arg for kw in call.keywords}
-        assert "list_level" in kwargs, f"{K_CALLER} line {call.lineno} lost list_level"
+def test_the_teaching_writer_writes_every_entry_through_the_entry_writer():
+    # Guards the wire, not the helper. Until #2019 `_insert_teaching_entry`
+    # had one `_insert_bulleted_entry` loop (seven per-branch calls before
+    # #476), which had to pass list_level or K lost its list markup. Since
+    # #2019 every K entry is a card or `_insert_entry_lines`, both of which
+    # write the entry bullet; a template-bullet call added beside them fails
+    # here rather than in a render.
+    assert K_CALLER not in _bullet_calls_by_function()
+    source = inspect.getsource(WCMTemplateGenerator._insert_teaching_entry)
+    assert "self._insert_entry_lines(" in source and "self._insert_entry_card(" in source
 
 
 def test_every_bulleted_entry_call_site_requests_a_list_level():
@@ -566,7 +564,8 @@ def test_a_blank_paragraph_inside_the_source_cell_does_not_break_the_match(tmp_p
 def test_levels_are_dropped_when_the_rendered_lines_are_not_the_raw_lines(tmp_path):
     # No formatted_text and no tail: the entry falls to the field/raw path,
     # which splits a long child on ';' into more lines than the source has
-    # paragraphs. Levels aligned to the source must not index into that.
+    # paragraphs. Levels aligned to the source must not index into that: the
+    # entry is one paragraph, its lines inline (#2019).
     long_child = ("Coordinate the partner site visits and prepare the annual review; "
                   "collect trainee feedback after every rotation block")
     assert len(long_child) > 100
@@ -575,11 +574,11 @@ def test_levels_are_dropped_when_the_rendered_lines_are_not_the_raw_lines(tmp_pa
     entry = _row_entry(lines, tail="")
     entry["extracted_fields"] = {}
     gen = _render_k(source, [entry])  # must not raise IndexError
-    rendered = [p for p in gen.doc.paragraphs
-                if p.text.strip() in {_TITLE, _CHILDREN[0]}
-                or p.text.strip() in {x.strip() for x in long_child.split(";")}]
-    assert len(rendered) == 4
-    assert {_plain_level(p) for p in rendered} == {"0"}
+    (rendered,) = [p for p in gen.doc.paragraphs if _TITLE in p.text]
+    assert rendered.text == (f"{_TITLE}, {_CHILDREN[0]}, Coordinate the partner site visits and "
+                             "prepare the annual review, collect trainee feedback after every "
+                             "rotation block")
+    assert _plain_level(rendered) == "0"
 
 
 def test_a_tail_is_licensed_on_the_first_line_only(tmp_path):
@@ -633,6 +632,38 @@ def test_a_wrapped_cell_row_without_source_levels_still_rejoins_to_one_bullet(tm
     gen = _render_k(_source_docx(tmp_path, [flat]), [entry])
     hits = [p for p in gen.doc.paragraphs if _TITLE in p.text]
     assert len(hits) == 1 and _CHILDREN[0] in hits[0].text
+
+
+def test_source_sub_bullets_are_level_1_of_the_entry_bullet_as_literal_ooxml(tmp_path):
+    """#2019: a source sub-bullet is a sub-bullet of the entry's own list, its
+    marker where the entry's text starts (left 720 less a 360 hang = 360)."""
+    gen = _render_k(_source_docx(tmp_path, [_HIER]), [_row_entry(_LINES)])
+    numbering = gen.doc.part.numbering_part.element
+    num_id = entry_bullet_num_id(numbering)
+    (title,) = [p for p in gen.doc.paragraphs if _TITLE in p.text]
+    assert _ooxml(title) == ("0", num_id, "360", "360")
+    for child in _CHILDREN:
+        (para,) = [p for p in gen.doc.paragraphs if p.text == child]
+        assert _ooxml(para) == ("1", num_id, "720", "360")
+    lvl = numbering.xpath(
+        'w:abstractNum[w:name/@w:val="CViche entry bullet"]/w:lvl[@w:ilvl="1"]')[0]
+    assert lvl.find(qn("w:numFmt")).get(qn("w:val")) == "bullet"
+    ind = lvl.find(f'{qn("w:pPr")}/{qn("w:ind")}')
+    assert (ind.get(qn("w:left")), ind.get(qn("w:hanging"))) == ("720", "360")
+    # The gap to the next entry is on the entry's last paragraph alone.
+    assert [_has_entry_gap(p) for p in gen.doc.paragraphs
+            if _TITLE in p.text or p.text in _CHILDREN] == [False, False, True]
+
+
+def test_a_k_entry_rides_its_last_paragraph_after_its_sub_bullets(tmp_path):
+    """The entry rides its last paragraph (`receipt_on_last`), so the row
+    receipt a #1205 sub-point anchors to (and its Word comments) follow the
+    source's sub-bullets rather than splitting the entry from them."""
+    entry = _row_entry(_LINES)
+    gen = _render_k(_source_docx(tmp_path, [_HIER]), [entry])
+    paras = [p for p in gen.doc.paragraphs if _TITLE in p.text or p.text in _CHILDREN]
+    assert len(paras) == 3
+    assert gen._row_receipts.elements_for(entry) == [paras[-1]._p]
 
 
 def test_hierarchical_row_is_not_rejoined_even_when_it_is_a_single_element_row(tmp_path):
@@ -689,28 +720,22 @@ def _has_entry_gap(para):
             and para.paragraph_format.space_after == Pt(ENTRY_GAP_AFTER_PT))
 
 
-def test_only_the_last_line_of_each_teaching_entry_carries_the_entry_gap():
+def test_each_multi_line_teaching_entry_is_one_paragraph_carrying_the_entry_gap():
     # Multi-line K entries ran together: the List Paragraph style's
-    # contextual spacing drops the space between two of its paragraphs. The
-    # last line of each entry now turns that off and sets the gap; its other
-    # lines keep the style's tight spacing.
+    # contextual spacing drops the space between two of its paragraphs. Each
+    # entry is now one paragraph, its lines inline (#2019), and it turns that
+    # off and sets the gap.
     gen = _generator()
     gen._fill_teaching({"K1": [_k_entry(_COURSE_A), _k_entry(_COURSE_B)]})
     paras = gen.doc.paragraphs
-    first = next(i for i, p in enumerate(paras) if p.text in (_COURSE_A[0], _COURSE_B[0]))
-    rendered = paras[first:first + len(_COURSE_A) + len(_COURSE_B)]
-    texts = [p.text for p in rendered]
-    assert sorted(texts) == sorted(_COURSE_A + _COURSE_B)
-    for para in rendered:
-        is_last = para.text in (_COURSE_A[-1], _COURSE_B[-1])
-        assert _has_entry_gap(para) is is_last, para.text
-        if not is_last:
-            assert para.paragraph_format.space_after is None
-            assert not is_entry_end(para._p.pPr)
+    joined = [", ".join(_COURSE_A), ", ".join(_COURSE_B)]
+    first = next(i for i, p in enumerate(paras) if p.text in joined)
+    rendered = paras[first:first + 2]
+    assert sorted(p.text for p in rendered) == sorted(joined)
+    assert all(_has_entry_gap(p) for p in rendered)
     # The first entry still gets its blank line above it, and only it does.
     assert paras[first - 1].text == ""
     assert not _has_entry_gap(paras[first - 1])
-    assert sum(p.text == "" for p in rendered) == 0
 
 
 def test_a_single_line_teaching_entry_carries_the_entry_gap():
@@ -741,7 +766,7 @@ def test_a_teaching_entrys_last_line_writes_the_gap_as_literal_ooxml():
     # would leave contextual spacing ON and the gap swallowed).
     gen = _generator()
     gen._fill_teaching({"K1": [_k_entry(_COURSE_A), _k_entry(_COURSE_B)]})
-    last = next(p for p in gen.doc.paragraphs if p.text == _COURSE_A[-1])
+    last = next(p for p in gen.doc.paragraphs if p.text.endswith(_COURSE_A[-1]))
     contextual = last._p.pPr.findall(qn("w:contextualSpacing"))
     assert [c.get(qn("w:val")) for c in contextual] == ["0"]
     assert last._p.pPr.find(qn("w:spacing")).get(qn("w:after")) == "120"  # 6pt

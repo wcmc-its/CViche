@@ -1,11 +1,14 @@
-"""One free-form K or L entry read as a card (#2019): its cells as lines in
-source order, and the span of its title to bold.
+"""One free-form K or L entry read as a card (#2019): its cells inline in
+source order, and the span of its title to bold; and the layout every other
+K or L entry takes (`entry_layout`).
 
 Partner feedback (2026-10-26) asked for the source CV's own layout in place of
 a run-on line; Paul's review of the first rendering (2026-10-27) asked for the
-date inline, where the source has it, and for only the title in bold:
+date inline, where the source has it, and for only the title in bold, and his
+review of the second asked for the location and details inline too, keeping a
+sub-level only where the source has one:
 
-    • Attending Surgeon, Resident Teaching, Northfield Health, 2025-Sep 2026
+    • Attending Surgeon, Resident Teaching, Northfield Health, 2025-Sep 2026,
       Orthopaedic Surgery Residency; clinical and operative teaching
 
 No model writes any of it. Stage 4's title and role fields are used only as
@@ -37,11 +40,12 @@ organization or date leads a list of peers, or when the lines' words are not
 exactly the text's words. That last check is what makes "no word lost or
 added" a guarantee rather than a property of the rule above.
 
-The layout keeps the source's order (`_card_lines`): each cell is a line,
-except that the cells holding the head and organization share line 1, and a
-cell that is nothing but the date joins the line before it (or, leading the
-text, line 1), with `CELL_JOIN`. The bold is `title_span`: the verbatim span
-of a title or role field, never the words around it (a K4 presenter list).
+The card keeps the source's order (`_card_groups`): its cells, trimmed of
+the separators between them, joined into one line by `join_inline`. The bold
+is `title_span` over the cells that hold the head and organization (and a
+date cell leading the text): the verbatim span of a title or role field,
+never the words around it (a K4 presenter list), and never a field that only
+a later cell repeats.
 
 Pure: strings in, a frozen record out; no Word object is touched (§1.2).
 """
@@ -84,10 +88,22 @@ _CELL_BREAK = re.compile(r'\t| \| ')
 # entry keeps the old rendering, which indents them.
 _SUB_LIST_LABEL = re.compile(r'[^\W_][^\t|]*:[ ]*(?:\t| \| )')
 
-# What joins two cells that share a line: the head's cell and the
-# organization's, or a date cell and the line before it. The source's own
-# separator there is a tab or a " | ", which no line prints.
+# What joins two cells or lines of one entry into its one paragraph
+# (`join_inline`). The source's own separator there is a tab, a " | " or a
+# paragraph break, which no paragraph prints.
 CELL_JOIN = ', '
+# A piece already ending in one of these is followed by a space alone, so a
+# join never doubles the punctuation ("Course A.", "Scope:" stay as written).
+_ENDS_ITS_OWN_CLAUSE = (',', ';', '.', ':')
+# A part ending in a colon labels the parts after it as a sub-list
+# ("Selected Initiatives:"); the zero-width space is how some sources end one.
+_LABEL_ENDINGS = (':', ':\u200b')
+# The deepest sub-level an entry's layout uses: a label's items are one level
+# under the entry, a later label's items one more.
+MAX_SUB_LEVEL = 2
+# How many parts a label must head to be a sub-list: one is a label and its
+# value ("Location: Example Hospital"), which reads inline.
+MIN_SUB_LIST_ITEMS = 2
 
 _WORD = re.compile(r'[^\W_]+')
 _MONTH = (r'(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?'
@@ -118,16 +134,39 @@ _OPENERS, _CLOSERS = '(“[', ')”]'
 _SEPARATORS_ONLY = re.compile(r'[\s\W_]*')
 _LEADING_SEPARATORS = re.compile(r'^[\s,;|:.–—\-]+')
 _TRAILING_SEPARATORS = re.compile(r'[\s,;|:–—\-]+$')
+# What a card trims from the end of a cell it prints: a dash or bar left
+# before the cell break, but not a comma, semicolon or colon, which the
+# source wrote and `join_inline` keeps in place of its own comma.
+_TRAILING_CELL_SEPARATORS = re.compile(r'[\s|–—\-]+$')
 
 
 @dataclass(frozen=True)
 class EntryCard:
-    """An entry's lines in source order, the span of line 1 to bold, and
-    whether the slot rule found detail items beyond the head, organization
-    and date (an L3 role line takes a card only without them)."""
-    lines: tuple[str, ...]
+    """An entry's cells as one line in source order, the span of it to bold,
+    and whether the slot rule found detail items beyond the head,
+    organization and date (an L3 role line takes a card only without them)."""
+    text: str
     title: tuple[int, int] | None
     has_details: bool
+
+
+@dataclass(frozen=True)
+class EntryParagraph:
+    """One paragraph of an entry: `level` 0 is the entry's own bulleted line;
+    1 and 2 are sub-bullets the source had (`entry_layout`). A paragraph that
+    is not `bulleted` is a top-level line the source wrote after its
+    sub-bullets, at the entry's text indent."""
+    level: int
+    text: str
+    bulleted: bool = True
+
+
+@dataclass(frozen=True)
+class EntryLayout:
+    """The paragraphs of one K or L entry in page order, and the span of the
+    first one to bold (its title, `title_span`)."""
+    paragraphs: tuple[EntryParagraph, ...]
+    title: tuple[int, int] | None
 
 
 @dataclass(frozen=True)
@@ -144,6 +183,25 @@ class _Slots:
 def words(text: str) -> Counter:
     """The case-folded word multiset of `text`: what no card may change."""
     return Counter(word.casefold() for word in _WORD.findall(text))
+
+
+def join_inline(pieces: list[str] | tuple[str, ...]) -> str:
+    """`pieces` as one line in order: each joined to the text before it by
+    `CELL_JOIN`, or by a space alone when that text already ends in
+    punctuation of its own (`_ENDS_ITS_OWN_CLAUSE`). Blank pieces are
+    dropped. Only separators are added, never a word."""
+    line = ''
+    for piece in pieces:
+        piece = piece.strip()
+        if not piece:
+            continue
+        if not line:
+            line = piece
+        elif line.endswith(_ENDS_ITS_OWN_CLAUSE):
+            line = f'{line} {piece}'
+        else:
+            line = f'{line}{CELL_JOIN}{piece}'
+    return line
 
 
 def _field_value(fields: Mapping, key: str) -> str | None:
@@ -364,11 +422,12 @@ def _cells(text: str) -> list[tuple[int, int]]:
 
 def _trimmed_span(text: str, start: int, end: int,
                   keep: tuple[int, int] | None) -> tuple[int, int]:
-    """`text[start:end]` without separator punctuation at either end, but
-    never cut into `keep` (the date, whose open-range dash is part of it)."""
+    """`text[start:end]` without separator punctuation at its start, or a
+    dash or bar at its end (`_TRAILING_CELL_SEPARATORS`), but never cut into
+    `keep` (the date, whose open-range dash is part of it)."""
     cell = text[start:end]
     lead = len(cell) - len(_LEADING_SEPARATORS.sub('', cell))
-    trail = _TRAILING_SEPARATORS.search(cell)
+    trail = _TRAILING_CELL_SEPARATORS.search(cell)
     first, last = start + lead, start + trail.start() if trail else end
     if keep and start <= keep[0] and keep[1] <= end:
         first, last = min(first, keep[0]), max(last, keep[1])
@@ -380,9 +439,11 @@ def _unchanged(date: str) -> str:
     return date
 
 
-def _card_lines(text: str, slots: _Slots, date_text: Callable[[str], str]) -> list[str]:
-    """The card's lines in source order (module docstring), the date slot
-    written as `date_text` returns it."""
+def _card_groups(text: str, slots: _Slots, date_text: Callable[[str], str]) -> list[list[str]]:
+    """The card's cells in source order, trimmed (module docstring), the date
+    slot written as `date_text` returns it. The first group holds the cells
+    of the head and organization, and a date cell next to them: the cells
+    the title may be found in."""
     line1_end = (slots.org or slots.head)[1]
     groups: list[list[str]] = []
     for start, end in _cells(text):
@@ -398,7 +459,7 @@ def _card_lines(text: str, slots: _Slots, date_text: Callable[[str], str]) -> li
             groups[-1].append(piece)
         else:
             groups.append([piece])
-    return [CELL_JOIN.join(group) for group in groups]
+    return groups
 
 
 def title_span(line: str, fields: Mapping | None) -> tuple[int, int] | None:
@@ -426,8 +487,118 @@ def entry_card(text: str, fields: Mapping | None,
     if not text or '\n' in text:
         return None
     slots = _slots(text, fields or {})
-    if slots is None or words(' '.join(_card_lines(text, slots, _unchanged))) != words(text):
+    if slots is None:
         return None
-    lines = _card_lines(text, slots, date_text or _unchanged)
-    return EntryCard(lines=tuple(lines), title=title_span(lines[0], fields),
+    raw = _card_groups(text, slots, _unchanged)
+    if words(join_inline([piece for group in raw for piece in group])) != words(text):
+        return None
+    groups = _card_groups(text, slots, date_text or _unchanged)
+    # `join_inline` folds left, so the first group's line is a prefix of the
+    # card's: a span found in it is the same span of the whole.
+    # A comma or semicolon the last cell ends on separates nothing now.
+    return EntryCard(text=join_inline([piece for group in groups for piece in group]).rstrip(',;'),
+                     title=title_span(join_inline(groups[0]), fields),
                      has_details=bool(slots.details))
+
+
+def _is_label(part: str) -> bool:
+    """`part` labels a sub-list: it ends in a colon (`_LABEL_ENDINGS`)."""
+    return part.rstrip(' ').endswith(_LABEL_ENDINGS)
+
+
+def _source_levels(parts: list[str], children: list[bool]) -> list[tuple[int, bool]]:
+    """(level, bulleted) per part from the source's own sub-bullet flags
+    (`children`, #423): a flagged part is a sub-bullet; any other part joins
+    the entry's line, or, after a sub-bullet, is a top-level line of its own."""
+    levels, seen_child = [], False
+    for child in children[:len(parts)]:
+        seen_child = seen_child or child
+        levels.append((1, True) if child else (0, not seen_child))
+    return levels
+
+
+def _items_after(parts: list[str], index: int) -> int:
+    """How many parts follow `parts[index]` before the next label."""
+    count = 0
+    for part in parts[index + 1:]:
+        if _is_label(part):
+            break
+        count += 1
+    return count
+
+
+def _with_label_values(parts: list[str]) -> list[str]:
+    """`parts` with each label that heads one part only joined to it: a
+    label and its value ("Budget: $4M"), not a sub-list."""
+    merged, index = [], 0
+    while index < len(parts):
+        if _is_label(parts[index]) and _items_after(parts, index) == 1:
+            merged.append(join_inline(parts[index:index + 2]))
+            index += 2
+        else:
+            merged.append(parts[index])
+            index += 1
+    return merged
+
+
+def sub_list_parts(text: str) -> list[str] | None:
+    """`text`'s cells (a tab or stage 2's " | " apart), when a label among
+    them heads a sub-list (`_label_levels`), or None."""
+    parts = [cell.strip() for cell in _CELL_BREAK.split(text) if cell.strip()]
+    heads = any(_is_label(part) and _items_after(parts, index) >= MIN_SUB_LIST_ITEMS
+                for index, part in enumerate(parts))
+    return parts if heads else None
+
+
+def _label_levels(parts: list[str]) -> list[tuple[int, bool]]:
+    """(level, bulleted) per part (`_with_label_values` applied) from its
+    sub-list labels: a label heading `MIN_SUB_LIST_ITEMS` parts or more
+    starts a sub-list whose items are one level under it. The first label,
+    on the entry's own line or joining it, puts its items at level 1; a later
+    one is itself a level-1 bullet and its items are level 2. Everything
+    before the first label joins the entry's line."""
+    levels, item_level = [], 0
+    for index, part in enumerate(parts):
+        heads = _is_label(part) and _items_after(parts, index) >= MIN_SUB_LIST_ITEMS
+        if heads and item_level == 0:
+            levels.append((0, True))
+            item_level = 1
+        elif heads:
+            levels.append((1, True))
+            item_level = MAX_SUB_LEVEL
+        else:
+            levels.append((item_level, True))
+    return levels
+
+
+def entry_layout(parts: list[str], fields: Mapping | None,
+                 children: list[bool] | None = None) -> EntryLayout:
+    """The paragraphs a K or L entry's `parts` (its lines or cells, already
+    cleaned for print, in source order) render as (#2019): one bulleted
+    paragraph holding every part joined inline (`join_inline`), except what
+    the source itself wrote as a sub-list. That is a part `children` flags as
+    a sub-bullet of the source's table cell (#423), or, without flags, the
+    parts after a part ending in a colon ("Selected Initiatives:",
+    `_label_levels`; a label heading one part is joined to it). The first
+    paragraph's title is bold (`title_span`, read in the first part alone,
+    so a later part's words are never bold)."""
+    kept = [(part.strip(), index) for index, part in enumerate(parts) if part.strip()]
+    if not kept:
+        return EntryLayout(paragraphs=(), title=None)
+    texts = [part for part, _ in kept]
+    if children and any(children):
+        flags = [children[index] if index < len(children) else False for _, index in kept]
+        levels = _source_levels(texts, flags)
+    else:
+        texts = _with_label_values(texts)
+        levels = _label_levels(texts)
+    levels[0] = (0, True)  # the entry's own line, whatever its source flag
+    groups: list[tuple[int, bool, list[str]]] = []
+    for part, (level, bulleted) in zip(texts, levels, strict=True):
+        if groups and level == 0 and groups[-1][:2] == (0, bulleted):
+            groups[-1][2].append(part)
+        else:
+            groups.append((level, bulleted, [part]))
+    paragraphs = tuple(EntryParagraph(level, join_inline(pieces), bulleted)
+                       for level, bulleted, pieces in groups)
+    return EntryLayout(paragraphs=paragraphs, title=title_span(texts[0], fields))

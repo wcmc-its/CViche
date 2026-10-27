@@ -130,8 +130,8 @@ from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
 from .formatting import (
     PRESENTATION_DATE_FIELDS,
     PRESENTATION_END_DATE_FIELD,
-    as_plain_entry,
     clear_entry_end,
+    deepen_entry_bullet,
     is_entry_bullet,
     is_entry_end,
     plain_entry_left_twips,
@@ -2558,9 +2558,9 @@ def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
     if ppr is not None:
         level = ppr.find(f"{qn('w:numPr')}/{qn('w:ilvl')}")
         if is_entry_bullet(ppr, _numbering(anchor)):
-            # A K or L entry's one bullet (#2019): its sub-points are
-            # unbulleted lines a level in, as the entry's own sub-lines are.
-            as_plain_entry(ppr, level=1)
+            # A K or L entry's bullet (#2019): its sub-points are sub-bullets
+            # of it, as a sub-list its source wrote is.
+            deepen_entry_bullet(ppr)
         elif level is not None:
             level.set(qn('w:val'), str(int(level.get(qn('w:val'), '0')) + 1))
         else:
