@@ -1821,6 +1821,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # anchor must never resolve to one of them (#548): an ALL-CAPS bullet
         # (the writer does not bold, but the shape test accepts bold too) would pass `_find_header_paragraph`'s shape test.
         self._bullet_paras = set()
+        # Entry paragraphs `_insert_entry_layout` joined from several lines
+        # (#2019): (the joined text, its lines), read by the #1205 planner's
+        # haystack (`_rendered_output_lines(joined_as_lines=True)`). Keyed by
+        # element, as `_bullet_paras` is.
+        self._joined_entry_lines: dict[BaseOxmlElement, tuple[str, tuple[str, ...]]] = {}
         # Which entry each written row renders (#534); fresh per render.
         self._row_receipts = RowReceiptLedger()
         self.stats = {
@@ -2976,7 +2981,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text, fields, date_text=lambda date: card_date(date, fields, code, text))
         if card is None or (one_line and card.has_details):
             return 0
-        layout = EntryLayout(paragraphs=(EntryParagraph(0, card.text),), title=card.title)
+        layout = EntryLayout(paragraphs=(EntryParagraph(0, card.text, lines=card.lines),), title=card.title)
         return self._insert_entry(insert_idx, layout, entry, add_blank_before=add_blank_before)
 
     def _insert_entry_lines(self, insert_idx: int, lines: list[str], entry: dict | None,
@@ -3041,6 +3046,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             para = anchor.insert_paragraph_before('')
             write_entry_line(para, item.text, layout.title if number == 0 else None)
             self._bullet_paras.add(para._p)
+            if len(item.lines) > 1:
+                self._joined_entry_lines[para._p] = (item.text, item.lines)
             if item.bulleted:
                 self._apply_entry_bullet(para, level=item.level)
             else:
@@ -4258,7 +4265,7 @@ Now analyze the text above:"""
         still stands for its entry."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
-        out_lines = self._rendered_output_lines() + self._subpoint_lines
+        out_lines = self._rendered_output_lines(joined_as_lines=True) + self._subpoint_lines
         haystack = supplementary.rendered_haystack(out_lines, self.doc)
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
         appendix = self.doc.paragraphs[appendix_idx]._p if appendix_idx is not None else None
@@ -4391,7 +4398,8 @@ Now analyze the text above:"""
         return lines
 
     def _rendered_output_lines(self, *, exclude_instruction_box: bool = False,
-                               include_tracked_insertions: bool = False) -> list[str]:
+                               include_tracked_insertions: bool = False,
+                               joined_as_lines: bool = False) -> list[str]:
         """Every rendered text line of the in-memory document: body paragraphs
         plus table cells. Two render-time divergences from run_doctor's
         read_docx_blocks (which walks only top-level tables, cell by cell):
@@ -4424,6 +4432,13 @@ Now analyze the text above:"""
         written as tracked insertions, so a caller asking whether the reader
         already sees a record must opt in (`_m1_appendix_entries`). Default
         off, which leaves every other caller's lines unchanged.
+
+        `joined_as_lines`: read a K or L entry paragraph joined inline from
+        several lines (#2019, `EntryParagraph.lines`) as those lines, one
+        each, while its text is still the joined text. The #1205 planner
+        opts in, so the join decides nothing it offers: the joined line
+        pools its lines' words, and a source sentence that one sub-line
+        paraphrases read as printed (#2024: 11 K1 sub-points lost).
         """
         lines: list[str] = []
 
@@ -4447,7 +4462,10 @@ Now analyze the text above:"""
                     add(' | '.join(' '.join(t.split()) for t in cell_texts))
 
         for para in self.doc.paragraphs:
-            add(_paragraph_text(para, include_tracked_insertions))
+            text = _paragraph_text(para, include_tracked_insertions)
+            joined = self._joined_entry_lines.get(para._p) if joined_as_lines else None
+            for line in (joined[1] if joined and joined[0] == text else (text,)):
+                add(line)
         for tbl in self.doc.tables:
             if exclude_instruction_box and self._is_instruction_box_table(tbl):
                 continue

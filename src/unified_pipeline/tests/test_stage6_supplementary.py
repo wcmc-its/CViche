@@ -3619,3 +3619,93 @@ def test_a_sub_point_with_no_paragraph_writes_nothing():
     sp.write_subpoint(_subpoint(paragraph)._replace(paragraphs=()), sp.Revision(0, _DATE))
     assert _texts(doc.element.body) == _texts(before) + ["Associate Professor"]
     assert _deleted_marks(doc.element.body) == []
+
+
+# --- #2019: a K entry joined inline is read as its lines ----------------------
+
+_K1_PROSE = ("I taught a 1-hour clerkship lecture for medical students at the Example School "
+             "of Medicine on their clerkship rotation (8-12 students). I received informal "
+             "positive feedback from medical students.")
+
+
+def _k1_talk():
+    """A K1 entry stage 5c wrote as a line and a "Notes:" sub-line that
+    paraphrases its prose (the farm's six-CV K1 family, #2024): joined
+    inline, the line holds most of the prose's words in one paragraph."""
+    title = "Example Ward Rounds: What sets them apart and why do they seem so different?"
+    return {
+        "element_idx_start": 12,
+        "taxonomy_code": "K1",
+        "text": f"Presenter of “{title}”\tFebruary 2021\t{_K1_PROSE}",
+        "extracted_fields": {
+            "course_title": title,
+            "institution": "Example School of Medicine",
+            "role": "Presenter",
+            "start_date": "2021-02",
+            "end_date": "2021-02",
+            "formatted_text": (f"**2021-02–2021-02** – \"{title},\" Presenter (Example School "
+                               "of Medicine; clerkship medical students)\n  - Notes: 1-hour clerkship "
+                               "lecture for 8–12 students; received informal positive feedback."),
+        },
+    }
+
+
+def test_a_k_entry_joined_inline_still_offers_the_prose_its_sub_line_paraphrases():
+    # #2024: the planner reads the entry's lines one each, as it did when
+    # 5c's sub-line printed on a line of its own, so the join pools nothing:
+    # the prose sentences are offered as sub-points, not taken for printed.
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    gen = WCMTemplateGenerator(verbose=False, supplementary_subpoints=True)
+    gen.doc = Document(gen.template_path)
+    entry = _k1_talk()
+    gen._fill_teaching({"K1": [entry]})
+    (line,) = [p for p in gen.doc.paragraphs if "Example Ward Rounds" in p.text]
+    assert "students), 1-hour clerkship lecture" in line.text  # one paragraph, joined
+
+    gen._add_supplementary_subpoints({"K1": [entry]})
+
+    (placement,) = gen._subpoint_placements
+    assert placement.code == "K1"
+    assert " ".join(placement.paragraphs) == _K1_PROSE
+    # Every other reader of the page still reads the joined line whole.
+    assert line.text in gen._rendered_output_lines()
+
+
+def test_a_joined_entry_line_changed_after_it_was_written_is_read_as_it_prints():
+    # The lines stand in for the paragraph only while it still holds their
+    # join: a paragraph rewritten later is read as it prints.
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    gen = WCMTemplateGenerator(verbose=False, supplementary_subpoints=True)
+    gen.doc = Document(gen.template_path)
+    gen._fill_teaching({"K1": [_k1_talk()]})
+    (line,) = [p for p in gen.doc.paragraphs if "Example Ward Rounds" in p.text]
+    assert "1-hour clerkship lecture for 8\u201312 students; received informal positive feedback." in (
+        gen._rendered_output_lines(joined_as_lines=True))
+
+    line.add_run(" Revised.")
+
+    lines = gen._rendered_output_lines(joined_as_lines=True)
+    assert line.text in lines
+    assert "1-hour clerkship lecture for 8\u201312 students; received informal positive feedback." not in lines
+
+
+def test_a_k_card_is_read_as_its_line_and_its_details():
+    # A card's cells join into one paragraph too; the planner reads its head
+    # line and each detail one each, as they printed before #2019.
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    gen = WCMTemplateGenerator(verbose=False, supplementary_subpoints=True)
+    gen.doc = Document(gen.template_path)
+    entry = {"taxonomy_code": "K1",
+             "text": "Course Director\tExample Hall\t2019\tWeekly seminar for second-year students",
+             "extracted_fields": {"role": "Course Director", "institution": "Example Hall"}}
+    gen._fill_teaching({"K1": [entry]})
+    (line,) = [p for p in gen.doc.paragraphs if p.text.startswith("Course Director")]
+    assert line.text == "Course Director, Example Hall, 2019, Weekly seminar for second-year students"
+
+    lines = gen._rendered_output_lines(joined_as_lines=True)
+    assert "Course Director, Example Hall, 2019" in lines
+    assert "Weekly seminar for second-year students" in lines
+    assert line.text not in lines

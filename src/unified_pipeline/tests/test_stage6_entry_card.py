@@ -66,6 +66,10 @@ def test_the_issue_shape_is_a_card_with_its_date_inline():
         "Orthopaedic Surgery Residency; clinical and operative teaching of PGY-5 residents")
     assert _bold(card) == "Attending Surgeon, Resident Teaching"
     assert card.title == (0, len("Attending Surgeon, Resident Teaching"))
+    # The lines the card joins, as each would print alone: line 1 (head,
+    # organization, date) and each detail. The #1205 planner reads these.
+    assert card.lines == ("Attending Surgeon, Resident Teaching, Northfield Health, 2025–Sep 2026",
+                          "Orthopaedic Surgery Residency; clinical and operative teaching of PGY-5 residents")
 
 
 def test_head_org_and_date_alone_are_a_one_line_card():
@@ -373,6 +377,8 @@ def test_a_multi_part_entry_is_one_paragraph():
                      clinical_role="Event physician")
     assert layout.paragraphs == (
         EntryParagraph(0, "Event physician, Example Arena, 2015-2020, 12 events a year"),)
+    assert layout.paragraphs[0].lines == ("Event physician, Example Arena", "2015-2020",
+                                          "12 events a year")
     assert layout.paragraphs[0].text[slice(*layout.title)] == "Event physician"
 
 
@@ -411,6 +417,9 @@ def test_a_colon_led_label_heads_a_sub_list():
         EntryParagraph(0, "Practice Lead, Example Residency, January 2022 – May 2024, "
                           "Selected Initiatives:"),
         EntryParagraph(1, "Built a referral workflow"), EntryParagraph(1, "Wrote a clinic manual"))
+    assert [p.lines for p in layout.paragraphs] == [
+        ("Practice Lead, Example Residency", "January 2022 – May 2024", "Selected Initiatives:"),
+        ("Built a referral workflow",), ("Wrote a clinic manual",)]
 
 
 def test_a_label_leading_the_entry_heads_its_sub_list():

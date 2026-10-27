@@ -52,7 +52,7 @@ Pure: strings in, a frozen record out; no Word object is touched (§1.2).
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Stage-4 fields that name an entry's title or role, tried as head anchors in
 # this order (K: course/activity/program titles and roles; L: clinical and
@@ -144,10 +144,12 @@ _TRAILING_CELL_SEPARATORS = re.compile(r'[\s|–—\-]+$')
 class EntryCard:
     """An entry's cells as one line in source order, the span of it to bold,
     and whether the slot rule found detail items beyond the head,
-    organization and date (an L3 role line takes a card only without them)."""
+    organization and date (an L3 role line takes a card only without them).
+    `lines` are the lines `text` joins (`EntryParagraph.lines`)."""
     text: str
     title: tuple[int, int] | None
     has_details: bool
+    lines: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -155,10 +157,18 @@ class EntryParagraph:
     """One paragraph of an entry: `level` 0 is the entry's own bulleted line;
     1 and 2 are sub-bullets the source had (`entry_layout`). A paragraph that
     is not `bulleted` is a top-level line the source wrote after its
-    sub-bullets, at the entry's text indent."""
+    sub-bullets, at the entry's text indent.
+
+    `lines` are the pieces `text` joins inline, each as it would print as a
+    line of its own (a card's head and each detail, a stage-5c sub-line).
+    The #1205 sub-point planner reads them in place of `text`, so joining
+    them does not decide what it offers: the joined line pools their words,
+    and a prose sentence a sub-line paraphrases would read as printed.
+    Empty for a paragraph of one piece."""
     level: int
     text: str
     bulleted: bool = True
+    lines: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -498,7 +508,8 @@ def entry_card(text: str, fields: Mapping | None,
     # A comma or semicolon the last cell ends on separates nothing now.
     return EntryCard(text=join_inline([piece for group in groups for piece in group]).rstrip(',;'),
                      title=title_span(join_inline(groups[0]), fields),
-                     has_details=bool(slots.details))
+                     has_details=bool(slots.details),
+                     lines=tuple(join_inline(group) for group in groups))
 
 
 def _is_label(part: str) -> bool:
@@ -599,6 +610,6 @@ def entry_layout(parts: list[str], fields: Mapping | None,
             groups[-1][2].append(part)
         else:
             groups.append((level, bulleted, [part]))
-    paragraphs = tuple(EntryParagraph(level, join_inline(pieces), bulleted)
+    paragraphs = tuple(EntryParagraph(level, join_inline(pieces), bulleted, tuple(pieces))
                        for level, bulleted, pieces in groups)
     return EntryLayout(paragraphs=paragraphs, title=title_span(texts[0], fields))
