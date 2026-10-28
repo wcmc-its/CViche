@@ -228,9 +228,9 @@ def _unextracted_name(entry: Mapping[str, Any], code: str) -> str | None:
 
 def _same_institution(own: str, name: str) -> bool:
     """Whether a row's own institution is the heading's, or a unit of it, or
-    the heading's abbreviation: one's words contain the other's ("UCLA" under
-    "UCLA", "Stanford Cancer Center" under "Stanford", "ASHP" under its full
-    name)."""
+    the heading's abbreviation: one's words contain the other's ("Exampleton"
+    under "Exampleton", "Exampleton Cancer Center" under "Exampleton", "ESIM"
+    under "Example Society of Imaginary Medicine (ESIM)")."""
     own_words, words = _content_words(own), _content_words(name)
     return bool(own_words) and (own_words <= words or words <= own_words)
 
