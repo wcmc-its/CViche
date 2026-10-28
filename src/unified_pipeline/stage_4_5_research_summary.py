@@ -17,7 +17,7 @@ import logging
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 # Output directory
@@ -37,6 +37,12 @@ from unified_pipeline.llm_provenance import (
     STAGE4_5_CALL_M1_SCORE,
     STAGE4_5_CALL_SUMMARY,
     STAGE4_5_FALLBACK_CALLS_KEY,
+)
+from unified_pipeline.stage6.parsing.dates import (
+    TWO_DIGIT_YEAR_DATE_RE,
+    grant_end_date,
+    grant_end_year,
+    grant_has_ended,
 )
 from unified_pipeline.stage_errors import CallFailure
 
@@ -165,6 +171,12 @@ YEAR_PATTERN = re.compile(r'\b(?:19|20)\d{2}\b')
 ONGOING_PATTERN = re.compile(
     r'(?:^|[-–—]|\bto)\s*\b(?:present|current|ongoing|now|currently\s+working)\b\s*$', re.IGNORECASE)
 OPEN_RANGE_PATTERN = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]+\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
+# What separates the dated items of an end date (end_date_state): a list ("2014; 2018; 2026"), a
+# range ("2020-2027", "Jan 1, 2020 - Dec 31, 2026") or an extension ("2025 (extended to 2027)").
+# A dash joins two items only between two years, so "06-2026" and "2016-10-21" are one date each.
+END_DATE_ITEM_SEPARATOR = re.compile(
+    r'[;,(]|\s[-–—]+\s|(?<=\b(?:19|20)\d{2})[-–—]+(?=(?:19|20)\d{2}\b)|\b(?:to|through|until)\b',
+    re.IGNORECASE)
 CURRENT_CONTEXT_TAG = '[CURRENT]'
 # A leading "YYYY" or "YYYY-YYYY" token in free text, for latest_entry_year's
 # text fallback: group 2 is empty when there is no range.
@@ -183,9 +195,12 @@ def latest_entry_year(entry: dict, current_year: int) -> int | None:
     an entry still in progress and is capped at current_year, not skipped in
     favour of a later token. A bare year after current_year, or a range
     whose START is after current_year, is a typo or forward-looking
-    projection and is skipped in favour of the next token in the text."""
+    projection and is skipped in favour of the next token in the text. A start
+    or end date written with a short year ("6/30/21") counts too
+    (short_year_dates)."""
     fields = entry.get('extracted_fields') or {}
     field_years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
+    field_years += short_year_dates(fields, current_year)
     if field_years:
         return max(field_years)
     for start, end in LEADING_YEAR_OR_RANGE_PATTERN.findall(entry.get('text') or ''):
@@ -200,46 +215,70 @@ def latest_entry_year(entry: dict, current_year: int) -> int | None:
     return None
 
 
-def resolve_current_year(current_year: int | None) -> int:
-    """The given year, or the wall-clock year when None (production's default)."""
-    return datetime.now().year if current_year is None else current_year
+def short_year_dates(fields: dict, current_year: int) -> list[int]:
+    """The years of the entry's start and end dates written mm/dd/yy, or with a one-digit year,
+    which YEAR_PATTERN does not read, as stage 6's grant_end_year reads them. end_date_state
+    reads those dates, so a grant it calls ended keeps its year for ranking and does not rank
+    as undated, below grants that ended earlier (PF07OS, QFJSXR, #1554)."""
+    years = []
+    for name in (GRANT_START_FIELD, GRANT_END_FIELD):
+        value = str(fields.get(name) or '').strip()
+        if TWO_DIGIT_YEAR_DATE_RE.fullmatch(value):
+            year = grant_end_year(value, current_year, fields.get(GRANT_START_FIELD))
+            if year is not None:
+                years.append(year)
+    return years
 
 
-def end_date_state(entry: dict, current_year: int) -> bool | None:
-    """Whether the entry's end_date has passed: True when it names only years
-    earlier than current_year; False when it matches ONGOING_PATTERN ("2024 -
-    Present"), whatever year it names, or names current_year or later; None
-    when it names neither (no end_date, or one with no year)."""
+def resolve_as_of(as_of: date | None) -> date:
+    """The given date, or the wall-clock date when None (production's default)."""
+    return datetime.now().date() if as_of is None else as_of
+
+
+def end_date_state(entry: dict, as_of: date) -> bool | None:
+    """Whether the entry's end_date has passed by `as_of`: False when it matches
+    ONGOING_PATTERN ("2024 - Present"), whatever year it names; otherwise stage
+    6's grant_has_ended(), at the precision the date states, so a grant that
+    ended in April has ended by October of the same year (UAURFU-05, #1554).
+    Each item between END_DATE_ITEM_SEPARATOR's separators is read so, and the
+    date has ended only when every item that names a date has: stage 4 fuses
+    several grants into one record with one end each ("2014; 2018; 2026"),
+    current while its last study runs (9MKVDA), and a range or an extension
+    names its start or old end first ("2020-2027", "2025 (extended to 2027)"),
+    which stage 6's first-year reading takes for the end. A comma inside one
+    date ("June 30, 2026") leaves its year, all that stage 6's parser reads of
+    it. None when it names no date (no end_date, or one with no year)."""
     fields = entry.get('extracted_fields') or {}
     end_date = str(fields.get('end_date') or '')
     if ONGOING_PATTERN.search(end_date):
         return False
-    end_years = [int(y) for y in YEAR_PATTERN.findall(end_date)]
-    if not end_years:
+    ends = [grant_end_date(item, as_of, fields.get('start_date')) for item in END_DATE_ITEM_SEPARATOR.split(end_date)]
+    ends = [end for end in ends if end is not None]
+    if not ends:
         return None
-    return max(end_years) < current_year
+    return all(grant_has_ended(end, as_of) for end in ends)
 
 
-def ended_before(entry: dict, current_year: int) -> bool:
-    """True when the entry's end_date names a year earlier than current_year.
+def ended_before(entry: dict, as_of: date) -> bool:
+    """True when the entry's end_date has passed by `as_of` (end_date_state).
     An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
     whatever year it names, so an open-ended M2A/N3A stays current."""
-    return end_date_state(entry, current_year) is True
+    return end_date_state(entry, as_of) is True
 
 
-def is_current_entry(entry: dict, taxonomy_code: str, current_year: int, latest_year: int | None = _UNCOMPUTED) -> bool:
+def is_current_entry(entry: dict, taxonomy_code: str, as_of: date, latest_year: int | None = _UNCOMPUTED) -> bool:
     """True for an ongoing entry: a current-by-definition section whose
     end_date has not passed, an undated M1 narrative, an end_date of
     'present'/'current'/'ongoing', or (M1 only -- M1 project lines carry
     their dates only in the text) an open 'YYYY-present' range in the text.
 
     `latest_year`, when given, is the caller's already-computed
-    latest_entry_year(entry, current_year), so the M1 undated check does not
+    latest_entry_year(entry, as_of.year), so the M1 undated check does not
     compute it a second time."""
     if taxonomy_code in CURRENT_TAXONOMY_CODES:
-        return not ended_before(entry, current_year)
+        return not ended_before(entry, as_of)
     if taxonomy_code == RESEARCH_ACTIVITIES_CODE:
-        year = latest_entry_year(entry, current_year) if latest_year is _UNCOMPUTED else latest_year
+        year = latest_entry_year(entry, as_of.year) if latest_year is _UNCOMPUTED else latest_year
         if year is None:
             return True
     fields = entry.get('extracted_fields') or {}
@@ -261,23 +300,23 @@ class EntryRecency:
     ended: bool | None = None
 
 
-def compute_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> EntryRecency:
+def compute_entry_recency(entry: dict, taxonomy_code: str, as_of: date) -> EntryRecency:
     """The entry's is_current/latest_year/score, sharing one latest_entry_year call."""
-    year = latest_entry_year(entry, current_year)
-    current = is_current_entry(entry, taxonomy_code, current_year, latest_year=year)
+    year = latest_entry_year(entry, as_of.year)
+    current = is_current_entry(entry, taxonomy_code, as_of, latest_year=year)
     if current:
         score = 1.0
     elif year is None:
         score = 0.0
     else:
-        score = min(max(1 - (current_year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
+        score = min(max(1 - (as_of.year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
     return EntryRecency(is_current=current, latest_year=year, score=score,
-                        ended=end_date_state(entry, current_year))
+                        ended=end_date_state(entry, as_of))
 
 
-def score_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> float:
+def score_entry_recency(entry: dict, taxonomy_code: str, as_of: date) -> float:
     """0.0-1.0: 1.0 if ongoing, else linear decay over RECENCY_WINDOW_YEARS; undated scores 0."""
-    return compute_entry_recency(entry, taxonomy_code, current_year).score
+    return compute_entry_recency(entry, taxonomy_code, as_of).score
 
 
 def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
@@ -321,7 +360,7 @@ def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = 
     return 0.0
 
 
-def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: int, cv_owner_name: str = '',
+def prioritize_entries(entries: list[dict], taxonomy_code: str, as_of: date, cv_owner_name: str = '',
                        limit: int | None = None, recency_by_id: dict[int, EntryRecency] | None = None) -> list[dict]:
     """
     Prioritize and limit entries for a taxonomy code.
@@ -344,7 +383,7 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: in
         seniority_score = score_entry_seniority(entry, taxonomy_code, cv_owner_name)
         recency = (recency_by_id or {}).get(id(entry))
         if recency is None:
-            recency = compute_entry_recency(entry, taxonomy_code, current_year)
+            recency = compute_entry_recency(entry, taxonomy_code, as_of)
 
         # Content quality score (has substantive text)
         text_len = len(entry.get('text', ''))
@@ -363,7 +402,7 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: in
     return [entry for _, entry in scored_entries[:limit]]
 
 
-def gather_context_entries(entries_by_code: dict[str, list[dict]], current_year: int,
+def gather_context_entries(entries_by_code: dict[str, list[dict]], as_of: date,
                            cv_owner_name: str = '') -> list[tuple[str, dict, float, EntryRecency]]:
     """
     Gather and weight entries from all sections for summary generation.
@@ -386,10 +425,10 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], current_year:
         if base_weight <= -0.85:
             continue
 
-        recency_by_id = {id(entry): compute_entry_recency(entry, code, current_year) for entry in entries}
+        recency_by_id = {id(entry): compute_entry_recency(entry, code, as_of) for entry in entries}
 
         # Prioritize and limit entries
-        prioritized = prioritize_entries(entries, code, current_year, cv_owner_name=cv_owner_name,
+        prioritized = prioritize_entries(entries, code, as_of, cv_owner_name=cv_owner_name,
                                           recency_by_id=recency_by_id)
 
         for entry in prioritized:
@@ -758,6 +797,9 @@ FUNDING_REQUIREMENT = (
 )
 # Pending applications are not funded work (KJJVVO, #1484). Asked only when the context has a
 # pending-application line: on a CV without one, the line primed "application under review" (#1554).
+# The line is found by its Status, not its tag: grant_status() reads a pending application off an
+# M2A/M2B grant's pending heading too, and an M2C the CV marks declined is not pending (#1554).
+PENDING_STATUS_SEGMENT = grant_status_segment(GRANT_STATUS_BY_CODE[PENDING_GRANT_CODE])
 PENDING_FUNDING_REQUIREMENT = (
     "A grant line whose Status is a pending application is an application, not funded work: if you "
     "mention it, say it was submitted (with its Submitted date, when the line gives one), and never describe it as funded, "
@@ -786,7 +828,7 @@ def summary_requirements(context: str) -> list[str]:
     ]
     if context_has_any_tag(context, [grant_context_tag(code) for code in FUNDED_GRANT_CODES]):
         requirements.append(FUNDING_REQUIREMENT)
-    if context_has_any_tag(context, [grant_context_tag(PENDING_GRANT_CODE)]):
+    if PENDING_STATUS_SEGMENT in context:
         requirements.append(PENDING_FUNDING_REQUIREMENT)
     if context_has_any_tag(context, [generic_context_tag(code) for code in MENTORING_TAXONOMY_CODES]):
         requirements.append(MENTORING_REQUIREMENT)
@@ -1039,7 +1081,7 @@ def run_stage_4_5(input_path: str, output_path: str | None = None, verbose: bool
     with open(input_file, 'r', encoding="utf-8") as f:
         data = json.load(f)
 
-    current_year = resolve_current_year(None)  # resolved once, reused for the whole run
+    as_of = resolve_as_of(None)  # resolved once, reused for the whole run
     document_uid = data.get('document_uid', input_file.stem)
     cv_owner = data.get('cv_owner') or {}
     cv_owner_name = f"{cv_owner.get('first_name', '')} {cv_owner.get('last_name', '')}".strip()
@@ -1109,7 +1151,7 @@ def run_stage_4_5(input_path: str, output_path: str | None = None, verbose: bool
             print(f"\nGenerating research summary from CV context...")
 
         # Gather weighted context
-        weighted_entries = gather_context_entries(entries_by_code, current_year, cv_owner_name=cv_owner_name)
+        weighted_entries = gather_context_entries(entries_by_code, as_of, cv_owner_name=cv_owner_name)
 
         if verbose:
             print(f"  Context entries: {len(weighted_entries)}")

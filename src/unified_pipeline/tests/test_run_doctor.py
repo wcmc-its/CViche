@@ -4141,6 +4141,13 @@ def test_owner_lint_prevalence_is_the_measured_farm_fraction():
     assert LINT_PREVALENCE["etal_added"] == round(59 / 63, 3)
 
 
+def test_summary_lint_prevalence_is_the_measured_pair_fraction():
+    """Pairs with a finding over S1554-R's 296 stored (uid, summary, stage-4)
+    pairs, measured 2026-10-27 (#1554); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["summary_unsupported_claim"] == round(55 / 296, 3)
+
+
 def test_run_doctor_reads_the_tracked_insertion_not_the_deleted_source(tmp_path):
     """#1259 end to end, the OIYKZE-02 shape: stage 6 replaced the CV line
     with a tracked deletion plus a tracked insertion of a citation without
