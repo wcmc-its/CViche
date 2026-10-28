@@ -3852,10 +3852,14 @@ class _GroupEntry(NamedTuple):
     any_date: bool
     #: Whether stage 2 joined more than one source line into the entry.
     multi_line: bool
+    #: The sub-heading name stage 6 printed in the row's institution or
+    #: organization cell (#985, `_filled_heading_names`); "" when none.
+    filled_name: str
 
 
-def _group_entries(stage4: dict) -> list[_GroupEntry]:
-    """The entries in source order, each with a position."""
+def _group_entries(stage4: dict, filled_names: Mapping[object, str]) -> list[_GroupEntry]:
+    """The entries in source order, each with a position, and with the name
+    `filled_names` gives its row, if any."""
     entries = []
     for raw in stage4.get("entries", []):
         position = _entry_position(raw)
@@ -3872,7 +3876,8 @@ def _group_entries(stage4: dict) -> list[_GroupEntry]:
         entries.append((position, _GroupEntry(
             raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), text,
             tuple(str(h) for h in hierarchy) if isinstance(hierarchy, list) else (),
-            fields, dated, dated or bool(_GROUP_SHORT_DATE_RE.search(text)), multi_line)))
+            fields, dated, dated or bool(_GROUP_SHORT_DATE_RE.search(text)), multi_line,
+            filled_names.get(raw.get("element_idx_start"), ""))))
     return [entry for _, entry in sorted(entries, key=lambda pair: pair[0])]
 
 
@@ -3959,8 +3964,11 @@ def _child_lost_header(child: _GroupEntry, header_name: frozenset[str],
 
 
 def _is_bare_role(entry: _GroupEntry) -> bool:
-    """A line that is a role and its dates, and nothing more."""
-    if entry.code not in _GROUP_ROLE_CODES or not _is_role_and_dates(entry):
+    """A line that is a role and its dates, and nothing more. A row stage 6
+    filled with its sub-heading's name (#985) prints what the role was held
+    in, though stage 4's fields lack it."""
+    if (entry.filled_name or entry.code not in _GROUP_ROLE_CODES
+            or not _is_role_and_dates(entry)):
         return False
     role = _value_tokens(entry, frozenset(_GROUP_ROLE_FIELDS))
     role_text = " ".join(str(entry.fields[key]) for key in entry.fields.keys() & _GROUP_ROLE_FIELDS)
@@ -4174,11 +4182,16 @@ def _parent_dates_lost_hits(entries: list[_GroupEntry],
 
 
 def lint_group_header_context(stage4: dict, table_rows: list[list[list[str]]],
-                              blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+                              blocks: list[tuple[str, str]] | None = None,
+                              stage6_report: dict | None = None) -> list[dict]:
     """Lines whose group header's context did not reach their rendered rows
     (X6 E8, E11): one finding per header, lead line or dated parent, named
-    by its element_idx_start, quoting up to three of its lines' rows."""
-    entries = _group_entries(stage4)
+    by its element_idx_start, quoting up to three of its lines' rows. A row
+    stage 6 filled from a sub-heading, consumed or kept (#985, read from
+    `stage6_report`), carries that heading's name, so it is no bare role:
+    read as one, it took another entry's headless row of the same role
+    (ZDCXIV 333)."""
+    entries = _group_entries(stage4, _filled_heading_names(stage4, stage6_report))
     rows = _junk_rendered_rows(table_rows, blocks or [])
     reported: set[int] = set()
     hits = (_children_lost_header_hits(entries, rows, reported)

@@ -9243,6 +9243,58 @@ def test_group_header_context_reports_a_bare_role_under_a_header_once():
     assert [shape for _, _, shape in hits] == ["children_lost_header"]
 
 
+def _filled_office_block():
+    """#985, the ZDCXIV 332 shape: a society line stage 6 filled the office
+    under it from, so the office's row prints the society although stage 4's
+    fields name none; another office's row of the same role renders alone."""
+    entries = [_grp4("Example Widget Society", "I", 10, organization="Example Widget Society"),
+               _grp4("President 1988-1990", "Q1", 11, role="President",
+                     start_date="1988", end_date="1990")]
+    rows = [[["Example Widget Society", "President", "1988-1990"], ["", "President", "1994-1995"]]]
+    return entries, rows
+
+
+def _grp_report_hits(entries, table_rows, blocks, report):
+    return [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
+            for f in lint_group_header_context({"entries": entries}, table_rows, blocks, report)]
+
+
+def test_group_header_context_reads_a_row_stage_6_filled_as_holding_its_role():
+    """#985: read from stage 4 alone, the filled office is a bare role, and it
+    takes the other office's headless row as its own. The record says stage 6
+    printed the heading's name on it, consumed or kept, so it is no bare role."""
+    entries, rows = _filled_office_block()
+    without = ("WARN", "entry 10 (I)", "role_without_holder")
+    assert _grp_hits(entries, rows) == [without]
+    assert _grp_report_hits(entries, rows, [], None) == [without]
+    assert _grp_report_hits(entries, rows, [], {"warnings": []}) == [without]
+    assert _grp_report_hits(entries, rows, [], _consumed_heading_report(10, [11])) == []
+    assert _grp_report_hits(entries, rows, [], _kept_heading_report(10, [11])) == []
+    assert _grp_report_hits(entries, rows, [], _consumed_heading_report(10, [12])) == [without]
+
+
+def test_group_header_context_reads_the_record_by_the_index_stage_4_wrote():
+    """Stage 4 may write element_idx_start as a string; stage 6 records the
+    value as it found it, so the lint looks a row up by that value, not by
+    its numeric position."""
+    entries, rows = _filled_office_block()
+    for entry in entries:
+        entry["element_idx_start"] = entry["element_idx_end"] = str(entry["element_idx_start"])
+    assert _grp_report_hits(entries, rows, [], _consumed_heading_report("10", ["11"])) == []
+
+
+def test_group_header_context_still_reads_a_headless_role_stage_6_did_not_fill():
+    """#985: the record spares only the rows it lists; a course's bare roles
+    (the RINASX-06 shape) still draw their WARN beside a filled office."""
+    entries, rows = _filled_office_block()
+    entries += _course_block()
+    course = ("WARN", "entry 140 (K1)", "role_without_holder")
+    assert _grp_report_hits(entries, rows, _COURSE_BLOCKS, None) == [
+        ("WARN", "entry 10 (I)", "role_without_holder"), course]
+    assert _grp_report_hits(entries, rows, _COURSE_BLOCKS,
+                            _consumed_heading_report(10, [11])) == [course]
+
+
 def _lead_block(lead_text="Thesis Committees, Example State University", code="K2", **fields):
     """An undated lead line, then three dated mentee lines coded N3B
     (the IEUPKK-18 shape)."""
@@ -9416,6 +9468,39 @@ def test_run_doctor_wires_group_header_context_with_the_rendered_rows(tmp_path):
     hits = [f for f in payload["findings"] if f["lint"] == "group_header_context"]
     assert [(f["severity"], f["evidence"][0]) for f in hits] == [
         ("WARN", "entry 141 (K3): 1956-1958 - Workshop Coordinator")]
+
+
+def test_run_doctor_hands_the_render_warnings_to_group_header_context(tmp_path):
+    """#985: the LINT_REGISTRY row hands the lint the render-warnings sidecar
+    (`stage_6_report`, optional), where stage 6 records the rows it filled.
+    The same run with and without that record."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+    )
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    entries, rows = _filled_office_block()
+    data["entries"].extend(entries)
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    table = output.add_table(rows=len(rows[0]), cols=3)
+    for row, values in zip(table.rows, rows[0], strict=True):
+        for cell, value in zip(row.cells, values, strict=True):
+            cell.text = value
+    output.save(str(docx_path))
+
+    def hits(warnings: list[dict]) -> list[str]:
+        _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                     {"document_uid": _UID, "warnings": warnings, "dedup_decisions": []})
+        return [f["message"].split(": ")[0] for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "group_header_context"]
+
+    assert hits([]) == ["entry 10 (I)"]
+    assert hits([{"check": CONSUMED_HEADING_CHECK, "code": None, "section": None, "message": "",
+                  "evidence": [], "severity": "INFO", CONSUMED_HEADINGS_KEY: [[10, [11]]]}]) == []
 
 
 def test_group_header_context_reads_entries_in_source_order():

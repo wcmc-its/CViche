@@ -380,7 +380,8 @@ Lints, ranked by the severity of the failure class they catch:
                           coded unlike the dated list under it (IEUPKK-18,
                           RINASX-14) and an undated role under a dated block
                           rendered with no dates (IEUPKK-14/-17), both INFO.
-                          Reads stage 4 and the docx's rows
+                          Reads stage 4 and the docx's rows. A row stage 6
+                          filled from a sub-heading (#985) is no bare role
 14ae. orphaned_fragments  a stage-3b fragment whose text is not in the entry
                           it belongs to, so no record holds it (#1256:
                           JNATFN's title tail, MQJAVH's examiner sessions).
@@ -1907,7 +1908,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("citation_field_dropped", lint_citation_field_dropped, ("stage_4", "blocks")),
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
-             optional=("blocks",)),
+             optional=("blocks", "stage_6_report")),
     LintSpec("orphaned_fragments", lint_orphaned_fragments, ("stage_3b",)),
     LintSpec("stage4_unplaced_items", lint_stage4_unplaced_items, ("stage_4",)),
     LintSpec("summary_unsupported_claim", lint_summary_unsupported_claim,
