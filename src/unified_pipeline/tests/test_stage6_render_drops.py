@@ -118,7 +118,7 @@ def test_an_institution_sub_heading_fills_its_rows_and_leaves_its_group() -> Non
                 "hierarchy": ["Institutional Service"],
                 "extracted_fields": {"committee_name": name, "start_date": "2001"}}
 
-    heading = {"taxonomy_code": "I", "text": "Quillmoor University", "element_idx_start": 10,
+    heading = {"taxonomy_code": "Q2", "text": "Quillmoor University", "element_idx_start": 10,
                "hierarchy": ["Institutional Service"],
                "extracted_fields": {"organization": "Quillmoor University"}}
     gen = WCMTemplateGenerator(verbose=False)

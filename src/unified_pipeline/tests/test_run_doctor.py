@@ -8139,6 +8139,33 @@ def test_date_cell_shape_reads_a_row_stage_6_filled_with_its_heading_name():
     rows = [[["Experiential Section", "Member", society, "2019-Present"]]]
     assert [f["message"].split(":")[0] for f in lint_date_cell_shape(stage4, rows, [])] == ["entry 426 (R)"]
     assert lint_date_cell_shape(stage4, rows, [], _consumed_heading_report(548, [552])) == []
+    assert lint_date_cell_shape(stage4, rows, [], _kept_heading_report(548, [552])) == []
+
+
+def _kept_heading_report(heading: int, rows: list[int]) -> dict:
+    """A render-warnings sidecar recording that stage 6 filled `rows` with the
+    society line at `heading` and kept that line as its own row (#985)."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+        KEPT_HEADINGS_KEY,
+    )
+    return {"warnings": [{"check": CONSUMED_HEADING_CHECK, CONSUMED_HEADINGS_KEY: [],
+                          KEPT_HEADINGS_KEY: [[heading, rows]]}]}
+
+
+def test_junk_or_header_row_still_reads_a_heading_stage_6_kept_as_its_own_row():
+    """#985: a heading stage 6 filled its rows from and kept as its own row
+    (`institution_headings._keeps_its_row`, a society line coded I) renders,
+    so it is read as before; only a consumed heading renders no row. The
+    record is read by element index, whatever the code."""
+    entries = [_junk4("Example Widget Society", "Q2", 172, organization="Example Widget Society"),
+               _junk4("Judicial Panels, 2011-2013", "P", 174, committee_name="Judicial Panels")]
+    rows = [[["Example Widget Society", "", ""]], [["Judicial Panels, Example Widget Society", "", "2011-2013"]]]
+    assert _junk_hits(entries, rows) == [("WARN", "entry 172 (Q2)", "header_only")]
+    kept = lint_junk_or_header_row({"entries": entries}, rows, [], _kept_heading_report(172, [174]))
+    assert [f["message"].split(":")[0] for f in kept] == ["entry 172 (Q2)"]
+    assert lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(172, [174])) == []
 
 
 def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_path):

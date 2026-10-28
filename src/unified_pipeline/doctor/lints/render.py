@@ -36,7 +36,10 @@ from unified_pipeline.core.text_norm import (
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
-from unified_pipeline.stage6.institution_headings import heading_fills
+from unified_pipeline.stage6.institution_headings import (
+    consumed_headings,
+    heading_fills,
+)
 from unified_pipeline.stage6.parsing import (
     _is_shattered,
     _mid_sentence_joins,
@@ -3258,9 +3261,10 @@ def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> boo
 
 def _filled_heading_names(stage4: dict, stage6_report: dict | None) -> dict[object, str]:
     """{element_idx_start of a row stage 6 filled from an institution
-    sub-heading it consumed (#985): that heading's text}. Stage 4's JSON has
-    neither the fill nor the removal; the render-warnings sidecar records
-    both (`stage6.institution_headings.heading_fills`)."""
+    sub-heading (#985), consumed or kept as its own row: that heading's
+    text}. Stage 4's JSON has neither the fill nor the removal; the
+    render-warnings sidecar records both
+    (`stage6.institution_headings.heading_fills`)."""
     fills = heading_fills((stage6_report or {}).get("warnings") or [])
     texts = {raw.get("element_idx_start"): str(raw.get("text") or "")
              for raw in stage4.get("entries", [])}
@@ -3683,10 +3687,11 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
     6 consumed into the rows under it (#985, read from `stage6_report`)
     renders no row, and is not read: its name is now in its rows' cells, and
     a short row holding it would otherwise be quoted as the header's
-    (NJIKGI 172)."""
+    (NJIKGI 172). A society line stage 6 kept as its own row is read as
+    before (`stage6.institution_headings.consumed_headings`)."""
     dated = _dated_ranks(stage4)
     rows = _junk_rendered_rows(table_rows, blocks or [])
-    consumed = heading_fills((stage6_report or {}).get("warnings") or [])
+    consumed = consumed_headings((stage6_report or {}).get("warnings") or [])
     findings = []
     taken: set[int] = set()
     for raw in stage4.get("entries", []):

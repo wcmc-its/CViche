@@ -38,6 +38,11 @@ def _committee(name: str, el: int, code: str = 'P', **fields) -> dict:
     return _entry(code, f'{name}, 2001-2003', el, committee_name=name, start_date='2001', **fields)
 
 
+def _office(role: str, el: int, code: str = 'Q1', **fields) -> dict:
+    """A dated office in a society, as a CV writes one: a role and its dates."""
+    return _entry(code, f'{role}, 2001-2003', el, role=role, start_date='2001', end_date='2003', **fields)
+
+
 def _at(entry: dict, hierarchy: tuple[str, ...]) -> dict:
     return {**entry, 'hierarchy': list(hierarchy)}
 
@@ -73,8 +78,8 @@ def test_an_institution_line_fills_the_committees_under_it_and_is_consumed() -> 
 def test_a_society_line_fills_the_organization_of_its_offices_and_memberships() -> None:
     heading = _entry('I', 'Northfield Society of Invented Pharmacy', 20,
                      organization='Northfield Society of Invented Pharmacy')
-    office = _entry('Q1', 'President, 2007-2009', 21, role='President', start_date='2007')
-    member = _entry('I', 'Member, 2007-2018', 22, membership_type='Member', start_date='2007')
+    office = _entry('Q1', 'President, 2007-2009', 21, role='President', start_date='2007', end_date='2009')
+    member = _entry('I', 'Member, 2007-2018', 22, membership_type='Member', start_date='2007', end_date='2018')
     groups, _ = _consume(heading, office, member)
     assert _filled(office, 'organization') == _filled(member, 'organization') == heading['text']
     assert groups['I'] == [member]
@@ -140,12 +145,30 @@ def test_a_row_naming_the_heading_institution_or_a_unit_of_it_keeps_it_and_the_r
 
 def test_an_alias_and_reordered_connectives_still_read_as_the_name() -> None:
     """WZSMUO 354's shape: stage 4 reorders a name with its parenthesised
-    alias, and drops or adds a connective; the text is still only the name."""
+    alias, and drops or adds a connective; the text is still only the name,
+    and the rows take stage 4's spelling of it, which has the same words."""
     heading = _entry('P', 'Examplefield (University of Examplefield, UEF)', 10,
                      institution='Examplefield University (UEF)')
     rows = [_committee('Admissions Committee', 11), _committee('Search Committee', 12)]
     _consume(heading, *rows)
-    assert [_filled(row, 'institution') for row in rows] == [heading['text']] * 2
+    assert [_filled(row, 'institution') for row in rows] == ['Examplefield University (UEF)'] * 2
+
+
+@pytest.mark.parametrize('text, fields, filled', [
+    # AOJEQD 71: a lettered sub-heading; stage 4 left the letter out.
+    ('A. Example Division, Example University', {'institution': 'Example Division, Example University'},
+     'Example Division, Example University'),
+    # SDEBQJ 346: a heading in capitals; stage 4 wrote the name as a name.
+    ('EXAMPLE DEPARTMENT (Invented Sciences)', {'institution': 'Example Department of Invented Sciences'},
+     'Example Department of Invented Sciences'),
+    # A field with a word the text lacks is not the text's spelling.
+    ('example university', {'institution': 'Example University Hospital'}, 'example university'),
+])
+def test_the_rows_take_stage_4s_spelling_of_the_name_when_it_has_the_texts_words(
+        text: str, fields: dict, filled: str) -> None:
+    rows = [_committee('Admissions Committee', 11), _committee('Search Committee', 12)]
+    _consume(_entry('P', text, 10, **fields), *rows)
+    assert [_filled(row, 'institution') for row in rows] == [filled] * 2
 
 
 def test_restating_and_blank_fields_do_not_make_a_heading_a_record() -> None:
@@ -164,9 +187,8 @@ def test_fanned_out_records_of_one_element_are_one_run() -> None:
     child, all on the entry's element; a row may also span several elements."""
     heading = _entry('I', 'Example Section of Imaginary Research', 930,
                      organization='Example Section of Imaginary Research')
-    rows = [_committee('Session co-chairman', 931, code='Q1'), _committee('Abstract reviewer', 931, code='Q1'),
-            {**_committee('Vice-President', 932, code='Q1'), 'element_idx_end': 934},
-            _committee('President', 935, code='Q1')]
+    rows = [_office('Session co-chairman', 931), _office('Abstract reviewer', 931),
+            {**_office('Vice-President', 932), 'element_idx_end': 934}, _office('President', 935)]
     _consume(heading, *rows)
     assert [_filled(row, 'organization') for row in rows] == [heading['text']] * 4
 
@@ -276,7 +298,7 @@ def test_a_filled_row_gets_its_own_fields_dict() -> None:
 
 
 def test_a_heading_that_is_its_codes_only_entry_leaves_no_empty_group() -> None:
-    groups, _ = _consume(_entry('G', 'Example Medical Group', 10, organization='Example Medical Group'),
+    groups, _ = _consume(_entry('Q2', 'Example Medical Group', 10, organization='Example Medical Group'),
                          _committee('Board Committee', 11), _committee('Strategy Committee', 12))
     assert sorted(groups) == ['P']
 
@@ -400,7 +422,7 @@ def test_a_sub_heading_another_family_t_or_an_unextracted_row_ends_the_run(ender
 def test_the_next_heading_ends_the_run_and_starts_its_own() -> None:
     """The next heading here is not heading-shaped (a comma), so only being a
     heading ends the first run."""
-    first = _entry('I', 'Example Society of Imaginary Medicine', 60,
+    first = _entry('Q2', 'Example Society of Imaginary Medicine', 60,
                    organization='Example Society of Imaginary Medicine')
     second = _entry('Q2', 'Westbrook Academy, Eastfield', 63, organization='Westbrook Academy, Eastfield')
     rows = [_committee('Research Committee', 61, code='Q2'), _committee('Program Committee', 62, code='Q2')]
@@ -409,6 +431,7 @@ def test_the_next_heading_ends_the_run_and_starts_its_own() -> None:
     assert [_filled(row, 'organization') for row in (*rows, *after)] == [first['text']] * 2 + [second['text']] * 2
     assert groups['Q2'] == [*rows, *after]
     assert warnings[0]['evidence'] == ['element_idx_start 60 filled 61, 62', 'element_idx_start 63 filled 64, 65']
+    assert warnings[0][ih.CONSUMED_HEADINGS_KEY] == [[60, [61, 62]], [63, [64, 65]]]
     assert warnings[0]['message'].endswith(': 2 headings, 4 rows filled')
 
 
@@ -502,6 +525,310 @@ def test_a_text_with_words_its_name_fields_lack_is_not_a_heading() -> None:
                _entry('Q1', 'Vice Chair, 2009-2010', 12, role='Vice Chair'))
 
 
+SOCIETY = 'Example Society of Invented Care'
+
+
+def _society(el: int = 10) -> dict:
+    return _entry('I', SOCIETY, el, organization=SOCIETY)
+
+
+def _member(el: int, kind: str = 'Member', **fields) -> dict:
+    """A dated membership line under a society line, with no organization of its own."""
+    return _entry('I', f'{kind}, 2001-2005', el, membership_type=kind, start_date='2001', end_date='2005', **fields)
+
+
+# The rows a renderer prints its own text for while the filled field is blank
+# (O with no role, `leadership.py`; Q2 with no committee name and Q1 with no
+# organization, `service.py`; I with no organization, `memberships.py`), each
+# with a heading of the same family and the two plain rows that make it a run.
+_FALLBACK_ROWS = {
+    'O': (_entry('P', 'Example University', 10, institution='Example University'),
+          _entry('O', 'Fernhollow Program Lead 2004-2006', 12, start_date='2004', end_date='2006'),
+          [_entry('O', f'Director, {name} Program, 2001-2003', el, leadership_role=f'Director, {name} Program',
+                  start_date='2001', end_date='2003') for el, name in ((11, 'Example'), (13, 'Invented'))]),
+    'Q2': (_society(), _entry('Q2', 'Member, Fernhollow Steering Group, 2010-2012', 12, role='Member',
+                              start_date='2010', end_date='2012'),
+           [_committee('Program Committee', 11, code='Q2', end_date='2003'),
+            _committee('Audit Committee', 13, code='Q2', end_date='2003')]),
+    'Q1': (_society(), _office('Treasurer', 12) | {'text': 'Treasurer, Fernhollow Chapter, 2001-2003'},
+           [_office('President', 11), _office('Secretary', 13)]),
+    'I': (_society(), _entry('I', 'Fellow, Fernhollow Section, 2006-2010', 12, membership_type='Fellow',
+                             start_date='2006', end_date='2010'),
+          [_member(11), _entry('I', 'Fellow, 2010-2015', 13, membership_type='Fellow', start_date='2010',
+                               end_date='2015')]),
+}
+
+
+@pytest.mark.parametrize('code', sorted(_FALLBACK_ROWS))
+def test_a_row_whose_renderer_prints_its_own_text_in_the_blank_cell_is_not_filled(code: str) -> None:
+    heading, row, plain = copy.deepcopy(_FALLBACK_ROWS[code])
+    _consume(heading, plain[0], row, plain[1])
+    assert _filled(row, ih.FILL_FIELD_BY_CODE[code]) is None
+    assert [_filled(other, ih.FILL_FIELD_BY_CODE[code]) for other in plain] == [heading['text']] * 2
+
+
+@pytest.mark.parametrize('heading, row', [
+    # memberships prints an organization stage 4 filed under an alias
+    (_society(), _member(12, institution='Westbrook Academy')),
+    (_society(), _member(12, society='Westbrook Academy')),
+    (_society(), _member(12, organization_name='Westbrook Academy')),
+    # Q1 prints the program or journal a rerouted row names (`EXTRAMURAL_ORGANIZATION_FIELDS`)
+    (_society(), _office('Director', 12, program_name='Westbrook Fellowship Program')),
+    (_society(), _office('Editor', 12, journal_name='Westbrook Journal')),
+    # a value that is not a string is still the row's own
+    (_society(), _committee('Liaison Committee', 12, code='Q2', end_date='2003',
+                            organization=['Westbrook Academy', 'Eastfield Board'])),
+    (_entry('P', 'Example University', 10, institution='Example University'),
+     _committee('Board', 12, institution={'name': 'Westbrook Hospital'})),
+    # a name its renderer does not print still says the row is another institution's
+    (_entry('P', 'Example University', 10, institution='Example University'),
+     _committee('Board', 12, organization='Westbrook Hospital')),
+])
+def test_a_row_naming_its_own_organization_under_any_field_keeps_it_and_ends_the_run(heading: dict, row: dict) -> None:
+    code = row['taxonomy_code']
+    plain = {'I': _member, 'Q1': lambda el: _office('President', el), 'Q2': lambda el: _committee('Audit Committee', el, code='Q2', end_date='2003'),
+             'P': lambda el: _committee('Search Committee', el)}[code]
+    before = copy.deepcopy(row['extracted_fields'])
+    rows = [plain(11), row, plain(13), plain(14)]
+    _consume(heading, *rows)
+    assert row['extracted_fields'] == before
+    assert [_filled(other, ih.FILL_FIELD_BY_CODE[code]) for other in rows[2:]] == [None, None]
+
+
+@pytest.mark.parametrize('row', [
+    # a list of records under the committee name: each record prints its own institution
+    _entry('P', 'Fernhollow Panel 2001-2002; Brindle Panel 2003-2004', 11,
+           committee_name=[{'committee_name': 'Fernhollow Panel', 'start_date': '2001'},
+                           {'committee_name': 'Brindle Panel', 'start_date': '2003'}]),
+    # a block the renderer re-parses one row per line
+    _entry('P', 'Fernhollow Panel, 2001-2002\nBrindle Panel, 2003-2004\nOstrava Panel, 2005', 11,
+           role='Member', start_date='2001'),
+    _entry('O', 'Director, Fernhollow, 2001\nDirector, Brindle, 2002\nDirector, Ostrava, 2003', 11,
+           leadership_role='Director', start_date='2001'),
+    # a role-only row: P has no committee name to append the institution to
+    _entry('P', 'Health and Safety Coordinator, 1999-2003', 11, role='Health and Safety Coordinator',
+           start_date='1999', end_date='2003'),
+])
+def test_a_heading_over_rows_that_print_no_entry_level_institution_is_left_alone(row: dict) -> None:
+    second = {**copy.deepcopy(row), 'element_idx_start': 12, 'element_idx_end': 12}
+    _unchanged(_entry('P', 'Example University', 10, institution='Example University'), row, second)
+
+
+@pytest.mark.parametrize('code', ['G', 'H'])
+def test_a_line_of_a_code_whose_bare_name_is_a_record_is_never_a_heading(code: str) -> None:
+    """FVQANK 378: a hospital affiliation that is only a name is a whole
+    Other Institutional Affiliations row."""
+    _unchanged(_entry(code, 'Example Medical Group', 10, organization='Example Medical Group'),
+               _committee('Board Committee', 11), _committee('Strategy Committee', 12))
+
+
+@pytest.mark.parametrize('own_rows', [False, True])
+def test_rows_on_a_sub_level_named_after_another_institution_are_not_its_rows(own_rows: bool) -> None:
+    duties = ('Administrative Duties',)
+    heading = _entry('P', 'Example University', 10, duties, institution='Example University')
+    first = [_at(_committee('Admissions Committee', 11), duties), _at(_committee('Search Committee', 12), duties)]
+    first = first if own_rows else []
+    level = ('Administrative Duties', 'Westbrook Hospital Committees')
+    other = [_at(_committee('Quality Committee', 14), level), _at(_committee('Safety Committee', 15), level)]
+    _consume(heading, *first, *other)
+    assert [_filled(row, 'institution') for row in (*first, *other)] == ['Example University'] * len(first) + [None] * 2
+
+
+def test_a_sub_level_named_by_the_headings_initials_is_its_own() -> None:
+    """WZSMUO 331: "U of M Committees" under "U of Minnesota"."""
+    heading = _entry('P', 'U of Exampleton', 50, ('Administrative Duties',), institution='U of Exampleton')
+    level = ('Administrative Duties', 'U of E Committees')
+    rows = [_at(_committee('Search Committee', 52), level), _at(_committee('Planning Committee', 53), level)]
+    _consume(heading, *rows)
+    assert [_filled(row, 'institution') for row in rows] == ['U of Exampleton'] * 2
+
+
+@pytest.mark.parametrize('sibling', [
+    _entry('P', 'St. Westbrook Hospital', 13, committee_name='St. Westbrook Hospital'),
+    _entry('P', 'Westbrook Hospital, Eastfield', 13, committee_name='Westbrook Hospital'),
+])
+def test_an_undated_name_line_stage_4_filed_as_a_committee_ends_the_run(sibling: dict) -> None:
+    """VQFSDI's stale-stamp class (#1365 R1): the next institution's line,
+    which a period or a comma keeps from reading as heading-shaped."""
+    heading = _entry('P', 'Example University', 10, institution='Example University')
+    rows = [_committee('Admissions Committee', 11), _committee('Search Committee', 12)]
+    after = [_committee('Quality Committee', 14), _committee('Safety Committee', 15)]
+    _consume(heading, *rows, sibling, *after)
+    assert [_filled(row, 'institution') for row in (*rows, sibling, *after)] == ['Example University'] * 2 + [None] * 3
+
+
+def test_an_undated_row_with_a_role_is_still_a_row_of_the_run() -> None:
+    heading = _entry('P', 'Example University', 10, institution='Example University')
+    rows = [_committee('Admissions Committee', 11),
+            _entry('P', 'Member, Curriculum Committee', 12, role='Member', committee_name='Curriculum Committee'),
+            _committee('Search Committee', 13)]
+    _consume(heading, *rows)
+    assert [_filled(row, 'institution') for row in rows] == ['Example University'] * 3
+
+
+def test_a_row_naming_only_a_kind_of_unit_keeps_it_and_the_run_goes_on() -> None:
+    """WZSMUO 345/346: "Medical School, <committee>" under a university names
+    a unit of it, not another institution."""
+    heading = _entry('P', 'Example University', 10, institution='Example University')
+    rows = [_committee('Search Committee', 11), _committee('Education Committee', 12, institution='Medical School'),
+            _committee('Planning Committee', 13)]
+    _consume(heading, *rows)
+    assert [_filled(row, 'institution') for row in rows] == ['Example University', 'Medical School',
+                                                             'Example University']
+
+
+def test_a_society_line_over_offices_only_keeps_its_membership_row() -> None:
+    """CHXRBM 129, EBZFDN 286, RBPXCD 155: the offices and committees render
+    in Service, so the society line is the only Memberships row naming it."""
+    heading = _society()
+    rows = [_office('President', 11), _committee('Program Committee', 12, code='Q2', end_date='2003')]
+    groups, warnings = _consume(heading, *rows)
+    assert [_filled(row, 'organization') for row in rows] == [SOCIETY] * 2
+    assert groups['I'] == [heading]
+    assert warnings[0][ih.CONSUMED_HEADINGS_KEY] == [] and warnings[0][ih.KEPT_HEADINGS_KEY] == [[10, [11, 12]]]
+    assert warnings[0]['message'].endswith(': 1 society heading kept as its own row, 2 rows filled')
+    assert warnings[0]['evidence'] == ['element_idx_start 10 kept, filled 11, 12']
+    assert ih.heading_fills(warnings) == {10: [11, 12]} and ih.consumed_headings(warnings) == frozenset()
+
+
+def test_a_society_line_a_membership_row_names_is_consumed() -> None:
+    heading = _society()
+    rows = [_member(11), _office('President', 12)]
+    groups, warnings = _consume(heading, *rows)
+    assert 'I' in groups and heading not in groups['I']
+    assert ih.consumed_headings(warnings) == frozenset({10})
+
+
+def test_rows_that_already_print_the_name_count_and_are_not_filled() -> None:
+    """WZSMUO 166: stage 4 already wrote the institution line into each
+    mentee's Site/Position."""
+    hierarchy = ('Graduate Student Mentorship', 'Thesis Advisor')
+    heading = _entry('N3B', 'Example University', 30, hierarchy, site_position='Example University')
+    rows = [_entry('N3B', f'{name}, Neuroscience Program, Ph.D. 2002', el, hierarchy, mentee_name=name,
+                   site_position='Neuroscience Program, Example University', end_date='2002')
+            for el, name in ((31, 'A. Student'), (32, 'B. Student'))]
+    groups, warnings = _consume(heading, *rows)
+    assert [_filled(row, 'institution') for row in rows] == [None, None]
+    assert groups['N3B'] == rows
+    assert warnings[0][ih.CONSUMED_HEADINGS_KEY] == [[30, []]]
+    assert warnings[0]['evidence'] == ['element_idx_start 30 filled none']
+
+
+def test_heading_fills_reads_kept_headings_and_consumed_headings_does_not() -> None:
+    warnings = [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: [[10, [11]]],
+                 ih.KEPT_HEADINGS_KEY: [[20, [21, 22]], 'x']}]
+    assert ih.heading_fills(warnings) == {10: [11], 20: [21, 22]}
+    assert ih.consumed_headings(warnings) == frozenset({10})
+
+
+def test_the_record_keys_are_the_sidecar_contract() -> None:
+    """The doctor reads these keys back from stored render-warnings sidecars,
+    so they are spelled out here, not read from the module."""
+    consumed = _consume(_entry('P', 'Example University', 10, institution='Example University'),
+                        _committee('Admissions Committee', 11), _committee('Search Committee', 12))[1]
+    kept = _consume(_society(), _office('President', 11), _office('Treasurer', 12))[1]
+    assert consumed[0]['check'] == 'institution_heading_consumed' and consumed[0]['consumed_headings'] == [[10, [11, 12]]]
+    assert kept[0]['kept_headings'] == [[10, [11, 12]]] and kept[0]['consumed_headings'] == []
+    assert 'kept_headings' not in consumed[0]
+
+
+# Each renderer path `_fill_outcome` reads, one row at a time, under a heading
+# with two plain rows that print the name: the row's own outcome is the case.
+_PLAIN_ROWS = {
+    'O': lambda: [_entry('O', 'Director, Example Program, 2001-2003', el, leadership_role='Director, Example Program',
+                         start_date='2001', end_date='2003') for el in (11, 13)],
+    'P': lambda: [_committee('Admissions Committee', 11), _committee('Search Committee', 13)],
+    'Q1': lambda: [_office('President', 11), _office('Secretary', 13)],
+    'Q2': lambda: [_committee('Program Committee', 11, code='Q2', end_date='2003'),
+                   _committee('Audit Committee', 13, code='Q2', end_date='2003')],
+    'I': lambda: [_member(11), _entry('I', 'Fellow, 2010-2015', 13, membership_type='Fellow', start_date='2010',
+                                      end_date='2015')],
+    'N3B': lambda: [_entry('N3B', f'{name}, Neuroscience Program, Ph.D. 2002', el, mentee_name=name,
+                           site_position='Neuroscience Program', end_date='2002')
+                    for el, name in ((11, 'A. Student'), (13, 'B. Student'))],
+}
+
+
+def _row_outcome(row: dict) -> object:
+    """The value filled on `row` under a heading of its family with two plain rows."""
+    code = row['taxonomy_code']
+    family_heading = {'O': 'P', 'P': 'P', 'Q1': 'I', 'Q2': 'I', 'I': 'I', 'N3B': 'N3B'}[code]
+    name = SOCIETY if family_heading == 'I' else 'Example University'
+    heading = _entry(family_heading, name, 10, **{ih.FILL_FIELD_BY_CODE.get(family_heading, 'institution'): name})
+    if family_heading == 'N3B':
+        heading = _entry('N3B', name, 10, site_position=name)
+    first, last = _PLAIN_ROWS[code]()
+    _consume(heading, first, row, last)
+    assert [_filled(plain, ih.FILL_FIELD_BY_CODE[code]) for plain in (first, last)] == [name] * 2
+    return _filled(row, ih.FILL_FIELD_BY_CODE[code])
+
+
+def _split(entry: dict) -> dict:
+    """`entry` as a record stage 6 fanned out of a multi-record entry."""
+    return {**entry, 'fanned_out_from': 9}
+
+
+@pytest.mark.parametrize('row, filled', [
+    # O: a role over two lines is still one row with an Institution cell
+    (_entry('O', 'Director, Example Program\n2001-2003', 12, leadership_role='Director', start_date='2001',
+            end_date='2003'), True),
+    # O: a division stage 4 filed the heading's name under already prints it
+    (_entry('O', 'Director, 2001-2003', 12, leadership_role='Director', division_department='Example University',
+            start_date='2001', end_date='2003'), False),
+    # P: no committee name, but the line names the activity the institution joins
+    (_entry('P', 'Chair, Faculty Search for Dean, 2001-2003', 12, role='Chair', start_date='2001',
+            end_date='2003'), True),
+    # P: a committee name over two lines is still one row
+    (_entry('P', 'Planning Committee\nannual retreat, 2001-2003', 12, committee_name='Planning Committee',
+            start_date='2001', end_date='2003'), True),
+    # Q1: no role and no organization prints the whole text in the Organization cell
+    (_entry('Q1', 'Fernhollow Liaison, 2001-2003', 12, start_date='2001', end_date='2003'), False),
+    # Q2: a committee merged into the role is split out, so the Organization cell takes the fill
+    (_entry('Q2', 'Chair, Fernhollow Committee, Annual Meeting, 2001-2003', 12, role='Chair, Fernhollow Committee',
+            start_date='2001', end_date='2003'), True),
+    # Q2: a role and its dates only: the committee cell, empty before, takes the name
+    (_entry('Q2', 'Member, 2001-2003', 12, role='Member', start_date='2001', end_date='2003'), True),
+    (_split(_entry('Q2', 'Member, 2001-2003', 12, role='Member', start_date='2001', end_date='2003')), True),
+    # Q2: a committee row over two lines renders its board lines with its fields
+    (_entry('Q2', 'Steering Committee\nworking session, 2001-2003', 12, committee_name='Steering Committee',
+            start_date='2001', end_date='2003'), True),
+    # Q2: an ad hoc grant review renders under Grant Reviewing, which prints no fill
+    (_entry('Q2', 'Ad hoc grant reviewer, Example Study Section, 2001-2003', 12, role='Reviewer',
+            committee_name='Example Study Section', start_date='2001', end_date='2003'), False),
+    # I: a source table's header row, which memberships drops, must not render with the name,
+    # even where its words are the name's and a membership type
+    (_entry('I', 'Society\tMember', 12, membership_type='Member'), False),
+    # N3B: a line naming no mentee is a summary line, which prints no Site/Position
+    (_entry('N3B', 'Ph.D. students advised: 12', 12, count='12'), False),
+    # N3B: a Site/Position that is the name already prints it
+    (_entry('N3B', 'C. Student, Ph.D. 2004', 12, mentee_name='C. Student', site_position='Example University',
+            end_date='2004'), False),
+])
+def test_a_row_is_filled_only_on_a_renderer_path_that_prints_the_fill(row: dict, filled: bool) -> None:
+    value = _row_outcome(copy.deepcopy(row))
+    assert (value is not None) is filled
+
+
+def test_a_row_naming_its_own_organization_as_a_dict_of_blanks_keeps_it() -> None:
+    """A value that is not blank is the row's own, even one that prints as nothing."""
+    row = _committee('Board', 12, institution={'note': None})
+    _consume(_entry('P', 'Example University', 10, institution='Example University'), _committee('Search Committee', 11),
+             row, _committee('Planning Committee', 13))
+    assert row['extracted_fields']['institution'] == {'note': None}
+
+
+def test_an_undated_line_naming_only_kinds_of_unit_is_a_row_of_the_run() -> None:
+    """Only a line naming a particular institution ends the run as the next
+    group's name line (`_is_bare_name_line`)."""
+    heading = _entry('P', 'Example University', 10, institution='Example University')
+    rows = [_committee('Search Committee', 11),
+            _entry('P', 'Department of Medicine, School of Medicine', 12,
+                   committee_name='Department of Medicine, School of Medicine'),
+            _committee('Planning Committee', 13)]
+    _consume(heading, *rows)
+    assert [_filled(row, 'institution') for row in rows] == ['Example University'] * 3
+
+
 # ------------------------------------------------------------ a rendered page
 
 def test_the_rendered_committee_rows_carry_the_institution_and_no_heading_row(tmp_path, monkeypatch) -> None:
@@ -524,3 +851,26 @@ def test_the_rendered_committee_rows_carry_the_institution_and_no_heading_row(tm
     sidecar = json.loads((tmp_path / 'TESTIH_render_warnings.json').read_text())
     assert [w['check'] for w in sidecar['warnings'] if w['check'] == ih.CONSUMED_HEADING_CHECK] == [
         ih.CONSUMED_HEADING_CHECK]
+
+
+def _rendered_rows(tmp_path, monkeypatch, uid: str, entries: list[dict]) -> list[str]:
+    """Every table row of the document stage 6 renders from `entries`, cells
+    joined by ' | ', with LLM calls raising."""
+    monkeypatch.setattr(stage6, 'call_llm', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('no LLM in tests')))
+    owner = {'taxonomy_code': 'A', 'element_idx_start': 0, 'text': 'Name: Pat Example, MD', 'extracted_fields': {}}
+    source = tmp_path / f'{uid}_fields.json'
+    source.write_text(json.dumps({'document_uid': uid, 'entries': [owner, *entries]}))
+    document = Document(stage6.run_stage6(str(source), str(tmp_path / f'{uid}.docx'), verbose=False))
+    return [' | '.join(cell.text.strip() for cell in row.cells) for table in document.tables for row in table.rows]
+
+
+@pytest.mark.parametrize('code', sorted(_FALLBACK_ROWS))
+def test_the_rendered_row_that_prints_its_own_text_keeps_its_words(tmp_path, monkeypatch, code: str) -> None:
+    """One per renderer that prints a row's own text in the cell a fill would
+    take (leadership, service boards, extramural leadership, memberships):
+    the row still prints its own words, and the plain rows the heading's name."""
+    heading, row, plain = copy.deepcopy(_FALLBACK_ROWS[code])
+    rows = _rendered_rows(tmp_path, monkeypatch, f'TESTFB{code}', [heading, plain[0], row, plain[1]])
+    own = [line for line in rows if 'Fernhollow' in line]
+    assert own and not any(heading['text'] in line for line in own)
+    assert sum(heading['text'] in line for line in rows if 'Fernhollow' not in line) >= 2
