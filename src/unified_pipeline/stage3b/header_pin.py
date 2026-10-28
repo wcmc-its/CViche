@@ -531,9 +531,8 @@ _REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for thes
 #   academic program's board ("<University Program>, Advisory Board", EJPAIA
 #   181), so it stays Q2.
 # Testimony and the other activities of the owner's decision on #1580
-# (2026-10-27) stay Q2 or P whatever else the line says (`_STAY_ACTIVITY`), and
-# so does "Consultant, <Society> Ethics Committee": a seat, as is "Consulting
-# Editor, <Journal>".
+# (2026-10-27) stay Q2 or P (`_names_stay_activity`), and so does "Consultant,
+# <Society> Ethics Committee": a seat, as is "Consulting Editor, <Journal>".
 _NON_SEAT_SOURCE_CODES = frozenset({"Q2", "P"})
 _BOARD_SERVICE_CODE = "Q2"
 _CONSULTING_CODE = "D3"
@@ -576,21 +575,35 @@ _TESTIMONY = re.compile(r"\btestif(?:y|ied|ies|ying|ier)\b|\btestimon(?:y|ies)\b
 # ("Promotions Consultant, Department of <Science>, <University>", JJYBKP 281;
 # "Consultant/reviewer for <Agency> on <a report>", web204 386; "<Event>
 # consultant and reviewer", web198 420) or as attendance. A line naming one is
-# never pinned. Stage 6's `NON_SEAT_ACTIVITY_RE` names the same activities for
-# the Role cell; stage 3b keeps its own list, since it imports only `.context`.
-# Reviews and examiners the decision does not name keep their routes
-# (`_OTHER_REVIEW`): grant and manuscript review have their own routers, expert
-# review in litigation is the issue's D3, a protocol or case review is
-# consulting work ("<Name> Centers, Inc. | Review of research protocols",
-# web244 797.2), and a medical examiner is an office. "Health promotion" is no
-# promotion case.
-_STAY_ACTIVITY = re.compile(
-    r"\b(?:examiners?|external\s+examin(?:ing|ation)|reviewers?|report\s+reviews?"
+# never pinned (`_names_stay_activity`). Stage 6's `NON_SEAT_ACTIVITY_RE` names
+# the same activities for the Role cell; stage 3b keeps its own list, since it
+# imports only `.context`. Advocacy and community service are
+# `_ADVOCACY_OR_SERVICE_DAY`, below. Hosting and volunteering (`_STAY_ACTIVITY`)
+# veto on any line. Of the reviews:
+# - external examining, and the review of a promotion or tenure case, a
+#   candidate or a report (`_STAY_REVIEW`), veto whatever kind of review the
+#   line calls them ("peer review of promotion dossiers", "tenure case review");
+# - a bare examiner or reviewer, and the review of a department, program, center
+#   or institute ("review of the <Center>", "program review";
+#   `_STAY_BODY_REVIEW`), veto unless the line calls them a review the
+#   decision does not name (`_OTHER_REVIEW`): grant and manuscript review
+#   have their own routers, an expert review is the issue's expert work, a
+#   protocol or case review is consulting work ("<Name> Centers, Inc. | Review
+#   of research protocols", web244 797.2), and a medical examiner is an office;
+# - on a line naming litigation or a law firm no review word vetoes: review
+#   there is expert work in litigation, the issue's D3 ("Litigation consultant
+#   and chart reviewer, <Firm>"). Testimony, advocacy, hosting and volunteering
+#   still do.
+# "Health promotion" is no promotion case.
+_STAY_ACTIVITY = re.compile(r"\b(?:hosted|hosting|hosts?\s+(?:of|for|to)|volunteer(?:s|ed|ing)?)\b", re.I)
+_STAY_REVIEW = re.compile(
+    r"\b(?:external\s+examin(?:ing|ation)|report\s+reviews?"
     r"|(?<!health\s)(?:promotions?|tenure)\s+(?:consult\w*|review\w*|referee\w*|cases?)"
-    r"|reviews?\s+(?:of|for)\s+(?:\S+\s+){0,4}?"
-    r"(?:promotions?|tenure|candidates?|departments?|programs?|cent(?:er|re)s?|institutes?|reports?)"
-    r"|hosted|hosting|hosts?\s+(?:of|for|to)|community\s+service|service\s+to\s+(?:the\s+)?community"
-    r"|advoca(?:cy|tes?|ted|ting)|volunteer(?:s|ed|ing)?)\b", re.I)
+    r"|review(?:s|ers?)?\s+(?:of|for)\s+(?:\S+\s+){0,4}?(?:promotions?|tenure|candidates?|reports?))\b", re.I)
+_STAY_BODY_REVIEW = re.compile(
+    r"\b(?:examiners?|reviewers?"
+    r"|reviews?\s+(?:of|for)\s+(?:\S+\s+){0,4}?(?:departments?|programs?|cent(?:er|re)s?|institutes?)"
+    r"|(?:departments?|programs?|cent(?:er|re)s?|institutes?)\s+reviews?)\b", re.I)
 _OTHER_REVIEW = re.compile(
     r"\b(?:grant|manuscript|journal|article|paper|abstract|proposal|application|ad\s+hoc|peer|expert"
     r"|protocol|case|medical)\s+(?:reviews?|reviewers?|examiners?)\b", re.I)
@@ -607,11 +620,11 @@ _CONSULTING_WHY = "Consulting, a company's advisory board or expert work in liti
 # guideline or consensus (SEKQUI 264), or an author list of two names or more
 # ("<City> DC," is a place, LTTYWI 1099). An attendance heading above a leaf
 # that names something else ("Meetings Attended > National Committees") says
-# nothing about the leaf's rows. A line that opens as attendance at advocacy
-# or a day of service ("Participant, <Society> Hill Day") is advocacy or
-# community service, which stays Q2 (the owner's decision on #1580); under an
-# attendance heading the CV itself calls it attended, unless the line names
-# advocacy or community service itself (`_STAY_ACTIVITY`).
+# nothing about the leaf's rows. A line naming advocacy or a day of service
+# ("Participant, <Society> Hill Day"; a hill day under "Meetings Attended",
+# OQIDBN 775) is advocacy or community service, which stays Q2 (the owner's
+# decision on #1580), under any heading: the veto (`_names_stay_activity`)
+# reads `_ADVOCACY_OR_SERVICE_DAY` before both pins.
 _ATTENDED_CODE = "B2"
 _ATTENDANCE_HEADING = re.compile(r"\b(?:attended|attendance)\b", re.I)
 _ATTENDANCE_LEAD = re.compile(
@@ -619,7 +632,7 @@ _ATTENDANCE_LEAD = re.compile(
     r"(?:attended|attendee|participant|participated\s+in)\b", re.I)
 _ADVOCACY_OR_SERVICE_DAY = re.compile(
     r"\b(?:advoca\w*|hill\s+days?|lobby\w*|rall(?:y|ies)|days?\s+of\s+service|service\s+days?"
-    r"|community\s+service)\b", re.I)
+    r"|community\s+service|service\s+to\s+(?:the\s+)?community)\b", re.I)
 _EVENT = re.compile(
     r"\b(?:meetings?|conferences?|congress(?:es)?|symposi(?:um|a|ums)|workshops?|courses?|summits?"
     r"|forums?|seminars?|webinars?|conventions?|day)\b", re.I)
@@ -658,7 +671,7 @@ def _is_attended_meeting(text: str, levels: list[str]) -> bool:
     """A meeting or event the owner attended, playing no part in it (#1580, #1691)."""
     leaf = levels[-1] if levels else ""
     by_heading = bool(_ATTENDANCE_HEADING.search(leaf))
-    by_lead = bool(_ATTENDANCE_LEAD.match(text)) and not _ADVOCACY_OR_SERVICE_DAY.search(text)
+    by_lead = bool(_ATTENDANCE_LEAD.match(text))
     event = _EVENT.search(text) or (by_heading and _EVENT.search(leaf))
     return ((by_heading or by_lead) and bool(event)
             and not _OWNERS_PART.search(text) and not _names_authors(text))
@@ -673,8 +686,13 @@ def _names_authors(text: str) -> bool:
 
 def _names_stay_activity(text: str) -> bool:
     """Whether a line names testimony or another activity the owner's decision
-    on #1580 keeps in the committee tables (`_STAY_ACTIVITY`)."""
-    return bool(_TESTIMONY.search(text) or _STAY_ACTIVITY.search(_OTHER_REVIEW.sub(" ", text)))
+    on #1580 keeps in the committee tables. On a litigation line only the
+    activities, not the reviews, count."""
+    if _TESTIMONY.search(text) or _ADVOCACY_OR_SERVICE_DAY.search(text) or _STAY_ACTIVITY.search(text):
+        return True
+    if _LITIGATION.search(text):
+        return False
+    return bool(_STAY_REVIEW.search(text) or _STAY_BODY_REVIEW.search(_OTHER_REVIEW.sub(" ", text)))
 
 
 def non_seat_pin_code(entry: dict) -> tuple[str, str] | None:

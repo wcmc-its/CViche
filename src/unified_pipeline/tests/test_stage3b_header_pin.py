@@ -1703,6 +1703,12 @@ def _service(code, text, *heading):
     _service("Q2", "2031  Expert Opinion, Example & Example, LLP, Litigation regarding an example drug",
              "Consulting Appointments"),
     _service("Q2", "Expert Witness for an Example Patent Case, Example Litigation\t2031-present", "Consulting"),
+    # a review word beside litigation or a law firm is that expert work too (the issue's item 1)
+    _service("Q2", "Expert witness/reviewer, product liability litigation, Doe & Roe LLP, 2031-2033"),
+    _service("Q2", "Medical-legal consultant and reviewer for law firms, 2031-present"),
+    _service("Q2", "Litigation consultant and chart reviewer, Doe Law Firm, 2031"),
+    _service("Q2", "Consultant and reviewer, patent litigation, Example Law Firm, 2031"),
+    _service("Q2", "Consultant, peer review of an expert report for Example Litigation, 2031"),
     # a company under a consulting heading, with no consulting word on its line (EJPAIA 175)
     _service("Q2", "Example Biologics Corporation, Example City, 2031 to 2032",
              "Scientific Advisory Boards and Consultantships"),
@@ -1873,10 +1879,16 @@ def test_advocacy_a_part_played_or_another_leaf_is_no_attended_meeting(entry):
     # a company's advisory board, a litigation line and a consulting heading do not outrank them
     _service("Q2", "Volunteer, Scientific Advisory Board, Example Pharmaceuticals, Inc., 2031"),
     _service("Q2", "Advocacy for an example cause, Example & Example, LLP, litigation consultant, 2031"),
+    _service("Q2", "Expert witness, testified in example litigation for Doe Law Firm, 2031"),
+    _service("Q2", "Volunteer litigation consultant, Example Legal Aid, 2031"),
     _service("Q2", "Example Biologics Corporation, external examiner, 2031 to 2032",
              "Scientific Advisory Boards and Consultantships"),
-    # nor does a meeting attended, and testimony vetoes it too
+    # nor does a meeting attended, under an attendance heading too (OQIDBN 775's shape),
+    # and testimony vetoes it too
     _service("Q2", "Example Society Advocacy Meeting, 2031", "Meetings Attended"),
+    _service("Q2", "2031-2033 Example Capitol Hill Day", "Continuing Education", "Meetings Attended, National"),
+    _service("Q2", "Example Society Lobby Day, State Capitol, 2031", "Meetings Attended"),
+    _service("Q2", "Day of Service, Example Medical Association Annual Meeting, 2031", "Meetings Attended"),
     _service("Q2", "Attended the Example Report Review Meeting, 2031", "Other Service"),
     _service("Q2", "Attended the Example Hearing Meeting and testified, 2031", "Other Service"),
 ])
@@ -1892,8 +1904,11 @@ def test_an_activity_the_owners_decision_keeps_is_never_pinned(entry):
     "review of the Example Imaging Center", "review of the Example Institute", "review of a draft report",
     "review of example promotions", "review for tenure",
     "hosted a visit", "hosting a delegation", "host of an example visit", "hosts for example fellows",
+    "an example program review", "department reviews", "a center review", "a centre review", "institute reviews",
     "community service", "service to the community", "service to community",
     "advocacy", "patient advocate", "advocates", "advocated for example care", "advocating for example care",
+    "the Example Society Hill Day", "hill days", "lobbying on research funding", "a lobby day", "a rally for example care",
+    "rallies", "a day of service", "days of service", "a service day", "service days",
     "volunteer", "volunteers", "volunteered", "volunteering",
 ])
 def test_each_activity_word_of_the_owners_decision_keeps_a_consultancy_unpinned(activity):
@@ -1901,13 +1916,36 @@ def test_each_activity_word_of_the_owners_decision_keeps_a_consultancy_unpinned(
     assert non_seat_pin_code(_service("Q2", f"Consultant, Example Pharma Inc., {activity}, 2031")) is None
 
 
-@pytest.mark.parametrize("kind", ["grant", "manuscript", "journal", "article", "paper", "abstract", "proposal",
-                                  "application", "ad hoc", "peer", "expert", "protocol", "case", "medical"])
+_OTHER_REVIEW_KINDS = ["grant", "manuscript", "journal", "article", "paper", "abstract", "proposal",
+                       "application", "ad hoc", "peer", "expert", "protocol", "case", "medical"]
+
+
+@pytest.mark.parametrize("kind", _OTHER_REVIEW_KINDS)
 def test_a_review_or_examiner_the_owners_decision_does_not_name_leaves_a_consultancy_pinned(kind):
     for role in ("reviewer", "reviewers", "review of the Example Program", "reviews for the Example Center",
-                 "examiner", "examiners"):
+                 "reviewer for the Example Department", "examiner", "examiners"):
         entry = _service("Q2", f"Consultant, Example Pharma Inc., {kind} {role}, 2031")
         assert non_seat_pin_code(entry)[0] == "D3", role
+
+
+@pytest.mark.parametrize("kind", _OTHER_REVIEW_KINDS)
+def test_a_promotion_tenure_candidate_or_report_review_stays_whatever_kind_the_line_calls_it(kind):
+    assert non_seat_pin_code(_service("Q2", "Consultant, Example University, 2031"))[0] == "D3"
+    for review in ("reviewer for promotion and tenure", "reviewers for faculty promotions",
+                   "review of promotion dossiers", "reviews for tenure", "review of an example candidate",
+                   "reviewer of a draft report"):
+        entry = _service("Q2", f"Consultant, {kind} {review}, Example University, 2031")
+        assert non_seat_pin_code(entry) is None, review
+
+
+@pytest.mark.parametrize("text", [
+    "Consultant, tenure case review, Example University, 2031",
+    "Consultant and promotion case reviewer, Example University, 2031",
+    "External peer reviewer for tenure, Example University; consultant, 2031",
+    "Consultant, expert reviewer for the Example Department of Medicine program review, Example University, 2031",
+])
+def test_a_case_or_program_review_named_with_another_review_word_stays(text):
+    assert non_seat_pin_code(_service("Q2", text)) is None
 
 
 @pytest.mark.parametrize(("entry", "code"), [
@@ -1922,6 +1960,9 @@ def test_a_review_or_examiner_the_owners_decision_does_not_name_leaves_a_consult
     # a community word that is no community service, nor is a body named for community services
     (_service("Q2", "Consultant, community engagement strategy, Example Trust Program, 2031"), "D3"),
     (_service("Q2", "Consultant, Example County Department of Community Services, 2031"), "D3"),
+    # a stay word inside a longer word is none
+    (_service("Q2", "Consultant, Example Vaccines Inc., host tolerance assays, 2031"), "D3"),
+    (_service("Q2", "Consultant, Example Analytics Inc., review of reporting software, 2031"), "D3"),
     # a review word in the name of a meeting attended
     (_service("Q2", "Participant, Example Realist Review Workshop, Example City, 2031", "Other Service"), "B2"),
 ])
@@ -1929,10 +1970,12 @@ def test_a_review_the_owners_decision_does_not_name_keeps_its_route(entry, code)
     assert non_seat_pin_code(entry)[0] == code
 
 
-def test_a_day_the_cv_lists_under_meetings_attended_is_attended():
-    # The CV's own attendance heading outranks the advocacy word (OQIDBN 775's shape).
-    entry = _service("Q2", "2031-2033 Federal Capitol Hill Day", "Continuing Education", "Meetings Attended, National")
-    assert non_seat_pin_code(entry)[0] == "B2"
+def test_advocacy_outranks_the_cvs_own_attendance_heading():
+    # One precedence for every advocacy and service-day word (OQIDBN 775's shape): it stays Q2,
+    # while a plain meeting under the same heading is attended.
+    heading = ("Continuing Education", "Meetings Attended, National")
+    assert non_seat_pin_code(_service("Q2", "2031-2033 Example Annual Meeting", *heading))[0] == "B2"
+    assert non_seat_pin_code(_service("Q2", "2031-2033 Example Capitol Hill Day", *heading)) is None
 
 
 def test_apply_non_seat_pins_keeps_the_models_answer_and_counts_each_recode():
