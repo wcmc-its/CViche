@@ -51,7 +51,7 @@ import, so `stage_6_word_template.py` passes it in, as it passes
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -721,13 +721,17 @@ def consumed_heading_warnings(runs: Sequence[HeadingRun],
 def _recorded_pairs(warnings: Sequence[object], key: str) -> dict[object, list[object]]:
     """{heading element_idx_start: [filled row element_idx_start, ...]} under
     `key` of every consumed-heading record; a malformed pair is skipped, as
-    the doctor skips any record it cannot read."""
+    the doctor skips any record it cannot read: a value under `key` that is
+    no list, a pair that is not a heading index and a list of row indexes,
+    or an index that is not hashable."""
     fills: dict[object, list[object]] = {}
     for warning in warnings:
         if not isinstance(warning, Mapping) or warning.get('check') != CONSUMED_HEADING_CHECK:
             continue
-        for pair in warning.get(key) or []:
-            if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[1], list):
+        pairs = warning.get(key)
+        for pair in pairs if isinstance(pairs, list) else []:
+            if (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[1], list)
+                    and all(isinstance(index, Hashable) for index in (pair[0], *pair[1]))):
                 fills[pair[0]] = list(pair[1])
     return fills
 

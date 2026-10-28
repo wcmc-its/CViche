@@ -283,9 +283,27 @@ def test_the_warning_names_element_indexes_and_no_text() -> None:
     [{'check': 'another_check', ih.CONSUMED_HEADINGS_KEY: [[10, [11]]]}],
     [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: [[10, 11], [12], 'x']}],
     ['not a record', {'check': ih.CONSUMED_HEADING_CHECK}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: 5}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: True}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: {'10': [11]}}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: '10,11'}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: [[[10], [11]]]}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: [[10, [[11]]]]}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: [[10, [11, {'el': 12}]]]}],
+    [{'check': ih.CONSUMED_HEADING_CHECK, ih.CONSUMED_HEADINGS_KEY: [], ih.KEPT_HEADINGS_KEY: 5}],
 ])
 def test_heading_fills_reads_nothing_from_other_or_malformed_records(warnings: list) -> None:
-    assert ih.heading_fills(warnings) == {}
+    assert ih.heading_fills(warnings) == {} and ih.consumed_headings(warnings) == frozenset()
+
+
+def test_heading_fills_reads_the_well_formed_pairs_beside_malformed_ones() -> None:
+    """A malformed pair is skipped, not the record: the doctor keeps every
+    fill it can read."""
+    warnings = [{'check': ih.CONSUMED_HEADING_CHECK,
+                 ih.CONSUMED_HEADINGS_KEY: [[[10], [11]], [20, [21]], [30, [[31]]]],
+                 ih.KEPT_HEADINGS_KEY: [[{'el': 40}, [41]], [50, [51, 52]]]}]
+    assert ih.heading_fills(warnings) == {20: [21], 50: [51, 52]}
+    assert ih.consumed_headings(warnings) == frozenset({20})
 
 
 def test_a_filled_row_gets_its_own_fields_dict() -> None:

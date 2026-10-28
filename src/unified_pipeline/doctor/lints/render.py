@@ -37,6 +37,7 @@ from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
 from unified_pipeline.stage6.institution_headings import (
+    FILL_FIELD_BY_CODE,
     consumed_headings,
     heading_fills,
 )
@@ -3083,15 +3084,16 @@ def _attribution_tokens(text: str) -> frozenset[str]:
                      and not tok.isdigit() and tok not in _ATTRIBUTION_STOPWORDS)
 
 
-def _dated_entries(stage4: dict, filled_names: Mapping[object, str] | None = None,
+def _dated_entries(stage4: dict, filled_names: Mapping[int, str] | None = None,
                    ) -> dict[str, list[_DatedEntry]]:
     """Every stage-4 entry, indexed by each four-digit year its text or its
     extracted fields carry, so a rendered date can be tied only to an entry
-    that holds its start year. `filled_names` (`_filled_heading_names`) adds
-    to an entry's words the institution stage 6 printed on its row."""
+    that holds its start year. `filled_names` (`_filled_heading_names`, by
+    place in stage 4's entries) adds to an entry's words the institution
+    stage 6 printed on its row."""
     names = filled_names or {}
-    entries = [_dated_entry(raw, names.get(raw.get("element_idx_start"), ""))
-               for raw in stage4.get("entries", [])]
+    entries = [_dated_entry(raw, names.get(place, ""))
+               for place, raw in enumerate(stage4.get("entries", []))]
     entries = _mark_latest_rank(entries)
     by_year: dict[str, list[_DatedEntry]] = defaultdict(list)
     for entry, years in entries:
@@ -3259,16 +3261,28 @@ def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> boo
                 or _OPEN_MARKER_DASH_RE.search(text))
 
 
-def _filled_heading_names(stage4: dict, stage6_report: dict | None) -> dict[object, str]:
-    """{element_idx_start of a row stage 6 filled from an institution
-    sub-heading (#985), consumed or kept as its own row: that heading's
-    text}. Stage 4's JSON has neither the fill nor the removal; the
-    render-warnings sidecar records both
-    (`stage6.institution_headings.heading_fills`)."""
+def _filled_heading_names(stage4: dict, stage6_report: dict | None) -> dict[int, str]:
+    """{place in stage 4's entries of a row stage 6 filled from an
+    institution sub-heading (#985), consumed or kept as its own row: that
+    heading's text}. Stage 4's JSON has neither the fill nor the removal; the
+    render-warnings sidecar records both, by element_idx_start
+    (`stage6.institution_headings.heading_fills`). Only an entry of a code
+    stage 6 fills (`FILL_FIELD_BY_CODE`) is read, so a K or L line sharing a
+    filled row's index is not. An index is filled only when the record lists
+    it once per stage-4 record its entries hold (`_split_child_records`):
+    listed fewer times, a record stage 6 fanned out of it was not filled."""
+    entries = stage4.get("entries", [])
     fills = heading_fills((stage6_report or {}).get("warnings") or [])
-    texts = {raw.get("element_idx_start"): str(raw.get("text") or "")
-             for raw in stage4.get("entries", [])}
-    return {row: texts.get(heading, "") for heading, rows in fills.items() for row in rows}
+    texts = {raw.get("element_idx_start"): str(raw.get("text") or "") for raw in entries}
+    names = {row: texts.get(heading, "") for heading, rows in fills.items() for row in rows}
+    listed = Counter(row for rows in fills.values() for row in rows)
+    fillable = {place: raw.get("element_idx_start") for place, raw in enumerate(entries)
+                if raw.get("taxonomy_code") in FILL_FIELD_BY_CODE}
+    records: Counter[object] = Counter()
+    for place, index in fillable.items():
+        records[index] += max(1, len(_split_child_records(entries[place])))
+    return {place: names[index] for place, index in fillable.items()
+            if index in names and listed[index] >= records[index]}
 
 
 def lint_date_cell_shape(stage4: dict, table_rows: list[list[list[str]]],
@@ -3852,16 +3866,17 @@ class _GroupEntry(NamedTuple):
     any_date: bool
     #: Whether stage 2 joined more than one source line into the entry.
     multi_line: bool
-    #: The sub-heading name stage 6 printed in the row's institution or
-    #: organization cell (#985, `_filled_heading_names`); "" when none.
+    #: The sub-heading name the record says stage 6 filled into the row's
+    #: institution or organization cell (#985, `_filled_heading_names`);
+    #: "" when none.
     filled_name: str
 
 
-def _group_entries(stage4: dict, filled_names: Mapping[object, str]) -> list[_GroupEntry]:
+def _group_entries(stage4: dict, filled_names: Mapping[int, str]) -> list[_GroupEntry]:
     """The entries in source order, each with a position, and with the name
-    `filled_names` gives its row, if any."""
+    `filled_names` gives its row by its place in stage 4's entries, if any."""
     entries = []
-    for raw in stage4.get("entries", []):
+    for place, raw in enumerate(stage4.get("entries", [])):
         position = _entry_position(raw)
         if position is None:
             continue
@@ -3877,7 +3892,7 @@ def _group_entries(stage4: dict, filled_names: Mapping[object, str]) -> list[_Gr
             raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), text,
             tuple(str(h) for h in hierarchy) if isinstance(hierarchy, list) else (),
             fields, dated, dated or bool(_GROUP_SHORT_DATE_RE.search(text)), multi_line,
-            filled_names.get(raw.get("element_idx_start"), ""))))
+            filled_names.get(place, ""))))
     return [entry for _, entry in sorted(entries, key=lambda pair: pair[0])]
 
 
@@ -3957,18 +3972,28 @@ def _child_lost_header(child: _GroupEntry, header_name: frozenset[str],
     that carries the name (ATUVAL 95)."""
     core = _value_tokens(child, frozenset(child.fields) - _JUNK_DATE_FIELDS)
     shown = _rows_showing(child, core, rows)
-    if any(len(header_name & row.tokens) >= len(header_name) * GROUP_HEADER_SHOWN_SHARE
-           for row in shown):
+    if any(_shows_name(header_name, row) for row in shown):
         return None
     return _tightest_row(shown, core)
 
 
+def _shows_name(name: frozenset[str], row: _RenderedRow) -> bool:
+    """Whether the row shows the name, at GROUP_HEADER_SHOWN_SHARE of its
+    words."""
+    return len(name & row.tokens) >= len(name) * GROUP_HEADER_SHOWN_SHARE
+
+
+def _prints_filled_name(entry: _GroupEntry, rows: list[_RenderedRow]) -> bool:
+    """Whether a row showing the entry shows the name stage 6 filled into it
+    (#985): the record says what stage 6 wrote, a row what printed."""
+    core = _value_tokens(entry, frozenset(entry.fields) - _JUNK_DATE_FIELDS)
+    name = _letter_tokens(entry.filled_name)
+    return any(_shows_name(name, row) for row in _rows_showing(entry, core, rows))
+
+
 def _is_bare_role(entry: _GroupEntry) -> bool:
-    """A line that is a role and its dates, and nothing more. A row stage 6
-    filled with its sub-heading's name (#985) prints what the role was held
-    in, though stage 4's fields lack it."""
-    if (entry.filled_name or entry.code not in _GROUP_ROLE_CODES
-            or not _is_role_and_dates(entry)):
+    """A line that is a role and its dates, and nothing more."""
+    if entry.code not in _GROUP_ROLE_CODES or not _is_role_and_dates(entry):
         return False
     role = _value_tokens(entry, frozenset(_GROUP_ROLE_FIELDS))
     role_text = " ".join(str(entry.fields[key]) for key in entry.fields.keys() & _GROUP_ROLE_FIELDS)
@@ -4107,12 +4132,18 @@ def _role_without_holder_hits(entries: list[_GroupEntry], rows: list[_RenderedRo
                                   reported: set[int]) -> list[_GroupHit]:
     """One finding per run of bare roles under a line of their heading,
     named by the line above when it can hold them (a course, committee or
-    society line: RINASX 29 over 30-34), else by the run's first role."""
+    society line: RINASX 29 over 30-34), else by the run's first role. A
+    bare role whose row prints the sub-heading name stage 6 filled in (#985)
+    is passed over: it takes no row and does not end the run, as when no
+    row showed its role alone. Read as a bare role, it took another entry's
+    headless row of the same role (ZDCXIV 333)."""
     hits = []
     taken: set[int] = set()
     above: _GroupEntry | None = None
     run: list[tuple[_GroupEntry, str]] = []
     for index, entry in enumerate(entries):
+        if entry.filled_name and _is_bare_role(entry) and _prints_filled_name(entry, rows):
+            continue
         if not _is_bare_role(entry) or index in reported:
             if run:
                 hits.append(_role_run_hit(above, run))
@@ -4188,9 +4219,8 @@ def lint_group_header_context(stage4: dict, table_rows: list[list[list[str]]],
     (X6 E8, E11): one finding per header, lead line or dated parent, named
     by its element_idx_start, quoting up to three of its lines' rows. A row
     stage 6 filled from a sub-heading, consumed or kept (#985, read from
-    `stage6_report`), carries that heading's name, so it is no bare role:
-    read as one, it took another entry's headless row of the same role
-    (ZDCXIV 333)."""
+    `stage6_report`), carries that heading's name; when it prints it, the
+    row is no headless role (`_role_without_holder_hits`)."""
     entries = _group_entries(stage4, _filled_heading_names(stage4, stage6_report))
     rows = _junk_rendered_rows(table_rows, blocks or [])
     reported: set[int] = set()
