@@ -52,6 +52,11 @@ from unified_pipeline.stage6.normalization import (  # noqa: E402
     grant_status_is_empty_section_label,
     grant_status_rebucket_target,
 )
+from unified_pipeline.stage6.parsing.dates import (  # noqa: E402
+    grant_end_date,
+    grant_end_year,
+    grant_has_ended,
+)
 from unified_pipeline.stage6.sections import research_support  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     NOTES_LABEL,
@@ -67,9 +72,6 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     divert_unfunded_grants,
     fill_major_goals_from_text,
     filter_role_effort_headers,
-    grant_end_date,
-    grant_end_year,
-    grant_has_ended,
     grant_id_tokens,
     heading_role,
     is_role_effort_header,
