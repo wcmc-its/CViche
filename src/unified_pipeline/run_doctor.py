@@ -1224,7 +1224,7 @@ LINT_PREVALENCE = {
     "stage4_unplaced_items": 0.001,
     # summary_unsupported_claim (#1554, S1554-R in doctor/PRECISION.md): 55
     # of the 296 stored (uid, summary, stage-4) pairs S1554-R reads (the
-    # YUYVIG, NECRGC, s3, OIEPQD, eb and extra runs and 103 others) at any
+    # YUYVIG, NECRGC, s3, OIEPQD, eb and extra runs and 111 others) at any
     # severity, measured 2026-10-27; 51 of 296 on origin/dev 0daa5392.
     # S1554-PC's 34 of 224 (0.152, 2026-10-14) was mostly summaries from
     # before #1558's prompt. Same mixed-corpus caveat as above.
