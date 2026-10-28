@@ -30,7 +30,8 @@ a change to the other.
                      spell it out (#1393)
     residue.py       a source line and the role and dates its row already
                      shows in, what is left of the line out (#1437, #1346);
-                     and the role a non-seat row's line writes (#1580)
+                     and the role and committee name a non-seat row's line
+                     writes (#1580)
 
 The first six were one module, `text.py`, until they were split apart. "Value
 in, cleaner value out" is a shared signature, not a shared reason to change: an
@@ -134,6 +135,7 @@ from .rendering import (  # noqa: F401
 from .residue import (  # noqa: F401
     _line_without_shown_role_and_dates,
     _organization_left_in_text,
+    name_without_unstated_body,
     names_non_seat_activity,
     own_activity_role,
 )

@@ -1799,6 +1799,70 @@ def test_an_attended_meeting_with_a_part_the_owner_played_stays(entry):
     assert non_seat_pin_code(entry) is None
 
 
+@pytest.mark.parametrize("entry", [
+    # a P consultancy that names a company (WBZIDP 222's shape coded P)
+    _service("P", "2031 Consultant, Example Therapeutics", "Other Activities"),
+    # a company under a nearest heading that names consulting, its line naming no body (BYFQBG 186)
+    _service("Q2", "Example Ltd,      SAB   2031 \u2013 present", "Consultancies/Scientific Advisory Board"),
+    # a consulting role with more than its dates on the line
+    _service("Q2", "Senior Consultant | 2031 - 2032", "Professional Organizations"),
+    # a company named with a plural noun (web244 797.2)
+    _service("Q2", "2031 | Example Centers, Inc. | Review of research protocols", "Professional Consulting"),
+])
+def test_more_consulting_is_another_professional_position(entry):
+    assert non_seat_pin_code(entry)[0] == "D3"
+
+
+@pytest.mark.parametrize("entry", [
+    # a line that is only the role and its dates: one record of a committee roster (MEZVNA 124.5, 124.10)
+    _service("Q2", "Consultant | 2031 - 2032", "Professional Organizations"),
+    _service("Q2", "Consultant      . | 2031 - 2033", "Professional Organizations"),
+    _service("Q2", "Consultant, Jan 2031 - present", "Professional Organizations"),
+    _service("Q2", "Consultant, September 2029 to 2031", "Professional Organizations"),
+    _service("Q2", "Consultant since 2031 (current)", "Professional Organizations"),
+    _service("Q2", "Consultant until 2031", "Professional Organizations"),
+    # a company named under a heading whose consulting word is a level up (the leaf names committees)
+    _service("Q2", "Example Biologics Corporation, 2031", "Consultancies and Committees", "Committees"),
+    # a company's board or committee under a consulting heading is a seat
+    _service("Q2", "Example Pharma Inc. Board of Directors, 2031", "Consulting"),
+    _service("Q2", "2031 | Example Pharma, Inc. | Data Monitoring Committee for an example vaccine",
+             "Professional Consulting"),
+    # an editor is an office
+    _service("Q2", "Consulting Editor, Example Journal of Methods, 2031"),
+    # a public body named in the plural is no company
+    _service("P", "2031 Consultant, Example City Health and Hospitals Corporation", "Other Activities"),
+    _service("Q2", "Example City Health and Hospitals Corporation, 2031", "Consulting"),
+])
+def test_a_bare_role_a_seat_or_a_public_body_is_not_consulting(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("entry", [
+    # advocacy and a day of service stay Q2 (the owner's decision on #1580)
+    _service("Q2", "Participant, Example Society Hill Day, 2031", "Other Service"),
+    _service("Q2", "2031 Participant, Example Society Advocacy Day", "Other Service"),
+    _service("Q2", "Participant, Example Day of Service, 2031", "Community Service"),
+    # a talk, an abstract or a guideline the owner worked on is a part played (SEKQUI 264)
+    _service("Q2", "Attended the Example Society Annual Meeting; gave a talk on example methods, 2031", "Other Service"),
+    _service("Q2", "Participant, Example Annual Meeting, oral abstract, 2031", "Other Service"),
+    _service("Q2", "2031 Participant, Example Consensus Conference on Methods", "National Leadership Positions"),
+    _service("Q2", "2031 Participant, Example Conference 2.0 \u2013 revisions to the Example Training Guidelines",
+             "National Leadership Positions"),
+    _service("Q2", "Example Society Annual Meeting, poster session judge, 2031", "Meetings Attended"),
+    _service("Q2", "2031 Attended the Example Annual Meeting; poster on example methods", "Other Service"),
+    # an attendance heading above a leaf that names something else
+    _service("Q2", "Example Society Annual Meeting, 2031", "Meetings Attended", "National Committees"),
+])
+def test_advocacy_a_part_played_or_another_leaf_is_no_attended_meeting(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+def test_a_day_the_cv_lists_under_meetings_attended_is_attended():
+    # The CV's own attendance heading outranks the advocacy word (OQIDBN 775's shape).
+    entry = _service("Q2", "2031-2033 Federal Capitol Hill Day", "Continuing Education", "Meetings Attended, National")
+    assert non_seat_pin_code(entry)[0] == "B2"
+
+
 def test_apply_non_seat_pins_keeps_the_models_answer_and_counts_each_recode():
     consulting = _service("Q2", "2031-present  Consultant, Example Health Rhythms")
     seat = _service("Q2", "Member, Example Society Ethics Committee, 2031")

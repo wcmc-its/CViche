@@ -826,11 +826,12 @@ def _board_rows(entries):
 
 
 @pytest.mark.parametrize("entry,expected", [
-    # an external examiner whose line states no role: stage 4's "Committee Member" goes (TYGUXX 227)
+    # an external examiner whose line states no role: stage 4's "Committee Member" goes, and so
+    # does the thesis committee its committee name invented (TYGUXX 227)
     (_q2("2031  Example University, Ph.D. Candidate: A. Example,\tTitle: Example Methods", "External Ph.D. Examiner",
          committee_name="Thesis Committee: Example Methods", role="Committee Member",
          organization="Example University", start_date="2031", end_date="2031"),
-     ["Thesis Committee: Example Methods", "", "Example University", "2031"]),
+     ["Example Methods", "External Ph.D. Examiner", "Example University", "2031"]),
     # the examiner's own word is on the line, so it is the role
     (_q2("External Examiner, Example University, 2031", "Outside Service", role="Committee Member",
          organization="Example University", start_date="2031", end_date="2031"),
@@ -895,7 +896,26 @@ def test_a_heading_given_as_a_string_still_marks_an_examiner_row():
              "hierarchy": "External Ph.D. Examiner", "element_idx_start": 7,
              "extracted_fields": {"committee_name": "Thesis Committee: A. Example", "role": "Committee Member",
                                   "organization": "Example University", "start_date": "2031"}}
-    assert ["Thesis Committee: A. Example", "", "Example University", "2031"] in _board_rows([entry])
+    assert ["A. Example", "External Ph.D. Examiner", "Example University", "2031"] in _board_rows([entry])
+
+
+def test_a_seat_keeps_a_committee_name_its_line_does_not_spell_out():
+    # Only a non-seat row loses a body its line never names: a seat's committee name is the seat.
+    entry = _q2("Member, Example Society, 2031", "Committees", role="Member",
+                committee_name="Example Society Steering Committee", start_date="2031")
+    assert ["Example Society Steering Committee", "Member", "", "2031"] in _board_rows([entry])
+
+
+def test_hosted_visits_render_alike_whatever_the_guests_title():
+    # ECXGAT 2138/2147: a guest's office after the hosting is no seat of the owner's, so both
+    # hosted visits keep the organization in its own cell, and read alike.
+    rows = _board_rows([
+        _q2("Invited and hosted Dr. A. Example, Director, Example Laboratory. Example Institute, 2031", "Personal Data",
+            role="Host", organization="Example Institute", start_date="2031"),
+        _q2("Invited and hosted B. Example, CEO of Example Products, Inc., at Example Institute, 2031", "Personal Data",
+            role="Host", organization="Example Institute", start_date="2031"),
+    ])
+    assert rows.count(["", "Host", "Example Institute", "2031"]) == 2
 
 
 def test_a_role_word_on_a_line_whose_role_was_another_persons_is_not_taken():

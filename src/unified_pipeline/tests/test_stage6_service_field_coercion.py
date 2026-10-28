@@ -89,6 +89,8 @@ from unified_pipeline.stage6.normalization.residue import (  # noqa: E402
     _DATE_SPAN,
     _line_without_shown_role_and_dates,
     _organization_left_in_text,
+    line_states_role,
+    name_without_unstated_body,
     names_non_seat_activity,
     own_activity_role,
 )
@@ -1364,6 +1366,14 @@ def test_line_without_shown_role_and_dates(text, role, start, end, expected):
     ("A. Zqname, PhD, 2031", ["Final Oral Exams"]),
     ("2031 Zqreport title, Zqacademies", ["Report Review"]),
     ("Consulting for Zqfirms, 2031", ["Other Activities"]),
+    # what follows the owner hosting someone is the guest's: an office there is no seat (ECXGAT 2138)
+    ("Invited and hosted Dr. A. Zqname, Director, Zqlab, 2031", ["Personal Data"]),
+    ("Hosted A. Zqname, Managing Director, Zqfirm, at Zqinstitute, 2031", ["Personal Data"]),
+    ("Host for sponsor site visit\tHosted A. Zqname, President, Zqfirm, 2031", ["Visits"]),
+    ("Host for the visit of Dr. A. Zqname, Director, Zqlab, 2031", ["Visits"]),
+    # board-certified is no board
+    ("Volunteer, board-certified physician at Zqclinic, 2031", ["Other Activities"]),
+    ("Zqsabine clinic volunteer, Sab Zqvalley, 2031", ["Other Activities"]),  # SAB in capitals only
 ])
 def test_a_row_naming_an_activity_and_no_seat_is_no_seat(text, headings):
     """#1580: the activity on the line or a heading, and no body or office on the line."""
@@ -1381,6 +1391,12 @@ def test_a_row_naming_an_activity_and_no_seat_is_no_seat(text, headings):
     ("Zqsociety Coalition to End Zqdisease, 2031", ["Community Service"]),  # a coalition is a body
     ("Zqsociety, 2031", ["Professional Service"]),                      # no activity anywhere
     ("10/2031-  Community Health Network of Zqstate", ["Program Consultation"]),  # a name, not a service
+    ("Chair and host, Zqsociety annual meeting, 2031", ["Community Service"]),  # the owner's office
+    ("Host Committee member, Zqsociety annual meeting", ["Community Service"]),  # a committee one sits on
+    ("Member, Hosting Committee, Zqsociety meeting", ["Community Service"]),
+    ("Hosting Committee member, Zqsociety meeting", ["Community Service"]),  # a committee one hosts with
+    ("Trustee, Zqfoundation, 2031", ["Community Service"]),             # a trustee sits on a board
+    ("Zqpharma     SAB   2031 - present", ["Consultancies/Scientific Advisory Board"]),  # a scientific advisory board
 ])
 def test_a_seat_or_a_row_naming_no_activity_is_not(text, headings):
     assert not names_non_seat_activity(text, headings)
@@ -1393,16 +1409,95 @@ def test_a_seat_or_a_row_naming_no_activity_is_not(text, headings):
     ("Member", "Zqtrust, 2031", ""),
     # no stage-4 role: the line's own word, as written
     (None, "2031 Zqsociety advocacy visits, Zqagency", "advocacy"),
-    ("", "Zqclinic volunteers, 2031", "volunteers"),
-    # a role in stage 4's own words for the activity claims no seat
+    ("", "2031  Zquniversity, External Ph.D. Examiner, A. Zqname", "External Ph.D. Examiner"),
+    # a plural or a possessive names others or a body, not the owner's role (FINSIS 86)
+    ("", "Organized training for 40 Zqclinic volunteers, 2031", ""),
+    ("Committee Member", "Organized training for 40 Zqclinic volunteers, 2031", ""),
+    ("", "Monthly Zqcenter Consultants' Conference, 2031", ""),
+    ("", "Talk, Zqregion Consultants Collaborative, 2031", ""),
+    ("", "Monthly Zqcenter Consultant\u2019s Conference, 2031", ""),
+    # a role in stage 4's own words for what the line writes claims no seat and stays
     ("Consultant", "Consulting for several Zqfirms, 2031", "Consultant"),
     ("Host", "Invited and hosted Dr. A. Zqname, 2031", "Host"),
     ("Organizer", "Organized the Zqcity centennial symposium, 2031", "Organizer"),
+    ("Recruiter", "2031: Recruiting for Zqprogram at the Zqsociety meeting", "Recruiter"),
+    ("Co-lead", "2031  Co-led the Zqproject launch", "Co-lead"),
+    ("Consultant/Testifier", "Consulted on and testified for Zqstate House Bill 31, 2031", "Consultant/Testifier"),
+    ("Teacher's assistant", "2031 Teacher\u2019s assistant at Zqdaycare", "Teacher's assistant"),
     ("Committee Member", "Attendee, Zqsociety appreciation day 2031", "Attendee"),
+    # a role the line does not write is stage 4 reading something else: the line's own word, else nothing
+    ("External Examiner", "2031 A. Zqname, PhD thesis defense, Zquniversity", ""),
+    ("Workshop leader", "How to be an Example Advocate, Workshop at Zqsociety Annual Meeting, 2031", ""),
+    ("External Examiner", "Examiner, Zquniversity thesis defense, 2031", "Examiner"),  # the line's own word for it
+    ("Medical Mission Volunteer", "Medical Mission to Zqcountry, 2031", ""),
+    ("Attendee", "Zqsociety Annual Meeting: 2029, 2031", ""),
+    ("Volunteer, built cisterns", "Clinic volunteer with Zqministry (2031)", "volunteer"),
 ])
 def test_own_activity_role(role, text, expected):
     """#1580: the Role cell of a row that is no seat."""
     assert own_activity_role(role or "", text) == expected
+
+
+@pytest.mark.parametrize("role, text, heading, expected", [
+    # the nearest heading states stage 4's role (ZCTARO 533, MEHOQM 143)
+    ("External Examiner", "2031 A. Zqname, PhD thesis defense", "PhD Theses External Examiner", "External Examiner"),
+    ("Attendee", "Zqsociety Annual Meeting: 2029, 2031", "Convention & Symposium Attendance", "Attendee"),
+    ("Medical Mission Volunteer", "Medical Mission to Zqcountry, 2031", "Selected Volunteer Activities",
+     "Medical Mission Volunteer"),                                    # words from the line and the heading
+    # no role, or a membership, takes the heading's own word when the line has none (TYGUXX 227)
+    ("Committee Member", "2031 Zquniversity, Ph.D. Candidate: A. Zqname", "External Ph.D. Examiner",
+     "External Ph.D. Examiner"),
+    ("", "2031 Zqsociety Hill Day", "COMMUNITY OUTREACH/SCIENCE ADVOCACY", "Advocacy"),
+    ("", "Clinic volunteer with Zqministry (2031)", "Advocacy", "volunteer"),  # the line's own word first
+    # a heading naming no role leaves nothing
+    ("Dissertation Committee Member", "A. Zqname | PhD, Zqstudies | 2031", "Oral Exam Participation", ""),
+    ("Workshop leader", "How to be an Example Advocate, Workshop, 2031", "Conferences", ""),
+    (None, "2031 A. Zqname, Ph.D., student in Zqstudies", "Examining Committees (External Appraiser)",
+     "External Appraiser"),
+    # of roles stage 4 joined, the stated ones stay
+    ("Consultant/Witness", "Consulted on and testified for Zqstate House Bill 31, 2031", "Community", "Consultant"),
+    ("Volunteer / Mentor / Host", "Volunteer host, Zqprogram, 2031", "Community", "Volunteer/Host"),
+    ("Consultant / Testifier", "Consulted on and testified for Zqstate House Bill 31, 2031", "Community",
+     "Consultant / Testifier"),                                          # all stated: as stage 4 wrote it
+])
+def test_own_activity_role_reads_the_nearest_heading(role, text, heading, expected):
+    """#1580: the heading the CV files a row under states its role as much as its line does."""
+    assert own_activity_role(role, text, heading) == expected
+
+
+@pytest.mark.parametrize("role, text, expected", [
+    ("Expert Opinion", "2031 Expert opinion, Zqfirm", True),            # case aside
+    ("Testimony on behalf of Zqsociety", "Testimony on behalf of the Zqsociety, 2031", True),
+    ("Developer", "Developed the Zqsociety screening kit", True),       # a form of a line word
+    ("Interviewer", "Interview panel, Zqprogram", True),
+    ("Examiner", "2031 A. Zqname, PhD thesis defense", False),
+    ("Lead", "2031 Zqproject", False),
+    ("of", "2031 Zqproject", False),                                     # no word of the role is checked
+    ("Co-PI", "Co-PI, Zqproject, 2031", True),                          # as it stands
+    ("Volunteer with Zqclinic", "Zqclinic volunteer, 2031", True),      # a filler need not be on the line
+    ("Assistant", "Assisted with the Zqprogram launch", True),          # six first letters
+    ("Partner", "Particular care for Zqclinic", False),
+    ("Interviewer", "International Zqsociety, 2031", False),             # five are not enough
+    ("VP", "Zqprogram leadership, 2031", False),                        # a short word is checked too
+])
+def test_line_states_role(role, text, expected):
+    """#1580: whether a line writes a role stage 4 gave, as it stands or word by word."""
+    assert line_states_role(role, text) is expected
+
+
+@pytest.mark.parametrize("name, text, expected", [
+    # stage 4's body, which the line never names, goes, with the lead it heads (TYGUXX 227)
+    ("Thesis Committee: Example Methods (A. Zqname)", "2031 Zquniversity, Ph.D. Candidate: A. Zqname", "Example Methods (A. Zqname)"),
+    ("PhD Thesis Defense Committee", "2031 A. Zqname, PhD thesis defense, Zquniversity", "PhD Thesis Defense"),
+    ("Zqsociety Report Review Committee", "Report review for Zqsociety, 2031", "Zqsociety Report Review"),
+    # a body the line names, or a name with no body, stays
+    ("Council of Zqscientists seminar", "Invited and hosted Dr. A. Zqname for the Council of Zqscientists seminar", "Council of Zqscientists seminar"),
+    ("Zqclinic", "Zqclinic volunteer, 2031", "Zqclinic"),
+    ("", "Zqclinic volunteer, 2031", ""),
+])
+def test_name_without_unstated_body(name, text, expected):
+    """#1580: a non-seat row's Name of Committee less a body its line never names."""
+    assert name_without_unstated_body(name, text) == expected
 
 
 # ---------------------------------------------------------------------------

@@ -515,18 +515,24 @@ _REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for thes
 # - its line names the owner consulting, and no body one sits on, no seat or
 #   office, it is no citation, and its heading is not a list of talks (Q2 only: a
 #   P "Consultant" row is the owner's own institution's project, EYTHNB 279;
-#   "<Company> Consultant Focus Group" under Invited Presentations is a talk);
+#   "<Company> Consultant Focus Group" under Invited Presentations is a talk),
+#   and the line says more than the role and its dates: "Consultant | 2012 -
+#   2013" is one record fanned out of a society committee's roster whose other
+#   records name the committee (MEZVNA 124.5, 124.10), a seat on it;
 # - its line names an advisory or consulting board and a company, and no
 #   public body, society or school ("<Pharma>, Scientific Advisory Board");
 # - its line names litigation or a law firm, and expert or consulting work;
-# - a heading above it names consulting, and its line names a company and no
-#   public body (EJPAIA 175 under "Scientific Advisory Boards and
-#   Consultantships"). A company named without a company word ("Scientific
-#   Advisory Board, <Startup>", UVZNIC 105) cannot be told from an academic
-#   program's board ("<University Program>, Advisory Board", EJPAIA 181), so it
-#   stays Q2.
+# - its nearest heading names consulting, and its line names a company, no
+#   public body and no body one sits on (EJPAIA 175 under "Scientific Advisory
+#   Boards and Consultantships"). "<Pharma> Inc. Board of Directors" under
+#   "Consulting", or a company's monitoring committee under "Consultancies and
+#   Committees > Committees", is a seat. A company named without a company word
+#   ("Scientific Advisory Board, <Startup>", UVZNIC 105) cannot be told from an
+#   academic program's board ("<University Program>, Advisory Board", EJPAIA
+#   181), so it stays Q2.
 # Testimony stays Q2 whatever else the line says (the owner's decision on #1580,
-# 2026-10-27), and so does "Consultant, <Society> Ethics Committee": a seat.
+# 2026-10-27), and so does "Consultant, <Society> Ethics Committee": a seat, as
+# is "Consulting Editor, <Journal>".
 _NON_SEAT_SOURCE_CODES = frozenset({"Q2", "P"})
 _BOARD_SERVICE_CODE = "Q2"
 _CONSULTING_CODE = "D3"
@@ -537,7 +543,13 @@ _SEAT_BODY = re.compile(
     r"\b(?:(?:sub)?committees?|boards?(?![\s-]+certified)|councils?|commissions?|panels?"
     r"|task\s*forces?|(?:working|advisory|technical|expert|steering)\s*groups?|workgroups?"
     r"|study\s+sections?|coalitions?|alliances?)\b", re.I)
-_SEAT_OR_OFFICE = re.compile(r"\b(?:members?|(?:co-?)?chair\w*|president|secretary|treasurer)\b", re.I)
+_SEAT_OR_OFFICE = re.compile(r"\b(?:members?|(?:co-?)?chair\w*|president|secretary|treasurer|editors?)\b", re.I)
+# What a bare role-and-dates line holds besides the consulting word and its
+# numbers: month names and the words of a range.
+_DATE_WORD = re.compile(
+    r"\b(?:present|current|to|since|until|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
+    r"|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b", re.I)
+_LETTER = re.compile(r"[^\W\d_]")
 _TALKS_HEADING = re.compile(r"\b(?:presentations?|lectures?|talks?|speeches)\b", re.I)
 # A citation: an author list and a year in parentheses ("Doe, J. (2031) ...").
 _CITATION_YEAR = re.compile(r"\((?:19|20)\d{2}[a-z]?\)")
@@ -545,37 +557,50 @@ _COMPANY = re.compile(
     r"\b(?:inc|llc|llp|ltd|corp|corporation|company|companies|pharma|pharmaceuticals?|therapeutics"
     r"|biotech(?:nology)?|biosciences?|biopharma(?:ceuticals?)?|gmbh|plc)\b", re.I)
 _ADVISORY_BOARD = re.compile(r"\b(?:advisory|consulting)\s+(?:board|panel|council|committee)s?\b", re.I)
+# Plural too ("<City> Health and Hospitals Corporation" is a public body),
+# except the nouns a company is named with in the plural ("<Name> Centers,
+# Inc.", web244 797.2; "<Name> Networks").
 _PUBLIC_BODY = re.compile(
-    r"\b(?:national|federal|state|united\s+states|government|ministry|agency|nih|institutes?"
-    r"|society|association|foundation|academy|college|university|school|department|council|commission"
-    r"|hospital|cent(?:er|re)|trust|fund|program(?:me)?|network|alliance|coalition|consortium"
-    r"|blood\s+banks?)\b", re.I)
+    r"\b(?:national|federal|states?|united\s+states|governments?|ministr(?:y|ies)|agenc(?:y|ies)|nih"
+    r"|institutes?|societ(?:y|ies)|associations?|foundations?|academ(?:y|ies)|colleges?|universit(?:y|ies)"
+    r"|schools?|departments?|councils?|commissions?|hospitals?|cent(?:er|re)|trust|fund"
+    r"|program(?:me)?|network|alliances?|coalitions?|consorti(?:um|a)|blood\s+banks?)\b", re.I)
 _LITIGATION = re.compile(r"\blitigations?\b|\b(?:law|legal)\s+firms?\b", re.I)
 _EXPERT_OR_CONSULTING = re.compile(r"\bexpert\b|\bconsult", re.I)
 _TESTIMONY = re.compile(r"\btestif(?:y|ied|ies|ying|ier)\b|\btestimon(?:y|ies)\b", re.I)
 _CONSULTING_WHY = "Consulting, a company's advisory board or expert work in litigation is a professional position, not a seat on a body"
 #
-# A meeting the owner attended (#1691's rule, B2): under a heading that names
-# attendance ("Scientific Meetings Attended": LTTYWI 1084-1101, coded Q2 by
-# T-validation), or on a line that opens as attendance ("Attendee <Day>",
-# MQLKPQ 109; "Participant, <Meeting>", LWMSPJ 342), when the line names an
-# event, or the attendance heading does (LTTYWI 1095 misspells "Congress"),
+# A meeting the owner attended (#1691's rule, B2): under a nearest heading
+# that names attendance ("Scientific Meetings Attended": LTTYWI 1084-1101,
+# coded Q2 by T-validation), or on a line that opens as attendance ("Attendee
+# <Day>", MQLKPQ 109; "Participant, <Meeting>", LWMSPJ 342), when the line
+# names an event, or that heading does (LTTYWI 1095 misspells "Congress"),
 # and no part the owner played in it: a chair, organizer, moderator, speaker,
-# panelist, a seat, a service provided ("Participant, <Day> - provided
-# <a service>", VGHNZD 570), or an author list of two names or more ("<City>
-# DC," is a place, LTTYWI 1099).
+# a talk, an abstract or poster, panelist, a seat, a service provided
+# ("Participant, <Day> - provided <a service>", VGHNZD 570), work on a
+# guideline or consensus (SEKQUI 264), or an author list of two names or more
+# ("<City> DC," is a place, LTTYWI 1099). An attendance heading above a leaf
+# that names something else ("Meetings Attended > National Committees") says
+# nothing about the leaf's rows. A line that opens as attendance at advocacy
+# or a day of service ("Participant, <Society> Hill Day") is advocacy or
+# community service, which stays Q2 (the owner's decision on #1580); under an
+# attendance heading the CV itself calls it attended.
 _ATTENDED_CODE = "B2"
 _ATTENDANCE_HEADING = re.compile(r"\b(?:attended|attendance)\b", re.I)
 _ATTENDANCE_LEAD = re.compile(
     r"^\W*(?:(?:19|20)\d{2}(?:\s*[-\u2013\u2014]\s*(?:(?:19|20)?\d{2}|present))?\W*)?"
     r"(?:attended|attendee|participant|participated\s+in)\b", re.I)
+_ADVOCACY_OR_SERVICE_DAY = re.compile(
+    r"\b(?:advoca\w*|hill\s+days?|lobby\w*|rall(?:y|ies)|days?\s+of\s+service|service\s+days?"
+    r"|community\s+service)\b", re.I)
 _EVENT = re.compile(
     r"\b(?:meetings?|conferences?|congress(?:es)?|symposi(?:um|a|ums)|workshops?|courses?|summits?"
     r"|forums?|seminars?|webinars?|conventions?|day)\b", re.I)
 _OWNERS_PART = re.compile(
     r"\b(?:(?:co-?)?chair\w*|organi[sz]\w*|moderat\w*|speaker|keynote|present(?:ed|er|ing|ation)"
     r"|lectur\w*|faculty|instructor|facilitat\w*|panelist|discussant|judge|host\w*|delegate"
-    r"|representative|members?|committees?|boards?|director|provid(?:ed|ing)|volunteer\w*|served|taught)\b",
+    r"|representative|members?|committees?|boards?|director|provid(?:ed|ing)|volunteer\w*|served|taught"
+    r"|talks?|spoke|abstracts?|posters?|oral|guidelines?|consensus)\b",
     re.I)
 _ATTENDED_WHY = "A meeting the owner attended is an educational experience, not service"
 _MIN_AUTHOR_NAMES = 2
@@ -587,23 +612,30 @@ def _is_consulting(code: str, text: str, levels: list[str]) -> bool:
     if _TESTIMONY.search(text):
         return False
     company = bool(_COMPANY.search(text)) and not _PUBLIC_BODY.search(text)
+    leaf = levels[-1] if levels else ""
     if (_CONSULTING_WORD.search(text) and not _SEAT_BODY.search(text) and not _SEAT_OR_OFFICE.search(text)
             and not (_has_author_list(text) and _CITATION_YEAR.search(text))
-            and not (levels and _TALKS_HEADING.search(levels[-1]))):
+            and not _TALKS_HEADING.search(leaf) and not _names_only_the_role(text)):
         return code == _BOARD_SERVICE_CODE or company
     if _ADVISORY_BOARD.search(text) and company:
         return True
     if _LITIGATION.search(text) and _EXPERT_OR_CONSULTING.search(text):
         return True
-    return company and any(_CONSULTING_WORD.search(level) for level in levels)
+    return company and bool(_CONSULTING_WORD.search(leaf)) and not _SEAT_BODY.search(text)
+
+
+def _names_only_the_role(text: str) -> bool:
+    """Whether a line holds nothing but the consulting role and its dates."""
+    return not _LETTER.search(_DATE_WORD.sub(" ", _CONSULTING_WORD.sub(" ", text)))
 
 
 def _is_attended_meeting(text: str, levels: list[str]) -> bool:
     """A meeting or event the owner attended, playing no part in it (#1580, #1691)."""
-    headings = [level for level in levels if _ATTENDANCE_HEADING.search(level)]
-    attended = _ATTENDANCE_LEAD.match(text) or headings
-    event = _EVENT.search(text) or any(_EVENT.search(level) for level in headings)
-    return (bool(attended) and bool(event)
+    leaf = levels[-1] if levels else ""
+    by_heading = bool(_ATTENDANCE_HEADING.search(leaf))
+    by_lead = bool(_ATTENDANCE_LEAD.match(text)) and not _ADVOCACY_OR_SERVICE_DAY.search(text)
+    event = _EVENT.search(text) or (by_heading and _EVENT.search(leaf))
+    return ((by_heading or by_lead) and bool(event)
             and not _OWNERS_PART.search(text) and not _names_authors(text))
 
 

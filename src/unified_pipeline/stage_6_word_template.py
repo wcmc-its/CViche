@@ -145,6 +145,7 @@ from unified_pipeline.stage6.normalization import (  # noqa: F401
     _get_cleaned_institution_name,
     _labels_its_own_address_slots,
     _labels_its_own_phone_slots,
+    _line_without_shown_role_and_dates,
     _normalize_author_names,
     _phone_cell_text,
     _pii_fragments,
@@ -1458,9 +1459,10 @@ _D2_TO_L3_FIELDS: Mapping[str, str] = MappingProxyType({
 # heading whose other rows are Q3, rendered as an institutional committee.
 # It renders under Grant Reviewing, as #1613 routes a Q2 one
 # (`service.is_p_grant_review`), its committee_name carried as the Q3
-# panel_name. Only a row whose institution, if any, its committee_name
-# already names moves: the P writer folds the institution into that cell and
-# Grant Reviewing has none for it.
+# panel_name. Only a row with a committee_name that names its institution,
+# if any, moves: the P writer folds the institution into that cell and Grant
+# Reviewing has none for it, so a row without one would lose the body it
+# reviewed for.
 P_GRANT_REVIEW_SOURCE_CODE = 'P'
 P_GRANT_REVIEW_REROUTE_CHECK = 'p_grant_review_reroute'
 
@@ -1476,9 +1478,9 @@ def _route_p_grant_review(entry: dict[str, Any], code: str, moved: list[object])
         return code
     committee = _committee_cell_text(fields.get('committee_name') or '')
     institution = _committee_cell_text(fields.get('institution') or '')
-    if institution and _name_with_institution(committee, institution) != committee:
+    if not committee or (institution and _name_with_institution(committee, institution) != committee):
         return code
-    if committee and not fields.get('panel_name'):
+    if not fields.get('panel_name'):
         fields['panel_name'] = committee
     entry.setdefault('taxonomy_code_original', code)
     entry['taxonomy_code'] = GRANT_REVIEWING_CODE
@@ -1502,6 +1504,67 @@ def p_grant_review_reroute_warnings(moved: list[object]) -> list[dict[str, Any]]
         'evidence': [f"element_idx_start {idx}" for idx in moved],
         'severity': 'INFO',
     }]
+
+
+# #1580: stage 3b's non-seat pin (`header_pin.non_seat_pin_code`) recodes a Q2
+# or P row that is no seat on a body D3 (consulting) or B2 (a meeting
+# attended), the model's code kept in pre_pin_code; no other stage-3b step
+# makes D3 or B2 out of Q2 or P. Two things in stage 6 would undo it:
+# - the hierarchy-mismatch reroute, under the committee heading the row was
+#   listed under, sends a low-confidence D3 back to Q2 (EYTHNB 427, 459, 465
+#   on a simulated arm), so a pinned row is not rerouted;
+# - the D3 and B2 writers read title / organization and program_name /
+#   institution, so a row whose stage 4 read it as Q2 or P, or found no
+#   fields at all, would render a blank Title or be dropped where Q2 printed
+#   its line (BMHBJZ 969, WBZIDP 46). Such a row's empty target fields are
+#   filled from its Q2 or P ones (`_carry_non_seat_fields`), else from its
+#   line less its dates; a field stage 4 filled is kept.
+NON_SEAT_PIN_SOURCE_CODES = frozenset({'Q2', 'P'})
+NON_SEAT_CONSULTING_CODE = 'D3'
+NON_SEAT_ATTENDED_CODE = 'B2'
+_B2_PROGRAM_KEYS = ('program_name', 'program_type', 'title')
+
+
+def is_non_seat_pin(entry: Mapping[str, Any]) -> bool:
+    """Whether stage 3b's non-seat pin made *entry* D3 or B2 out of Q2 or P."""
+    return (entry.get('pre_pin_code') in NON_SEAT_PIN_SOURCE_CODES
+            and entry.get('taxonomy_code') in (NON_SEAT_CONSULTING_CODE, NON_SEAT_ATTENDED_CODE))
+
+
+def _joined_cells(*parts: str) -> str:
+    """The non-empty parts joined by ", ", a part another already holds left out."""
+    kept: list[str] = []
+    for part in parts:
+        if part and not any(part.lower() in other.lower() for other in kept):
+            kept = [other for other in kept if other.lower() not in part.lower()] + [part]
+    return ', '.join(kept)
+
+
+def _carry_non_seat_fields(entry: dict[str, Any]) -> None:
+    """Fill the empty D3 or B2 fields of a non-seat pin (`is_non_seat_pin`)
+    from its Q2 or P fields, else from its line less its dates (see the
+    comment above). D3: organization from organization or institution, else
+    the committee name; title from the role and the committee name the
+    organization did not take. B2: program_name from the committee name,
+    else the organization; institution from the organization the program did
+    not take (a P row's institution is B2's own field already)."""
+    fields = dict(entry.get('extracted_fields') or {})
+    cell = {key: _committee_cell_text(fields.get(key) or '')
+            for key in ('role', 'committee_name', 'organization', 'institution')}
+    line = _line_without_shown_role_and_dates(
+        str(entry.get('text') or ''), None, fields.get('start_date'), fields.get('end_date'))
+    if entry.get('taxonomy_code') == NON_SEAT_CONSULTING_CODE:
+        organization = cell['organization'] or cell['institution'] or cell['committee_name']
+        fields['organization'] = organization
+        if _is_blank_value(fields.get('title')):
+            committee = '' if organization == cell['committee_name'] else cell['committee_name']
+            fields['title'] = (_joined_cells(cell['role'], committee)
+                               or ('' if line.strip() == organization else line))
+    elif all(_is_blank_value(fields.get(key)) for key in _B2_PROGRAM_KEYS):
+        fields['program_name'] = cell['committee_name'] or cell['organization'] or line
+        if cell['committee_name'] and _is_blank_value(fields.get('institution')):
+            fields['institution'] = cell['organization']
+    entry['extracted_fields'] = fields
 
 
 def _split_record_position(entry: Mapping[str, Any]) -> tuple[int, int] | None:
@@ -2193,7 +2256,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
             code = normalize_retired_code(entry)
-            code = self._correct_mismatch_if_needed(entry, code, reroutes)
+            if is_non_seat_pin(entry):
+                _carry_non_seat_fields(entry)
+            else:
+                code = self._correct_mismatch_if_needed(entry, code, reroutes)
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
             code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
             code = _route_d2_leadership_title(entry, code, leadership_moved)

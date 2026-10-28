@@ -231,15 +231,15 @@ def _name_with_institution(activity: str, institution: str) -> str:
 def _row_role(entry: _AdminActivityEntry, role: str) -> str:
     """The Role cell of a P row: stage 4's `role`, except on a row that is
     not a seat on a committee (`names_non_seat_activity`, #1580), which shows
-    the role its line writes, else nothing (ZASOTV 645: "Dissertation
-    Committee Member" for an oral-exam participant)."""
+    the role its line or its nearest heading writes, else nothing (ZASOTV
+    645: "Dissertation Committee Member" for an oral-exam participant)."""
     text = str(entry.get('text') or '')
     headings = entry.get('hierarchy') or []
     if isinstance(headings, str):
         headings = [headings]
     if not names_non_seat_activity(text, [str(heading) for heading in headings]):
         return role
-    return own_activity_role(role, text)
+    return own_activity_role(role, text, str(headings[-1]) if headings else '')
 
 
 class AdministrativeActivitiesSection:

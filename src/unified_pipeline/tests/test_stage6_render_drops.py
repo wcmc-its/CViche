@@ -1186,3 +1186,177 @@ def test_a_grant_review_heading_given_as_a_string_still_routes() -> None:
              "hierarchy": "Grant Review Panels"}
     gen = WCMTemplateGenerator(verbose=False)
     assert [e["taxonomy_code"] for e in gen._group_entries_by_code([entry])["Q3"]] == ["Q3"]
+
+
+def test_a_p_row_whose_role_names_the_review_moves() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_p_review(
+        "Zqcenter pilot awards, 2031", "Grant Review Panels", committee_name="Zqcenter pilot awards",
+        role="Grant Reviewer", start_date="2031")])
+    assert "P" not in groups and len(groups["Q3"]) == 1
+
+
+@pytest.mark.parametrize("entry", [
+    # no committee name: Grant Reviewing has no cell for the body reviewed for
+    _p_review("Zqcenter, Grant Reviewer, 2031", "Grant Review Panels", role="Grant Reviewer", start_date="2031"),
+    _p_review("Grant Reviewer, Zqcenter pilot program, 2031", "Grant Review Panels", role="Grant Reviewer",
+              institution="Zqcenter", start_date="2031"),
+    # a heading alone is no review: committee seats with no role of their own under a mis-nested
+    # "Grant Reviewing" heading (_VQWSA 109's shape)
+    _p_review("Example Department: Associate Chair; Example Climate Committee: Chair, 2014-2017",
+              "Grant Reviewing", institution="Example University", start_date="2014", end_date="2017"),
+    # an "Ad hoc" role on a line that names no review
+    _p_review("Example Pilot Awards Committee, 2031", "Grant Review Panels",
+              committee_name="Example Pilot Awards Committee", role="Ad hoc", start_date="2031"),
+])
+def test_a_p_row_that_names_no_review_or_no_body_stays_p(entry: dict) -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    assert "Q3" not in groups and len(groups["P"]) == 1
+    assert _p_review_records(gen) == []
+
+
+# --- #1580: a row stage 3b's non-seat pin recoded D3 or B2 renders there ---
+# Invented values. `pre_pin_code` Q2 or P with code D3 or B2 is the pin's mark (`_recode`).
+
+def _pinned(code: str, text: str, fields: dict | None, *, pre: str = "Q2", heading: str = "Committees",
+            **extra) -> dict:
+    return {"taxonomy_code": code, "pre_pin_code": pre, "element_idx_start": 31, "text": text,
+            "hierarchy": ["Professional Service", heading], "extracted_fields": fields, **extra}
+
+
+def _rendered_rows(groups: dict[str, list[dict]]) -> list[list[str]]:
+    from docx import Document
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_positions(groups)
+    gen._fill_other_education(groups.get("B2", []))
+    return [[cell.text for cell in row.cells] for table in gen.doc.tables for row in table.rows]
+
+
+def _grouped(*entries: dict) -> dict[str, list[dict]]:
+    return WCMTemplateGenerator(verbose=False)._group_entries_by_code(list(entries))
+
+
+def test_a_pinned_consultancy_with_q2_fields_renders_its_role_and_client() -> None:
+    groups = _grouped(_pinned("D3", "Consultant, Zqpharma, 2029-2031",
+                              {"committee_name": "Zqpharma", "role": "Consultant",
+                               "start_date": "2029", "end_date": "2031"}))
+    [entry] = groups["D3"]
+    assert (entry["extracted_fields"]["title"], entry["extracted_fields"]["organization"]) == ("Consultant", "Zqpharma")
+    assert any(row[:2] == ["Consultant", "Zqpharma"] for row in _rendered_rows(groups))
+
+
+def test_a_pinned_advisory_board_keeps_its_board_beside_its_role() -> None:
+    groups = _grouped(_pinned("D3", "Member, Scientific Advisory Board, Zqpharma Inc., 2031",
+                              {"committee_name": "Scientific Advisory Board", "role": "Member",
+                               "organization": "Zqpharma Inc.", "start_date": "2031"}))
+    fields = groups["D3"][0]["extracted_fields"]
+    assert (fields["title"], fields["organization"]) == ("Member, Scientific Advisory Board", "Zqpharma Inc.")
+
+
+def test_a_pinned_p_advisory_row_takes_its_institution_as_the_organization() -> None:
+    groups = _grouped(_pinned("D3", "2031 Scientific Founder and Consultant, Zqpharma", pre="P",
+                              fields={"committee_name": None, "role": "Scientific Founder and Consultant",
+                                      "institution": "Zqpharma", "start_date": "2031"}))
+    fields = groups["D3"][0]["extracted_fields"]
+    assert (fields["title"], fields["organization"]) == ("Scientific Founder and Consultant", "Zqpharma")
+    assert any(row[:2] == ["Scientific Founder and Consultant", "Zqpharma"] for row in _rendered_rows(groups))
+
+
+def test_a_pinned_meeting_with_q2_fields_renders_under_other_education() -> None:
+    meeting = _pinned("B2", "Attended the Zqsociety Annual Meeting, 2031",
+                      {"committee_name": "Zqsociety Annual Meeting", "role": "Attendee", "organization": None,
+                       "start_date": "2031-03-01"}, heading="Presentations")
+    named_in_org = _pinned("B2", "Annual Meeting of the Zqcollege, Zqcity, 2030",
+                           {"committee_name": None, "role": None, "organization": "Annual Meeting of the Zqcollege",
+                            "start_date": "2030-09-01"}, heading="Scientific Meetings Attended")
+    groups = _grouped(meeting, named_in_org)
+    programs = [e["extracted_fields"]["program_name"] for e in groups["B2"]]
+    assert programs == ["Zqsociety Annual Meeting", "Annual Meeting of the Zqcollege"]
+    assert groups["B2"][1]["extracted_fields"].get("institution") is None  # the meeting is not its own institution
+    rendered = [row[0] for row in _rendered_rows(groups)]
+    assert "Zqsociety Annual Meeting" in rendered and "Annual Meeting of the Zqcollege" in rendered
+
+
+@pytest.mark.parametrize("code", ["D3", "B2"])
+def test_a_pinned_row_with_no_fields_renders_its_line(code: str) -> None:
+    # As Q2 it printed its line; the D3 and B2 writers drop a row with no title or program.
+    for fields in (None, {"committee_name": None, "role": None, "organization": None, "start_date": None}):
+        groups = _grouped(_pinned(code, "Zqfirm consulting on patent cases", fields))
+        assert any("Zqfirm consulting on patent cases" in row for row in _rendered_rows(groups))
+
+
+def test_a_pinned_row_does_not_print_its_organization_twice() -> None:
+    # The line is the organization and its dates: no title rather than the organization again.
+    groups = _grouped(_pinned("D3", "Zqpharma, 2031", {"organization": "Zqpharma", "start_date": "2031"}))
+    fields = groups["D3"][0]["extracted_fields"]
+    assert (fields["title"], fields["organization"]) == ("", "Zqpharma")
+
+
+@pytest.mark.parametrize("role, committee, title", [
+    ("Consultant", "Consultant to the Zqproject", "Consultant to the Zqproject"),
+    ("Scientific Advisory Board Member", "Scientific Advisory Board", "Scientific Advisory Board Member"),
+    ("Member", "Zqpharma Advisory Board", "Member, Zqpharma Advisory Board"),
+])
+def test_a_pinned_title_names_the_role_and_board_once(role: str, committee: str, title: str) -> None:
+    groups = _grouped(_pinned("D3", f"{role}, {committee}, Zqpharma Inc., 2031",
+                              {"committee_name": committee, "role": role, "organization": "Zqpharma Inc."}))
+    assert groups["D3"][0]["extracted_fields"]["title"] == title
+
+
+def test_a_pinned_meeting_takes_its_institution_from_the_organization_or_the_p_institution() -> None:
+    society = _pinned("B2", "Attended the Zqsociety Annual Meeting, 2031",
+                      {"committee_name": "Zqsociety Annual Meeting", "organization": "Zqsociety", "start_date": "2031"})
+    p_row = _pinned("B2", "Attended the annual retreat, 2031", {"institution": "Zqcollege", "start_date": "2031"}, pre="P")
+    fresh = _pinned("B2", "Attended the Zqsociety retreat, 2031", {"program_name": None, "institution": "Zqsociety", "start_date": "2031"})
+    p_named = _pinned("B2", "Attended the Zqcollege retreat, 2031", pre="P",
+                      fields={"committee_name": "Zqcollege retreat", "institution": "Zqcollege", "start_date": "2031"})
+    groups = _grouped(society, p_row, fresh, p_named)
+    got = [(e["extracted_fields"]["program_name"], e["extracted_fields"]["institution"]) for e in groups["B2"]]
+    assert got == [("Zqsociety Annual Meeting", "Zqsociety"),
+                   ("Attended the annual retreat", "Zqcollege"),
+                   ("Attended the Zqsociety retreat", "Zqsociety"),
+                   ("Zqcollege retreat", "Zqcollege")]
+
+
+def test_fields_a_fresh_stage_4_extracted_for_the_pinned_code_are_kept() -> None:
+    groups = _grouped(_pinned("D3", "Consultant, Zqpharma, 2031",
+                              {"title": "Consultant", "organization": "Zqpharma Inc.", "start_date": "2031"}),
+                      _pinned("B2", "Attended the Zqsociety meeting, 2031",
+                              {"program_name": "Zqsociety meeting", "institution": "Zqsociety", "start_date": "2031"}))
+    assert groups["D3"][0]["extracted_fields"] == {"title": "Consultant", "organization": "Zqpharma Inc.",
+                                                   "start_date": "2031"}
+    assert groups["B2"][0]["extracted_fields"] == {"program_name": "Zqsociety meeting", "institution": "Zqsociety",
+                                                   "start_date": "2031"}
+
+
+def test_a_pinned_row_is_not_sent_back_by_the_hierarchy_mismatch_reroute() -> None:
+    # Under the committee heading it was listed under, a low-confidence D3 reroutes to Q2
+    # unless it is the pin's (EYTHNB 427 on a simulated arm).
+    def flagged(**extra):
+        return _pinned("D3", "Consultant, Zqproject, 2031", {"role": "Consultant", "committee_name": "Zqproject",
+                                                               "start_date": "2031"},
+                       heading="National", taxonomy_confidence=0.6, hierarchy_mismatch_flag=True,
+                       hierarchy_mismatch_detail={"hierarchy": ["National"], "assigned_code": "D3",
+                                                  "expected_codes": ["Q2"]}, **extra)
+    pinned, unpinned = flagged(), {**flagged(), "pre_pin_code": None}
+    assert list(_grouped(pinned)) == ["D3"]
+    assert list(_grouped(unpinned)) == ["Q2"]
+    # not even weighed: a refused reroute would be recorded too
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._group_entries_by_code([flagged()])
+    assert [w for w in gen._section_failures if w["check"] == REROUTE_CHECK] == []
+
+
+@pytest.mark.parametrize("entry, carried", [
+    (_pinned("D3", "Zqfirm consulting", {"role": "Consultant"}), True),
+    (_pinned("B2", "Zqsociety meeting", {"committee_name": "Zqsociety meeting"}, pre="P"), True),
+    (_pinned("B2", "Zqsociety course", {"committee_name": "Zqsociety course"}, pre="K4"), False),  # the course pin
+    (_pinned("D3", "Zqfirm consulting", {"role": "Consultant"}, pre=None), False),
+    (_pinned("Q2", "Zqfirm consulting", {"role": "Consultant"}), False),
+])
+def test_only_the_non_seat_pin_is_carried(entry: dict, carried: bool) -> None:
+    before = dict(entry["extracted_fields"])
+    [grouped] = [e for group in _grouped(entry).values() for e in group]
+    assert (grouped["extracted_fields"] != before) is carried

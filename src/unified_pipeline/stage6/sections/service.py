@@ -43,6 +43,7 @@ from ..normalization import (
     _line_without_shown_role_and_dates,
     _organization_left_in_text,
     _squash,
+    name_without_unstated_body,
     names_non_seat_activity,
     own_activity_role,
 )
@@ -134,6 +135,9 @@ REVIEWER_ROLE_RE = re.compile(r'review|^\s*ad[- ]?hoc\s*$', re.IGNORECASE)
 # meeting abstracts (BMAMWE 625), board examinations, a task-group report.
 NOT_GRANT_REVIEW_RE = re.compile(
     r'\b(?:abstracts?|exam(?:ination)?s?|task\s+group)\b', re.IGNORECASE)
+# A P row reaches Grant Reviewing only when its own line or role names a
+# review (`is_p_grant_review`); a heading alone does not move it.
+P_REVIEW_WORD_RE = re.compile(r'\breview', re.IGNORECASE)
 
 # Role indicators used by `_is_known_org_line`'s veto and the sibling
 # `is_role` check in `_parse_extramural_leadership_lines`, both matched with
@@ -293,15 +297,18 @@ def _is_non_seat_row(entry: dict) -> bool:
 def _board_row_role(entry: dict, non_seat: bool) -> str:
     """The Role cell of a Service on Boards row: stage 4's role, else the
     default board role. A row that is not a seat (#1580) shows the role its
-    line writes, else nothing (`own_activity_role`): "Committee Member" for
-    an external examiner, or a "Member" taken from the heading, is a claim
-    the CV does not make."""
+    line or its nearest heading writes, else nothing (`own_activity_role`):
+    "Committee Member" for an external examiner, or a "Member" taken from
+    the heading, is a claim the CV does not make."""
     role = _cell_text((entry.get('extracted_fields') or {}).get('role'))
     if not non_seat:
         return role or _default_board_role(entry)
     if entry.get(_ANOTHER_PERSONS_ROLE_KEY):
         return ''
-    return own_activity_role(role, str(entry.get('text') or ''))
+    headings = entry.get('hierarchy') or []
+    if isinstance(headings, str):
+        headings = [headings]
+    return own_activity_role(role, str(entry.get('text') or ''), str(headings[-1]) if headings else '')
 
 
 def _board_row_cells(entry: dict) -> tuple[str, str, str, str]:
@@ -309,12 +316,16 @@ def _board_row_cells(entry: dict) -> tuple[str, str, str, str]:
 
     A row that is not a seat (`_is_non_seat_row`, #1580) names no committee,
     so its organization stays in the Organization cell rather than filling
-    Name of Committee (PPMTJH 177, a clinic volunteer)."""
+    Name of Committee (PPMTJH 177, a clinic volunteer), and a body stage 4
+    put in its committee name that its line never names is left out
+    (`name_without_unstated_body`, TYGUXX 227's "Thesis Committee:")."""
     fields = entry.get('extracted_fields', {}) or {}
     taxonomy_code = entry.get('taxonomy_code', 'Q2')
     non_seat = _is_non_seat_row(entry)
 
     committee = _board_committee_text(fields)
+    if non_seat:
+        committee = name_without_unstated_body(committee, str(entry.get('text') or ''))
     role = _board_row_role(entry, non_seat)
     organization = _cell_text(fields.get('organization'))
 
@@ -682,15 +693,20 @@ def is_p_grant_review(entry: dict) -> bool:
     grant reviews (#1580, QQGKXR 679: "<center>, Grant Reviewer, 2021" under
     "Grant Review Panels", whose other rows render under Grant Reviewing).
 
-    The row must pass the Q2 test (`_is_q2_grant_review`) and its nearest
-    heading must name grant review: a P grant reviewer under an
+    The row must pass the Q2 test (`_is_q2_grant_review`), its nearest
+    heading must name grant review, and its own line or role must name a
+    review (`P_REVIEW_WORD_RE`): a P grant reviewer under an
     institutional-service heading is the owner's own institution's review,
-    which P is for."""
+    which P is for, and a line of departmental and university committee
+    seats under a mis-nested "Grant Reviewing" heading is no review at all
+    (_VQWSA 109, whose committees stage 4 listed with no role of its own)."""
     headings = entry.get('hierarchy') or []
     if isinstance(headings, str):
         headings = [headings]
     nearest_heading = str(headings[-1]) if headings else ''
-    return bool(GRANT_REVIEW_HEADING_RE.search(nearest_heading)) and _is_q2_grant_review(entry)
+    role = _cell_text((entry.get('extracted_fields') or {}).get('role') or '')
+    names_review = bool(P_REVIEW_WORD_RE.search(str(entry.get('text') or '')) or P_REVIEW_WORD_RE.search(role))
+    return names_review and bool(GRANT_REVIEW_HEADING_RE.search(nearest_heading)) and _is_q2_grant_review(entry)
 
 
 def _route_q2_grant_reviews(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
