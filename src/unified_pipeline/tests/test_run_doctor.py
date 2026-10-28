@@ -8098,6 +8098,49 @@ def test_junk_or_header_row_warns_on_a_lead_in_label_less_its_first_word():
     assert _junk_hits([_junk4("Reviewers:", "Q4D", 5)], [[[":"]]]) == []
 
 
+def _consumed_heading_report(heading: int, rows: list[int]) -> dict:
+    """A render-warnings sidecar recording that stage 6 consumed the heading
+    at `heading` into `rows` (#985, `stage6/institution_headings.py`)."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+    )
+    return {"warnings": [{"check": CONSUMED_HEADING_CHECK, CONSUMED_HEADINGS_KEY: [[heading, rows]]}]}
+
+
+def test_junk_or_header_row_does_not_read_a_heading_stage_6_moved_into_its_rows():
+    """#985, the NJIKGI 172 shape: stage 6 consumed the society line and filled
+    the rows under it, so a short row now holding its name is a record, not the
+    header's row. Without the sidecar's record the lint reads it as one."""
+    entries = [_junk4("Example Widget Society", "Q2", 172, organization="Example Widget Society"),
+               _junk4("Judicial Panels, 2011-2013", "P", 174, committee_name="Judicial Panels")]
+    rows = [[["Judicial Panels, Example Widget Society", "", "2011-2013"]]]
+    assert _junk_hits(entries, rows) == [("WARN", "entry 172 (Q2)", "header_only")]
+    assert lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(172, [174])) == []
+    another = lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(99, [174]))
+    assert [f["message"].split(":")[0] for f in another] == ["entry 172 (Q2)"]
+
+
+def test_date_cell_shape_reads_a_row_stage_6_filled_with_its_heading_name():
+    """#985, the SXPHOG 426 shape: stage 6 filled a committee row with its
+    society's name. Read without it, the name ties the row's date to a talk
+    held at that society in the same year, which never says "present"."""
+    society = "Northfield Association of Imaginary Pharmacy"
+    stage4 = {"entries": [
+        _entry(f"Doe J. Which Test Is Best? {society}. June 2019.", start=426, hierarchy=["Talks"],
+               taxonomy_code="R", extracted_fields={"title": "Which Test Is Best?", "location": society,
+                                                    "date": "2019-06"}),
+        _entry(society, start=548, hierarchy=["Service"], taxonomy_code="I",
+               extracted_fields={"organization": society}),
+        _entry("Member, Experiential Section January 2019 - present", start=552, hierarchy=["Service"],
+               taxonomy_code="Q2", extracted_fields={"committee_name": "Experiential Section",
+                                                     "start_date": "2019", "end_date": "present"}),
+    ]}
+    rows = [[["Experiential Section", "Member", society, "2019-Present"]]]
+    assert [f["message"].split(":")[0] for f in lint_date_cell_shape(stage4, rows, [])] == ["entry 426 (R)"]
+    assert lint_date_cell_shape(stage4, rows, [], _consumed_heading_report(548, [552])) == []
+
+
 def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_path):
     """The LINT_REGISTRY row must hand the lint the docx's body paragraphs
     (`blocks`, optional): a header bulleted as a paragraph is seen only there.
@@ -8120,6 +8163,49 @@ def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_pa
     hits = [f for f in payload["findings"] if f["lint"] == "junk_or_header_row"]
     assert [(f["severity"], f["evidence"]) for f in hits] == [
         ("WARN", ["Example Widget Institute"])]
+
+
+def test_run_doctor_hands_the_render_warnings_to_junk_and_date_lints(tmp_path):
+    """#985: the LINT_REGISTRY rows of junk_or_header_row and date_cell_shape
+    must hand each lint the render-warnings sidecar (`stage_6_report`,
+    optional), where stage 6 records the heading it consumed and the rows it
+    filled. Invented values; the same run with and without that record."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+    )
+    society = "Northfield Association of Imaginary Pharmacy"
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [
+        _entry(society, start=96, hierarchy=["Service"], taxonomy_code="Q2",
+               extracted_fields={"organization": society}),
+        _entry("Member, Experiential Section January 2019 - present", start=97, hierarchy=["Service"],
+               taxonomy_code="Q2", extracted_fields={"committee_name": "Experiential Section",
+                                                     "start_date": "2019", "end_date": "present"}),
+        _entry(f"Doe J. Which Test Is Best? {society}. June 2019.", start=98, hierarchy=["Talks"],
+               taxonomy_code="R", extracted_fields={"title": "Which Test Is Best?", "location": society,
+                                                    "date": "2019-06"})]
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_table(rows=1, cols=4)
+    for cell, value in zip(output.tables[-1].rows[0].cells,
+                           ("Experiential Section", "Member", society, "2019-Present"), strict=True):
+        cell.text = value
+    output.add_paragraph(f"Judicial Panels, {society}")
+    output.save(str(docx_path))
+
+    def hits(warnings: list[dict]) -> list[tuple[str, str]]:
+        _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                     {"document_uid": _UID, "warnings": warnings, "dedup_decisions": []})
+        return sorted((f["lint"], f["message"].split(":")[0]) for f in run_doctor(root, _UID)["findings"]
+                      if f["lint"] in ("junk_or_header_row", "date_cell_shape"))
+
+    assert hits([]) == [("date_cell_shape", "entry 98 (R)"), ("junk_or_header_row", "entry 96 (Q2)")]
+    assert hits([{"check": CONSUMED_HEADING_CHECK, "code": None, "section": None, "message": "",
+                  "evidence": [], "severity": "INFO", CONSUMED_HEADINGS_KEY: [[96, [97]]]}]) == []
 
 
 # ------------------------------------------ lint 14y: fanout_cell_residue

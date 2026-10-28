@@ -36,6 +36,7 @@ from unified_pipeline.core.text_norm import (
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
+from unified_pipeline.stage6.institution_headings import heading_fills
 from unified_pipeline.stage6.parsing import (
     _is_shattered,
     _mid_sentence_joins,
@@ -3079,11 +3080,15 @@ def _attribution_tokens(text: str) -> frozenset[str]:
                      and not tok.isdigit() and tok not in _ATTRIBUTION_STOPWORDS)
 
 
-def _dated_entries(stage4: dict) -> dict[str, list[_DatedEntry]]:
+def _dated_entries(stage4: dict, filled_names: Mapping[object, str] | None = None,
+                   ) -> dict[str, list[_DatedEntry]]:
     """Every stage-4 entry, indexed by each four-digit year its text or its
     extracted fields carry, so a rendered date can be tied only to an entry
-    that holds its start year."""
-    entries = [_dated_entry(raw) for raw in stage4.get("entries", [])]
+    that holds its start year. `filled_names` (`_filled_heading_names`) adds
+    to an entry's words the institution stage 6 printed on its row."""
+    names = filled_names or {}
+    entries = [_dated_entry(raw, names.get(raw.get("element_idx_start"), ""))
+               for raw in stage4.get("entries", [])]
     entries = _mark_latest_rank(entries)
     by_year: dict[str, list[_DatedEntry]] = defaultdict(list)
     for entry, years in entries:
@@ -3092,10 +3097,11 @@ def _dated_entries(stage4: dict) -> dict[str, list[_DatedEntry]]:
     return by_year
 
 
-def _dated_entry(raw: dict) -> tuple[_DatedEntry, set[str]]:
+def _dated_entry(raw: dict, filled_name: str = "") -> tuple[_DatedEntry, set[str]]:
     """One stage-4 entry read into a `_DatedEntry`, with every four-digit
     year its text or extracted fields carry. Its start year is the first
-    year of `start_date`, else the first year of its text."""
+    year of `start_date`, else the first year of its text. `filled_name` is
+    an institution stage 6 filled in, a word source like the fields."""
     fields = raw.get("extracted_fields")
     fields = fields if isinstance(fields, dict) else {}
     values = " ".join(str(v) for v in fields.values() if v)
@@ -3108,7 +3114,7 @@ def _dated_entry(raw: dict) -> tuple[_DatedEntry, set[str]]:
     entry = _DatedEntry(raw.get("element_idx_start"),
                         str(raw.get("taxonomy_code") or ""), text,
                         "\n".join(headings),
-                        _attribution_tokens(f"{text} {values}"),
+                        _attribution_tokens(f"{text} {values} {filled_name}"),
                         start_years[0] if start_years else None)
     return entry, set(_FOUR_DIGIT_YEAR_RE.findall(f"{text} {values}"))
 
@@ -3250,14 +3256,30 @@ def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> boo
                 or _OPEN_MARKER_DASH_RE.search(text))
 
 
+def _filled_heading_names(stage4: dict, stage6_report: dict | None) -> dict[object, str]:
+    """{element_idx_start of a row stage 6 filled from an institution
+    sub-heading it consumed (#985): that heading's text}. Stage 4's JSON has
+    neither the fill nor the removal; the render-warnings sidecar records
+    both (`stage6.institution_headings.heading_fills`)."""
+    fills = heading_fills((stage6_report or {}).get("warnings") or [])
+    texts = {raw.get("element_idx_start"): str(raw.get("text") or "")
+             for raw in stage4.get("entries", [])}
+    return {row: texts.get(heading, "") for heading, rows in fills.items() for row in rows}
+
+
 def lint_date_cell_shape(stage4: dict, table_rows: list[list[list[str]]],
-                         blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+                         blocks: list[tuple[str, str]] | None = None,
+                         stage6_report: dict | None = None) -> list[dict]:
     """Rendered dates that read wrong (EBYSBC E9/E21): an open range the
     source never states, a raw stored value, a range whose two ends are the
     same. One finding per entry and shape, WARN for an open range and INFO
     for the other two. A raw value or same-ended range that no entry can be
-    tied to is still reported, in one INFO per shape that names no entry."""
-    by_year = _dated_entries(stage4)
+    tied to is still reported, in one INFO per shape that names no entry.
+    A row stage 6 filled from a consumed heading (#985) is read with that
+    heading's name, so the name does not tie its date to another entry that
+    holds it (SXPHOG 426: a webinar at the society the committee rows now
+    name)."""
+    by_year = _dated_entries(stage4, _filled_heading_names(stage4, stage6_report))
     per_entry: dict[tuple[object, str, str], list[str]] = defaultdict(list)
     unattributed: dict[str, list[str]] = defaultdict(list)
     for date in _table_dates(table_rows) + _paragraph_dates(blocks or []):
@@ -3652,16 +3674,24 @@ def _is_cut_label_row(candidate: _JunkCandidate, row: _RenderedRow) -> bool:
 
 
 def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
-                            blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+                            blocks: list[tuple[str, str]] | None = None,
+                            stage6_report: dict | None = None) -> list[dict]:
     """Stage-4 entries that are no record of their own, rendered as one
     (EBYSBC E8, E10, E29): a group header, a lead-in label, a date fragment,
     or a dateless repeat of a dated D1 appointment. One finding per entry,
-    named by its element_idx_start, quoting the rendered row."""
+    named by its element_idx_start, quoting the rendered row. A heading stage
+    6 consumed into the rows under it (#985, read from `stage6_report`)
+    renders no row, and is not read: its name is now in its rows' cells, and
+    a short row holding it would otherwise be quoted as the header's
+    (NJIKGI 172)."""
     dated = _dated_ranks(stage4)
     rows = _junk_rendered_rows(table_rows, blocks or [])
+    consumed = heading_fills((stage6_report or {}).get("warnings") or [])
     findings = []
     taken: set[int] = set()
     for raw in stage4.get("entries", []):
+        if raw.get("element_idx_start") in consumed:
+            continue
         candidate = _junk_candidate(raw, dated)
         if candidate is None:
             continue
