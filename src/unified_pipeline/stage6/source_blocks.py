@@ -57,6 +57,12 @@ LOOSE_HEADING_MAX_LEN = 80
 MAX_BLOCK_ELEMENTS = 25
 
 _LEADING_LETTER_RE = re.compile(r"^\s*(?:[A-Z]|[IVX]{1,4}|\d{1,2})[.)]\s*")
+# A lettered heading ("K. EXTRAMURAL PROFESSIONAL RESPONSIBILITIES") inside a
+# copied block ends it: old WCM-format sources hold the next sections in the J
+# block, as a body line the heading test misses because of its trailing note
+# ("J.  RESEARCH SUPPORT (past and present)") or as a table row (#2028).
+_SECTION_LETTER_RE = re.compile(r"^\s*[A-Z][.)]\s")
+_TRAILING_NOTE_RE = re.compile(r"\s*\([^()]*\)\s*$")
 _HEADERS = frozenset(normalize_template_text(_LEADING_LETTER_RE.sub("", h))
                      for h in template_section_headers())
 # The October-2022 template's section order, by a phrase each heading contains;
@@ -122,6 +128,36 @@ def is_template_heading(text: str, letter_of: LetterOf) -> bool:
     if normalize_template_text(_LEADING_LETTER_RE.sub("", text)).rstrip(":") in _HEADERS:
         return True
     return letter_of(text) is not None and ":" not in text and len(text) <= LOOSE_HEADING_MAX_LEN
+
+
+def _is_later_heading(text: str, letter_of: LetterOf) -> bool:
+    """`text` is a template heading lettered as a section ("K. ..."), its
+    trailing note aside."""
+    return bool(_SECTION_LETTER_RE.match(text)) and is_template_heading(_TRAILING_NOTE_RE.sub("", text), letter_of)
+
+
+def _first_line(el: _Element) -> str:
+    return next((t for t in (element_text(p) for p in el.iter(qn("w:p"))) if t), "")
+
+
+def _cut_at_later_heading(elements: list[_Element], letter_of: LetterOf) -> list[_Element]:
+    """`elements` up to the first later section's heading: a paragraph, or a
+    table row whose first line is one (that table keeps the rows above it)."""
+    for n, el in enumerate(elements):
+        if el.tag == qn("w:p"):
+            if _is_later_heading(element_text(el), letter_of):
+                return elements[:n]
+            continue
+        rows = el.findall(qn("w:tr"))
+        cut = next((r for r, tr in enumerate(rows) if _is_later_heading(_first_line(tr), letter_of)), None)
+        if cut == 0:
+            return elements[:n]
+        if cut is not None:
+            kept = deepcopy(el)
+            for tr in kept.findall(qn("w:tr"))[cut:]:
+                kept.remove(tr)
+            return elements[:n] + [kept]
+    return elements
 
 
 def _section_rank(text: str) -> int | None:
@@ -220,7 +256,8 @@ def clean_copy(el: _Element) -> _Element:
 def capture_source_blocks(path: str, letter_of: LetterOf) -> dict[str, list[_Element]]:
     """{letter: source elements} for the E/G/J blocks of a WCM-format source;
     {} when the source is not WCM-format. A block longer than
-    MAX_BLOCK_ELEMENTS is left out (see its comment). Filled-or-not is the
+    MAX_BLOCK_ELEMENTS is left out (see its comment); a block holding a later
+    section's lettered heading is cut there (#2028). Filled-or-not is the
     caller's call: it needs the template's own lines for that."""
     # Opened as stage 1 opened it: a block inside a body content control is
     # read like any other (#1656).
@@ -232,5 +269,5 @@ def capture_source_blocks(path: str, letter_of: LetterOf) -> dict[str, list[_Ele
         if len(elements) > MAX_BLOCK_ELEMENTS:
             logger.warning("Source %s block has %d elements (> %d); not copied", letter, len(elements), MAX_BLOCK_ELEMENTS)
             continue
-        captured[letter] = elements
+        captured[letter] = _cut_at_later_heading(elements, letter_of)
     return captured
