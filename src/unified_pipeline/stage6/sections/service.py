@@ -189,7 +189,10 @@ _MEMBERSHIP_BODY_RE = re.compile(
 
 def _default_board_role(entry: dict) -> str:
     """'Member' when the headings above `entry` or its own text name a
-    committee-like body; '' otherwise."""
+    committee-like body; '' otherwise, and when the entry's role was another
+    person's title (`_ANOTHER_PERSONS_ROLE_KEY`, #1573)."""
+    if entry.get(_ANOTHER_PERSONS_ROLE_KEY):
+        return ''
     headings = entry.get('hierarchy') or []
     if isinstance(headings, str):
         headings = [headings]
@@ -218,6 +221,67 @@ def _board_committee_text(fields: dict) -> str:
         if text:
             return text
     return ''
+
+
+# #1573 (DYLJXC 444-534): sabbatical site-visit lines name each host and the
+# host's title ("<Hospital>\tDirector, A. Name, M.D."; "<Hospital>\tDr. First
+# Last, Chief Physician"), and stage 4 read the host's title as the
+# owner's role, so the International committee rows read as roles the owner
+# held. A role written right against another person -- after or before
+# "Dr./Prof./Professor <name>" or "<name>, M.D./Ph.D." -- or on a line that
+# opens with a professor or doctor named by initials ("Professor A. B. Name,
+# <dept>,\tResearch Lead, <hospital>") is that person's title: the row
+# keeps its organization alone. A word in between ("Co-Director with Dr. A.
+# Name") or no person at all ("Visiting Professor, <university>") keeps the
+# owner's role. An undotted "MD" is not read as a degree: it is also Maryland.
+# A name is a person only where it ends (a comma, tab, semicolon, bracket or
+# the line's end follows): "Dr. A. Name Memorial Prize Committee" and "Co-Chair,
+# Dr. First Last Day Committee" name a committee after a person. A spelled-out
+# "Professor" is an honorific only before initials: "Assistant Professor Search
+# Committee", or a rank before a committee's name (GDGSWJ 335), is a rank. A
+# degree followed by "candidate" or "student" is not held ("Thesis Examiner,
+# <Name>, Ph.D. candidate"), and a run of capitalised words holding an
+# organisation word ("Graduate Studies Program, PhD") is not a person's name.
+_NAME_WORD = (r"(?!(?:Program(?:me)?|Department|Dept|University|Institute|School|College|Cent(?:er|re)"
+              r"|Committee|Board|Council|Society|Hospital|Clinic|Foundation|Association|Graduate"
+              r"|Studies|Division|Faculty|Section|Panel|Group|Laborator(?:y|ies)|Unit)\b)"
+              r"[A-Z][a-z'\u2019-]+")
+_PERSON_NAME = rf"(?:[A-Z]\.\s?){{0,3}}{_NAME_WORD}(?:\s+(?:(?:and|&)\s+)?{_NAME_WORD}){{0,3}}"
+_INITIALS_NAME = rf"(?:[A-Z]\.\s?){{1,3}}{_NAME_WORD}"
+_HONORIFIC_NAME = (rf"(?:(?:Dr\.?|Prof\.)\s+(?:{_INITIALS_NAME}|{_NAME_WORD}\s+{_NAME_WORD})"
+                   rf"|Professor\s+{_INITIALS_NAME})")
+_NAME_END = r"(?=\s*(?:[,;(\t]|$))"
+_DEGREE_AFTER_NAME = (r",\s*(?:M\.\s?D\.?|Ph\.?\s?D\.?|D\.\s?O\.)"
+                      r"(?!\.?\s*(?:candidate|student)s?\b)")
+_ANOTHER_PERSON = rf"(?:{_HONORIFIC_NAME}{_NAME_END}|{_PERSON_NAME}{_DEGREE_AFTER_NAME})"
+_PERSON_BEFORE_ROLE = re.compile(rf"{_ANOTHER_PERSON}(?:{_DEGREE_AFTER_NAME})?[\s,]*$")
+_PERSON_AFTER_ROLE = re.compile(rf"s?,?\s*{_ANOTHER_PERSON}")
+_OPENS_WITH_PERSON = re.compile(rf"\W*(?:Dr\.?|Prof\.|Professor)\s+{_INITIALS_NAME}{_NAME_END}")
+# Set on an entry whose stage-4 role was cleared here: the Role cell stays
+# blank, not the default board role ('Member' would be a new claim).
+_ANOTHER_PERSONS_ROLE_KEY = 'role_is_another_persons'
+
+
+def _role_is_another_persons(role: str, text: str) -> bool:
+    """Whether the source line writes `role` as another person's title (#1573),
+    everywhere it writes it: "Panellist, <forum>. Moderator: Dr. A Name,
+    Panellists: ..." opens with the owner's own (web210 408). A role the line
+    does not hold is stage 4's own reading and is left alone."""
+    spans = [match.span() for match in re.finditer(re.escape(role), text, re.IGNORECASE)] if role else []
+    if spans and _OPENS_WITH_PERSON.match(text):
+        return True
+    return bool(spans) and all(_PERSON_BEFORE_ROLE.search(text[:start]) or _PERSON_AFTER_ROLE.match(text[end:])
+                               for start, end in spans)
+
+
+def _without_another_persons_role(entry: dict) -> dict:
+    """`entry` with its stage-4 role cleared, and marked so
+    (`_ANOTHER_PERSONS_ROLE_KEY`), when the source gives that title to another
+    person (`_role_is_another_persons`); the entry itself otherwise."""
+    fields = entry.get('extracted_fields') or {}
+    if not _role_is_another_persons(_cell_text(fields.get('role')), str(entry.get('text') or '')):
+        return entry
+    return {**entry, 'extracted_fields': {**fields, 'role': None}, _ANOTHER_PERSONS_ROLE_KEY: True}
 
 
 def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
@@ -826,6 +890,11 @@ class ServiceSection:
         - Grant Reviewing/Study Sections: Table with Role, Organization, Dates
         - Editorial Activities: Multiple tables for Editor, Editorial Board, Journal Reviewing
         """
+        # A host's title on a site-visit line is not the owner's role (#1573).
+        # Every read below is of a Q code, so the other codes are not carried.
+        entries_by_code = {
+            code: [_without_another_persons_role(entry) for entry in entries_by_code.get(code, [])]
+            for code in SERVICE_TAXONOMY_CODES}
         # Collect all Q entries
         q_entries = []
         for code in SERVICE_TAXONOMY_CODES:

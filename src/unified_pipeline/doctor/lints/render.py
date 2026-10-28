@@ -56,6 +56,7 @@ from unified_pipeline.stage6.sections.appendix import (
     recovery_candidates,
     t_line_is_scaffolding,
 )
+from unified_pipeline.stage6.sections.bibliography import SOURCE_HEADING_NOTE_RE
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
@@ -2251,7 +2252,9 @@ class RenderedCitation(NamedTuple):
 def _bibliography_lines(blocks: list[tuple[str, str]]) -> list[str]:
     """The numbered paragraphs under the BIBLIOGRAPHY heading, numbers
     removed: stage 6 prints each publication as one ("12. Author A, ...").
-    The Appendix's numbered verbatim entries are not citations it wrote."""
+    The Appendix's numbered verbatim entries are not citations it wrote. The
+    source-heading note stage 6 adds after a citation (#1573) is removed too:
+    it is not the citation, and its words would keep a short source from pairing."""
     lines: list[str] = []
     letter = None
     for kind, text in blocks:
@@ -2260,7 +2263,8 @@ def _bibliography_lines(blocks: list[tuple[str, str]]) -> list[str]:
         if _output_section_header(text):
             letter = _section_letter(text) or letter
         elif letter == _BIBLIOGRAPHY_LETTER and _NUMBERED_LINE_RE.match(text):
-            lines.append(_NUMBERED_LINE_RE.sub("", text, count=1).strip())
+            line = _NUMBERED_LINE_RE.sub("", text, count=1).strip()
+            lines.append(SOURCE_HEADING_NOTE_RE.sub("", line))
     return lines
 
 

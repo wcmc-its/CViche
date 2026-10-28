@@ -20,7 +20,10 @@ sub-heading is L3 (#1977), the same leaf-only way. `is_note_not_record` names
 the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code`
 (#1251) recodes a mentee's own awards, listed under the owner's mentoring, to N4.
 `mentor_grant_pin_code` (#1710) recodes a grant listed under a heading that names
-the owner as mentor or sponsor to N2.
+the owner as mentor or sponsor to N2. `someone_elses_pin_code` (#1573) sends a
+paper under an acknowledgements heading, and a "mentee" under a review panel's
+or a laboratory staff heading, to the Appendix (T), and an abstract that names
+its award under an abstracts heading to S8.
 An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
 An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
@@ -386,6 +389,82 @@ _MENTOR_GRANT_HEADING = re.compile(
 )
 _MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is a mentored trainee grant"
 
+# --- #1573: rows a heading says are someone else's are not the owner's records ---
+#
+# Batch YUYVIG. Papers listed under an acknowledgements lead line are other
+# groups' papers that thank the owner (ECXGAT 2156-2204: S1, S2, S4, S5), and
+# rendered as the owner's bibliography. The applicants of an internal
+# grant-review panel (ECXGAT 1293-1299, N3B) and a laboratory's technical
+# staff (IZIXVF 284-305, N3B and N3) rendered as the owner's past mentees.
+# Both go to the Appendix (T), which prints the line as the source wrote it and
+# claims nothing for the owner; a T set here is final for T-validation.
+# The heading is the row's own hierarchy level or, on a run whose headings
+# stage 1b lost (ECXGAT placed none), the nearest lead line above the row in
+# its group (`is_heading_line`), read off the rows as the model coded them
+# (`next_lead`). A lead line's list holds the rows it makes someone else's,
+# and, under a reviewing line, service and administrative rows
+# (`_REVIEW_LIST_CODE`: ECXGAT 1289-1291, P). Any other row ends it: a T
+# section heading that is dated, numbered or long ("5. Mentoring"), a row of
+# another code (web26: a "Reviewer:" line, then a training row and two
+# committees, then a postdoc list), a mentee row the line does not move. A row
+# the pin moves is never a new lead line, so a short pinned row does not split
+# its list (IZIXVF-01's complaint). A lead line is a heading, not a record: a
+# line with a comma or semicolon ("Ad hoc grant reviewer, <Foundation>") is
+# one, unless it is coded T or ends in a colon.
+# Only a level or line that is "Acknowledg(e)ments" alone, or with a
+# parenthesised qualifier ("(partial list)"), moves a publication: a
+# publications heading that only mentions them ("... (acknowledging grant
+# support)", "Acknowledgements and Publications") keeps its rows. A level or
+# lead line that names trainees, a thesis, mentoring or training keeps
+# a mentee row, whatever else it names (a fellows-and-staff level, a level of
+# staff the owner trained, a thesis-review line), and so does a staff level
+# under a mentoring or supervision parent ("MENTORING > Staff").
+# Reviewing is read off the lead line only: stage 1b's hierarchy drifts a
+# student-thesis list under its sibling journal-reviewer and study-section-panel
+# levels (wave-1 2030_* 710-738, 2025_* 360),
+# while a staff level is the mentoring section's own sub-heading (IZIXVF).
+_SOMEONE_ELSES_CODE = "T"
+_ACKNOWLEDGEMENTS_HEADING = re.compile(
+    r"^\W*(?:[\dA-Za-z]{1,3}[.)]\s*)?acknowledge?ments?\b\W*(?:\([^)]*\)\W*)?$", re.I)
+_ACKNOWLEDGED_WHY = "A paper listed under the CV's acknowledgements is another group's work"
+_MENTEE_CODES = frozenset({"N3", "N3A", "N3B"})
+_REVIEWED_HEADING = re.compile(r"\breview(?:s|er|ers|ing)?\b|\bapplicants?\b|\bpanels?\b", re.I)
+_STAFF_HEADING = re.compile(r"\bstaff\b|\btechnicians?\b|\blab(?:oratory)?\s+managers?\b", re.I)
+_TRAINEE_WORD = re.compile(
+    r"student|fellow|train|mentee|mentor|post-?doc|resident|scholar|advisee|thes[ie]s"
+    r"|dissertation|supervis", re.I)
+# A parent level that makes a staff level the owner's mentoring (IZIXVF's parent
+# level lists its students, postdocs and staff, and names neither).
+_MENTORING_PARENT = re.compile(r"mentor|mentee|supervis", re.I)
+_NOT_A_MENTEE_WHY = "Listed under a heading of people the owner reviewed or employed, not trained"
+# A lead line heads the rows after it: undated, short, not a list item, not a
+# mentee, and not punctuated as a record unless it is a note or ends in a colon.
+_HEADING_LINE_MAX_WORDS = 12
+_FOUR_DIGIT_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+_LIST_ITEM_LEAD = re.compile(r"^\W*(?:\(?\d{1,3}[.)]|\(?[A-Za-z][.)]\s|[-\u2013\u2022\u00b7\u25e6*])")
+_RECORD_PUNCTUATION = re.compile(r"[,;]")
+_LEAD_LINE_END = ":"
+# The rows a reviewing lead line heads besides the mentee rows it moves.
+_REVIEW_LIST_CODE = re.compile(r"^(?:P|Q\w*)$")
+
+# --- #1573: a trainee's award stated inside an abstract is the abstract's ---
+#
+# ULHCAP 1415, under PUBLICATIONS > Abstracts: an abstract by a trainee alone
+# that ends with the prize it won at a meeting came back H at 0.75 and
+# rendered in the owner's Honors, and its title nowhere. A row that
+# opens with an author list ("Doe, JD.", "Doe J, Roe K.": a surname, then
+# initials that a comma, semicolon or period ends) under a leaf level naming
+# abstracts is an abstract (S8). An award line there with no author list ("Best
+# Abstract Award, <meeting>"), or one that opens with an award word and a
+# society's acronym ("Winner, <ACRONYM> Travel Award"), keeps its H. A mentee's
+# abstract under a students level is the mentee pin's (#1251), checked first.
+_ABSTRACTS_HEADING = re.compile(r"\babstracts\b", re.I)
+_AUTHOR_LEAD = re.compile(
+    r"^[\s\u2022*\-\d.)]*"
+    r"(?!(?i:winners?|recipients?|finalists?|semi-?finalists?|awardees?|nominees?|honou?rees?|laureates?)\b)"
+    r"[A-Z][A-Za-z'\u2019-]+,?\s+(?:[A-Z]\.?\s?){1,3}(?=[,;.])")
+_ABSTRACT_WITH_AWARD_WHY = "An abstract listed under the CV's abstracts, whatever award it names"
+
 # --- #1413: a journal listed under a reviewer lead-in is a review, not a board seat ---
 #
 # "Reviewer for the following journals and conferences:" heads a flat list of
@@ -683,6 +762,66 @@ def mentor_grant_pin_code(entry: dict) -> tuple[str, str] | None:
     return _MENTOR_GRANT_CODE, _MENTOR_GRANT_WHY
 
 
+def is_heading_line(entry: dict) -> bool:
+    """An undated, short, unnumbered line that is not a mentee row and not
+    punctuated as a record (unless it is a note or ends in a colon): it heads
+    the rows after it (#1573)."""
+    text = (entry.get("text") or "").strip()
+    return (entry.get("taxonomy_code") not in _MENTEE_CODES
+            and not _FOUR_DIGIT_YEAR.search(text)
+            and len(text.split()) <= _HEADING_LINE_MAX_WORDS
+            and not _LIST_ITEM_LEAD.match(text)
+            and (entry.get("taxonomy_code") == _APPENDIX_CODE or text.endswith(_LEAD_LINE_END)
+                 or not _RECORD_PUNCTUATION.search(text)))
+
+
+def next_lead(entry: dict, lead: str) -> str:
+    """The lead line still open after `entry`, read off the row as the model
+    coded it: `lead` while the row is one of its list's rows (one it makes
+    someone else's, or a service row under a reviewing line), else the row's
+    own text when it is a heading line, else ""."""
+    if lead and someone_elses_pin_code(entry, lead):
+        return lead
+    if is_heading_line(entry):
+        return (entry.get("text") or "").strip()
+    reviewing = _REVIEWED_HEADING.search(lead)
+    return lead if reviewing and _REVIEW_LIST_CODE.match(entry.get("taxonomy_code") or "") else ""
+
+
+def _non_mentee_heading(levels: list[str], lead: str) -> bool:
+    """The leaf level names staff under no mentoring parent, or the lead line
+    names reviewing or staff; a leaf, then a lead line, naming trainees settles
+    it first."""
+    leaf, parents = (levels[-1], levels[:-1]) if levels else ("", [])
+    if _TRAINEE_WORD.search(leaf):
+        return False
+    if _STAFF_HEADING.search(leaf):
+        return not any(_MENTORING_PARENT.search(level) for level in parents)
+    if _TRAINEE_WORD.search(lead):
+        return False
+    return bool(_REVIEWED_HEADING.search(lead) or _STAFF_HEADING.search(lead))
+
+
+def someone_elses_pin_code(entry: dict, lead: str) -> tuple[str, str] | None:
+    """(code, why) for a row its heading says is another person's, else None (#1573).
+
+    `lead` is the lead line still open above the row in its group (`next_lead`), or "".
+    A publication under an acknowledgements level or line is T; a mentee row
+    under a staff leaf, or a reviewing or staff line, is T; an H that opens with
+    an author list under an abstracts leaf is S8.
+    """
+    code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
+    levels = [str(level) for level in entry.get("hierarchy") or []]
+    leaf = levels[-1] if levels else ""
+    if _PUBLICATION_CODE.match(code) and any(_ACKNOWLEDGEMENTS_HEADING.match(h) for h in [*levels, lead]):
+        return _SOMEONE_ELSES_CODE, _ACKNOWLEDGED_WHY
+    if code in _MENTEE_CODES and _non_mentee_heading(levels, lead):
+        return _SOMEONE_ELSES_CODE, _NOT_A_MENTEE_WHY
+    if code == _HONOR_CODE and _ABSTRACTS_HEADING.search(leaf) and _AUTHOR_LEAD.match(text):
+        return _ABSTRACT_CODE, _ABSTRACT_WITH_AWARD_WHY
+    return None
+
+
 def is_lead_in(text: str) -> bool:
     """A short line that ends in a colon: it introduces the rows after it (#1413)."""
     stripped = (text or "").strip()
@@ -772,12 +911,15 @@ def _recode(entry: dict, code: str, why: str) -> dict:
 
 
 def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
-             after_unseen_reviewer_lead_in: bool) -> tuple[str, str] | None:
-    """(code, why) for one model answer: the header pin, then the mentor-grant, mentee, content and reviewer pins."""
+             after_unseen_reviewer_lead_in: bool, lead: str) -> tuple[str, str] | None:
+    """(code, why) for one model answer: the header pin, then the mentor-grant,
+    mentee, someone-else's, content and reviewer pins. A mentee's abstract under
+    a students level is the mentee's (N4), not the owner's (S8)."""
     header_code = header_pin_code(entry, pin, leaf)
     if header_code:
         return header_code, _HEADER_PIN_WHY
-    return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee) or content_pin_code(entry)
+    return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee)
+            or someone_elses_pin_code(entry, lead) or content_pin_code(entry)
             or reviewer_pin_code(entry, after_unseen_reviewer_lead_in))
 
 
@@ -795,24 +937,26 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
     Returns (entries, number recoded). A recoded entry keeps the model's answer
     in `pre_pin_code` / `pre_pin_reasoning`; `classification_source` stays
     "llm" (stage 3b's zero-classification gate counts it). The header pin is
-    checked first, then the mentor-grant pin (#1710), the mentee pin (#1251), a
-    content pin and the reviewer pin (#1413).
+    checked first, then the mentor-grant pin (#1710), the mentee pin (#1251),
+    the someone-else's pin (#1573), a content pin and the reviewer pin (#1413).
 
     `batch_size` is the number of entries per classification call the group was
     sent in, in the order given here; None means the group went in one call, so
     the model saw every lead-in and the reviewer pin never applies.
     """
     pin, leaf = pinned_header_code(context), leaf_header_code(context)
-    out, recoded, after_mentee, reviewer_lead_in_at = [], 0, False, None
+    out, recoded, after_mentee, reviewer_lead_in_at, lead = [], 0, False, None, ""
     for position, entry in enumerate(entries):
+        as_coded = entry  # the lead line is read off the model's codes, not the pins' (#1573)
         if entry.get("classification_source") == _MODEL_SOURCE:
             unseen_lead_in = _in_later_batch(position, reviewer_lead_in_at, batch_size)
-            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in)
+            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in, lead)
             if pinned and pinned[0] != entry.get("taxonomy_code"):
                 recoded += 1
                 entry = _recode(entry, *pinned)
         after_mentee = after_mentee or entry.get("taxonomy_code") in _MENTEE_RECORD_CODES
         reviewer_lead_in_at = _next_reviewer_lead_in(entry, position, reviewer_lead_in_at)
+        lead = next_lead(as_coded, lead)
         out.append(entry)
     if recoded:
         logger.info("Stage 3b header pin: %d entr%s recoded", recoded, "y" if recoded == 1 else "ies")
