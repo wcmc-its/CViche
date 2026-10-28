@@ -335,20 +335,28 @@ def test_prose_with_percent_and_yes_no_keywords_not_a_header_stays_appendix_boun
             assert row.cells[1].text == ""
 
 
-def test_multiline_candidate_not_fused_stays_appendix_bound(tmp_path):
-    """N1: a multi-line pipe-joined candidate ("Teaching | 10% | Yes\\n
-    Clinical | 20% | No") must not be parsed as one row with a corrupted
-    third cell and the later row silently dropped from both the table and
-    the Appendix."""
-    text = "Teaching | 10% | Yes\nClinical | 20% | No"
-    entries = [_OWNER_ENTRY, _j_entry(text, 1)]
-    doc = _render(tmp_path, entries)
+def test_multiline_candidate_is_split_into_its_rows(tmp_path):
+    """N1 / #2028: a multi-line candidate -- here a whole source table, header
+    row included, under one entry -- is placed row by row, never parsed as
+    one row with a corrupted third cell, and is consumed when every row is."""
+    text = ("Current percent effort Percent effort | % | students | researchers\n"
+            "Teaching | 10% | Yes\nClinical Care | 20% | No\n\nTotal | 100% |")
+    doc = _render(tmp_path, [_OWNER_ENTRY, _j_entry(text, 1)])
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "10%", "Yes"]
+    assert rows["Clinical"] == ["Clinical", "20%", "No"]
+    assert "Teaching" not in _appendix_text(doc)
+
+
+def test_multiline_candidate_with_an_unplaced_row_stays_appendix_bound(tmp_path):
+    """N1: a row that can't be placed keeps the whole candidate Appendix-bound,
+    so that row is never dropped; the rows that can be placed are still written."""
+    text = "Teaching | 10% | Yes\nOther duties | 5% | No"
+    doc = _render(tmp_path, [_OWNER_ENTRY, _j_entry(text, 1)])
 
     assert _clean_inline_tabs(text) in _appendix_text(doc)
-    table = _find_j_table(doc)
-    for row in table.rows[1:]:
-        if row.cells[0].text.strip() != "Total":
-            assert row.cells[1].text == ""
+    assert _j_rows_by_label(doc)["Teaching"] == ["Teaching", "10%", "Yes"]
 
 
 def test_extra_cell_candidate_not_written_stays_appendix_bound(tmp_path):

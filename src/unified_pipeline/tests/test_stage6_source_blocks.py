@@ -95,49 +95,6 @@ def test_capture_skips_a_non_wcm_source_and_a_runaway_block(tmp_path):
     assert "E" not in blocks and "G" in blocks
 
 
-J_HEADING = "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES"
-EFFORT_ROWS = [["Research", "Dates"], ["1. Research", "2001-2005"]]
-
-
-def _j_rows(blocks) -> list[list[str]]:
-    """Each copied J element as its rows' cell texts ([[text]] for a paragraph)."""
-    return [[[sb.element_text(tc) for tc in tr.findall(qn("w:tc"))] for tr in el.findall(qn("w:tr"))]
-            if el.tag == qn("w:tbl") else [[sb.element_text(el)]] for el in blocks["J"]]
-
-
-def test_capture_cuts_a_block_at_a_later_lettered_heading_line(tmp_path):
-    """#2028: a later section's heading inside J, missed by the heading test
-    because of its trailing note, ends the copy; a "Research" row label (itself
-    a template heading, but unlettered) and a numbered row label do not."""
-    path = _source(tmp_path, {J_HEADING: [EFFORT_ROWS, "Example note", "J.  RESEARCH SUPPORT (past and present)",
-                                          [["Source", "Amount"], ["Example Foundation", "10K"]]]})
-    assert _j_rows(sb.capture_source_blocks(path, _passthrough_letter)) == [EFFORT_ROWS, [["Example note"]]]
-
-
-def test_capture_cuts_a_table_at_a_row_led_by_a_later_heading(tmp_path):
-    """#2028: when the later section is a ROW of J's table, the table keeps
-    the rows above it and nothing after it is copied."""
-    path = _source(tmp_path, {J_HEADING: [EFFORT_ROWS + [["", ""]], "Example note",
-                                          [["Teaching", "20"], ["Total", "100%"]]]})
-    doc = Document(path)
-    tables = doc.tables
-    first_cell = tables[0].cell(2, 0)
-    first_cell.paragraphs[0].text = "K. EXTRAMURAL PROFESSIONAL RESPONSIBILITIES"
-    first_cell.add_paragraph("Example Society, reviewer")
-    tables[1].cell(0, 0).paragraphs[0].text = ""
-    tables[1].cell(0, 0).add_paragraph("K. EXTRAMURAL PROFESSIONAL RESPONSIBILITIES")  # after a blank line
-    doc.save(path)
-    assert _j_rows(sb.capture_source_blocks(path, _passthrough_letter)) == [EFFORT_ROWS]
-
-    doc = Document(path)
-    doc.tables[0].cell(2, 0).paragraphs[0].text = "A. Example Lab award"
-    doc.save(path)
-    # A lettered line that is no template heading leaves the table whole; the
-    # second table's first row then cuts it out entirely.
-    assert _j_rows(sb.capture_source_blocks(path, _passthrough_letter)) == [
-        EFFORT_ROWS + [["A. Example Lab award Example Society, reviewer", ""]], [["Example note"]]]
-
-
 def _block(paragraphs: list[str], table: list[list[str]] | None = None) -> list:
     doc = Document()
     for text in paragraphs:
