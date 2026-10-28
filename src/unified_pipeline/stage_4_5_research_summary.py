@@ -38,7 +38,12 @@ from unified_pipeline.llm_provenance import (
     STAGE4_5_CALL_SUMMARY,
     STAGE4_5_FALLBACK_CALLS_KEY,
 )
-from unified_pipeline.stage6.parsing.dates import grant_end_date, grant_has_ended
+from unified_pipeline.stage6.parsing.dates import (
+    TWO_DIGIT_YEAR_DATE_RE,
+    grant_end_date,
+    grant_end_year,
+    grant_has_ended,
+)
 from unified_pipeline.stage_errors import CallFailure
 
 logger = logging.getLogger(__name__)
@@ -166,8 +171,12 @@ YEAR_PATTERN = re.compile(r'\b(?:19|20)\d{2}\b')
 ONGOING_PATTERN = re.compile(
     r'(?:^|[-–—]|\bto)\s*\b(?:present|current|ongoing|now|currently\s+working)\b\s*$', re.IGNORECASE)
 OPEN_RANGE_PATTERN = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]+\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
-# What separates the items of an end date that lists several dates (names_several_dates).
-END_DATE_LIST_SEPARATOR = re.compile(r'[;,]')
+# What separates the dated items of an end date (end_date_state): a list ("2014; 2018; 2026"), a
+# range ("2020-2027", "Jan 1, 2020 - Dec 31, 2026") or an extension ("2025 (extended to 2027)").
+# A dash joins two items only between two years, so "06-2026" and "2016-10-21" are one date each.
+END_DATE_ITEM_SEPARATOR = re.compile(
+    r'[;,(]|\s[-–—]+\s|(?<=\b(?:19|20)\d{2})[-–—]+(?=(?:19|20)\d{2}\b)|\b(?:to|through|until)\b',
+    re.IGNORECASE)
 CURRENT_CONTEXT_TAG = '[CURRENT]'
 # A leading "YYYY" or "YYYY-YYYY" token in free text, for latest_entry_year's
 # text fallback: group 2 is empty when there is no range.
@@ -186,9 +195,12 @@ def latest_entry_year(entry: dict, current_year: int) -> int | None:
     an entry still in progress and is capped at current_year, not skipped in
     favour of a later token. A bare year after current_year, or a range
     whose START is after current_year, is a typo or forward-looking
-    projection and is skipped in favour of the next token in the text."""
+    projection and is skipped in favour of the next token in the text. A start
+    or end date written with a short year ("6/30/21") counts too
+    (short_year_dates)."""
     fields = entry.get('extracted_fields') or {}
     field_years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
+    field_years += short_year_dates(fields, current_year)
     if field_years:
         return max(field_years)
     for start, end in LEADING_YEAR_OR_RANGE_PATTERN.findall(entry.get('text') or ''):
@@ -203,6 +215,21 @@ def latest_entry_year(entry: dict, current_year: int) -> int | None:
     return None
 
 
+def short_year_dates(fields: dict, current_year: int) -> list[int]:
+    """The years of the entry's start and end dates written mm/dd/yy, or with a one-digit year,
+    which YEAR_PATTERN does not read, as stage 6's grant_end_year reads them. end_date_state
+    reads those dates, so a grant it calls ended keeps its year for ranking and does not rank
+    as undated, below grants that ended earlier (PF07OS, QFJSXR, #1554)."""
+    years = []
+    for name in (GRANT_START_FIELD, GRANT_END_FIELD):
+        value = str(fields.get(name) or '').strip()
+        if TWO_DIGIT_YEAR_DATE_RE.fullmatch(value):
+            year = grant_end_year(value, current_year, fields.get(GRANT_START_FIELD))
+            if year is not None:
+                years.append(year)
+    return years
+
+
 def resolve_as_of(as_of: date | None) -> date:
     """The given date, or the wall-clock date when None (production's default)."""
     return datetime.now().date() if as_of is None else as_of
@@ -212,27 +239,24 @@ def end_date_state(entry: dict, as_of: date) -> bool | None:
     """Whether the entry's end_date has passed by `as_of`: False when it matches
     ONGOING_PATTERN ("2024 - Present"), whatever year it names; otherwise stage
     6's grant_has_ended(), at the precision the date states, so a grant that
-    ended in April has ended by October of the same year (UAURFU-05, #1554);
-    None when it names no date (no end_date, or one with no year) or several
-    (names_several_dates)."""
+    ended in April has ended by October of the same year (UAURFU-05, #1554).
+    Each item between END_DATE_ITEM_SEPARATOR's separators is read so, and the
+    date has ended only when every item that names a date has: stage 4 fuses
+    several grants into one record with one end each ("2014; 2018; 2026"),
+    current while its last study runs (9MKVDA), and a range or an extension
+    names its start or old end first ("2020-2027", "2025 (extended to 2027)"),
+    which stage 6's first-year reading takes for the end. A comma inside one
+    date ("June 30, 2026") leaves its year, all that stage 6's parser reads of
+    it. None when it names no date (no end_date, or one with no year)."""
     fields = entry.get('extracted_fields') or {}
     end_date = str(fields.get('end_date') or '')
     if ONGOING_PATTERN.search(end_date):
         return False
-    if names_several_dates(end_date):
+    ends = [grant_end_date(item, as_of, fields.get('start_date')) for item in END_DATE_ITEM_SEPARATOR.split(end_date)]
+    ends = [end for end in ends if end is not None]
+    if not ends:
         return None
-    end = grant_end_date(end_date, as_of, fields.get('start_date'))
-    return None if end is None else grant_has_ended(end, as_of)
-
-
-def names_several_dates(end_date: str) -> bool:
-    """True for an end date listing more than one dated item ("2014; 2018;
-    2026"): stage 4 fused several grants into one record, so it states no one
-    end. Its first year (stage 6's reading) called the fused record's last,
-    still-running study completed; its latest called the ended ones current
-    (9MKVDA, #1554). A date with a comma inside ("June 30, 2026") names one
-    year and is one date."""
-    return sum(bool(YEAR_PATTERN.search(item)) for item in END_DATE_LIST_SEPARATOR.split(end_date)) > 1
+    return all(grant_has_ended(end, as_of) for end in ends)
 
 
 def ended_before(entry: dict, as_of: date) -> bool:

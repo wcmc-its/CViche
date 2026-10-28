@@ -769,9 +769,9 @@ def test_end_date_state_reads_ended_ongoing_or_unstated(end_date, expected):
     ("2026-11-30", False),
     ("2026", False),          # a bare year may name any month of it
     ("2026 - present", False),
-    ("2014; 2018; 2026", None),        # a fused record's list of ends states no one end
-    ("2019, 2026", None),
     ("June 30, 2026", False),          # a comma inside one date is not a list
+    ("2016-10-21", True),              # nor is an ISO date's dash a range
+    ("2015-16", True),
 ])
 def test_end_date_state_judges_the_end_date_at_its_own_precision(end_date, expected):
     """#1554 (comment 6125259955): end_date_state compared years only, so a grant
@@ -779,6 +779,73 @@ def test_end_date_state_judges_the_end_date_at_its_own_precision(end_date, expec
     the way stage 6's Current/Past rebucket does (grant_has_ended, #1713)."""
     entry = {"extracted_fields": {"end_date": end_date}, "text": ""}
     assert end_date_state(entry, date(2026, 10, 27)) is expected
+
+
+@pytest.mark.parametrize("end_date, expected", [
+    # A fused record (9MKVDA, #1554): one end per grant; current while the last runs.
+    ("2014; 2018; 2026", False),
+    ("2019, 2026", False),
+    ("2015, 2016", True),
+    ("2024; 2025-12-31", True),
+    # A range or an extension names its start or its old end first.
+    ("2020-2027", False),
+    ("2020–2027", False),
+    ("2020—2027", False),
+    ("2023 - 2027", False),
+    ("2023 – 2027", False),
+    ("2023 — 2027", False),
+    ("2019-2020", True),
+    ("2025 (NCE 2027)", False),
+    ("2019 to 2027", False),
+    ("2019 through 2027", False),
+    ("2019 until 2027", False),
+    ("Jan 1, 2020 - Dec 31, 2026", False),
+    ("2016-10-21 to 2017-03-31", True),
+    ("2019 Through 2027", False),
+    ("2019; 6/30/27", False),          # a short-year item counts too
+    # One dated item with a note: the date alone is read, at its precision.
+    ("2026-04-30 (NCE pending)", True),
+    ("06-2026", True),                 # a dash after a month joins no two dates
+])
+def test_end_date_state_reads_every_dated_item_of_an_end_date(end_date, expected):
+    """The record has ended only when each dated item of its end date has: a
+    first-year reading called a fused record whose last study still runs
+    completed, and "2020-2027" ended."""
+    entry = {"extracted_fields": {"end_date": end_date}, "text": ""}
+    assert end_date_state(entry, date(2026, 10, 27)) is expected
+
+
+def test_a_short_year_date_dates_the_entry_for_ranking():
+    """PF07OS and QFJSXR: a grant ending "6/30/21" read as ended but ranked as
+    undated, below grants that ended earlier. Its start and end dates now give
+    their years as stage 6 reads them; an invalid date, a run of digits, or a
+    one-digit year with no start to read it against, gives none."""
+    def year(**fields):
+        return latest_entry_year({"extracted_fields": fields, "text": ""}, current_year=2026)
+    assert year(start_date="7/1/16", end_date="6/30/21") == 2021
+    assert year(start_date="7/1/16") == 2016
+    assert year(start_date="9/1/07", end_date="8/30/1") == 2011
+    assert year(end_date="8/30/1") is None
+    assert year(end_date="13/45/21") is None
+    assert year(start_date="2015", end_date="13/45/21") == 2015
+    assert year(end_date="98765") is None
+    assert year(end_date="6/30/31") == 2031
+    assert year(date="6/30/21") is None
+    short = {"text": "Short", "extracted_fields": {"start_date": "7/1/16", "end_date": "6/30/21"}}
+    earlier = {"text": "Earlier", "extracted_fields": {"start_date": "2015-07-01", "end_date": "2019-06-30"}}
+    assert [e["text"] for e in prioritize_entries([earlier, short], "M2B", as_of=AS_OF_2026)] == ["Short", "Earlier"]
+
+
+def test_a_mentee_line_is_current_until_its_end_month_passes():
+    """is_current_entry reads the as-of date, not its year: an N3A mentee whose
+    end date is May 2026 is current, and tagged, in March and not in October."""
+    mentee = {"extracted_fields": {"start_date": "2024-09", "end_date": "2026-05"}, "text": "Widget mentee"}
+    for as_of, current in ((date(2026, 3, 1), True), (date(2026, 10, 27), False)):
+        recency = compute_entry_recency(mentee, "N3A", as_of)
+        assert recency.is_current is current
+        assert is_current_entry(mentee, "N3A", as_of) is current
+        line = build_context_string([("N3A", mentee, 0.0, recency)], max_tokens=200)
+        assert line.startswith(CURRENT_CONTEXT_TAG) is current, as_of
 
 
 def test_end_date_state_reads_a_one_digit_end_year_against_the_start():

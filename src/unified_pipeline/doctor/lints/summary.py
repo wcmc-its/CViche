@@ -23,13 +23,13 @@ INFO:
   end date, heading or lack of either contradicts, or "completed" for a study
   its own line says runs on or closed early; "earlier" for a paper in press;
   "current" is not judged where a current research-activities entry names
-  the same words;
+  the same words, unless that entry is a row of the grant itself;
 - an award the CV marks declined, withdrawn or not funded, counted as held;
 - "funded by X" or "X-funded" over a grant whose own line does not name X,
   or X the CV names only as a collaborator;
 - a lead-role claim ("I led", "I serve as PI on") over a grant whose role
-  does not give it, or gives it as shared; and over a named entry that is no
-  grant, when no entry holding the name gives the verb's role;
+  does not give it; and over a named entry that is no grant, when no entry
+  sharing most of the name gives the verb's role;
 - a PI role "since" a year before the earliest grant that could give it;
 - an agent combined into a grant's design ("in combination with X") that its
   own line lacks and another grant's line holds.
@@ -49,6 +49,7 @@ from unified_pipeline.stage6.normalization.records import (
     grant_heading_rebucket_target,
     grant_status_rebucket_target,
 )
+from unified_pipeline.stage6.parsing.dates import grant_end_year
 from unified_pipeline.stage6.sections.research_support import (
     PENDING_GRANT_CODE,
     RESEARCH_SUPPORT_SECTIONS,
@@ -341,6 +342,12 @@ _MAX_WORD_GAP = 4
 #: description of one grant named a neighbour's title and took its funder (a
 #: clean NECRGC run, UHBORP), and a cap of 6 merged WPJHYT-05's projects (#1554).
 _STATUS_TITLE_WORDS_CAP = 8
+#: Design words any protocol title holds. A title named at the cap needs
+#: `_MIN_SHARED_TITLE_WORDS` of its words outside them, so a run of design
+#: words alone names no trial: it may describe a neighbour's design (#1554).
+_PROTOCOL_STEMS = frozenset(word[:_STEM_CHARS] for word in (
+    "multicenter", "double", "blind", "placebo", "parallel",
+    "group", "evaluate", "efficacy", "safety", "tolerability"))
 #: A one-word title, or a one-word agency, names no grant: a single word
 #: recurs in any research sentence.
 _MIN_NAMING_WORDS = 2
@@ -382,7 +389,12 @@ _COUNT_REACH = 30
 #: "prior formal education" and "the past decade" name no grant's status.
 _CURRENT_CLAIM_RE = re.compile(
     r"\b(?:currently|current|ongoing|continu(?:e|es|ed|ing)|active)\b", re.IGNORECASE)
-_COMPLETED_CLAIM_RE = re.compile(r"\b(?:completed|previous(?:ly)?|earlier|formerly)\b", re.IGNORECASE)
+_COMPLETED_CLAIM_RE = re.compile(r"\bcompleted\b", re.IGNORECASE)
+#: "Earlier" claims completed, and before the CV's newest work: a paper in
+#: press contradicts it, not "completed" (QZCHAG-13). Nor does a study's own
+#: line saying it runs on: the owner's part in it may be the earlier one.
+_EARLIER_CLAIM_RE = re.compile(r"\b(?:previous(?:ly)?|earlier|formerly)\b", re.IGNORECASE)
+_CLAIM_EARLIER = "earlier"
 #: Between a grant and a status word after it: the word starts a new clause
 #: ("<title words>, and completed a study of ...").
 _NEW_CLAUSE_RE = re.compile(r",\s*and\b|;|\band\s+(?:I|my)\b")
@@ -397,15 +409,16 @@ _TOPICAL_NOUN_RE = re.compile(
 _CONTINUE_VERB_RE = re.compile(r"continue[sd]?", re.IGNORECASE)
 #: A grant's own text saying the study has not finished, whatever its dates
 #: say about the owner's part in it: it runs on under another PI (MFJRKW-09),
-#: or it stopped early for lack of enrollment (HVSKET-03). Either contradicts
+#: or it closed for lack of enrollment (HVSKET-03). Either contradicts
 #: "completed". A study the line calls closed, with no reason given, has
-#: finished, so a bare "closed" does not count.
+#: finished, so a bare "closed" does not count; nor does a design word
+#: ("open-label") or an agent's activity ("active against").
 _STILL_RUNNING_RE = re.compile(
-    r"\b(?:is|are|remains?|still|currently)\s+(?:currently\s+|still\s+)?(?:active|ongoing|open|enrolling|recruiting)\b",
+    r"\b(?:is|are|remains?|still|currently)\s+(?:active|ongoing|open|enrolling|recruiting)\b(?!-|\s+against\b)",
     re.IGNORECASE)
 _CLOSED_EARLY_RE = re.compile(
-    r"\b(?:closed|terminated|stopped|halted|ended|discontinued)\s+(?:early|prematurely|due\s+to|because\s+of|for\s+lack)\b"
-    r"|\b(?:insufficient|inadequate|poor|low|slow)\s+(?:enrollment|accrual|recruitment)\b", re.IGNORECASE)
+    r"\b(?:closed|terminated|stopped|halted|ended|discontinued)\s+(?:early|prematurely|due\s+to|because\s+of"
+    r"|for\s+lack)\b", re.IGNORECASE)
 #: A publication the CV lists as not yet published is current work: calling
 #: the CV's newest, in-press paper earlier work got it wrong (QZCHAG-13).
 _IN_PRESS_RE = re.compile(r"\b(?:in\s+press|forthcoming|accepted\s+for\s+publication)\b", re.IGNORECASE)
@@ -451,48 +464,50 @@ _ENTRY_LEAD_CLAIM_RE = re.compile(
 _NAMED_OBJECT_RE = re.compile(
     r"\s+(?:the\s+|an?\s+)?(?P<name>[A-Z][\w'’&-]*(?:\s+(?:(?:of|and|for|in|on|the|&)\s+)*[A-Z][\w'’&-]*)*)")
 _ROLE_FOR_VERB = (
-    ("found", re.compile(r"\bfound\w*", re.IGNORECASE)),
-    ("direct", re.compile(r"\bdirect\w*", re.IGNORECASE)),
+    ("found", re.compile(r"\b(?:co-?)?found\w*|\bestablish\w*|\bcreator\b", re.IGNORECASE)),
+    ("direct", re.compile(r"\bdirect\w*|\bhead\b", re.IGNORECASE)),
     ("coordinat", re.compile(r"\bcoordinat\w*", re.IGNORECASE)),
 )
 #: A named entry is judged only when its name holds this many title words:
 #: two capitalised words ("Grand Rounds") name many entries and none.
 _MIN_ENTRY_NAME_WORDS = 3
+#: An entry sharing this share of a named entry's words, and at least
+#: `_MIN_ENTRY_NAME_WORDS` of them, may give its role: a leadership line names
+#: the event its own way, without one of the summary's words (OKRTPJ-13, whose
+#: leadership line gives both roles, #1554).
+_ROLE_SUPPORT_SHARE = 0.5
 _PI_CLAIM_RE = re.compile(
     r"\bserv(?:e|ed|ing)\s+as\s+(?:the\s+)?(?:Multiple\s+)?(?:Principal\s+Investigator|PI)\b")
-#: A grant role that supports a lead-role claim, and one that supports a PI claim.
+#: A grant role that supports a lead-role claim, and one that supports a PI
+#: claim. A shared lead role ("Co-Founder", "Founder along with" a colleague)
+#: supports it too: the owner founded it (XNWSZN-15, #1554).
 _LEAD_ROLE_RE = re.compile(
     r"\b(?:PI|MPI|princip(?:al|le)\s+investigator|director|founder|founding|chair\w*|lead\w*|head"
-    r"|coordinator)\b", re.IGNORECASE)
+    r"|coordinator|president|chief|organi[sz]er)\b", re.IGNORECASE)
 _PI_ROLE_RE = re.compile(r"(?<![-\w])(?:PI|MPI|princip(?:al|le)\s+investigator)\b", re.IGNORECASE)
 #: The words between a lead-role claim and the grant that is its object hold
-#: no clause punctuation: "I served as PI on a study of <title>". A comma that
-#: opens a quoted title is the object itself (XNWSZN-15).
-_ROLE_OBJECT_RE = re.compile(r"(?:[^,;:.]|,\s*[\"“])*\Z")
+#: no clause punctuation: "I served as PI on a study of <title>".
+_ROLE_OBJECT_RE = re.compile(r"[^,;:.]*\Z")
 _NOT_OWN_PI_RE = re.compile(r"\b(?:co|sub|site)[-\s]*(?:PI|principal|investigator)", re.IGNORECASE)
-#: A lead role the grant gives as shared: a co-founder or co-director (its
-#: role), or a role its own text says was held jointly with a colleague, was
-#: not held alone, so "I founded" or "I direct" overstates it (XNWSZN-15). Only
-#: the role is read for a "co-" title: the text may name another person's.
-_CO_LEAD_ROLE_RE = re.compile(r"\bco-?(?:found\w*|direct\w*|chair\w*|lead\w*)", re.IGNORECASE)
-_LEAD_ROLE_SHARED_WITH_RE = re.compile(
-    r"\b(?:found|direct|chair|lead)\w*\s+(?:along|together|jointly)\s+with\b", re.IGNORECASE)
 #: A name the CV gives only as a collaborator, never as a funder: a grant line
 #: naming a body after a collaboration cue is not that body's funding, although
 #: stage 4 put both names in the grant's agency (DYLJXC-16). The name follows
 #: the cue directly, after an optional "the".
-_COLLABORATION_CUE_RE = re.compile(
-    r"\b(?:in\s+(?:collaboration|partnership)\s+with|collaborat\w*\s+(?:research\s+)?with)\s+(?:the\s+)?",
-    re.IGNORECASE)
+_COLLABORATOR_RE = re.compile(
+    r"\b(?i:in\s+(?:collaboration|partnership)\s+with|collaborat\w*\s+(?:research\s+)?with)\s+(?:(?i:the)\s+)?"
+    rf"(?P<name>{_NAME})")
 #: A PI role dated by "since <year>": WWRSAL-02 dated it three years before
 #: the CV's earliest grant the owner may lead, to a fellowship under another PI.
-_PI_SINCE_RE = re.compile(r"\b(?:Principal\s+Investigator|PI)\s+since\s+(?P<year>(?:19|20)\d{2})\b")
+#: A co-, sub- or site PI's span (`shared`) claims no lead role: not judged.
+_PI_SINCE_RE = re.compile(
+    r"(?<![-\w])(?P<shared>(?i:co|sub|site)[-\s]+)?(?:Principal\s+Investigator|PI)\s+since\s+"
+    r"(?P<year>(?:19|20)\d{2})\b")
 #: A design detail a sentence adds to the grant it names: the agent a drug is
 #: combined with. TJDPJE-01 gave one trial another trial's co-therapy; the
 #: agent names a grant's design only when that grant's own line holds it. Not
 #: a comparator that is no agent of its own.
 _COMBINED_AGENT_RE = re.compile(
-    r"\b(?:in\s+combination\s+with|combined\s+with|plus)\s+(?P<agent>[A-Za-z][\w-]{3,})", re.IGNORECASE)
+    r"\b(?:in\s+combination\s+with|combined\s+with)\s+(?P<agent>[A-Za-z][\w-]{3,})", re.IGNORECASE)
 _NO_AGENT_WORDS = frozenset(("placebo", "standard", "usual", "conventional", "other", "others"))
 
 
@@ -500,7 +515,8 @@ class _Grant(NamedTuple):
     """One stage-4 grant (M2A, M2B or M2C), read once for every sentence.
     `unfinished`: its own text says the study runs on or closed early
     (`_STILL_RUNNING_RE`, `_CLOSED_EARLY_RE`). An in-press publication is
-    read into this shape too, for the status check alone (`_in_press_records`)."""
+    read into this shape too (`in_press`), for the status check alone
+    (`_in_press_records`)."""
     title_stems: frozenset[str]
     agency: str
     role: str
@@ -509,6 +525,7 @@ class _Grant(NamedTuple):
     status_now: str | None
     unfinished: bool = False
     start_year: int | None = None
+    in_press: bool = False
 
 
 class _Mention(NamedTuple):
@@ -575,7 +592,9 @@ def _grants(stage_4: Mapping, written: date | None) -> list[_Grant]:
     ending 2020 was current when the CV was written (HXBPCT-17, JUTBUZ), and a
     2013 CV's grant has ended since (YSXCFU): a summary calling it current, or
     completed, is right either way, so each claim is judged on the date that
-    favours it (§7.4: never the day the doctor runs)."""
+    favours it (§7.4: never the day the doctor runs). Its start year is stage
+    6's reading of the start date (grant_end_year, "9/1/07" too), as of the
+    summary's year; with no summary date, none."""
     cv_date = _cv_date(stage_4, written)
     grants = []
     for entry in _fields_entries(stage_4):
@@ -591,13 +610,8 @@ def _grants(stage_4: Mapping, written: date | None) -> list[_Grant]:
             grant_status(entry.code, record, _grant_ended(record, cv_date)),
             grant_status(entry.code, record, _grant_ended(record, written)),
             bool(_STILL_RUNNING_RE.search(entry.text) or _CLOSED_EARLY_RE.search(entry.text)),
-            _first_year(_field(fields, "start_date"))))
+            grant_end_year(_field(fields, "start_date"), written.year) if written else None))
     return grants
-
-
-def _first_year(text: str) -> int | None:
-    match = _YEAR_RE.search(text)
-    return int(match.group()) if match else None
 
 
 def _in_press_records(stage_4: Mapping) -> list[_Grant]:
@@ -607,31 +621,39 @@ def _in_press_records(stage_4: Mapping) -> list[_Grant]:
     for entry in _fields_entries(stage_4):
         if entry.code in PUBLICATION_TAXONOMY_CODES and _IN_PRESS_RE.search(entry.text):
             records.append(_Grant(_title_stems(_field(entry.fields, "title")), "", "", entry.text,
-                                  GRANT_STATUS_CURRENT, GRANT_STATUS_CURRENT))
+                                  GRANT_STATUS_CURRENT, GRANT_STATUS_CURRENT, in_press=True))
     return records
 
 
 def _current_research_stems(stage_4: Mapping, cv_date: date) -> list[frozenset[str]]:
     """The words of each research-activities entry stage 4.5 calls current as
     of the CV's date (is_current_entry: undated, or open to the present). The
-    context gave the model those lines as [CURRENT] research."""
-    return [_title_stems(entry.text) for entry in _fields_entries(stage_4)
-            if entry.code == _RESEARCH_ACTIVITIES_CODE and is_current_entry(
-                {"extracted_fields": dict(entry.fields), "text": entry.text}, entry.code, cv_date)]
+    context gave the model those lines as [CURRENT] research. An entry whose
+    text is inside a grant's own text is a row of that grant stage 2 split off
+    (its "Project title" row, D9PLBD), not a research statement: left out."""
+    entries = _fields_entries(stage_4)
+    grant_texts = [_squeezed(entry.text) for entry in entries if entry.code in _GRANT_CODES]
+    return [_title_stems(entry.text) for entry in entries
+            if entry.code == _RESEARCH_ACTIVITIES_CODE
+            and not any(_squeezed(entry.text) in text for text in grant_texts)
+            and is_current_entry({"extracted_fields": dict(entry.fields), "text": entry.text}, entry.code, cv_date)]
 
 
 def _title_mention(grant: _Grant, words: Sequence[re.Match], most_needed: float) -> _Mention | None:
     """Where the sentence names the grant's title, else None: the run of its
     words holding the most title words, as `words`, and as the span, that run
     cut back to the fewest words that still name the title. A title naming
-    needs no more than `most_needed` of its words."""
+    needs no more than `most_needed` of its words; one named at that cap needs
+    some outside `_PROTOCOL_STEMS`."""
     if len(grant.title_stems) < _MIN_NAMING_WORDS:
         return None
-    needed = max(min(_MIN_SHARED_TITLE_WORDS, len(grant.title_stems)),
-                 min(_MIN_TITLE_SHARE * len(grant.title_stems), most_needed))
+    share_needed = _MIN_TITLE_SHARE * len(grant.title_stems)
+    needed = max(min(_MIN_SHARED_TITLE_WORDS, len(grant.title_stems)), min(share_needed, most_needed))
+    distinct_needed = _MIN_SHARED_TITLE_WORDS if most_needed < share_needed else 0
 
     def enough(run: Sequence[int]) -> bool:
-        return len({_stem(words[i].group()) for i in run}) >= needed
+        stems = {_stem(words[i].group()) for i in run}
+        return len(stems) >= needed and len(stems - _PROTOCOL_STEMS) >= distinct_needed
 
     hits = [i for i, word in enumerate(words) if _stem(word.group()) in grant.title_stems]
     runs: list[list[int]] = []
@@ -710,7 +732,7 @@ def _span(group: _MentionGroup) -> tuple[int, int]:
 def _claimed_status(sentence: str, group: _MentionGroup) -> str | None:
     """The status word that describes the group: the nearest one before it
     within reach, else the nearest one after it within reach in the same
-    clause; current or completed. A status word that is one of a grant's own
+    clause; current, completed or earlier. A status word that is one of a grant's own
     title words is the title's. A current one that frames a topic ("my current
     research investigates <title words>") claims nothing, and hides a farther
     word; "my earlier work on <title words>" still dates it (CKDDEG-10)."""
@@ -719,7 +741,8 @@ def _claimed_status(sentence: str, group: _MentionGroup) -> str | None:
     before: list[tuple[int, str | None]] = []
     after: list[tuple[int, str | None]] = []
     for pattern, status in ((_CURRENT_CLAIM_RE, GRANT_STATUS_CURRENT),
-                            (_COMPLETED_CLAIM_RE, GRANT_STATUS_COMPLETED)):
+                            (_COMPLETED_CLAIM_RE, GRANT_STATUS_COMPLETED),
+                            (_EARLIER_CLAIM_RE, _CLAIM_EARLIER)):
         for match in pattern.finditer(sentence):
             if _stem(match.group()) in title_stems:
                 continue
@@ -747,11 +770,16 @@ def _named_by_current_research(sentence: str, group: _MentionGroup,
 
 def _contradicts(claimed: str, grant: _Grant) -> bool:
     """The grant's own record contradicts the claimed status: "current" as of
-    the CV's date, "completed" as of the summary's, or "completed" for a study
-    its own text says runs on or closed early."""
+    the CV's date, "completed" or "earlier" as of the summary's, or
+    "completed" for a study its own text says runs on or closed early. A paper
+    in press contradicts "earlier" alone: research whose paper is in press may
+    be complete."""
     if claimed == GRANT_STATUS_CURRENT:
         return grant.status_then in _CLAIM_CONTRADICTED_BY[claimed]
-    return grant.status_now in _CLAIM_CONTRADICTED_BY[claimed] or grant.unfinished
+    if grant.in_press:
+        return claimed == _CLAIM_EARLIER
+    return (grant.status_now in _CLAIM_CONTRADICTED_BY[GRANT_STATUS_COMPLETED]
+            or (claimed == GRANT_STATUS_COMPLETED and grant.unfinished))
 
 
 def _status_contradicted(sentence: str, group: _MentionGroup,
@@ -801,7 +829,14 @@ def _squeezed(text: str) -> str:
 
 
 def _names_funder(funder: str, record_text: str) -> bool:
-    """The record names the funder: its text, its words, a known funder's
+    """The record names the funder: by name (`_names_funder_by_name`), or by
+    all of its words."""
+    stems = _title_stems(funder)
+    return _names_funder_by_name(funder, record_text) or (bool(stems) and stems <= _title_stems(record_text))
+
+
+def _names_funder_by_name(funder: str, record_text: str) -> bool:
+    """The record names the funder by name: its text, a known funder's
     spellings, its acronym, or its initials ("National Widget Institute" for an
     "NWI" agency)."""
     if _squeezed(funder) in _squeezed(record_text):
@@ -809,8 +844,6 @@ def _names_funder(funder: str, record_text: str) -> bool:
     if any(f.claim.search(funder) and f.support.search(record_text) for f in _FUNDERS):
         return True
     stems = _title_stems(funder)
-    if stems and stems <= _title_stems(record_text):
-        return True
     acronym = funder if not stems else "".join(w[0] for w in funder.split() if w[:1].isupper())
     return len(acronym) >= _MIN_ACRONYM_LETTERS and re.search(rf"\b{re.escape(acronym)}\b", record_text) is not None
 
@@ -874,18 +907,19 @@ def _funder_link_sentences(sentences: Sequence[str], grants: Sequence[_Grant]) -
 
 
 def _named_only_as_collaborator(funder: str, texts: Sequence[str]) -> bool:
-    """At least one stage-4 entry's text names the funder, and every one that
-    does names it right after a collaboration cue ("in collaboration with the
-    <funder>"). The texts are the CV's own words; the agency field is stage
-    4's reading of them, and took the collaborator for a funder (DYLJXC-16)."""
-    name = re.compile(r"\s+".join(map(re.escape, funder.split())), re.IGNORECASE)
+    """At least one stage-4 entry's text names the funder right after a
+    collaboration cue ("in collaboration with the <funder>"), and none names
+    it by name anywhere else (`_names_funder_by_name`: a grant line giving it
+    by its acronym funds by it). The texts are the CV's own words; the agency
+    field is stage 4's reading of them, and took the collaborator for a funder
+    (DYLJXC-16). The funder's words alone are no naming: a grant's title may
+    hold them."""
     named = False
     for text in texts:
-        for match in name.finditer(text):
-            cue_ends = {cue.end() for cue in _COLLABORATION_CUE_RE.finditer(text, 0, match.start())}
-            if match.start() not in cue_ends:
-                return False
-            named = True
+        if _names_funder_by_name(funder, _COLLABORATOR_RE.sub(" ", text)):
+            return False
+        named = named or any(_names_funder_by_name(funder, cue.group("name"))
+                             for cue in _COLLABORATOR_RE.finditer(text))
     return named
 
 
@@ -898,14 +932,8 @@ def _funder_claim_sentences(sentences: Sequence[str], grants: Sequence[_Grant],
         _named_only_as_collaborator(phrase.funder, texts) for phrase in _funder_phrases(s)))
 
 
-def _gives_role(role_re: re.Pattern, grant: _Grant) -> bool:
-    """The grant's role gives the claimed role as the owner's own: not a co-,
-    sub- or site PI, and, for a lead role, not one held with someone else."""
-    role = grant.role
-    if not role_re.search(role) or _NOT_OWN_PI_RE.search(role):
-        return False
-    return role_re is not _LEAD_ROLE_RE or not (
-        _CO_LEAD_ROLE_RE.search(role) or _LEAD_ROLE_SHARED_WITH_RE.search(grant.record_text))
+def _gives_role(role_re: re.Pattern, role: str) -> bool:
+    return bool(role_re.search(role)) and not _NOT_OWN_PI_RE.search(role)
 
 
 def _lead_role_sentences(sentences: Sequence[str], grants: Sequence[_Grant]) -> tuple[str, ...]:
@@ -923,7 +951,7 @@ def _lead_role_sentences(sentences: Sequence[str], grants: Sequence[_Grant]) -> 
             if named is None or not _ROLE_OBJECT_RE.match(sentence, claim_end, _span(named)[0]) \
                     or _span(named)[0] - claim_end > _ROLE_REACH:
                 continue
-            if not any(_gives_role(role_re, m.grant) for m in named):
+            if not any(_gives_role(role_re, m.grant.role) for m in named):
                 found.append(sentence)
                 break
     return tuple(found)
@@ -939,19 +967,12 @@ def _role_for_verb(verb: str) -> re.Pattern:
     return next((role for stem, role in _ROLE_FOR_VERB if verb.lower().startswith(stem)), _LEAD_ROLE_RE)
 
 
-def _gives_entry_role(verb: str, words: str) -> bool:
-    """The entry's words give the verb's role as the owner's alone: a "co-"
-    title or a role held "along with" someone does not count."""
-    own = _LEAD_ROLE_SHARED_WITH_RE.sub(" ", _CO_LEAD_ROLE_RE.sub(" ", words))
-    return bool(_role_for_verb(verb).search(own))
-
-
 def _entry_role_sentences(sentences: Sequence[str], entries: Sequence[_FieldsEntry]) -> tuple[str, ...]:
-    """A lead-role claim on a named entry when entries hold the name and none
-    gives a verb's role (OKRTPJ-13: the CV names the owner the event's
-    founder, never its director). Every
-    entry holding the name is a candidate; with none, nothing is judged, and
-    a name a grant holds is the grant check's (`_lead_role_sentences`)."""
+    """A lead-role claim on a named entry when entries hold the name and no
+    entry sharing most of its words gives a verb's role. With no entry
+    holding the whole name nothing is judged, and a name a grant holds is the
+    grant check's (`_lead_role_sentences`). A shared role gives the verb's: a
+    co-founder founded it."""
     words = [(_title_stems(_entry_words(entry)), _entry_words(entry), entry.code in _GRANT_CODES)
              for entry in entries]
     found = []
@@ -961,12 +982,13 @@ def _entry_role_sentences(sentences: Sequence[str], entries: Sequence[_FieldsEnt
             stems = _title_stems(name.group("name")) if name else frozenset()
             if len(stems) < _MIN_ENTRY_NAME_WORDS:
                 continue
-            holders = [(text, grant) for entry_stems, text, grant in words if stems <= entry_stems]
-            if not holders or any(grant for _text, grant in holders):
+            holders = [grant for entry_stems, _text, grant in words if stems <= entry_stems]
+            if not holders or any(holders):
                 continue
-            holders = [text for text, _grant in holders]
+            shared = max(_MIN_ENTRY_NAME_WORDS, _ROLE_SUPPORT_SHARE * len(stems))
+            supporters = [text for entry_stems, text, _grant in words if len(stems & entry_stems) >= shared]
             verbs = [verb for verb in claim.group("first", "second") if verb]
-            if any(not any(_gives_entry_role(verb, text) for text in holders) for verb in verbs):
+            if any(not any(_role_for_verb(verb).search(text) for text in supporters) for verb in verbs):
                 found.append(sentence)
                 break
     return tuple(found)
@@ -975,13 +997,15 @@ def _entry_role_sentences(sentences: Sequence[str], entries: Sequence[_FieldsEnt
 def _role_span_sentences(sentences: Sequence[str], grants: Sequence[_Grant]) -> tuple[str, ...]:
     """A PI role dated from before the CV's earliest grant the owner may have
     led: a funded one whose role gives PI or states no role (WWRSAL-02). With
-    no such grant dated, nothing is judged."""
+    no such grant dated, nothing is judged; nor is a co-, sub- or site PI's
+    span."""
     starts = [g.start_year for g in grants if g.start_year is not None and g.status_now not in _UNFUNDED
-              and (not g.role or _gives_role(_PI_ROLE_RE, g))]
+              and (not g.role or _gives_role(_PI_ROLE_RE, g.role))]
     if not starts:
         return ()
     earliest = min(starts)
-    return tuple(s for s in sentences if any(int(m.group("year")) < earliest for m in _PI_SINCE_RE.finditer(s)))
+    return tuple(s for s in sentences if any(not m.group("shared") and int(m.group("year")) < earliest
+                                             for m in _PI_SINCE_RE.finditer(s)))
 
 
 def _foreign_agent(sentence: str, group: _MentionGroup, grants: Sequence[_Grant]) -> bool:

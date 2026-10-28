@@ -1222,14 +1222,13 @@ LINT_PREVALENCE = {
     # stage-4 artifacts carries it, measured 2026-10-07. The zero-observed
     # floor, as for research_summary_call_failed above.
     "stage4_unplaced_items": 0.001,
-    # summary_unsupported_claim (#1554, S1554-PC in doctor/PRECISION.md): 34
-    # of 224 distinct stored stage-4.5 summaries (the main checkout's
-    # analysis/, the eb, ndm, x6, eo and wave1 farms and
-    # src/unified_pipeline/outputs) at any severity once the per-claim INFO
-    # checks were added, measured 2026-10-14; 20 of 224 before them (WARN
-    # only). Most of those summaries predate #1558's prompt; same
-    # mixed-corpus caveat as above.
-    "summary_unsupported_claim": 0.152,
+    # summary_unsupported_claim (#1554, S1554-R in doctor/PRECISION.md): 55
+    # of the 296 stored (uid, summary, stage-4) pairs S1554-R reads (the
+    # YUYVIG, NECRGC, s3, OIEPQD, eb and extra runs and 103 others) at any
+    # severity, measured 2026-10-27; 51 of 296 on origin/dev 0daa5392.
+    # S1554-PC's 34 of 224 (0.152, 2026-10-14) was mostly summaries from
+    # before #1558's prompt. Same mixed-corpus caveat as above.
+    "summary_unsupported_claim": 0.186,
     # owner_attribution (#1573, YUY-OA in doctor/PRECISION.md): 36 of the 145
     # runs of the YUYVIG (37), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI (9)
     # and X6 (6) farms at any severity, 3 at WARN, over fresh renders of
