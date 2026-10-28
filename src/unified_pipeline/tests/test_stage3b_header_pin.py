@@ -16,11 +16,13 @@ from unified_pipeline.stage3b.context import TaxonomyContext  # noqa: E402
 from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     HEADER_PIN_MIN_CONFIDENCE,
     apply_header_pin,
+    apply_non_seat_pins,
     content_pin_code,
     is_note_not_record,
     is_reviewer_lead_in,
     leaf_header_code,
     mentee_pin_code,
+    non_seat_pin_code,
     pinned_header_code,
     someone_elses_pin_code,
 )
@@ -1678,3 +1680,134 @@ def test_a_review_list_ends_at_a_publication_row():
              _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
     out, n = apply_header_pin(group, NO_PIN_CTX)
     assert n == 0 and _codes(out) == ["T", "S1", "N3B"]
+
+
+# --- #1580: a Q2 or P row that is no seat on a body ---------------------------
+
+def _service(code, text, *heading):
+    return {"text": text, "taxonomy_code": code, "taxonomy_confidence": 0.75,
+            "classification_reasoning": "external advisory service (Q2)", "classification_source": "llm",
+            "hierarchy": list(heading or ("Professional Service",)), "element_idx_start": 95}
+
+
+@pytest.mark.parametrize("entry", [
+    # a consultancy coded Q2 (HBALTD 38, EYTHNB 459)
+    _service("Q2", "2031-present  Consultant, Example Health Rhythms"),
+    _service("Q2", "Consultantships with several pharmaceutical companies, 2031 to present.", "Consultantships"),
+    # a company's advisory board (UVZNIC 102, AOJEQD 46), coded Q2 or P (WBZIDP 47)
+    _service("Q2", "2031  Scientific Advisory Board, Example Pharmaceuticals, Inc., Example City"),
+    _service("Q2", "2031  Scientific Advisory Board, Example Biosciences, Example City"),
+    _service("P", "2031 Founder, Chair of the Scientific Advisory Board, Example Pharma.",
+             "Professional Honors"),
+    # expert work in litigation (UVZNIC 98, XNWSZN 1256, ZASOTV 184)
+    _service("Q2", "2031  Expert Opinion, Example & Example, LLP, Litigation regarding an example drug",
+             "Consulting Appointments"),
+    _service("Q2", "Expert Witness for an Example Patent Case, Example Litigation\t2031-present", "Consulting"),
+    # a company under a consulting heading, with no consulting word on its line (EJPAIA 175)
+    _service("Q2", "Example Biologics Corporation, Example City, 2031 to 2032",
+             "Scientific Advisory Boards and Consultantships"),
+    # a year in parentheses alone does not make a consultancy a citation
+    _service("Q2", "Consultant, Example Health Rhythms (2031)"),
+])
+def test_consulting_is_another_professional_position(entry):
+    assert non_seat_pin_code(entry)[0] == "D3"
+
+
+@pytest.mark.parametrize("entry", [
+    # a consultant's seat on a society's named committee
+    _service("Q2", "Consultant, Example Society Ethics Committee, 2031"),
+    # an advisory board of a public body, society, foundation or school stays a board
+    _service("Q2", "2031  Scientific Advisory Board, Example Foundation, Inc."),
+    _service("Q2", "2031  Advisory Board, Example Institute of Health"),
+    # a company named without a company word cannot be told from a school's program (EJPAIA 181)
+    _service("Q2", "Example University Research Program, Advisory Board, 2031",
+             "Scientific Advisory Boards and Consultantships"),
+    # testimony stays Q2 (the owner's decision, 2026-10-27), and so does expert work outside litigation
+    _service("Q2", "Consulted and testified on Example Bill 31-1234, 2031", "Community Involvement"),
+    _service("Q2", "Expert Witness, Example Agency hearings, 2031-32"),
+    # an institution's own consulting project coded P names no company
+    _service("P", "Consultant\tExample Health System\tExample Quality Project\t2031", "Departmental"),
+    # a board of directors is a seat, not consulting
+    _service("Q2", "2031 - 2032  Example Board of Directors"),
+    # a public body's, a hospital's or a blood bank's advisory board is no company's
+    _service("Q2", "2031  Scientific Advisory Board, Example Children's Hospital, Inc."),
+    _service("Q2", "2031  Example Inc. Medical Advisory Board, Example Blood Bank"),
+    _service("Q2", "United States Example Convention, Inc., Example Advisory Committee, 2031"),
+    # consulting inside a body, a seat or an office, a citation, or a list of talks
+    _service("Q2", "Consultant, Example Technical Advisory Group 2031"),
+    _service("Q2", "Example Health Coalition, consultant 2031"),
+    _service("Q2", "2031 Member, External Consultant to the Example Department"),
+    _service("Q2", "Consultant: Example Foundation, 2031. President: Example Association, 2032-"),
+    _service("Q2", "Doe, J. (2031) A consulting career. Interview with Example Consulting."),
+    _service("Q2", "12. Example Pharma Consultant Focus Group; Example City 2031", "Invited Presentations"),
+    # a meeting or a body named after consultants is not the owner consulting
+    _service("Q2", "Example Center Consultants\u2019 Conference (2031 - present)"),
+    _service("Q2", "Example Consultant\u2019s Forum, 2031"),
+    _service("Q2", "\u201cExample Care.\u201d Example Regional Consultants Collaborative, Example City, 2031"),
+    # litigation that names no expert or consulting work
+    _service("Q2", "Example Bar Association Litigation Section, 2031"),
+    # a company's board of directors is a seat
+    _service("Q2", "Example Pharma Inc. Board of Directors, 2031"),
+    # only Q2 and P are read
+    _service("D3", "2031-present  Consultant, Example Health Rhythms"),
+    _service("Q1", "2031  Scientific Advisory Board, Example Pharmaceuticals, Inc."),
+])
+def test_a_seat_or_a_public_board_stays_where_the_model_put_it(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("entry", [
+    # under a heading that names attendance (LTTYWI 1084-1101, coded Q2 by T-validation)
+    _service("Q2", "31. Annual Meeting of the Example College, Example City, September 26-27, 2031.",
+             "Scientific Meetings Attended"),
+    _service("Q2", "36. World Congress of Example Studies, Example City, September 23-27, 2031.",
+             "Scientific Meetings Attended"),
+    # on a line that opens as attendance (MQLKPQ 109, LWMSPJ 342)
+    _service("Q2", "Attendee Example Appreciation Day 2031, 2032", "Affiliations and Activities"),
+    _service("P", "Participant, Example Program Directors Meeting, 12/11-12/14, Example City", "Other Service"),
+    _service("Q2", "2031 Participant, Example Workshop on Methods, Example City", "Other Service"),
+    # the event named by the attendance heading only, or by a heading of attendance (MEHOQM 143)
+    _service("Q2", "36. World Congres of Example Studies, Example City, September 23-27, 2031.",
+             "Scientific Meetings Attended"),
+    _service("Q2", "Example Society Annual Meeting: 2031, 2032", "Convention & Symposium Attendance"),
+    # a place's initials are no author list (LTTYWI 1099)
+    _service("Q2", "Annual Meeting of the Example College, Example City DC, September 19-20, 2031.",
+             "Scientific Meetings Attended"),
+    _service("Q2", "Annual Meeting of the Example College, Example, D.C., 2031; Satellite Session, Example, D.C.",
+             "Scientific Meetings Attended"),
+])
+def test_a_meeting_the_owner_attended_is_other_education(entry):
+    assert non_seat_pin_code(entry)[0] == "B2"
+
+
+@pytest.mark.parametrize("entry", [
+    # an attended meeting the owner chaired, organized or spoke at
+    _service("Q2", "Chair, Annual Meeting of the Example Society, Example City, 2031", "Meetings Attended"),
+    _service("Q2", "Organizer, Example Workshop on Methods, 2031", "Meetings Attended"),
+    _service("Q2", "Participant and member of Planning Committee, Example Experts Meeting, 2031", "Conferences"),
+    # an author list is the owner's talk or abstract
+    _service("Q2", "Doe J, Roe K. An example title. Annual Meeting of the Example Society, 2031.", "Meetings Attended"),
+    _service("Q2", "Doe J et al. An example title. Annual Meeting of the Example Society, 2031.", "Meetings Attended"),
+    _service("Q2", "Panelist, Example Annual Meeting, 2031", "Meetings Attended"),
+    _service("Q2", "2031 Participant, Example Health Day - provided screenings to patients", "Public Service"),
+    # no event on the line or on the attendance heading (another heading's event does not count)
+    _service("Q2", "Example Society of Example Studies, 2031", "Attendance"),
+    _service("Q2", "Participant, Example Data Working Party, 2031", "Conferences"),
+    _service("Q2", "Participant, Example Workgroup on Data Standards, 2031", "Other Service"),
+])
+def test_an_attended_meeting_with_a_part_the_owner_played_stays(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+def test_apply_non_seat_pins_keeps_the_models_answer_and_counts_each_recode():
+    consulting = _service("Q2", "2031-present  Consultant, Example Health Rhythms")
+    seat = _service("Q2", "Member, Example Society Ethics Committee, 2031")
+    out, stats = apply_non_seat_pins([consulting, seat])
+    assert _codes(out) == ["D3", "Q2"]
+    assert out[0]["pre_pin_code"] == "Q2" and "(category D3)" in out[0]["classification_reasoning"]
+    assert out[1] is seat and consulting["taxonomy_code"] == "Q2"
+    assert stats["corrections_applied"] == 1
+    assert stats["correction_details"] == [{"element_idx": 95, "correction": {
+        "from": "Q2", "to": "D3", "reason": non_seat_pin_code(consulting)[1]}}]
+    assert stats["correction_details"][0]["correction"]["reason"].startswith("Consulting")
+    assert non_seat_pin_code(_service("Q2", "Attendee Example Day 2031"))[1].startswith("A meeting the owner attended")

@@ -39,6 +39,7 @@ from unified_pipeline.stage_6_word_template import (
     _TAXONOMY_WARNED_CONFUSIONS,
     BARE_MENTEE_RESOLVE_CHECK,
     D2_LEADERSHIP_REROUTE_CHECK,
+    P_GRANT_REVIEW_REROUTE_CHECK,
     PRECOLLEGIATE_REROUTE_CHECK,
     REROUTE_ACCEPTED_CROSS_FAMILY,
     REROUTE_ACCEPTED_SAME_FAMILY,
@@ -1121,3 +1122,67 @@ def test_a_moved_record_renders_under_clinical_leadership_not_hospital_appointme
                   for table in document.tables for row in table.rows]
     assert not any("Quillmoor" in row for row in table_rows)
     assert sum("Fernhollow" in row for row in table_rows) == 1
+
+
+# --- #1580: a P grant review under a grant-review heading renders under Grant Reviewing ---
+# QQGKXR 679's shape: "<center>, Grant Reviewer, 2021" coded P beside Q3 siblings. Invented values.
+
+def _p_review(text: str, heading: str, idx: int = 679, **fields) -> dict:
+    return {"taxonomy_code": "P", "element_idx_start": idx, "text": text,
+            "hierarchy": ["Professional Activities", heading], "extracted_fields": fields}
+
+
+def _p_review_records(gen: WCMTemplateGenerator) -> list[dict]:
+    return [w for w in gen._section_failures if w["check"] == P_GRANT_REVIEW_REROUTE_CHECK]
+
+
+def test_a_p_grant_review_under_a_grant_review_heading_moves_to_grant_reviewing() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_p_review(
+        "Example Research Center, Grant Reviewer, 2031", "Grant Review Panels",
+        committee_name="Example Research Center", role="Grant Reviewer",
+        institution="Example", start_date="2031", end_date="2031")])
+    [moved] = groups["Q3"]
+    assert "P" not in groups
+    assert (moved["taxonomy_code"], moved["taxonomy_code_original"]) == ("Q3", "P")
+    assert moved["extracted_fields"]["panel_name"] == "Example Research Center"
+    [record] = _p_review_records(gen)
+    assert (record["code"], record["severity"], record["evidence"]) == ("P", "INFO", ["element_idx_start 679"])
+    assert "P->Q3" in record["message"] and "Example" not in json.dumps(record)
+
+
+@pytest.mark.parametrize("entry", [
+    # an internal review under an administrative heading is the owner's institution's service
+    _p_review("Grant Reviewer, Example Pilot Awards, 2031", "Institutional Service",
+              committee_name="Example Pilot Awards", role="Grant Reviewer", start_date="2031"),
+    # a seat on a review committee
+    _p_review("Member, Example Grant Review Committee, 2031", "Grant Review Panels",
+              committee_name="Example Grant Review Committee", role="Member", start_date="2031"),
+    # an institution the committee name does not hold has no cell under Grant Reviewing
+    _p_review("Example Pilot Awards, Grant Reviewer, 2031", "Grant Review Panels",
+              committee_name="Example Pilot Awards", role="Grant Reviewer",
+              institution="Other Example University", start_date="2031"),
+    # reviewing that is not grant reviewing
+    _p_review("Reviewer, Example Abstracts, 2031", "Grant Review Panels",
+              committee_name="Example Abstracts", role="Reviewer", start_date="2031"),
+])
+def test_other_p_rows_under_or_near_grant_review_stay_p(entry: dict) -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    assert "Q3" not in groups and len(groups["P"]) == 1
+    assert _p_review_records(gen) == []
+
+
+def test_a_p_grant_review_with_no_fields_stays_p_without_raising() -> None:
+    entry = {**_p_review("Example Center, Grant Reviewer, 2031", "Grant Review Panels"), "extracted_fields": None}
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    assert "Q3" not in groups and len(groups["P"]) == 1
+
+
+def test_a_grant_review_heading_given_as_a_string_still_routes() -> None:
+    entry = {**_p_review("Example Center, Grant Reviewer, 2031", "Grant Review Panels",
+                         committee_name="Example Center", role="Grant Reviewer", start_date="2031"),
+             "hierarchy": "Grant Review Panels"}
+    gen = WCMTemplateGenerator(verbose=False)
+    assert [e["taxonomy_code"] for e in gen._group_entries_by_code([entry])["Q3"]] == ["Q3"]

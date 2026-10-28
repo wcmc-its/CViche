@@ -19,6 +19,10 @@ this way: Q1's Organization, a Q2 row's Name of Committee (both
 `sections/service.py`) and a P row's Activity/Committee
 (`sections/administrative_activities.py`, #1346), and sections never import
 one another (CODING_STANDARDS.md §1.3).
+
+The same two sections read the Role cell of a row that is not a seat on a
+body off its source line (`names_non_seat_activity`, `own_activity_role`,
+#1580), for the same reason.
 """
 import re
 
@@ -214,3 +218,72 @@ def _line_without_shown_role_and_dates(text: object, role: object, start_date: o
     if line == text.strip(_LINE_EDGE_CHARS) or _YEAR_RE.search(line):
         return text
     return line
+
+
+# --- #1580: the Role cell of a row that is not a committee or board seat ---
+#
+# Stage 3b codes consulting, testimony, volunteering, advocacy, attending,
+# external examining, report review and hosted visits Q2 or P, so each one
+# renders as a committee row. Owner decision on #1580 (2026-10-27): they stay
+# in those tables, and the Role cell carries the role or activity word the
+# source line writes. It is never an invented "Member" or "Committee Member"
+# (TYGUXX 227: an external Ph.D. examiner; ZASOTV 645: an oral-exam
+# participant), and it is blank only when the line states no role.
+#
+# Such a row names the activity on its own line or in a heading above it,
+# and its own line names no body one sits on and no seat or office. A bare
+# "community" names an organization as often as a service ("Community <Name>
+# Network"), so only "community service" and its kin count.
+# "Consultant, <Society> Ethics Committee", "Volunteer board member,
+# <Foundation>" and "Chair, <Meeting>" are seats.
+NON_SEAT_ACTIVITY_RE = re.compile(
+    r'\b(?:consult(?:ant|ants|ancy|ancies|antships?|ing|ed)|expert\s+(?:opinion|witness)'
+    r'|witness(?:es)?|testimon(?:y|ies)|testif(?:y|ied|ies|ying)'
+    r'|volunteer(?:s|ed|ing)?|outreach|advoca(?:cy|tes?|ting)'
+    r'|community\s+(?:and\s+\w+\s+)?(?:service|outreach|engagement|activit(?:y|ies)|involvement)'
+    r'|service\s+to\s+(?:the\s+)?community'
+    r'|attend(?:ed|ee|ees|ance)|examin(?:er|ers|ing|ation|ations)|exams?'
+    r'|host(?:s|ed|ing)?|report\s+reviews?)\b',
+    re.IGNORECASE)
+# A body one sits on, or membership of one: a role naming this claims a seat.
+_SEAT_BODY = (
+    r'(?:sub)?committees?|boards?(?!\s*-?\s*certif)|councils?|commissions?|panels?'
+    r'|task\s*forces?|(?:working|work|advisory|steering|expert|study|writing)\s+groups?'
+    r'|workgroups?|cabinets?|senates?|study\s+sections?|consorti(?:um|a)|coalitions?|alliances?'
+    r'|trustees?|members?|membership')
+# An office, which a line also names when the row is a seat ("Chair, <Meeting>").
+_SEAT_OFFICE = (
+    r'(?:co-?)?chair\w*|president|secretary|treasurer|directors?|officer|(?:co-?)?founder'
+    r'|coordinator|(?:co-?)?organi[sz]er|moderator|convener|editor')
+SEAT_ON_LINE_RE = re.compile(rf'\b(?:{_SEAT_BODY}|{_SEAT_OFFICE})\b', re.IGNORECASE)
+MEMBERSHIP_ROLE_RE = re.compile(rf'\b(?:{_SEAT_BODY})\b', re.IGNORECASE)
+# The owner's role or activity as a line writes it ("External Ph.D. Examiner",
+# "Clinic Volunteer", "Testimony before ...").
+OWN_ACTIVITY_ROLE_RE = re.compile(
+    r'\b(?:(?:expert|external|invited)\s+)?(?:examiners?|reviewers?|volunteers?|hosts?|testimony'
+    r'|witness|ambassadors?|delegates?|panelists?|exhibitors?|consultants?|advocates?|advocacy'
+    r'|participants?|attendees?)\b',
+    re.IGNORECASE)
+
+
+def names_non_seat_activity(text: str, headings: list[str]) -> bool:
+    """Whether a Q2 or P row is an activity, not a seat on a body (#1580):
+    its line or a heading above it names one (`NON_SEAT_ACTIVITY_RE`), and
+    its line names no body and no seat or office (`SEAT_ON_LINE_RE`)."""
+    if SEAT_ON_LINE_RE.search(text):
+        return False
+    return any(NON_SEAT_ACTIVITY_RE.search(part) for part in (text, *headings))
+
+
+def own_activity_role(role: str, text: str) -> str:
+    """The Role cell of a row that is not a seat (#1580): stage 4's `role`
+    unless it claims membership of a body (`MEMBERSHIP_ROLE_RE`), which the
+    line cannot name (it would not be such a row), else the first role or
+    activity word the line writes (`OWN_ACTIVITY_ROLE_RE`), as written, else
+    ''. A role stage 4 put in its own words for the activity ("Consultant"
+    for "Consulting for ...", "Organizer" for "Organized ...") claims no
+    seat and stays."""
+    if role and not MEMBERSHIP_ROLE_RE.search(role):
+        return role
+    match = OWN_ACTIVITY_ROLE_RE.search(text)
+    return match.group() if match else ''

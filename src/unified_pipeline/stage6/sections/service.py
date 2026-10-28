@@ -17,9 +17,13 @@ is the section's actual logic.
 `_fill_service` reroutes before it dispatches: a Q2 entry whose text is really
 journal reviewing is moved to Q4D, and a multi-line Q2 entry mixing both is
 split line by line; a single-line Q2 entry that is an ad hoc grant review is
-moved to Q3 (#1580). Separating the writers into four modules would put the
-dispatcher in one file and the thing it corrects in another, which is the split
-that would have to be undone first to understand either.
+moved to Q3 (#1580). A P grant review under a grant-review heading
+(`is_p_grant_review`) reaches Q3 earlier, when stage 6 groups the entries:
+the P writer is another section's. A Q2 row that is no seat on a body shows
+the role its line writes and keeps its organization in its own cell
+(`_board_row_cells`, #1580). Separating the writers into four modules would
+put the dispatcher in one file and the thing it corrects in another, which is
+the split that would have to be undone first to understand either.
 
 `_add_extramural_row` and `_parse_extramural_leadership_lines` are shared by two
 of the four writers and by nothing outside the section.
@@ -39,6 +43,8 @@ from ..normalization import (
     _line_without_shown_role_and_dates,
     _organization_left_in_text,
     _squash,
+    names_non_seat_activity,
+    own_activity_role,
 )
 from ..parsing import _ORPHAN_DATE, _UNDATED_ACTIVITY, _orphaned_dates_line_up
 from ..parsing.dates import YEAR_LIST, YEAR_OR_OPEN_SPAN, YEAR_OR_SPAN
@@ -272,6 +278,82 @@ def _role_is_another_persons(role: str, text: str) -> bool:
         return True
     return bool(spans) and all(_PERSON_BEFORE_ROLE.search(text[:start]) or _PERSON_AFTER_ROLE.match(text[end:])
                                for start, end in spans)
+
+
+def _is_non_seat_row(entry: dict) -> bool:
+    """Whether a Q2 row is an activity the owner did, not a seat on a body
+    (`names_non_seat_activity`, #1580): consulting, testimony, volunteering,
+    advocacy, attending, examining, report review or a hosted visit."""
+    headings = entry.get('hierarchy') or []
+    if isinstance(headings, str):
+        headings = [headings]
+    return names_non_seat_activity(str(entry.get('text') or ''), [str(heading) for heading in headings])
+
+
+def _board_row_role(entry: dict, non_seat: bool) -> str:
+    """The Role cell of a Service on Boards row: stage 4's role, else the
+    default board role. A row that is not a seat (#1580) shows the role its
+    line writes, else nothing (`own_activity_role`): "Committee Member" for
+    an external examiner, or a "Member" taken from the heading, is a claim
+    the CV does not make."""
+    role = _cell_text((entry.get('extracted_fields') or {}).get('role'))
+    if not non_seat:
+        return role or _default_board_role(entry)
+    if entry.get(_ANOTHER_PERSONS_ROLE_KEY):
+        return ''
+    return own_activity_role(role, str(entry.get('text') or ''))
+
+
+def _board_row_cells(entry: dict) -> tuple[str, str, str, str]:
+    """(Name of Committee, Role, Organization, Dates) of one Service on Boards row.
+
+    A row that is not a seat (`_is_non_seat_row`, #1580) names no committee,
+    so its organization stays in the Organization cell rather than filling
+    Name of Committee (PPMTJH 177, a clinic volunteer)."""
+    fields = entry.get('extracted_fields', {}) or {}
+    taxonomy_code = entry.get('taxonomy_code', 'Q2')
+    non_seat = _is_non_seat_row(entry)
+
+    committee = _board_committee_text(fields)
+    role = _board_row_role(entry, non_seat)
+    organization = _cell_text(fields.get('organization'))
+
+    # When Stage 4 merges committee name into the role field
+    # (e.g., role="Chair, Ultrasound Committee"), split them apart
+    if not committee and ', ' in role:
+        role_parts = role.split(', ', 1)
+        role_word = role_parts[0].strip().lower()
+        # Only split if the first part looks like a role title,
+        # including a qualified or chair-variant title Stage 4
+        # sometimes writes ("Past President", "Chairperson") --
+        # whole-phrase matching only (#624 review).
+        if _is_board_role_title(role_word):
+            role = role_parts[0].strip()
+            committee = role_parts[1].strip()
+
+    # If still no committee, fall back to organization
+    if not committee and not (non_seat and organization):
+        committee = organization
+        organization = ''
+    dates = _service_boards_dates_text(fields, taxonomy_code, entry.get('text', ''))
+
+    # If we don't have structured fields, parse from raw text.
+    # The row already shows its role and dates, so only what the
+    # line holds beyond them is left: a split record's own line
+    # (#1445, EOAHMI DUTAVD 79), and any other entry's text less
+    # the role and dates at its ends, which printed whole beside
+    # them (#1346, YYVITM 353). A non-seat row's Role cell may be a
+    # word of its line (#1580), so that is the role taken out.
+    shown_role = role if non_seat else fields.get('role')
+    if not committee and not organization and is_split_record(entry):
+        committee = _organization_left_in_text(
+            fallback_text(entry), shown_role,
+            fields.get('start_date'), fields.get('end_date'))
+    elif not committee and not organization:
+        committee = _line_without_shown_role_and_dates(
+            entry.get('text', ''), shown_role,
+            fields.get('start_date'), fields.get('end_date'))
+    return committee, role, organization, dates
 
 
 def _without_another_persons_role(entry: dict) -> dict:
@@ -593,6 +675,22 @@ def _is_q2_grant_review(entry: dict) -> bool:
     # No role: a named committee or board is still a seat on it
     # (QZWBKQ 1192, "External Advisory Committee").
     return not _cell_text(fields.get('committee_name') or '')
+
+
+def is_p_grant_review(entry: dict) -> bool:
+    """True when a P row is a grant review that its own heading files with
+    grant reviews (#1580, QQGKXR 679: "<center>, Grant Reviewer, 2021" under
+    "Grant Review Panels", whose other rows render under Grant Reviewing).
+
+    The row must pass the Q2 test (`_is_q2_grant_review`) and its nearest
+    heading must name grant review: a P grant reviewer under an
+    institutional-service heading is the owner's own institution's review,
+    which P is for."""
+    headings = entry.get('hierarchy') or []
+    if isinstance(headings, str):
+        headings = [headings]
+    nearest_heading = str(headings[-1]) if headings else ''
+    return bool(GRANT_REVIEW_HEADING_RE.search(nearest_heading)) and _is_q2_grant_review(entry)
 
 
 def _route_q2_grant_reviews(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -1020,47 +1118,7 @@ class ServiceSection:
             sorted_entries = sort_entries_reverse_chronological(scope_entries)
 
             for entry in sorted_entries:
-                fields = entry.get('extracted_fields', {}) or {}
-                taxonomy_code = entry.get('taxonomy_code', 'Q2')
-
-                committee = _board_committee_text(fields)
-                role = _cell_text(fields.get('role')) or _default_board_role(entry)
-                organization = _cell_text(fields.get('organization'))
-
-                # When Stage 4 merges committee name into the role field
-                # (e.g., role="Chair, Ultrasound Committee"), split them apart
-                if not committee and ', ' in role:
-                    role_parts = role.split(', ', 1)
-                    role_word = role_parts[0].strip().lower()
-                    # Only split if the first part looks like a role title,
-                    # including a qualified or chair-variant title Stage 4
-                    # sometimes writes ("Past President", "Chairperson") --
-                    # whole-phrase matching only (#624 review).
-                    if _is_board_role_title(role_word):
-                        role = role_parts[0].strip()
-                        committee = role_parts[1].strip()
-
-                # If still no committee, fall back to organization
-                if not committee:
-                    committee = organization
-                    organization = ''
-                dates = _service_boards_dates_text(fields, taxonomy_code,
-                                                   entry.get('text', ''))
-
-                # If we don't have structured fields, parse from raw text.
-                # The row already shows its role and dates, so only what the
-                # line holds beyond them is left: a split record's own line
-                # (#1445, EOAHMI DUTAVD 79), and any other entry's text less
-                # the role and dates at its ends, which printed whole beside
-                # them (#1346, YYVITM 353).
-                if not committee and is_split_record(entry):
-                    committee = _organization_left_in_text(
-                        fallback_text(entry), fields.get('role'),
-                        fields.get('start_date'), fields.get('end_date'))
-                elif not committee:
-                    committee = _line_without_shown_role_and_dates(
-                        entry.get('text', ''), fields.get('role'),
-                        fields.get('start_date'), fields.get('end_date'))
+                committee, role, organization, dates = _board_row_cells(entry)
 
                 # Add row to table
                 row = table.add_row()

@@ -89,6 +89,8 @@ from unified_pipeline.stage6.normalization.residue import (  # noqa: E402
     _DATE_SPAN,
     _line_without_shown_role_and_dates,
     _organization_left_in_text,
+    names_non_seat_activity,
+    own_activity_role,
 )
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _join_names,
@@ -1340,6 +1342,67 @@ def test_line_without_shown_role_and_dates(text, role, start, end, expected):
     """#1346: what a P or Q2 row's fallback line holds beyond the role and
     dates at its ends."""
     assert _line_without_shown_role_and_dates(text, role, start, end) == expected
+
+
+@pytest.mark.parametrize("text, headings", [
+    ("Zqclinic\tFront Desk Volunteer 2031", ["Community Service"]),
+    ("2031 Zqsociety advocacy visits, Zqagency", ["Outreach"]),
+    ("2031  Zquniversity, Ph.D. Candidate: A. Zqname", ["External Ph.D. Examiner"]),
+    ("Invited and hosted Dr. A. Zqname at Zqinstitute, 2031", ["Personal Data"]),
+    ("Testimony before the Zqstate legislature, 2031", ["Service"]),
+    ("Zqtrust, 2031", ["Scientific Advisory Boards and Consultantships"]),
+    ("Zqsociety, 2031", ["Service to the Community"]),
+    # one case for each activity, read off a neutral heading or the line alone
+    ("Zqsociety, 2031", ["Community Service"]),
+    ("Zqsociety, 2031", ["Community and Civic Activities"]),
+    ("Zqsociety, 2031", ["Outreach"]),
+    ("Zqsociety, 2031", ["Science Advocacy"]),
+    ("Zqclinic volunteer, 2031", ["Other Activities"]),
+    ("2031 Expert Opinion, Zqfirm", ["Other Activities"]),
+    ("Expert Witness, Zqagency hearings, 2031", ["Other Activities"]),
+    ("2031 Zqsociety annual meeting", ["Meetings Attended"]),
+    ("A. Zqname, PhD, 2031", ["Final Oral Exams"]),
+    ("2031 Zqreport title, Zqacademies", ["Report Review"]),
+    ("Consulting for Zqfirms, 2031", ["Other Activities"]),
+])
+def test_a_row_naming_an_activity_and_no_seat_is_no_seat(text, headings):
+    """#1580: the activity on the line or a heading, and no body or office on the line."""
+    assert names_non_seat_activity(text, headings)
+
+
+@pytest.mark.parametrize("text, headings", [
+    ("Consultant, Zqsociety Ethics Committee", ["Consulting"]),          # a named committee
+    ("Volunteer board member, Zqfoundation", ["Community Service"]),    # a board
+    ("Testimony before the Zqstate Senate Standing Committee", []),      # a committee on the line
+    ("Chair, Zqsociety annual community day", ["Community Service"]),  # an office
+    ("Organizer, Zqsociety outreach day", ["Outreach"]),                # an office
+    ("Volunteer, Zqsociety Working Group", ["Volunteer"]),             # a group one sits on
+    ("Member, Zqcommunity network", ["Community Service"]),            # a member
+    ("Zqsociety Coalition to End Zqdisease, 2031", ["Community Service"]),  # a coalition is a body
+    ("Zqsociety, 2031", ["Professional Service"]),                      # no activity anywhere
+    ("10/2031-  Community Health Network of Zqstate", ["Program Consultation"]),  # a name, not a service
+])
+def test_a_seat_or_a_row_naming_no_activity_is_not(text, headings):
+    assert not names_non_seat_activity(text, headings)
+
+
+@pytest.mark.parametrize("role, text, expected", [
+    # a membership the line does not name goes; the line's own role word, if any, comes in
+    ("Committee Member", "2031  Zquniversity, Ph.D. Candidate: A. Zqname", ""),
+    ("Dissertation Committee Member", "A. Zqname, PhD, 2031, External Examiner", "External Examiner"),
+    ("Member", "Zqtrust, 2031", ""),
+    # no stage-4 role: the line's own word, as written
+    (None, "2031 Zqsociety advocacy visits, Zqagency", "advocacy"),
+    ("", "Zqclinic volunteers, 2031", "volunteers"),
+    # a role in stage 4's own words for the activity claims no seat
+    ("Consultant", "Consulting for several Zqfirms, 2031", "Consultant"),
+    ("Host", "Invited and hosted Dr. A. Zqname, 2031", "Host"),
+    ("Organizer", "Organized the Zqcity centennial symposium, 2031", "Organizer"),
+    ("Committee Member", "Attendee, Zqsociety appreciation day 2031", "Attendee"),
+])
+def test_own_activity_role(role, text, expected):
+    """#1580: the Role cell of a row that is no seat."""
+    assert own_activity_role(role or "", text) == expected
 
 
 # ---------------------------------------------------------------------------

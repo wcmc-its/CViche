@@ -255,6 +255,7 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     ServiceSection,
     TeachingSection,
 )
+from unified_pipeline.stage6.sections.administrative_activities import _name_with_institution
 from unified_pipeline.stage6.sections.appendix import (
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
 )
@@ -284,7 +285,11 @@ from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 from unified_pipeline.stage6.sections.postdoc_training import POSTDOC_TRAINING_HEADING
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
 from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VERBATIM_M1
-from unified_pipeline.stage6.sections.service import EXTRAMURAL_ORGANIZATION_FIELDS
+from unified_pipeline.stage6.sections.service import (
+    EXTRAMURAL_ORGANIZATION_FIELDS,
+    GRANT_REVIEWING_CODE,
+    is_p_grant_review,
+)
 from unified_pipeline.stage6.sorting import (  # noqa: F401
     element_idx_sort_key,
     extract_sort_date,
@@ -1449,6 +1454,56 @@ _D2_TO_L3_FIELDS: Mapping[str, str] = MappingProxyType({
     'title': 'leadership_role', 'department': 'unit_program'})
 
 
+# #1580 (QQGKXR 679): an extramural grant review coded P, under a grant-review
+# heading whose other rows are Q3, rendered as an institutional committee.
+# It renders under Grant Reviewing, as #1613 routes a Q2 one
+# (`service.is_p_grant_review`), its committee_name carried as the Q3
+# panel_name. Only a row whose institution, if any, its committee_name
+# already names moves: the P writer folds the institution into that cell and
+# Grant Reviewing has none for it.
+P_GRANT_REVIEW_SOURCE_CODE = 'P'
+P_GRANT_REVIEW_REROUTE_CHECK = 'p_grant_review_reroute'
+
+
+def _route_p_grant_review(entry: dict[str, Any], code: str, moved: list[object]) -> str:
+    """The code to group *entry* under: Q3 for a P grant review under a
+    grant-review heading (see the comment above), its element_idx_start
+    appended to *moved*; *code* otherwise."""
+    if code != P_GRANT_REVIEW_SOURCE_CODE or not is_p_grant_review(entry):
+        return code
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, dict):
+        return code
+    committee = _committee_cell_text(fields.get('committee_name') or '')
+    institution = _committee_cell_text(fields.get('institution') or '')
+    if institution and _name_with_institution(committee, institution) != committee:
+        return code
+    if committee and not fields.get('panel_name'):
+        fields['panel_name'] = committee
+    entry.setdefault('taxonomy_code_original', code)
+    entry['taxonomy_code'] = GRANT_REVIEWING_CODE
+    moved.append(entry.get('element_idx_start'))
+    return GRANT_REVIEWING_CODE
+
+
+def p_grant_review_reroute_warnings(moved: list[object]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record naming every P grant review moved to
+    Q3 by `_route_p_grant_review`, by element_idx_start only (never CV
+    text); none when nothing moved."""
+    if not moved:
+        return []
+    return [{
+        'check': P_GRANT_REVIEW_REROUTE_CHECK,
+        'code': P_GRANT_REVIEW_SOURCE_CODE,
+        'section': None,
+        'message': (f"grant review under a grant-review heading moved "
+                    f"{P_GRANT_REVIEW_SOURCE_CODE}->{GRANT_REVIEWING_CODE}: "
+                    f"{len(moved)} entr{'y' if len(moved) == 1 else 'ies'}"),
+        'evidence': [f"element_idx_start {idx}" for idx in moved],
+        'severity': 'INFO',
+    }]
+
+
 def _split_record_position(entry: Mapping[str, Any]) -> tuple[int, int] | None:
     """(index, count) of a record fanned out of a multi-record entry, or None."""
     origin = entry.get(FANNED_OUT_FROM) or entry.get(LAST_STAGE4_RECORD)
@@ -2129,6 +2184,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         precollegiate_moved: list[object] = []
         bare_mentees_resolved: list[tuple[object, str]] = []
         leadership_moved: list[tuple[object, tuple[int, int]]] = []
+        grant_reviews_moved: list[object] = []
         self._declined_lists = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
@@ -2141,6 +2197,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
             code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
             code = _route_d2_leadership_title(entry, code, leadership_moved)
+            code = _route_p_grant_review(entry, code, grant_reviews_moved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
@@ -2149,6 +2206,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._section_failures.extend(precollegiate_reroute_warnings(precollegiate_moved))
         self._section_failures.extend(bare_mentee_resolution_warnings(bare_mentees_resolved))
         self._section_failures.extend(d2_leadership_reroute_warnings(leadership_moved))
+        self._section_failures.extend(p_grant_review_reroute_warnings(grant_reviews_moved))
         self._section_failures.extend(outcome_mentee_warnings(annotate_outcome_mentees(coded)))
 
         if self.verbose:

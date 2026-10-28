@@ -36,9 +36,14 @@ that opens, after an optional date, with "Chief Resident(cy)" or "Chief Fellow" 
 A reviewer pin (#1413) recodes an unsure Q4C journal name to Q4D when the
 "Reviewer for the following journals:" line heading its list went to the model
 in an earlier batch.
+`non_seat_pin_code` (#1580) recodes a Q2 or P row that is no seat on a body:
+consulting, a company's advisory board and expert work in litigation are D3,
+and a meeting the owner attended is B2.
 
 Pure functions over one hierarchy group's classified entries and its
-`TaxonomyContext`; no LLM, no I/O. Imports only `.context`.
+`TaxonomyContext`, except `apply_non_seat_pins`, which reads the whole CV's
+entries after T-validation (where some of those rows got their Q2) and needs
+no context; no LLM, no I/O. Imports only `.context`.
 """
 
 import logging
@@ -500,6 +505,130 @@ _HEADING_ROW = re.compile(
     r"\b(?:activities|positions|roles|appointments|services|responsibilities)\W*$", re.I)
 _REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for these journals"
 
+# --- #1580: a Q2 or P row that is no seat on a body ---
+#
+# The prompt's rule 15 sends advisory consulting to Q2 as external service, so
+# consultancies, a company's advisory board and expert work in litigation
+# rendered as Service on Boards rows (UVZNIC 97-103, XNWSZN 1252/1256, AOJEQD
+# 46/49, CKDDEG 646, HBALTD 38) or, coded P, as an institutional committee
+# (WBZIDP 46/47). They are Other Professional Positions (D3). A row is one when:
+# - its line names the owner consulting, and no body one sits on, no seat or
+#   office, it is no citation, and its heading is not a list of talks (Q2 only: a
+#   P "Consultant" row is the owner's own institution's project, EYTHNB 279;
+#   "<Company> Consultant Focus Group" under Invited Presentations is a talk);
+# - its line names an advisory or consulting board and a company, and no
+#   public body, society or school ("<Pharma>, Scientific Advisory Board");
+# - its line names litigation or a law firm, and expert or consulting work;
+# - a heading above it names consulting, and its line names a company and no
+#   public body (EJPAIA 175 under "Scientific Advisory Boards and
+#   Consultantships"). A company named without a company word ("Scientific
+#   Advisory Board, <Startup>", UVZNIC 105) cannot be told from an academic
+#   program's board ("<University Program>, Advisory Board", EJPAIA 181), so it
+#   stays Q2.
+# Testimony stays Q2 whatever else the line says (the owner's decision on #1580,
+# 2026-10-27), and so does "Consultant, <Society> Ethics Committee": a seat.
+_NON_SEAT_SOURCE_CODES = frozenset({"Q2", "P"})
+_BOARD_SERVICE_CODE = "Q2"
+_CONSULTING_CODE = "D3"
+# The owner's own consulting: "<Center> Consultants' Conference" and "<Region>
+# Consultants Collaborative" name a meeting or a body.
+_CONSULTING_WORD = re.compile(r"\bconsult(?:ant|ancy|ancies|antships?|ing|ed)\b(?!['\u2019])", re.I)
+_SEAT_BODY = re.compile(
+    r"\b(?:(?:sub)?committees?|boards?(?![\s-]+certified)|councils?|commissions?|panels?"
+    r"|task\s*forces?|(?:working|advisory|technical|expert|steering)\s*groups?|workgroups?"
+    r"|study\s+sections?|coalitions?|alliances?)\b", re.I)
+_SEAT_OR_OFFICE = re.compile(r"\b(?:members?|(?:co-?)?chair\w*|president|secretary|treasurer)\b", re.I)
+_TALKS_HEADING = re.compile(r"\b(?:presentations?|lectures?|talks?|speeches)\b", re.I)
+# A citation: an author list and a year in parentheses ("Doe, J. (2031) ...").
+_CITATION_YEAR = re.compile(r"\((?:19|20)\d{2}[a-z]?\)")
+_COMPANY = re.compile(
+    r"\b(?:inc|llc|llp|ltd|corp|corporation|company|companies|pharma|pharmaceuticals?|therapeutics"
+    r"|biotech(?:nology)?|biosciences?|biopharma(?:ceuticals?)?|gmbh|plc)\b", re.I)
+_ADVISORY_BOARD = re.compile(r"\b(?:advisory|consulting)\s+(?:board|panel|council|committee)s?\b", re.I)
+_PUBLIC_BODY = re.compile(
+    r"\b(?:national|federal|state|united\s+states|government|ministry|agency|nih|institutes?"
+    r"|society|association|foundation|academy|college|university|school|department|council|commission"
+    r"|hospital|cent(?:er|re)|trust|fund|program(?:me)?|network|alliance|coalition|consortium"
+    r"|blood\s+banks?)\b", re.I)
+_LITIGATION = re.compile(r"\blitigations?\b|\b(?:law|legal)\s+firms?\b", re.I)
+_EXPERT_OR_CONSULTING = re.compile(r"\bexpert\b|\bconsult", re.I)
+_TESTIMONY = re.compile(r"\btestif(?:y|ied|ies|ying|ier)\b|\btestimon(?:y|ies)\b", re.I)
+_CONSULTING_WHY = "Consulting, a company's advisory board or expert work in litigation is a professional position, not a seat on a body"
+#
+# A meeting the owner attended (#1691's rule, B2): under a heading that names
+# attendance ("Scientific Meetings Attended": LTTYWI 1084-1101, coded Q2 by
+# T-validation), or on a line that opens as attendance ("Attendee <Day>",
+# MQLKPQ 109; "Participant, <Meeting>", LWMSPJ 342), when the line names an
+# event, or the attendance heading does (LTTYWI 1095 misspells "Congress"),
+# and no part the owner played in it: a chair, organizer, moderator, speaker,
+# panelist, a seat, a service provided ("Participant, <Day> - provided
+# <a service>", VGHNZD 570), or an author list of two names or more ("<City>
+# DC," is a place, LTTYWI 1099).
+_ATTENDED_CODE = "B2"
+_ATTENDANCE_HEADING = re.compile(r"\b(?:attended|attendance)\b", re.I)
+_ATTENDANCE_LEAD = re.compile(
+    r"^\W*(?:(?:19|20)\d{2}(?:\s*[-\u2013\u2014]\s*(?:(?:19|20)?\d{2}|present))?\W*)?"
+    r"(?:attended|attendee|participant|participated\s+in)\b", re.I)
+_EVENT = re.compile(
+    r"\b(?:meetings?|conferences?|congress(?:es)?|symposi(?:um|a|ums)|workshops?|courses?|summits?"
+    r"|forums?|seminars?|webinars?|conventions?|day)\b", re.I)
+_OWNERS_PART = re.compile(
+    r"\b(?:(?:co-?)?chair\w*|organi[sz]\w*|moderat\w*|speaker|keynote|present(?:ed|er|ing|ation)"
+    r"|lectur\w*|faculty|instructor|facilitat\w*|panelist|discussant|judge|host\w*|delegate"
+    r"|representative|members?|committees?|boards?|director|provid(?:ed|ing)|volunteer\w*|served|taught)\b",
+    re.I)
+_ATTENDED_WHY = "A meeting the owner attended is an educational experience, not service"
+_MIN_AUTHOR_NAMES = 2
+_ET_AL = re.compile(r"\bet\s+al\b", re.I)
+
+
+def _is_consulting(code: str, text: str, levels: list[str]) -> bool:
+    """A consultancy, a company's advisory board, or expert work in litigation (#1580)."""
+    if _TESTIMONY.search(text):
+        return False
+    company = bool(_COMPANY.search(text)) and not _PUBLIC_BODY.search(text)
+    if (_CONSULTING_WORD.search(text) and not _SEAT_BODY.search(text) and not _SEAT_OR_OFFICE.search(text)
+            and not (_has_author_list(text) and _CITATION_YEAR.search(text))
+            and not (levels and _TALKS_HEADING.search(levels[-1]))):
+        return code == _BOARD_SERVICE_CODE or company
+    if _ADVISORY_BOARD.search(text) and company:
+        return True
+    if _LITIGATION.search(text) and _EXPERT_OR_CONSULTING.search(text):
+        return True
+    return company and any(_CONSULTING_WORD.search(level) for level in levels)
+
+
+def _is_attended_meeting(text: str, levels: list[str]) -> bool:
+    """A meeting or event the owner attended, playing no part in it (#1580, #1691)."""
+    headings = [level for level in levels if _ATTENDANCE_HEADING.search(level)]
+    attended = _ATTENDANCE_LEAD.match(text) or headings
+    event = _EVENT.search(text) or any(_EVENT.search(level) for level in headings)
+    return (bool(attended) and bool(event)
+            and not _OWNERS_PART.search(text) and not _names_authors(text))
+
+
+def _names_authors(text: str) -> bool:
+    """An author list of two names or more, or "et al" (one name-and-initials
+    is as often a place: "<City> DC,")."""
+    names = _AUTHOR_LIST.findall(_PLACE_INITIALS.sub("", text))
+    return len(names) >= _MIN_AUTHOR_NAMES or bool(_ET_AL.search(text))
+
+
+def non_seat_pin_code(entry: dict) -> tuple[str, str] | None:
+    """(code, why) for a Q2 or P row that is no seat on a body, else None (#1580):
+    consulting, a company's advisory board or expert work in litigation is D3
+    (`_is_consulting`), a meeting attended is B2 (`_is_attended_meeting`)."""
+    code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
+    if code not in _NON_SEAT_SOURCE_CODES:
+        return None
+    levels = [str(level) for level in entry.get("hierarchy") or []]
+    if _is_consulting(code, text, levels):
+        return _CONSULTING_CODE, _CONSULTING_WHY
+    if _is_attended_meeting(text, levels):
+        return _ATTENDED_CODE, _ATTENDED_WHY
+    return None
+
+
 # A line that only points elsewhere ("<label> - see section N") or is only a
 # URL is a note, not a record: a T it was given must survive T-validation.
 _POINTER = re.compile(r"\(?\bsee\s+(?:sections?|items?|pages?|above|below|publications?)\b[^)]*\)?", re.I)
@@ -908,6 +1037,26 @@ def _recode(entry: dict, code: str, why: str) -> dict:
             f"reading the entry alone had suggested {entry['taxonomy_code']}."
         ),
     }
+
+
+def apply_non_seat_pins(entries: Iterable[dict]) -> tuple[list[dict], dict]:
+    """Recode every Q2 or P row of the CV that `non_seat_pin_code` pins.
+
+    Runs over the whole CV after T-validation, not per group: T-validation is
+    where some of these rows got their Q2 (LTTYWI's meetings). A recoded entry
+    keeps the model's answer in `pre_pin_code`, as with the other pins.
+    Returns (entries, stats) in the post-correction stats shape."""
+    out, details = [], []
+    for entry in entries:
+        pinned = non_seat_pin_code(entry)
+        if pinned:
+            details.append({"element_idx": entry.get("element_idx_start"),
+                            "correction": {"from": entry["taxonomy_code"], "to": pinned[0], "reason": pinned[1]}})
+            entry = _recode(entry, *pinned)
+        out.append(entry)
+    if details:
+        logger.info("Stage 3b non-seat pin: %d entr%s recoded", len(details), "y" if len(details) == 1 else "ies")
+    return out, {"corrections_applied": len(details), "correction_details": details}
 
 
 def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
