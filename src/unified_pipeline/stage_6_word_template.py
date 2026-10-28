@@ -4690,6 +4690,8 @@ Now analyze the text above:"""
         skip_narrative_comment = taxonomy_code in ('M2A', 'M2B', 'M2C')
 
         narrative = fields.get('narrative', '')
+        if isinstance(narrative, list):  # an older stage-4 shape; it crashed the Appendix (#2028)
+            narrative = ' '.join(map(str, narrative))
         if narrative and len(narrative.strip()) > 10 and not skip_narrative_comment:
             # Truncate very long narratives for readability
             if len(narrative) > 500:
