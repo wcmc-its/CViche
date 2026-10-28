@@ -530,9 +530,10 @@ _REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for thes
 #   ("Scientific Advisory Board, <Startup>", UVZNIC 105) cannot be told from an
 #   academic program's board ("<University Program>, Advisory Board", EJPAIA
 #   181), so it stays Q2.
-# Testimony stays Q2 whatever else the line says (the owner's decision on #1580,
-# 2026-10-27), and so does "Consultant, <Society> Ethics Committee": a seat, as
-# is "Consulting Editor, <Journal>".
+# Testimony and the other activities of the owner's decision on #1580
+# (2026-10-27) stay Q2 or P whatever else the line says (`_STAY_ACTIVITY`), and
+# so does "Consultant, <Society> Ethics Committee": a seat, as is "Consulting
+# Editor, <Journal>".
 _NON_SEAT_SOURCE_CODES = frozenset({"Q2", "P"})
 _BOARD_SERVICE_CODE = "Q2"
 _CONSULTING_CODE = "D3"
@@ -568,6 +569,31 @@ _PUBLIC_BODY = re.compile(
 _LITIGATION = re.compile(r"\blitigations?\b|\b(?:law|legal)\s+firms?\b", re.I)
 _EXPERT_OR_CONSULTING = re.compile(r"\bexpert\b|\bconsult", re.I)
 _TESTIMONY = re.compile(r"\btestif(?:y|ied|ies|ying|ier)\b|\btestimon(?:y|ies)\b", re.I)
+# The owner's decision on #1580 (2026-10-27) keeps in the committee tables,
+# with testimony, external examining, the review of a report, a promotion or
+# tenure case, a department or a program, hosting a visit, community service,
+# advocacy and volunteering, though a line writes them with a consulting word
+# ("Promotions Consultant, Department of <Science>, <University>", JJYBKP 281;
+# "Consultant/reviewer for <Agency> on <a report>", web204 386; "<Event>
+# consultant and reviewer", web198 420) or as attendance. A line naming one is
+# never pinned. Stage 6's `NON_SEAT_ACTIVITY_RE` names the same activities for
+# the Role cell; stage 3b keeps its own list, since it imports only `.context`.
+# Reviews and examiners the decision does not name keep their routes
+# (`_OTHER_REVIEW`): grant and manuscript review have their own routers, expert
+# review in litigation is the issue's D3, a protocol or case review is
+# consulting work ("<Name> Centers, Inc. | Review of research protocols",
+# web244 797.2), and a medical examiner is an office. "Health promotion" is no
+# promotion case.
+_STAY_ACTIVITY = re.compile(
+    r"\b(?:examiners?|external\s+examin(?:ing|ation)|reviewers?|report\s+reviews?"
+    r"|(?<!health\s)(?:promotions?|tenure)\s+(?:consult\w*|review\w*|referee\w*|cases?)"
+    r"|reviews?\s+(?:of|for)\s+(?:\S+\s+){0,4}?"
+    r"(?:promotions?|tenure|candidates?|departments?|programs?|cent(?:er|re)s?|institutes?|reports?)"
+    r"|hosted|hosting|hosts?\s+(?:of|for|to)|community\s+service|service\s+to\s+(?:the\s+)?community"
+    r"|advoca(?:cy|tes?|ted|ting)|volunteer(?:s|ed|ing)?)\b", re.I)
+_OTHER_REVIEW = re.compile(
+    r"\b(?:grant|manuscript|journal|article|paper|abstract|proposal|application|ad\s+hoc|peer|expert"
+    r"|protocol|case|medical)\s+(?:reviews?|reviewers?|examiners?)\b", re.I)
 _CONSULTING_WHY = "Consulting, a company's advisory board or expert work in litigation is a professional position, not a seat on a body"
 #
 # A meeting the owner attended (#1691's rule, B2): under a nearest heading
@@ -584,7 +610,8 @@ _CONSULTING_WHY = "Consulting, a company's advisory board or expert work in liti
 # nothing about the leaf's rows. A line that opens as attendance at advocacy
 # or a day of service ("Participant, <Society> Hill Day") is advocacy or
 # community service, which stays Q2 (the owner's decision on #1580); under an
-# attendance heading the CV itself calls it attended.
+# attendance heading the CV itself calls it attended, unless the line names
+# advocacy or community service itself (`_STAY_ACTIVITY`).
 _ATTENDED_CODE = "B2"
 _ATTENDANCE_HEADING = re.compile(r"\b(?:attended|attendance)\b", re.I)
 _ATTENDANCE_LEAD = re.compile(
@@ -609,8 +636,6 @@ _ET_AL = re.compile(r"\bet\s+al\b", re.I)
 
 def _is_consulting(code: str, text: str, levels: list[str]) -> bool:
     """A consultancy, a company's advisory board, or expert work in litigation (#1580)."""
-    if _TESTIMONY.search(text):
-        return False
     company = bool(_COMPANY.search(text)) and not _PUBLIC_BODY.search(text)
     leaf = levels[-1] if levels else ""
     if (_CONSULTING_WORD.search(text) and not _SEAT_BODY.search(text) and not _SEAT_OR_OFFICE.search(text)
@@ -646,12 +671,20 @@ def _names_authors(text: str) -> bool:
     return len(names) >= _MIN_AUTHOR_NAMES or bool(_ET_AL.search(text))
 
 
+def _names_stay_activity(text: str) -> bool:
+    """Whether a line names testimony or another activity the owner's decision
+    on #1580 keeps in the committee tables (`_STAY_ACTIVITY`)."""
+    return bool(_TESTIMONY.search(text) or _STAY_ACTIVITY.search(_OTHER_REVIEW.sub(" ", text)))
+
+
 def non_seat_pin_code(entry: dict) -> tuple[str, str] | None:
     """(code, why) for a Q2 or P row that is no seat on a body, else None (#1580):
     consulting, a company's advisory board or expert work in litigation is D3
-    (`_is_consulting`), a meeting attended is B2 (`_is_attended_meeting`)."""
+    (`_is_consulting`), a meeting attended is B2 (`_is_attended_meeting`). A
+    line naming an activity the owner's decision keeps in the committee tables
+    is never pinned (`_names_stay_activity`)."""
     code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
-    if code not in _NON_SEAT_SOURCE_CODES:
+    if code not in _NON_SEAT_SOURCE_CODES or _names_stay_activity(text):
         return None
     levels = [str(level) for level in entry.get("hierarchy") or []]
     if _is_consulting(code, text, levels):
