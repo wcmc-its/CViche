@@ -8113,8 +8113,8 @@ def test_junk_or_header_row_does_not_read_a_heading_stage_6_moved_into_its_rows(
     the rows under it, so a short row now holding its name is a record, not the
     header's row. Without the sidecar's record the lint reads it as one."""
     entries = [_junk4("Example Widget Society", "Q2", 172, organization="Example Widget Society"),
-               _junk4("Judicial Panels, 2011-2013", "P", 174, committee_name="Judicial Panels")]
-    rows = [[["Judicial Panels, Example Widget Society", "", "2011-2013"]]]
+               _junk4("Fernhollow Panels, 2011-2013", "P", 174, committee_name="Fernhollow Panels")]
+    rows = [[["Fernhollow Panels, Example Widget Society", "", "2011-2013"]]]
     assert _junk_hits(entries, rows) == [("WARN", "entry 172 (Q2)", "header_only")]
     assert lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(172, [174])) == []
     another = lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(99, [174]))
@@ -8160,8 +8160,8 @@ def test_junk_or_header_row_still_reads_a_heading_stage_6_kept_as_its_own_row():
     so it is read as before; only a consumed heading renders no row. The
     record is read by element index, whatever the code."""
     entries = [_junk4("Example Widget Society", "Q2", 172, organization="Example Widget Society"),
-               _junk4("Judicial Panels, 2011-2013", "P", 174, committee_name="Judicial Panels")]
-    rows = [[["Example Widget Society", "", ""]], [["Judicial Panels, Example Widget Society", "", "2011-2013"]]]
+               _junk4("Fernhollow Panels, 2011-2013", "P", 174, committee_name="Fernhollow Panels")]
+    rows = [[["Example Widget Society", "", ""]], [["Fernhollow Panels, Example Widget Society", "", "2011-2013"]]]
     assert _junk_hits(entries, rows) == [("WARN", "entry 172 (Q2)", "header_only")]
     kept = lint_junk_or_header_row({"entries": entries}, rows, [], _kept_heading_report(172, [174]))
     assert [f["message"].split(":")[0] for f in kept] == ["entry 172 (Q2)"]
@@ -8221,7 +8221,7 @@ def test_run_doctor_hands_the_render_warnings_to_junk_and_date_lints(tmp_path):
     for cell, value in zip(output.tables[-1].rows[0].cells,
                            ("Experiential Section", "Member", society, "2019-Present"), strict=True):
         cell.text = value
-    output.add_paragraph(f"Judicial Panels, {society}")
+    output.add_paragraph(f"Fernhollow Panels, {society}")
     output.save(str(docx_path))
 
     def hits(warnings: list[dict]) -> list[tuple[str, str]]:

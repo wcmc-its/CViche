@@ -188,8 +188,8 @@ _STOPWORDS = frozenset({'a', 'an', 'and', 'at', 'for', 'in', 'of', 'the'})
 #: one. A heading made only of these ("University", "Medical Center", "School of
 #: Medicine", "Board of Directors") names no institution a reader could place:
 #: it is a sub-group label under one the CV named earlier (CXRYCF 86/93 under
-#: "University/Medical Center Committees", HVLDGS 2302 over a society's task
-#: forces), so it is not a heading here. Census of #985 (2026-10-28).
+#: a level naming two such kinds, HVLDGS 2302 over a society's task forces),
+#: so it is not a heading here. Census of #985 (2026-10-28).
 _GENERIC_NAME_WORDS = frozenset({
     'university', 'college', 'school', 'medical', 'medicine', 'center', 'centre', 'hospital',
     'department', 'division', 'institute', 'faculty', 'program', 'programs', 'office', 'section',
@@ -314,8 +314,8 @@ def _unextracted_name(entry: Mapping[str, Any], code: str) -> str | None:
 
 
 def _words_match(word: str, other: str) -> bool:
-    """Whether two words are the same, or one is the other's initial ("M" in
-    "U of M" for "Minnesota")."""
+    """Whether two words are the same, or one is the other's initial ("E" in
+    "U of E" for "Exampleton")."""
     return word == other or (len(word) == 1 and other.startswith(word)) or (len(other) == 1 and word.startswith(other))
 
 
@@ -338,7 +338,7 @@ def _same_institution(own: str, name: str) -> bool:
 def _is_unit_of(own: str, name: str) -> bool:
     """Whether a row's own institution is the heading's or a unit of it: the
     same institution (`_same_institution`), or a name of only a kind of unit
-    ("Medical School" under a university, WZSMUO 345/346), which names no
+    ("School of Nursing" under a university; WZSMUO 345/346), which names no
     other institution a reader could place. A placeholder with no word ("-")
     is neither."""
     return _same_institution(own, name) or (bool(_content_words(own)) and not _names_a_particular_one(own))
@@ -358,9 +358,9 @@ def _own_name(entry: Mapping[str, Any], code: str) -> str:
 def _in_scope(heading: Mapping[str, Any], entry: Mapping[str, Any], name: str) -> bool:
     """Whether `entry` sits under the heading's hierarchy leaf: the same path,
     or one below it whose every deeper level names no particular institution
-    or names the heading's (WZSMUO 331's "U of M Programs" / "U of M
-    Committees" under "U of Minnesota"). A level named after another
-    institution is that institution's block."""
+    or names the heading's (WZSMUO 331, whose two sub-levels name its
+    university by initials). A level named after another institution is that
+    institution's block."""
     path = list(heading.get('hierarchy') or [])
     entry_path = list(entry.get('hierarchy') or [])
     return entry_path[:len(path)] == path and all(
@@ -387,7 +387,7 @@ def _is_bare_name_line(entry: Mapping[str, Any]) -> bool:
     period that also keeps it from being weakly heading-shaped), and the rows
     under it are that institution's (#1365 R1: a run stops at the next
     organization line). An undated committee row with a comma is a row of the
-    run ("<name> Advisory Group, <topic>", FLYBMX 303)."""
+    run (FLYBMX 303)."""
     name = _heading_text(entry)
     return (name is not None and _names_a_particular_one(name) and not _MEMBERSHIP_BODY_RE.search(name)
             and not any(key in _ROLE_FIELDS or _is_date_key(key) for key in _held_fields(entry)))

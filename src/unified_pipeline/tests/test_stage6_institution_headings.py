@@ -88,10 +88,10 @@ def test_a_society_line_fills_the_organization_of_its_offices_and_memberships() 
 def test_a_mentee_list_institution_line_fills_the_mentee_institution() -> None:
     hierarchy = ('Graduate Student Mentorship', 'Thesis Advisor')
     heading = _entry('N3B', 'Example University', 30, hierarchy, site_position='Example University')
-    past = _entry('N3B', 'A. Student, Neuroscience Program, Ph.D. 2002', 31, hierarchy,
-                  mentee_name='A. Student', site_position='Neuroscience Program')
-    current = _entry('N3A', 'B. Student, Neuroscience Program', 32, hierarchy,
-                     mentee_name='B. Student', site_position='Neuroscience Program')
+    past = _entry('N3B', 'A. Student, Invented Science Program, Ph.D. 2002', 31, hierarchy,
+                  mentee_name='A. Student', site_position='Invented Science Program')
+    current = _entry('N3A', 'B. Student, Invented Science Program', 32, hierarchy,
+                     mentee_name='B. Student', site_position='Invented Science Program')
     groups, _ = _consume(heading, past, current)
     assert _filled(past, 'institution') == _filled(current, 'institution') == 'Example University'
     assert groups['N3B'] == [past]
@@ -131,7 +131,7 @@ def test_an_unextracted_name_line_is_a_heading_when_a_row_under_it_names_it() ->
 def test_a_row_naming_the_heading_institution_or_a_unit_of_it_keeps_it_and_the_run_goes_on() -> None:
     heading = _entry('Q2', 'Exampleton', 70, organization='Exampleton')
     unit = _committee('Exampleton Cancer Center search committee', 72, institution='Exampleton Cancer Center')
-    rows = [_committee('Judicial Panels', 71), unit, _committee('Focus Group', 73)]
+    rows = [_committee('Fernhollow Panels', 71), unit, _committee('Brindle Group', 73)]
     _consume(heading, *rows)
     assert [_filled(row, 'institution') for row in rows] == ['Exampleton', 'Exampleton Cancer Center', 'Exampleton']
     society = _entry('I', 'Example Society of Imaginary Medicine (ESIM)', 80,
@@ -187,7 +187,7 @@ def test_fanned_out_records_of_one_element_are_one_run() -> None:
     child, all on the entry's element; a row may also span several elements."""
     heading = _entry('I', 'Example Section of Imaginary Research', 930,
                      organization='Example Section of Imaginary Research')
-    rows = [_office('Session co-chairman', 931), _office('Abstract reviewer', 931),
+    rows = [_office('Session co-chair', 931), _office('Poster judge', 931),
             {**_office('Vice-President', 932), 'element_idx_end': 934}, _office('President', 935)]
     _consume(heading, *rows)
     assert [_filled(row, 'organization') for row in rows] == [heading['text']] * 4
@@ -207,7 +207,7 @@ def test_rows_of_one_element_on_a_sub_level_set_no_negative_spacing() -> None:
 def test_a_mentee_list_run_ends_at_a_committee_row() -> None:
     hierarchy = ('Mentoring',)
     heading = _entry('N3B', 'Example University', 30, hierarchy, site_position='Example University')
-    mentees = [_entry('N3B', f'Student {n}, Neuroscience Program', 31 + n, hierarchy, mentee_name=f'Student {n}')
+    mentees = [_entry('N3B', f'Student {n}, Invented Science Program', 31 + n, hierarchy, mentee_name=f'Student {n}')
                for n in range(2)]
     after = [_at(_committee('Admissions Committee', 33), hierarchy), _at(_committee('Search Committee', 34), hierarchy)]
     _consume(heading, *mentees, *after)
@@ -405,7 +405,7 @@ def test_a_row_naming_another_institution_ends_the_run() -> None:
 
 
 @pytest.mark.parametrize('ender', [
-    _entry('Q2', 'Council on Professional Affairs', 63, committee_name='Council on Professional Affairs'),
+    _entry('Q2', 'Council on Invented Affairs', 63, committee_name='Council on Invented Affairs'),
     _entry('T', 'Meeting Location', 63, description='Meeting Location'),
     _committee('Hospital Committee', 63),
     _entry('Q2', 'A row stage 4 extracted nothing from', 63),
@@ -441,7 +441,7 @@ def test_a_unit_heading_under_a_heading_starts_its_own_run() -> None:
     first = _entry('Q2', 'Exampleton', 60, organization='Exampleton')
     unit = _entry('P', 'Exampleton Cancer Center, Main Campus', 63,
                   institution='Exampleton Cancer Center, Main Campus')
-    rows = [_committee('Judicial panels', 61), _committee('Focus group', 62)]
+    rows = [_committee('Fernhollow panels', 61), _committee('Brindle group', 62)]
     after = [_committee('Search committee', 64), _committee('Program committee', 65)]
     _, warnings = _consume(first, *rows, unit, *after)
     assert [_filled(row, 'institution') for row in (*rows, *after)] == ['Exampleton'] * 2 + [unit['text']] * 2
@@ -467,9 +467,9 @@ def test_an_unextracted_name_line_no_row_names_is_left_alone() -> None:
 
 def test_a_cell_of_its_own_row_is_not_a_heading() -> None:
     """HVLDGS 1878: stage 2 split a table row's first cell off as an entry."""
-    _unchanged(_entry('Q2', 'Celebrate Example Science', 10, organization='Celebrate Example Science'),
-               _committee('Celebrate Example Science\tDepartment Contact', 10),
-               _committee('Department Contact and Organizer', 11))
+    _unchanged(_entry('Q2', 'Example Science Fair', 10, organization='Example Science Fair'),
+               _committee('Example Science Fair\tFair Contact', 10),
+               _committee('Fair Contact and Organizer', 11))
 
 
 def test_a_heading_with_more_than_its_name_is_not_a_heading() -> None:
@@ -543,7 +543,7 @@ def _member(el: int, kind: str = 'Member', **fields) -> dict:
 # with a heading of the same family and the two plain rows that make it a run.
 _FALLBACK_ROWS = {
     'O': (_entry('P', 'Example University', 10, institution='Example University'),
-          _entry('O', 'Fernhollow Program Lead 2004-2006', 12, start_date='2004', end_date='2006'),
+          _entry('O', 'Fernhollow Program Head 2004-2006', 12, start_date='2004', end_date='2006'),
           [_entry('O', f'Director, {name} Program, 2001-2003', el, leadership_role=f'Director, {name} Program',
                   start_date='2001', end_date='2003') for el, name in ((11, 'Example'), (13, 'Invented'))]),
     'Q2': (_society(), _entry('Q2', 'Member, Fernhollow Steering Group, 2010-2012', 12, role='Member',
@@ -606,7 +606,7 @@ def test_a_row_naming_its_own_organization_under_any_field_keeps_it_and_ends_the
     _entry('O', 'Director, Fernhollow, 2001\nDirector, Brindle, 2002\nDirector, Ostrava, 2003', 11,
            leadership_role='Director', start_date='2001'),
     # a role-only row: P has no committee name to append the institution to
-    _entry('P', 'Health and Safety Coordinator, 1999-2003', 11, role='Health and Safety Coordinator',
+    _entry('P', 'Quality Coordinator, 1999-2003', 11, role='Quality Coordinator',
            start_date='1999', end_date='2003'),
 ])
 def test_a_heading_over_rows_that_print_no_entry_level_institution_is_left_alone(row: dict) -> None:
@@ -635,7 +635,7 @@ def test_rows_on_a_sub_level_named_after_another_institution_are_not_its_rows(ow
 
 
 def test_a_sub_level_named_by_the_headings_initials_is_its_own() -> None:
-    """WZSMUO 331: "U of M Committees" under "U of Minnesota"."""
+    """WZSMUO 331: its sub-levels name the heading's university by initials."""
     heading = _entry('P', 'U of Exampleton', 50, ('Administrative Duties',), institution='U of Exampleton')
     level = ('Administrative Duties', 'U of E Committees')
     rows = [_at(_committee('Search Committee', 52), level), _at(_committee('Planning Committee', 53), level)]
@@ -660,20 +660,20 @@ def test_an_undated_name_line_stage_4_filed_as_a_committee_ends_the_run(sibling:
 def test_an_undated_row_with_a_role_is_still_a_row_of_the_run() -> None:
     heading = _entry('P', 'Example University', 10, institution='Example University')
     rows = [_committee('Admissions Committee', 11),
-            _entry('P', 'Member, Curriculum Committee', 12, role='Member', committee_name='Curriculum Committee'),
+            _entry('P', 'Member, Brindle Committee', 12, role='Member', committee_name='Brindle Committee'),
             _committee('Search Committee', 13)]
     _consume(heading, *rows)
     assert [_filled(row, 'institution') for row in rows] == ['Example University'] * 3
 
 
 def test_a_row_naming_only_a_kind_of_unit_keeps_it_and_the_run_goes_on() -> None:
-    """WZSMUO 345/346: "Medical School, <committee>" under a university names
+    """WZSMUO 345/346: a row naming only a kind of unit under a university names
     a unit of it, not another institution."""
     heading = _entry('P', 'Example University', 10, institution='Example University')
-    rows = [_committee('Search Committee', 11), _committee('Education Committee', 12, institution='Medical School'),
+    rows = [_committee('Search Committee', 11), _committee('Education Committee', 12, institution='School of Nursing'),
             _committee('Planning Committee', 13)]
     _consume(heading, *rows)
-    assert [_filled(row, 'institution') for row in rows] == ['Example University', 'Medical School',
+    assert [_filled(row, 'institution') for row in rows] == ['Example University', 'School of Nursing',
                                                              'Example University']
 
 
@@ -704,8 +704,8 @@ def test_rows_that_already_print_the_name_count_and_are_not_filled() -> None:
     mentee's Site/Position."""
     hierarchy = ('Graduate Student Mentorship', 'Thesis Advisor')
     heading = _entry('N3B', 'Example University', 30, hierarchy, site_position='Example University')
-    rows = [_entry('N3B', f'{name}, Neuroscience Program, Ph.D. 2002', el, hierarchy, mentee_name=name,
-                   site_position='Neuroscience Program, Example University', end_date='2002')
+    rows = [_entry('N3B', f'{name}, Invented Science Program, Ph.D. 2002', el, hierarchy, mentee_name=name,
+                   site_position='Invented Science Program, Example University', end_date='2002')
             for el, name in ((31, 'A. Student'), (32, 'B. Student'))]
     groups, warnings = _consume(heading, *rows)
     assert [_filled(row, 'institution') for row in rows] == [None, None]
@@ -743,8 +743,8 @@ _PLAIN_ROWS = {
                    _committee('Audit Committee', 13, code='Q2', end_date='2003')],
     'I': lambda: [_member(11), _entry('I', 'Fellow, 2010-2015', 13, membership_type='Fellow', start_date='2010',
                                       end_date='2015')],
-    'N3B': lambda: [_entry('N3B', f'{name}, Neuroscience Program, Ph.D. 2002', el, mentee_name=name,
-                           site_position='Neuroscience Program', end_date='2002')
+    'N3B': lambda: [_entry('N3B', f'{name}, Invented Science Program, Ph.D. 2002', el, mentee_name=name,
+                           site_position='Invented Science Program', end_date='2002')
                     for el, name in ((11, 'A. Student'), (13, 'B. Student'))],
 }
 
@@ -822,8 +822,8 @@ def test_an_undated_line_naming_only_kinds_of_unit_is_a_row_of_the_run() -> None
     group's name line (`_is_bare_name_line`)."""
     heading = _entry('P', 'Example University', 10, institution='Example University')
     rows = [_committee('Search Committee', 11),
-            _entry('P', 'Department of Medicine, School of Medicine', 12,
-                   committee_name='Department of Medicine, School of Medicine'),
+            _entry('P', 'Department of Nursing, Medical Center', 12,
+                   committee_name='Department of Nursing, Medical Center'),
             _committee('Planning Committee', 13)]
     _consume(heading, *rows)
     assert [_filled(row, 'institution') for row in rows] == ['Example University'] * 3
