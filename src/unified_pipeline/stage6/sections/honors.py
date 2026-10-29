@@ -317,7 +317,7 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     3-column row with its own organization AND date (via `_honor_columns`) --
     see that function for the full guard. Reading the farm's changed uids proved the
     general UNCHANGED rule matters:
-    2054_Opresko_Cv's "1994 | American Chemical Society Award,\\nLehigh Valley
+    farm 2054's "1994 | American Chemical Society Award,\\nLehigh Valley
     Chapter of ACS" already has 2 lines by newline alone, and additionally
     splitting line 0's '|' collides with the existing (separate, pre-existing)
     "DATE | AWARD" mislabeling in `_parse_honor_lines`, adding a spurious
@@ -330,11 +330,11 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     newline-blind H entries carry a tab, and reading them shows why: 038WKA's
     "Award Name\\tDate\\tDescription" is one award with three tab-separated
     fields, correctly rejoined today by the per-part loop's "does the last
-    tab part look like a year" check; 2082_Dr_Scot's is a mid-sentence
+    tab part look like a year" check; farm 2082's is a mid-sentence
     line-wrap artifact ("...NISOD) Award for\\tTeaching Excellence.
     Valencia..." ) that pre-splitting tears in half, verified to produce three
     garbled rows instead of the one correct one `award_name` already
-    carries. And 2068_Yount_Cv's single blind entry has BOTH a tab and a '|'
+    carries. And farm 2068's single blind entry has BOTH a tab and a '|'
     ("2022\\tWorld's Best ... Ranking | Research.com"): splitting on '|' first
     hands the tab-rejoin branch a part with no leading year to isolate,
     which is what makes it emit a spurious "Research.com" row instead of

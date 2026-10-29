@@ -6,7 +6,7 @@
 
 --uids-file reads one uid per line instead of positional args: this corpus's
 uids are derived from real filenames and routinely contain spaces and
-parentheses ("038WKA_Jonathan Nahmias CV (Updated 1-26-26)"), which shell
+parentheses ("038WKA_Jane Doe CV (Updated 1-26-26)"), which shell
 word-splitting on a $(...) uid list silently mangles into unmatched
 fragments -- the run then just renders fewer uids than asked, with no error.
 

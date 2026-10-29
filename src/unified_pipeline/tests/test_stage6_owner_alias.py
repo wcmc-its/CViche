@@ -39,16 +39,16 @@ def test_name_parts(name, parts):
 
 @pytest.mark.parametrize("citation, expected", [
     # Initials, markers and the leading citation number are dropped.
-    ("12. Wende ME*, Smith J" + _TAIL, [("Wende", "M"), ("Smith", "J")]),
+    ("12. Testa ME*, Smith J" + _TAIL, [("Testa", "M"), ("Smith", "J")]),
     # Comma form: the initials token belongs to the surname before it.
-    ("Wende, M. E., Smith, J. A. Title of a paper. J Things. 2020.",
-     [("Wende", "M"), ("Smith", "J")]),
+    ("Testa, M. E., Smith, J. A. Title of a paper. J Things. 2020.",
+     [("Testa", "M"), ("Smith", "J")]),
     # Unless that author already has initials: a stray one after it is dropped.
-    ("Wende ME, J., Smith JA" + _TAIL, [("Wende", "M"), ("Smith", "J")]),
+    ("Testa ME, J., Smith JA" + _TAIL, [("Testa", "M"), ("Smith", "J")]),
     # Given-name-first forms.
-    ("Michael E. Wendee, John Smith. Cancer genomics in mice. Nature. 2020.",
-     [("Wendee", "M"), ("Smith", "J")]),
-    ("M. E. Wende, J. Smith" + _TAIL, [("Wende", "M"), ("Smith", "J")]),
+    ("Michael E. Testae, John Smith. Cancer genomics in mice. Nature. 2020.",
+     [("Testae", "M"), ("Smith", "J")]),
+    ("M. E. Testa, J. Smith" + _TAIL, [("Testa", "M"), ("Smith", "J")]),
     ("Ana Garza Ruiz, John Doe" + _TAIL, [("Garza Ruiz", "A"), ("Doe", "J")]),
     # Spaced compounds, hyphenated compounds and particles stay whole.
     ("Doe A, Garza Ruiz M" + _TAIL, [("Doe", "A"), ("Garza Ruiz", "M")]),
@@ -57,8 +57,8 @@ def test_name_parts(name, parts):
     ("dos Santos AS, Doe J" + _TAIL, [("dos Santos", "A"), ("Doe", "J")]),
     ("Das M, Doe J" + _TAIL, [("Das", "M"), ("Doe", "J")]),
     # The title is not an author list: the segment ends before it.
-    ("Smith J, Lee K. Wende disease in mice. 2020.", [("Smith", "J"), ("Lee", "K")]),
-    ("Smith J, Lee K (2020) Wende disease.", [("Smith", "J"), ("Lee", "K")]),
+    ("Smith J, Lee K. Testa disease in mice. 2020.", [("Smith", "J"), ("Lee", "K")]),
+    ("Smith J, Lee K (2020) Testa disease.", [("Smith", "J"), ("Lee", "K")]),
 ])
 def test_parse_authors(citation, expected):
     assert parse_authors(citation) == [Author(s, i) for s, i in expected]
@@ -79,7 +79,7 @@ def _cites(*authors: str) -> list[str]:
     (_cites("Smith J, Oconnor P", "Oconnor P, Lee K"), ["O'Connor"], ["P"], ("Oconnor",)),
     (_cites("Smith J, Mac Donald P", "Mac Donald P, Lee K"), ["MacDonald"], ["P"], ("Mac Donald",)),
     # A one-letter typo.
-    (_cites("Smith J, Wendee ME", "Wendee M, Lee K"), ["Wende"], ["M"], ("Wendee",)),
+    (_cites("Smith J, Testae ME", "Testae M, Lee K"), ["Testa"], ["M"], ("Testae",)),
     # A spaced compound the stage-4 half belongs to (shape b).
     (_cites("Garza Ruiz M, Doe J", "Doe J, Garza Ruiz M"), ["Garza"], ["M"], ("Garza Ruiz",)),
     # Two forms of one compound, each passing on its own (shape g).
@@ -123,9 +123,9 @@ def test_infer_owner_alias_replaces_a_stage4_surname_the_papers_never_use(
     (_cites("Garza M, Doe J", "Garza M, Lee K", "Doe J, Garza-Ruiz J", "Lee K, Garza-Ruiz J"),
      ["Garza"], ["M"], "Garza-Ruiz"),
     # A name in the title is not an author.
-    (["Smith J, Lee K. Wende disease in mice. 2020."] * 3, ["Wende"], ["W"], "Wende"),
+    (["Smith J, Lee K. Testa disease in mice. 2020."] * 3, ["Testa"], ["T"], "Testa"),
     # Nothing to search.
-    ([], ["Wende"], ["M"], "Wende"),
+    ([], ["Testa"], ["M"], "Testa"),
 ])
 def test_infer_owner_alias_declines(citations, surnames, initials, rejected):
     assert rejected not in infer_owner_alias(citations, surnames, initials).surnames
@@ -139,8 +139,8 @@ def test_infer_owner_alias_shape_h_finds_only_the_owner_half():
 def test_infer_owner_alias_needs_an_owner_initial():
     # No stage-4 initial, no exact owner author, and the stage-4 surname is
     # carried by an author: nothing is known to check initials against.
-    citations = _cites("Wende, Doe J", "Wende, Lee K")
-    assert infer_owner_alias(citations, ["Wende"]) == OwnerAlias()
+    citations = _cites("Testa, Doe J", "Testa, Lee K")
+    assert infer_owner_alias(citations, ["Testa"]) == OwnerAlias()
 
 
 def test_infer_owner_alias_counts_the_whole_bibliography():
@@ -161,10 +161,10 @@ def test_infer_owner_alias_keeps_stage4_when_it_names_the_papers():
 
 
 def test_infer_owner_alias_initials_fall_back_to_the_exact_owner_authors():
-    citations = _cites("Wende ME, Doe J", "Doe J, Wende-Lopez M", "Lee K, Wende-Lopez M", "Wende ME, Lee K")
-    alias = infer_owner_alias(citations, ["Wende"])
+    citations = _cites("Testa ME, Doe J", "Doe J, Testa-Lopez M", "Lee K, Testa-Lopez M", "Testa ME, Lee K")
+    alias = infer_owner_alias(citations, ["Testa"])
     assert alias.initials == frozenset("M")
-    assert "Wende-Lopez" in alias.surnames
+    assert "Testa-Lopez" in alias.surnames
 
 
 def test_infer_owner_alias_result_carries_initials_and_parts():
@@ -187,9 +187,9 @@ def test_infer_owner_alias_prefers_the_more_frequent_spelling_as_written():
     # author's initials, so the last (often senior) author is kept.
     ("Doe J, Lee K, Garza Ruiz MA. Title Case Study of Things. J Things. 2020;1:1.",
      [("Doe", "J"), ("Lee", "K"), ("Garza Ruiz", "M")]),
-    ("Doe J, Wende ME. Chemoprevention. J Things. 2020;1:1.", [("Doe", "J"), ("Wende", "M")]),
+    ("Doe J, Testa ME. Chemoprevention. J Things. 2020;1:1.", [("Doe", "J"), ("Testa", "M")]),
     # Not a Vancouver end: a given name, a middle initial, then the surname.
-    ("Michael E. Wende, John Doe. A study of things. 2020.", [("Wende", "M"), ("Doe", "J")]),
+    ("Michael E. Testa, John Doe. A study of things. 2020.", [("Testa", "M"), ("Doe", "J")]),
     # Hyphenated and four-letter initials are never a surname.
     ("Lee H.-T, Doe HJWL, Smith A. Title Case Study. J. 2020.",
      [("Lee", "H"), ("Doe", "H"), ("Smith", "A")]),
@@ -216,6 +216,6 @@ def test_infer_owner_alias_never_aliases_a_similar_coauthor(owner, coauthor, tot
 def test_infer_owner_alias_close_spelling_only_when_stage4_spelling_is_absent():
     # Stage 4's spelling on no paper: the close one is the owner's (a stage-4
     # typo). On even one paper: the close one is someone else.
-    typos = _cites("Wendee M, Doe J", "Doe J, Wendee M", "Lee K, Wendee M")
-    assert infer_owner_alias(typos, ["Wende"], ["M"]).surnames == ("Wendee",)
-    assert "Wendee" not in infer_owner_alias(typos + _cites("Wende M, Lee K"), ["Wende"], ["M"]).surnames
+    typos = _cites("Testae M, Doe J", "Doe J, Testae M", "Lee K, Testae M")
+    assert infer_owner_alias(typos, ["Testa"], ["M"]).surnames == ("Testae",)
+    assert "Testae" not in infer_owner_alias(typos + _cites("Testa M, Lee K"), ["Testa"], ["M"]).surnames

@@ -12,7 +12,7 @@ only the first membership.
 more than one part unchanged) by adding '|' as a boundary when the whole
 entry is one line. Migrating this call site to `entry_fragments` outright
 (tab included) was tried and reverted after reading the actual render-gate
-diff: 038WKA and 11 near-duplicate "Jonathan Nahmias" uids (12 total) carry
+diff: 038WKA and 11 near-duplicate uids of the same CV (12 total) carry
 a single
 membership with three tab-separated fields ("Member of the American
 Psychiatric Association\\tFebruary 2018 - Present\\tI have attended and
@@ -62,7 +62,7 @@ cell: a recovered organization may give up a tail only when the date column
 now carries every word of it.
 
 Block (t) is the third round, and the same class of loss one level up. The
-render gate read 2082_Dr_Scot's memberships table missing "Faculty Associate"
+render gate read farm 2082's memberships table missing "Faculty Associate"
 on two of three rows. The fallback's structured-alias branch resolved the
 organization and the membership type TOGETHER: an `institution` field named
 the organization, the branch returned on it, and the `role` field sitting
@@ -109,7 +109,7 @@ from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  #
 from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
-# Genuinely multi-line, farm-derived shape (2071_Zuschlag_Cv's actual I
+# Genuinely multi-line, farm-derived shape (farm 2071's actual I
 # entry): entry_lines already returns >1 part, each carrying its own unsplit
 # tabs -- _entry_parts must not touch it further.
 MULTILINE_CASES = [
@@ -924,7 +924,7 @@ def test_a_lift_that_would_unbalance_a_bracket_is_refused():
 
 # --- (t) round 3: a structured alias must not silence the field beside it ---
 
-# 2082_Dr_Scot's two section I entries verbatim in shape: stage 4 extracted
+# farm 2082's two section I entries verbatim in shape: stage 4 extracted
 # them under another taxonomy code's field schema (course_code/institution/
 # role, stage4/schemas.py), so the organization arrives under `institution`
 # and the membership role under `role` -- section I's own `organization` and

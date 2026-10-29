@@ -89,7 +89,7 @@ def test_a_value_no_other_entry_states_is_left_alone():
     ("Issued 3/3019", "date", "2019-03"),                                    # m/yyyy (SPIHVQ "(2/1018)")
     ("2106-present Member", "start_date", "2006"),                           # CKDDEG
     ("2107-current Maple", "start_date", "2007"),
-    ("Neurosurgical Focus 2104;36(1):E5.", "year", "2004"),                  # 2100_Mocco
+    ("Neurosurgical Focus 2104;36(1):E5.", "year", "2004"),                  # farm 2100
     ("Effort 0.07 FTE", "percent_effort", "7%"),                             # 0.07 * 100 is not exactly 7
     ("Effort FTE: 0.25", "percent_effort", "25%"),
     ("Effort 1.0 FTE", "percent_effort", "100%"),                            # a whole post is at most 1

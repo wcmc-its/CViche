@@ -63,7 +63,7 @@ def test_thresholds_are_pinned():
 
 
 def test_flags_same_body_at_different_list_numbers_same_section():
-    """Positive control -- mirrors the real shape (e.g. 2068_Yount_Cv: the
+    """Positive control -- mirrors the real shape (e.g. farm 2068: the
     same citation at list numbers 32 and 38). Fails on dev because
     lint_duplicate_records does not exist there at all."""
     blocks = [
@@ -263,7 +263,7 @@ def test_names_match_whole_word_token_containment_not_bare_substring():
     'Research Administration' to NOT match. Implemented literally (a
     coordinate-segment split that only matches on 'and'/'&'/','), that
     passed the synthetic test but caused a REAL regression on the doctor
-    A/B gate: the 65-doc farm's 2100_Mocco lost a genuine dead_sections
+    A/B gate: farm 2100, in the 65-doc farm, lost a genuine dead_sections
     true positive ('Research Presentations' / empty output 'RESEARCH')
     because the two no longer matched. Keeping a same-word match here (a
     same-word match can SUPPRESS a real finding but, on its own, can also
@@ -404,7 +404,7 @@ def test_quiet_when_the_repeat_is_the_same_prose_with_different_dates():
 def test_window_boundary(offset, expect_finding):
     """Boundary control for the `<=` comparison that prunes `recent` against
     DUPLICATE_RECORD_WINDOW (T4.12, #446 review). The corpus's own headline
-    firing (2068_Yount_Cv, list numbers 32 and 38) sits at distance exactly
+    firing (farm 2068, list numbers 32 and 38) sits at distance exactly
     DUPLICATE_RECORD_WINDOW, so an off-by-one to `<` would silently stop
     detecting it; one past the window must stay quiet, since the shipped
     window is bounded, not global-within-section."""
@@ -1022,7 +1022,7 @@ def test_run_doctor_wires_stage_5d_into_duplicate_records(tmp_path):
     "Jun 2020-Jun 2025, Assistant Professor of Medicine, Weill Cornell",
     "2018 - Present: Attending Physician, NewYork-Presbyterian Hospital",
     "2015-2017\tResident, Internal Medicine, Mount Sinai Hospital",
-    # stage 2 glues the payload onto the end year (farm: 2068_Yount_Cv, web08)
+    # stage 2 glues the payload onto the end year (farm 2068, web08)
     "2008-15Associate Professor, Department of Behavioral Sciences",
     "1996-8\tResearch Fellowship, Andrew Mellon Foundation",
     "2008-presentAssistant Professor of Medicine, Division of Cardiology",
@@ -1125,7 +1125,7 @@ def test_record_rendered_cjk_line_is_unverifiable_not_absent():
 
 
 def test_record_rendered_farm_case_different_course_with_the_same_title_words():
-    """T1.5, the farm's own instance (2054_Opresko_Cv): a 2008 course record
+    """T1.5, the farm's own instance (farm 2054): a 2008 course record
     was vouched for by the CV's 2006 course line, which shares 4 of its 5
     tokens; the year veto turns that into the true 'absent' the doctor A/B
     gained on that uid."""

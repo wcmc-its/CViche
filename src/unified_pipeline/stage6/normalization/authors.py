@@ -28,7 +28,7 @@ _INITIALS_TRAILING_MARKS = ".*†‡"
 _HYPHENATED_INITIALS_RE = re.compile(r'^[^\W\d_](-[^\W\d_])+$')
 
 # Longest run of letters still readable as an initials group rather than as a
-# short given name ("Scot", "Wang").
+# short given name ("Ravi", "Wang").
 _MAX_INITIALS_LETTERS = 4
 
 
@@ -46,7 +46,7 @@ def _looks_like_initials(token: str) -> bool:
     A single alphabetic character of any case or script is always an initial
     -- #560 gives "Kelly, r" and "Kelly, Å" as shapes the old ASCII-uppercase
     gate rejected, and a lone letter has no other plausible reading. 2-4
-    characters must still be uppercase: a short mixed-case word ("Scot",
+    characters must still be uppercase: a short mixed-case word ("Ravi",
     "Li", "Wei") is at least as likely to be a real given name as an initials
     group. Hyphenated initials ("R-Y") follow the same rule per side.
     """

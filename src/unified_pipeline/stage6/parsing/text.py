@@ -36,8 +36,8 @@ from .dates import (
 logger = logging.getLogger(__name__)
 
 # The document-uid convention this module parses: an optional "CV_" prefix,
-# then underscore-separated name/year parts (e.g. "CV_2015_Wende",
-# "Wende_John"). `removeprefix` strips only a leading match; a bare
+# then underscore-separated name/year parts (e.g. "CV_2015_Testa",
+# "Testa_John"). `removeprefix` strips only a leading match; a bare
 # `.replace('CV_', '')` would also eat "CV_" occurring mid-string in a name
 # part, which `removeprefix` cannot do.
 _UID_PREFIX = 'CV_'
@@ -65,7 +65,7 @@ def _extract_name_from_uid(uid: str) -> str:
     stem = uid.removeprefix(_UID_PREFIX)
     if is_run_id(stem):
         return ''
-    # Remove year prefix (e.g., "2015_Wende" -> "Wende")
+    # Remove year prefix (e.g., "2015_Testa" -> "Testa")
     parts = stem.split('_')
 
     # Filter out year
@@ -83,7 +83,7 @@ def _extract_last_name_from_uid(uid: str) -> str:
     """Extract last name from document UID for author matching.
 
     Returns the uid's last name part as written. It does NOT guess whether the
-    part carries appended initials ("Quennevillejs"): no case rule can tell those
+    part carries appended initials ("Examplejs"): no case rule can tell those
     from the tail of an ordinary surname ("Smith"), so the guess lives at the
     one call site that can check it against real citation text --
     `_resolve_uid_owner_surname` in sections/bibliography.py, which uses
@@ -108,7 +108,7 @@ def _extract_last_name_from_uid(uid: str) -> str:
 
 def _strip_appended_initials(last_name: str) -> str:
     """`last_name` without 2-3 trailing characters that might be appended
-    initials ("Quennevillejs" -> "Quenneville"), or unchanged when none qualify.
+    initials ("Examplejs" -> "Example"), or unchanged when none qualify.
 
     A guess, not a fact: the tail of "Smith" passes the same case test and
     would become "Smi". Callers must confirm the result against text that

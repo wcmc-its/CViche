@@ -38,7 +38,7 @@ npm run dev
 2. **Click** "Click to select a file"
 3. **Choose a CV** from:
    ```
-   ../data/sample_cvs/word/2025_Denckla_Cv.docx
+   ../data/sample_cvs/word/9999_Doe_Jane_CV.docx
    ```
 4. **Click** "Start Pipeline"
 5. **Watch the magic!** ✨

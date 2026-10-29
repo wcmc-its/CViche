@@ -3,7 +3,7 @@ owner's surname.
 
 When name extraction yielded nothing, `fallback_from_uid()` derived a surname
 from the document uid. That is correct for filename-style uids
-('2097_Upton_Cv' -> 'Upton') and is kept. It was wrong for opaque ones: all five
+('2097_Roe_Cv' -> 'Roe') and is kept. It was wrong for opaque ones: all five
 hard-fail CVs in the 2026-07-25 corpus batch carried
 
     "cv_owner": {"first_name": "", "full_name": "", "last_name": "web151"}
@@ -13,7 +13,7 @@ emptiness checks in spirit, and feeds `add_target_names` and the bibliography
 author bolding a token that matches nothing in the document.
 
 Also pinned here: the uid suffix strip was case-sensitive (`_[Cc]v$`), so a CV
-named '2026_OBrien_CV' produced the literal 'CV' as the owner's surname.
+named '2026_McDoe_CV' produced the literal 'CV' as the owner's surname.
 
     python3 -m pytest src/unified_pipeline/tests/test_stage4_uid_surname_fallback.py -p no:cacheprovider
 
@@ -45,15 +45,15 @@ def test_an_opaque_uid_never_becomes_a_surname():
 
 def test_a_filename_style_uid_still_yields_its_name():
     """This behaviour is useful and is deliberately kept."""
-    assert _owner("2097_Upton_Cv").get("last_name") == "Upton"
+    assert _owner("2097_Roe_Cv").get("last_name") == "Roe"
     assert _owner("WSP0KQ_Smith_Cv").get("last_name") == "Smith"
 
 
 def test_the_cv_suffix_strip_is_case_insensitive():
     """'_CV' was not stripped, so the surname came out as the literal 'CV'."""
-    owner = _owner("2026_OBrien_CV")
+    owner = _owner("2026_McDoe_CV")
     assert owner.get("last_name") != "CV", "the file extension became the surname"
-    assert owner.get("last_name") == "OBrien"
+    assert owner.get("last_name") == "McDoe"
 
 
 def test_a_missing_name_stays_empty_rather_than_plausible():

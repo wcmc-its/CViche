@@ -159,7 +159,7 @@ USE_LEGACY_HANDLERS = True  # Professional WCM formatting
 # Advanced features (requires USE_LEGACY_HANDLERS=True)
 ENABLE_PMCID_ENRICHMENT = True  # PubMed API lookup
 ENABLE_AUTHOR_BOLDING = True  # Bold CV owner's name
-ENABLE_AUTHOR_ABBREVIATION = True  # "Zahida Y" not "Yaseen Zahida"
+ENABLE_AUTHOR_ABBREVIATION = True  # "Doe J" not "Jane Doe"
 ENABLE_SUBSECTION_CATEGORIZATION = True  # S1-S15 publication categories
 
 # Stage 3 parsing behavior

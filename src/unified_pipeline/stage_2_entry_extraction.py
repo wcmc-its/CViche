@@ -2446,7 +2446,7 @@ if __name__ == '__main__':
         print("Usage: python stage_2_entry_extraction.py <docx_path> [hierarchy_json]")
         print()
         print("Example:")
-        print("  python stage_2_entry_extraction.py data/sample_cvs/word/2071_Zuschlag_Cv.docx")
+        print("  python stage_2_entry_extraction.py data/sample_cvs/word/9999_Doe_Jane_CV.docx")
         sys.exit(1)
 
     docx_path = sys.argv[1]

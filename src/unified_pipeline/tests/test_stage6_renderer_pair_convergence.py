@@ -463,15 +463,15 @@ class TestL2FallbackMatchesL1AndL3:
 
 
 class TestCitationWritersShareOneSplit:
-    CITATION = "Wende ME, Smith J. A study of things. J Things. 2023;1:1-9."
+    CITATION = "Testa ME, Smith J. A study of things. J Things. 2023;1:1-9."
 
     def test_split_prefers_target_name(self):
         before, bold, after = _citation_author_split(self.CITATION, "Smith J", "Nobody")
-        assert (before, bold, after) == ("Wende ME, ", "Smith J", ". A study of things. J Things. 2023;1:1-9.")
+        assert (before, bold, after) == ("Testa ME, ", "Smith J", ". A study of things. J Things. 2023;1:1-9.")
 
     def test_split_falls_back_to_owner_last_name_and_strips_punctuation(self):
-        before, bold, after = _citation_author_split(self.CITATION, None, "wende")
-        assert bold == "Wende ME"
+        before, bold, after = _citation_author_split(self.CITATION, None, "testa")
+        assert bold == "Testa ME"
         assert before == ""
         assert after == ", Smith J. A study of things. J Things. 2023;1:1-9."
 
@@ -499,19 +499,19 @@ class TestCitationWritersShareOneSplit:
             "", "Alvarez-Diaz M", ", Smith J. A study of things. J Things. 2023;1:1-9.")
 
     def test_split_falls_back_case_insensitively_to_owner_last_name(self):
-        citation = "WENDE ME, Smith J. A study of things. J Things. 2023;1:1-9."
-        before, bold, after = _citation_author_split(citation, None, "wende")
+        citation = "TESTA ME, Smith J. A study of things. J Things. 2023;1:1-9."
+        before, bold, after = _citation_author_split(citation, None, "testa")
         assert (before, bold, after) == (
-            "", "WENDE ME", ", Smith J. A study of things. J Things. 2023;1:1-9.")
+            "", "TESTA ME", ", Smith J. A study of things. J Things. 2023;1:1-9.")
 
     def test_plain_writer_bolds_through_the_shared_split(self):
         gen = _generator()
         para = gen.doc.paragraphs[0].insert_paragraph_before("")
-        gen._add_citation_with_bold_author(para, self.CITATION, None, "Wende")
+        gen._add_citation_with_bold_author(para, self.CITATION, None, "Testa")
 
         runs = [(r.text, bool(r.bold)) for r in para.runs]
         assert runs == [
-            ("Wende ME", True),
+            ("Testa ME", True),
             (", Smith J. A study of things. J Things. 2023;1:1-9.", False),
         ]
 
@@ -530,7 +530,7 @@ class TestCitationWritersShareOneSplit:
         gen = _generator()
         assert gen.emit_track_changes
         para = gen.doc.paragraphs[0].insert_paragraph_before("")
-        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Wende")
+        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Testa")
 
         ins = para._p.find(qn("w:ins"))
         assert ins is not None, "tracked insertion was not emitted"
@@ -540,7 +540,7 @@ class TestCitationWritersShareOneSplit:
             bold = run.find(f"{qn('w:rPr')}/{qn('w:b')}") is not None
             segments.append((text, bold))
         assert segments == [
-            ("Wende ME", True),
+            ("Testa ME", True),
             (", Smith J. A study of things. J Things. 2023;1:1-9.", False),
         ]
 
@@ -658,11 +658,11 @@ class TestInsertionWriterNeverLosesTheCitation:
         gen.emit_track_changes = False
         added_before = gen.stats['track_changes_added']
         para = gen.doc.paragraphs[0].insert_paragraph_before("")
-        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Wende")
+        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Testa")
 
         assert para._p.find(qn("w:ins")) is None
         assert [(r.text, bool(r.bold)) for r in para.runs] == [
-            ("Wende ME", True),
+            ("Testa ME", True),
             (", Smith J. A study of things. J Things. 2023;1:1-9.", False),
         ]
         assert gen.stats['track_changes_added'] == added_before
@@ -683,11 +683,11 @@ class TestInsertionWriterNeverLosesTheCitation:
         gen = _generator()
         assert gen.emit_track_changes
         para = gen.doc.paragraphs[0].insert_paragraph_before("")
-        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Wende")
+        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Testa")
 
         assert para._p.find(qn("w:ins")) is None
         assert [(r.text, bool(r.bold)) for r in para.runs] == [
-            ("Wende ME", True),
+            ("Testa ME", True),
             (", Smith J. A study of things. J Things. 2023;1:1-9.", False),
         ]
 

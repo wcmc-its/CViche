@@ -196,7 +196,7 @@ def test_is_header_match_ignores_a_trailing_underscore_rule():
     ("research", "fellow's research mentor"),
 ])
 def test_is_header_match_refuses_a_one_word_header_between_content_words(header, para):
-    # #1848 (CMTQDR 110, HVLDGS, Denckla): the word sits inside a record line,
+    # #1848 (CMTQDR 110, HVLDGS, the farm-2025 owner): the word sits inside a record line,
     # within the 3x length cap, so the line was taken as the header's own.
     # Every 1b caller matches strictly; the loose mode is left as it was.
     assert is_header_match(header, normalize_text(para), strict=True) is False
@@ -242,7 +242,7 @@ def test_map_hierarchy_node_leaves_an_invented_one_word_heading_off_a_record_tit
 
 
 def test_map_hierarchy_node_child_takes_its_exact_line_not_a_committee_line():
-    # Denckla (#1848): "Publications" took "Member: Publications Committee" in
+    # The farm-2025 owner (#1848): "Publications" took "Member: Publications Committee" in
     # the service section; its own line is the bare heading earlier on.
     elements = [
         _elem(0, "Publications"),

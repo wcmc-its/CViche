@@ -38,7 +38,7 @@ organization is a lower-confidence cell than an extracted one and the run
 should say so.
 
 The organization alias and the membership-type alias are read INDEPENDENTLY.
-Resolving them together cost 2082_Dr_Scot both of its memberships' roles: an
+Resolving them together cost farm 2082 both of its memberships' roles: an
 `institution` field named the organization, the branch returned on it, and the
 `role` field sitting beside it never reached a cell.
 
@@ -154,7 +154,7 @@ _ORGANIZATION_FALLBACK_MAX_CHARS = 150
 # picks a field schema per taxonomy code (stage4/schemas.py), so an entry
 # that reaches section I under a different code's schema names the role
 # under that schema's key: `role` is the one the farm actually produces
-# (2082_Dr_Scot's memberships carry the K-schema's
+# (farm 2082's memberships carry the K-schema's
 # course_code/institution/role shape), and `fellowship_designation` is
 # section I's own second designation field. `position` is emitted by no
 # schema at all and `title` only ever names a work -- a publication, a
@@ -262,7 +262,7 @@ def _entry_parts(text: str) -> list[str]:
 
     A genuinely multi-line entry (entry_lines already returns >1 part) is
     returned UNCHANGED. Reading the farm's own newline-blind uids proved
-    this matters: 2071_Zuschlag_Cv's "2009-2012\\t\\tStudent Osteopathic
+    this matters: farm 2071's "2009-2012\\t\\tStudent Osteopathic
     Surgical Association\\t\\t\\n\\n2009-2012\\t\\tFlorida Osteopathic Medical
     Association" already has 2 lines by newline alone, each carrying its own
     unsplit tabs; running the multi-membership parser on that produces two
@@ -482,7 +482,7 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
     The organization and the membership type are chosen INDEPENDENTLY, each
     preferring its own structured alias and each falling back to the fragment
     scan. Resolving them together -- returning early as soon as an alias named
-    the organization -- is what lost "Faculty Associate" off 2082_Dr_Scot's
+    the organization -- is what lost "Faculty Associate" off farm 2082's
     "2016-present\\tFaculty Associate. Center for Southeast Asian Studies":
     `institution` named the organization, so the `role` beside it was never
     read and the type reached no cell at all.

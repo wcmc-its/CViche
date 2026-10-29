@@ -687,14 +687,14 @@ def test_stage5d_editors_matching_only_on_a_stopword_are_appended():
     shape #481 exists for."""
     fields = {
         'editors': 'M. Moaddel and M. Gelfand',
-        'formatted_citation': 'Yount K. Family and modernity. In: Book. 2008.',
+        'formatted_citation': 'Roe K. Family and modernity. In: Book. 2008.',
         'formatting_source': 'stage_5d_llm',
     }
 
     citation, _, _ = _format_citation(_entry(fields), 8)
 
     assert citation == (
-        '8. Yount K. Family and modernity. In: M. Moaddel and M. Gelfand, eds. '
+        '8. Roe K. Family and modernity. In: M. Moaddel and M. Gelfand, eds. '
         'Book. 2008.'
     )
 
@@ -1432,7 +1432,7 @@ def test_stage5d_editors_only_already_referenced_are_not_appended():
     test_stage5d_entry_with_reworded_publisher_is_not_duplicated.)"""
     fields = {
         'editors': 'Moaddel M, Gelfand M',
-        'formatted_citation': 'Yount K. A chapter. In: Moaddel M, Gelfand M, eds. Book. 2008.',
+        'formatted_citation': 'Roe K. A chapter. In: Moaddel M, Gelfand M, eds. Book. 2008.',
         'formatting_source': 'stage_5d_llm',
     }
     expected = '1. ' + fields['formatted_citation']
@@ -1506,7 +1506,7 @@ def test_a_series_issue_with_no_volume_is_cited_alone():
 
 
 def test_pubmed_matched_to_another_chapter_keeps_the_journal_citation():
-    """2054_Opresko_Cv 396: one CV line held two chapters. PubMed matched
+    """farm 2054 396: one CV line held two chapters. PubMed matched
     the first and stage 4 read the second's book, so the book shape would
     join one chapter's title to another's book."""
     citation, _, _ = _format_citation(
@@ -1613,7 +1613,7 @@ def test_journal_trailer_separators_need_something_on_their_left(
     rendered the literal string "None": the trailer read `None;154(1):27-31`,
     which is wrong but not *dangling*. Routing `year` through `_scalar_text`
     turned those into ` ;154(1):27-31` on 7 farm citations across 2 delivered
-    CVs (2100_Mocco, GLC5JG_Mocco), all S1 with a real volume and no year --
+    CVs (farm 2100, GLC5JG), all S1 with a real volume and no year --
     found reviewing round 5 of #481. The colon case has no farm instance and
     is fixed as the same rule, not as an observed failure.
     """

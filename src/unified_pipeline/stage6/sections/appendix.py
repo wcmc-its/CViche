@@ -192,10 +192,10 @@ where it belonged. The key is the top-level heading text (`hierarchy[0]`), by
 design: the label the reader sees IS the heading text, so two source sections
 sharing a heading would be indistinguishable as separate groups anyway. That
 key is NOT proven collision-free: measured 2026-09-05 over the local corpus,
-3 of 111 stage-1b files carry a duplicated top-level heading (one, 2025_Denckla's
+3 of 111 stage-1b files carry a duplicated top-level heading (one, farm 2025's
 "Conference Activities", at two genuinely distinct source positions -- the
 merge-and-renumber scenario this key risks). Only one of the three,
-2068_Yount ("GRANT SUPPORT", two synthetic nodes), is among the 66 stage-6
+farm 2068 ("GRANT SUPPORT", two synthetic nodes), is among the 66 stage-6
 inputs, and its current appendix has a single entry under that heading, so
 `_group_by_source_heading` has not yet been exercised on a real collision.
 Numbering restarts under each heading. A body renders whole

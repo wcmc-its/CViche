@@ -17,7 +17,7 @@ almost nothing about a CV's contact block is structured. The work is in order:
    fax number, goes to the Appendix recovery (`_unrouted_record_values`).
 3. Re-open the ORIGINAL .docx when fields are still missing, in
    `_recover_contact_fields_from_docx`. Contact data frequently lives in a
-   source table ("NAME: | Patricia Opresko") that entry extraction never
+   source table ("NAME: | Jane Roe") that entry extraction never
    turned into entries, and business-address cells embed Phone/Fax/E-mail
    lines that have to be pulled back out line by line. A record that already
    has all four -- a complete name and all three contact values -- never
@@ -232,8 +232,8 @@ def _classify_contact_label(label: str) -> str | None:
     address (the address branch accepted them on 'address', or on nothing) and
     the email branch never saw them. It is also this change's only
     corpus-visible effect -- the 66-CV render A/B reports exactly one changed
-    document, NSUJZG_2027_Eil_Robert gaining eil@ohsu.edu from its
-    "E-Mail Address: | eil@ohsu.edu" row, which is the half of #730 this
+    document, NSUJZG gaining its work email from its
+    "E-Mail Address: | ..." row, which is the half of #730 this
     closes.
     """
     text = ' '.join(label.strip().lower().split())
@@ -1493,7 +1493,7 @@ def _row_label_value_pairs(row: _TableRow) -> list[tuple[str, str]]:
 
     Normally one: label in cell 0, value in the first later cell that differs
     from it (a gridSpan label cell repeats itself across `row.cells` --
-    NSUJZG_2027_Eil_Robert's "Professional Address:" row is label merged over
+    NSUJZG's "Professional Address:" row is label merged over
     columns 0-1 with the value in column 2). A HOME-labelled cell 0 that
     carries its own value ("Home Address: 12 Elm St | Business Phone: ...")
     is a side-by-side layout: cell 0 is the home pair, and the next cell is a
@@ -1697,7 +1697,7 @@ class PersonalDataSection:
 
         # Fallback: read personal data from original Word document.
         # This handles cases where personal data is in tables
-        # (e.g., NAME: | Patricia Opresko). The scan lives in
+        # (e.g., NAME: | Jane Roe). The scan lives in
         # `_recover_contact_fields_from_docx` below; it writes the same three
         # slots this function has been filling all along, and returns them
         # unchanged when there is nothing left to recover or nothing to read.

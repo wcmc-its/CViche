@@ -8,17 +8,17 @@ investigated and found not safely fixable within this file -- see below.
      any Title Case surname, matching #665's own claim that no case-based
      signal distinguishes "appended initials" from "the end of an ordinary
      word". A corpus render-gate probe over all 66 CVs proved that removing
-     the strip is a real regression, not a fix: uid "2003_Albrechtjs_Cv"
-     belongs to a person whose real surname genuinely is "Albrecht" --
-     confirmed by "Albrecht JS"/"Albrecht J" as the cited author in every
+     the strip is a real regression, not a fix: farm 2003's uid carries
+     the owner's real surname with the initials "js" glued on --
+     confirmed by "<Surname> JS"/"<Surname> J" as the cited author in every
      one of that CV's own bibliography entries -- and
      `bibliography.py:176` uses this function's return value to bold the
      CV owner's name among citation authors. Removing the strip changes the
-     extracted name to "Albrechtjs", and a direct python-docx run-level bold
+     extracted name to "<Surname>js", and a direct python-docx run-level bold
      diff (ref arm vs. a probe render with the strip disabled) confirms it
      silently drops bold-highlighting from 12 of the 98 paragraphs in that
-     document's bibliography citing "Albrecht" -- the 12 formatted as bare
-     "Albrecht J"/"Albrecht JS", which the stripped form no longer matches;
+     document's bibliography citing "<Surname>" -- the 12 formatted as bare
+     "<Surname> J"/"<Surname> JS", which the stripped form no longer matches;
      the other 86 are unaffected, so "matches nothing" (this file's and this
      test's own earlier wording) overstated the mechanism. 12 is also what
      commit 6935094's body and PR_BODY.md already said; this file previously
@@ -116,12 +116,12 @@ def test_last_name_from_uid_is_returned_as_written():
     # uid parser must not shorten it. Whether initials are glued on is decided
     # against citation text in bibliography.py, not here.
     assert _extract_last_name_from_uid("2003_Smithson_Cv") == "Smithson"
-    assert _extract_last_name_from_uid("2003_Quennevillejs_Cv") == "Quennevillejs"
+    assert _extract_last_name_from_uid("2003_Examplejs_Cv") == "Examplejs"
 
 
 @pytest.mark.parametrize("name, expected", [
-    ("Quennevillejs", "Quenneville"),   # appended lower-case initials
-    ("Wende", "Wende"),           # too short to be considered
+    ("Examplejs", "Example"),   # appended lower-case initials
+    ("Testa", "Testa"),           # too short to be considered
 ])
 def test_strip_appended_initials_guess(name, expected):
     assert _strip_appended_initials(name) == expected
@@ -141,8 +141,8 @@ def test_uid_prefix_strip_does_not_eat_mid_string_occurrences():
 
 
 def test_uid_prefix_strip_still_removes_a_real_leading_prefix():
-    assert _extract_last_name_from_uid("CV_2015_Wende") == "Wende"
-    assert _extract_name_from_uid("CV_2015_Wende") == "Wende"
+    assert _extract_last_name_from_uid("CV_2015_Testa") == "Testa"
+    assert _extract_name_from_uid("CV_2015_Testa") == "Testa"
 
 
 # --- #457: a run id names nobody ---------------------------------------------
@@ -291,7 +291,7 @@ def test_pipe_separated_columns_still_match_real_header_words():
 
 
 def test_pipe_separated_columns_match_plural_header_word():
-    # Round-1 regression guard, corpus-real shape (2054_Opresko_Cv has a
+    # Round-1 regression guard, corpus-real shape (farm 2054 has a
     # "Dates | Journal Title" entry): a bare "date" keyword must still match
     # the plural "Dates" column header, the same way the substring check it
     # replaced did (and the way `header_patterns` already handles it via

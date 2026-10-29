@@ -79,22 +79,22 @@ A multi-stage LLM pipeline for extracting structured data from faculty CVs and r
 
 ```bash
 # Run full pipeline on a CV (Stages 1-4)
-python3 run_full_pipeline.py data/sample_cvs/word/2015_Wende.docx
+python3 run_full_pipeline.py data/sample_cvs/word/2015_Doe.docx
 
 # Run specific stage only
-python3 run_full_pipeline.py 2015_Wende --stage 4
+python3 run_full_pipeline.py 2015_Doe --stage 4
 
 # Run Stage 5: PubMed Enrichment
-python3 stage_5_pubmed_enrichment.py 2015_Wende
+python3 stage_5_pubmed_enrichment.py 2015_Doe
 
 # Run Stage 5b: Institution Enrichment (LLM lookup for locations)
-python3 stage_5b_institution_enrichment.py 2015_Wende
+python3 stage_5b_institution_enrichment.py 2015_Doe
 
 # Run Stage 5c: Teaching Formatter (LLM-polish K-code entries)
-python3 run_full_pipeline.py 2015_Wende --stage 5c
+python3 run_full_pipeline.py 2015_Doe --stage 5c
 
 # Run Stage 6: Generate WCM Word document
-python3 stage_6_word_template.py 2015_Wende
+python3 stage_6_word_template.py 2015_Doe
 ```
 
 ## Directory Structure
@@ -212,8 +212,8 @@ COMPREHENSIVE EXTRACTION (15 codes)
 
 For publications (S-codes) and presentations (R), the pipeline identifies the CV owner's name as it appears in author lists:
 
-1. CV owner name extracted from document UID (e.g., "2015_Wende" → "Wende")
-2. Handles filename patterns with initials (e.g., "2003_Albrechtjs" → "Albrecht")
+1. CV owner name extracted from document UID (e.g., "2015_Doe" → "Doe")
+2. Handles filename patterns with initials (e.g., "2003_Examplejs" → "Example")
 3. Searches raw citation text for matching author
 4. Supports author markers (*, †, ‡) for disambiguation
 
@@ -245,9 +245,9 @@ The pipeline includes pre- and post-classification validators:
 
 ```json
 {
-  "document_uid": "2015_Wende",
+  "document_uid": "2015_Doe",
   "stage": "4",
-  "cv_owner": {"last_name": "Wende"},
+  "cv_owner": {"last_name": "Doe"},
   "schema_version": "1.1",
   "stats": {
     "total_entries": 248,
@@ -258,15 +258,15 @@ The pipeline includes pre- and post-classification validators:
     {
       "element_idx_start": 42,
       "taxonomy_code": "S1",
-      "text": "Wende ME, Smith J. Title. Journal. 2023;45:123.",
+      "text": "Doe JA, Smith J. Title. Journal. 2023;45:123.",
       "extracted_fields": {
-        "authors": "Wende ME, Smith J",
+        "authors": "Doe JA, Smith J",
         "year": "2023",
         "title": "Title",
         "journal": "Journal",
         "volume": "45",
         "pages": "123",
-        "target_name": "Wende ME"
+        "target_name": "Doe JA"
       }
     }
   ]
@@ -330,10 +330,10 @@ Stage 5 enriches publication entries with authoritative PubMed metadata.
 
 ```bash
 # Enrich Stage 4 output
-python3 stage_5_pubmed_enrichment.py 2015_Wende
+python3 stage_5_pubmed_enrichment.py 2015_Doe
 
 # With custom output path
-python3 stage_5_pubmed_enrichment.py 2015_Wende -o custom_output.json
+python3 stage_5_pubmed_enrichment.py 2015_Doe -o custom_output.json
 ```
 
 ### Rate Limiting
@@ -381,10 +381,10 @@ For each institution, the LLM lookup provides:
 
 ```bash
 # Enrich Stage 5 output with institution locations
-python3 stage_5b_institution_enrichment.py 2015_Wende
+python3 stage_5b_institution_enrichment.py 2015_Doe
 
 # Or specify full path
-python3 stage_5b_institution_enrichment.py outputs/stage_5_enrichment/2015_Wende_enriched.json
+python3 stage_5b_institution_enrichment.py outputs/stage_5_enrichment/2015_Doe_enriched.json
 ```
 
 ### Caching
@@ -418,10 +418,10 @@ Stage 6 generates a WCM-formatted Word document from enriched data.
 
 ```bash
 # Generate from Stage 5 enriched output
-python3 stage_6_word_template.py 2015_Wende
+python3 stage_6_word_template.py 2015_Doe
 
 # Or from Stage 4 output (without enrichment)
-python3 stage_6_word_template.py outputs/stage_4_field_extraction/2015_Wende_fields.json
+python3 stage_6_word_template.py outputs/stage_4_field_extraction/2015_Doe_fields.json
 ```
 
 ### Output

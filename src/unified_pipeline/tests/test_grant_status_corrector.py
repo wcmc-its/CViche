@@ -219,7 +219,7 @@ def test_a_grant_coded_current_or_completed_under_a_pending_heading_is_left_alon
 
 
 def test_an_m2c_under_a_funded_heading_with_ended_dates_still_becomes_completed():
-    """2015_W: "GRANT FUNDING: > Funded" grants the LLM coded M2C, one ended
+    """farm 2015: "GRANT FUNDING: > Funded" grants the LLM coded M2C, one ended
     2023. No pending word, so dev's Rule 1 holds."""
     entry = _grant('M2C', '01/01/2022-05/31/2023 Example Award',
                    'GRANT SUPPORT', 'GRANT FUNDING:', 'Funded')

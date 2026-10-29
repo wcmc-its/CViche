@@ -82,11 +82,11 @@ Captures faculty member's identity, contact information, and professional identi
 ### Example Entry
 ```json
 {
-  "Full Name": "Heidi K. Holtz",
+  "Full Name": "Jane Q. Doe",
   "Degrees/Post-nominals": "PhD, RN",
-  "Office Address": "4483 Duncan Avenue, St. Louis, MO. 63110",
-  "Work Email": "heidi.holtz@bjc.org",
-  "ORCID iD": "0000-0002-7634-2854"
+  "Office Address": "123 Example Avenue, St. Louis, MO. 63110",
+  "Work Email": "jane.doe@example.org",
+  "ORCID iD": "0000-0002-1825-0097"
 }
 ```
 

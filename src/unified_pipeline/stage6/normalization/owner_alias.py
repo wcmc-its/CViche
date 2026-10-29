@@ -53,13 +53,13 @@ MIN_REPLACEMENT = 0.5
 _NGRAM = 3
 # The author segment ends at the first sentence break that opens a quote or a
 # phrase whose second word is lower case (a title: "A study of"), or at a year.
-# Not at any capitalised word, so "Michael E. Wende" stays one author.
+# Not at any capitalised word, so "Michael E. Testa" stays one author.
 _AUTHOR_SEGMENT_END = re.compile(
     r"\.\s+(?=[\"“'‘]|\S+\s+[a-z])|\(?\b(?:19|20)\d{2}\b")
 # Vancouver "Doe J, Garza Ruiz MA. Title Case Title." ends at the period after
 # the last author's initials (a surname ending lower case, then 1-4 capitals),
 # when two plain words follow -- a Title Case title the rule above misses.
-# "Michael E. Wende, ..." and "... Wende Jr, ..." are not that: the word after
+# "Michael E. Testa, ..." and "... Testa Jr, ..." are not that: the word after
 # the period is followed by a comma, "and", or its own period. A one-word
 # title ("Doe JM. Chemoprevention.") counts only after two or more initials,
 # which a given name with one middle initial never has.
@@ -144,7 +144,7 @@ def _author_words(token: str) -> list[str] | None:
 
 def _split_author(words: list[str]) -> Author | None:
     """Surname and initial of an author written "Garza Ruiz M", "M. E.
-    Wende", "Ana Garza Ruiz" or "Michael E. Wende"."""
+    Testa", "Ana Garza Ruiz" or "Michael E. Testa"."""
     flags = [is_initials(w) for w in words]
     if all(flags):
         return None
@@ -160,7 +160,7 @@ def _split_author(words: list[str]) -> Author | None:
 
 
 def parse_authors(citation: str) -> list[Author]:
-    """The authors of a citation. A comma form ("Wende, M. E.") puts the
+    """The authors of a citation. A comma form ("Testa, M. E.") puts the
     initials in the next token, which is folded back into the surname."""
     tokens = [_author_words(t) for t in _AUTHOR_SEPARATOR.split(author_segment(citation))]
     authors: list[Author] = []

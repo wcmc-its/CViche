@@ -111,8 +111,8 @@ def test_iter_source_lines_recurses_into_nested_table(tmp_path):
 # ------------------------------------------------------------------ metrics
 
 _GRANT_A = "FSMB Foundation Grant | Shapiro, M. (PI) | Improving Access to Healthcare | Role: Co-PI"
-_GRANT_B = "John Templeton Foundation OFI | Jung, E. (PI) | Intellectual Humility | Role: PI"
-_GRANT_C = "NBME Stemmler Education Grant | Jung, E. (PI) | Use of AI | Role: PI | Status: Not Funded"
+_GRANT_B = "John Templeton Foundation OFI | Tester, E. (PI) | Intellectual Humility | Role: PI"
+_GRANT_C = "NBME Stemmler Education Grant | Tester, E. (PI) | Use of AI | Role: PI | Status: Not Funded"
 
 _STAGE1A = {"hierarchy": [
     {"text": "GRANTS", "children": [

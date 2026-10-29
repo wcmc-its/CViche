@@ -434,7 +434,7 @@ def lint_dead_sections(stage2: dict,
     nothing actually missing -- so a single-word name only matches
     exactly. A multi-word source name ('Research Presentations') still
     falls back to `_names_match`'s token containment, which is what the
-    farm's 2100_Mocco true positive (matching the shorter 'RESEARCH' output
+    true positive on farm 2100 (matching the shorter 'RESEARCH' output
     section) needs."""
     per_h1: dict[str, int] = {}
     for e in stage2.get("entries", []):
