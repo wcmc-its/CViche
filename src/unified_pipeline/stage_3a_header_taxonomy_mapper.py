@@ -443,7 +443,7 @@ def run_stage_3a(
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python stage_3a_header_taxonomy_mapper.py <document_uid>")
-        print("  document_uid: Document identifier (e.g., 2086_Jones_Webb)")
+        print("  document_uid: Document identifier (e.g., 9999_Doe_Jane_CV)")
         sys.exit(1)
 
     document_uid = sys.argv[1]

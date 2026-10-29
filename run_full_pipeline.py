@@ -30,28 +30,28 @@ to override; the summary reports which ones actually served the run.
 
 Example:
     # Run full pipeline
-    python3 run_full_pipeline.py 2097_Upton_Cv
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV
 
     # Run only Stage 2 (requires Stage 1b output to exist)
-    python3 run_full_pipeline.py 2097_Upton_Cv --stage 2
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 2
 
     # Run only Stage 3a (header taxonomy mapping)
-    python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3a
 
     # Run only Stage 3b (entry classification, requires 3a)
-    python3 run_full_pipeline.py 2097_Upton_Cv --stage 3b
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3b
 
     # Run both 3a and 3b together
-    python3 run_full_pipeline.py 2097_Upton_Cv --stage 3
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3
 
     # Run only Stage 4 (field extraction, requires 3b)
-    python3 run_full_pipeline.py 2097_Upton_Cv --stage 4
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 4
 
     # Run only Stage 4.5 (research summary generation, requires 4)
-    python3 run_full_pipeline.py 2097_Upton_Cv --stage 4.5
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 4.5
 
     # Run only Stage 6 (Word template generation, uses best available input)
-    python3 run_full_pipeline.py 2097_Upton_Cv --stage 6
+    python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 6
 
 Outputs:
     - Stage 1a: src/unified_pipeline/outputs/stage_1a_segmentation/{uid}_segmented.json
@@ -398,8 +398,8 @@ def resolve_cv_path(cv_path_or_uid: str) -> tuple[str, str]:
     Resolve CV path from either a full path or just the document UID.
 
     Supports:
-    - Full path: 'data/sample_cvs/word/2097_Upton_Cv.docx'
-    - Just UID: '2097_Upton_Cv' (looks in data/sample_cvs/word/)
+    - Full path: 'data/sample_cvs/word/9999_Doe_Jane_CV.docx'
+    - Just UID: '9999_Doe_Jane_CV' (looks in data/sample_cvs/word/)
 
     Returns:
         (cv_path, document_uid)
@@ -1167,22 +1167,22 @@ def _print_usage() -> None:
     logger.info("")
     logger.info("Examples:")
     logger.info("  # Full pipeline")
-    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv")
+    logger.info("  python3 run_full_pipeline.py 9999_Doe_Jane_CV")
     logger.info("")
     logger.info("  # Run only Stage 2")
-    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 2")
+    logger.info("  python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 2")
     logger.info("")
     logger.info("  # Run only Stage 3a (header taxonomy mapping)")
-    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a")
+    logger.info("  python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3a")
     logger.info("")
     logger.info("  # Run only Stage 3b (entry classification)")
-    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3b")
+    logger.info("  python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3b")
     logger.info("")
     logger.info("  # Run both 3a and 3b")
-    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3")
+    logger.info("  python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3")
     logger.info("")
     logger.info("  # Run only Stage 4 (field extraction)")
-    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 4")
+    logger.info("  python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 4")
 
 
 def parse_args(argv: list[str]) -> tuple[str, str | None]:

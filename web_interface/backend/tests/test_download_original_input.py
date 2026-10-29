@@ -11,7 +11,7 @@ import app.api.steps as steps_mod
 from app.auth import COOKIE_NAME, create_session_cookie
 from app.models import Run, User
 
-_ORIGINAL = "Eulho Jung_CV_JUN_2026_USU.docx"
+_ORIGINAL = "Jane Doe_CV_JUN_2026_USU.docx"
 
 
 def _user_and_run(db, role="user", suffix="", filename=_ORIGINAL, file_type="docx"):

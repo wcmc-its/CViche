@@ -14,16 +14,16 @@ arm's `_render_index.json`):
     Rejected by the sparsity guard (no usable title, no agency+role/dates): 3
     Of those, carrying a grant_number (the #486 actionable subset): 1
 
-      ODAWYA_2002_Holtz [M2C] grant_number='R21'  text='4.  Pending-NINR R21'
+      ODAWYA [M2C] grant_number='R21'  text='4.  Pending-NINR R21'
 
-The other two guard rejections (`2100_Mocco` M2A, `GLC5JG_Mocco_CV 022525` M2B)
+The other two guard rejections (farm 2100 M2A, `GLC5JG 022525` M2B)
 carry no grant_number and stay rejected under this fix -- confirmed below by
 construction (test_bare_grant_number_alone_still_rejected mirrors their shape:
 an identifier or narrative with nothing to corroborate it).
 
-The positive-control fixture below is ODAWYA_2002_Holtz's real M2C entry, read
-from `stage_5d_citation_formatted/ODAWYA_2002_Holtz_citation_formatted.json`
-(identical to `stage_5_enrichment/ODAWYA_2002_Holtz_enriched.json` for this
+The positive-control fixture below is ODAWYA's real M2C entry, read from
+ODAWYA's `stage_5d_citation_formatted/` JSON (identical to its
+`stage_5_enrichment/` JSON for this
 entry -- the citation-formatting stage passed it through unchanged):
 `extracted_fields` = {"grant_number": "R21", "title": None, "pi_role": None,
 "co_investigators": None, "agency": "NINR", "total_funding_requested": None,
@@ -74,7 +74,7 @@ def _cells(table):
 # --- #486: grant_number admitted, corroborated ----------------------------------
 
 def test_grant_number_only_entry_is_admitted_with_a_real_farm_fixture():
-    # ODAWYA_2002_Holtz's real M2C entry -- see module docstring for provenance.
+    # ODAWYA's real M2C entry -- see module docstring for provenance.
     fields = {
         "grant_number": "R21",
         "title": None,
@@ -126,7 +126,7 @@ def test_bare_grant_number_alone_still_rejected():
 
 
 def test_narrative_with_no_identifier_still_rejected():
-    # Mirrors the farm's other two guard rejections (2100_Mocco, GLC5JG_Mocco_CV):
+    # Mirrors the farm's other two guard rejections (farm 2100, GLC5JG):
     # agency and funding present, but no title, no dates/role, no grant_number.
     fields = {"agency": "Microvention", "total_funding": "$492,560"}
     entry = {"text": "Sponsored by: Microvention.\tFunding: $492,560",

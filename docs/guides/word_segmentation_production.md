@@ -32,10 +32,10 @@ The chunked segmentation is now integrated as Stage 1a of the unified pipeline. 
 
 ```bash
 # Full pipeline (includes chunked segmentation as Stage 1a)
-python3 run_full_pipeline.py data/sample_cvs/word/2097_Upton_Cv.docx
+python3 run_full_pipeline.py data/sample_cvs/word/9999_Doe_Jane_CV.docx
 
 # Stage 1a only (segmentation)
-python3 run_full_pipeline.py data/sample_cvs/word/2097_Upton_Cv.docx --stage 1a
+python3 run_full_pipeline.py data/sample_cvs/word/9999_Doe_Jane_CV.docx --stage 1a
 ```
 
 Or via the web interface by uploading a CV at `http://localhost:3001` (local dev) or `http://localhost:3000` (Docker).
@@ -95,7 +95,7 @@ done
 - Splits on paragraph boundaries
 - Keeps related items together
 
-**Example** (from 2009_Mucci CV test):
+**Example** (from the farm 2009 CV test):
 ```
 Original Articles section: 58,418 chars total
 → Chunk 1: 11,940 chars (58 paragraphs)
@@ -115,7 +115,7 @@ Total: 5 chunks, all under 12K limit ✓
 
 ```json
 {
-  "document_uid": "2009_Mucci_March",
+  "document_uid": "2009_March",
   "meta": {
     "num_top_level_groups": 27,
     "total_entries": 31,
@@ -444,7 +444,7 @@ Stage 1a output feeds directly into the subsequent stages:
 
 ## Appendix: Test Results
 
-### 2009_Mucci_March.docx Test
+### 2009_March.docx Test
 
 **Input**: 171KB Word document, 864 paragraphs, 338,578 chars
 **Previous Approach**: ❌ FAILED (85,456 tokens requested, 30K limit)

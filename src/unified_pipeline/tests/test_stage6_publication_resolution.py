@@ -219,7 +219,7 @@ def test_a_non_year_shape_no_longer_reaches_the_page_as_its_repr(value, old_repr
     `year: null` and 299 of them rendered the literal text "None" into a
     citation -- many reading exactly "18. None.". After this they render no
     year, which is also the cosmetic defect PR #737's own body noted on
-    2082_Dr_Scot's "Legislative Norms in the Twenty-First Century" entry."""
+    farm 2082's "Legislative Norms in the Twenty-First Century" entry."""
     resolved = resolve_publication({'extracted_fields': {'year': value}})
 
     assert str(value) == old_repr, 'the table must state the real old output'
@@ -458,7 +458,7 @@ def test_a_chapter_pubmed_indexed_under_its_series_resolves_the_series():
      {'book_title': None}, {}),
     ('no publisher: nothing for the book trailer to name',
      {'publisher': ''}, {}),
-    ('PubMed matched another chapter of the same CV line (2054_Opresko_Cv 396)',
+    ('PubMed matched another chapter of the same CV line (farm 2054 396)',
      {}, {'pubmed_title': 'Targeted formation of example lesions'}),
     ('PubMed gave no title to compare',
      {}, {'pubmed_title': ''}),

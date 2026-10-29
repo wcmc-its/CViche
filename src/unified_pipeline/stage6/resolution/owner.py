@@ -2,7 +2,7 @@
 
 Same responsibility as `institution.py`, different subject: the owner's name is
 needed to auto-fill PI fields, and it may arrive as a structured record, or only
-as a document uid like "2015_Wende", or not at all.
+as a document uid like "2015_Testa", or not at all.
 """
 import re
 
@@ -12,10 +12,10 @@ def _get_cv_owner_name(cv_owner: dict | None = None, document_uid: str = '') -> 
 
     Args:
         cv_owner: Dict with keys like 'last_name', 'first_name', etc.
-        document_uid: Document UID like "2015_Wende" to extract name from
+        document_uid: Document UID like "2015_Testa" to extract name from
 
     Returns:
-        Full name string (e.g., "Adam Wende") or last name if first not available
+        Full name string (e.g., "Jane Testa") or last name if first not available
     """
     if cv_owner:
         first = cv_owner.get('first_name', '')
@@ -27,7 +27,7 @@ def _get_cv_owner_name(cv_owner: dict | None = None, document_uid: str = '') -> 
 
     # Fall back to extracting from document_uid
     if document_uid:
-        # Handle patterns like "2015_Wende" or "2003_Albrechtjs_Cv"
+        # Handle patterns like "2015_Testa" or "2003_Examplejs_Cv"
         parts = document_uid.split('_')
         if len(parts) >= 2:
             # Second part is usually the name

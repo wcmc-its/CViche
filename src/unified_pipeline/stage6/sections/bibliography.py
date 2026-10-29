@@ -296,8 +296,8 @@ def _find_name_span(citation: str, name: str) -> tuple[int, int] | None:
 
 def _trailing_initials_end(citation: str, end: int) -> int:
     """End of the author token after its surname: `end` extended over up to
-    `_MAX_INITIALS` capital initials ("Wende ME"), else `end` unchanged. The
-    initials must be upper case and stand alone, so "Wende and" and "Wende
+    `_MAX_INITIALS` capital initials ("Testa ME"), else `end` unchanged. The
+    initials must be upper case and stand alone, so "Testa and" and "Testa
     Michael" stop at the surname."""
     start = _WHITESPACE_RUN.match(citation, end).end()
     stop = start
@@ -405,9 +405,9 @@ def _target_surname(target_name: str) -> str:
     -> "Pell-Rowan", "Tarn-Ellery, K." -> "Tarn-Ellery"), or unchanged
     when it does not end in some. Stage 4 records the initials it saw in one
     citation form; another form of the same author may carry more or fewer.
-    A "Surname, Given" form keeps what precedes the comma ("Wende, Michael
-    E." -> "Wende", #1393); a bare trailing comma is not that form. Spaced
-    initials all go ("Wende M. E." -> "Wende")."""
+    A "Surname, Given" form keeps what precedes the comma ("Testa, Michael
+    E." -> "Testa", #1393); a bare trailing comma is not that form. Spaced
+    initials all go ("Testa M. E." -> "Testa")."""
     surname, comma, given = target_name.partition(",")
     if comma and surname.strip() and given.strip():
         return surname.strip()
@@ -472,8 +472,8 @@ def _citation_author_split(citation: str, target_name: str | None,
     adjacent owner name parts, so a spaced compound bolds whole. A
     `target_name` shaped like a title
     (a colon, or more than `_MAX_TARGET_NAME_TOKENS` words) is skipped. A surname match takes trailing capital
-    initials, e.g. "Wende ME", "Wende M", and any leading particles ("de la
-    Cruz M"). The comma form ("Wende, M") bolds only the surname, pinned by
+    initials, e.g. "Testa ME", "Testa M", and any leading particles ("de la
+    Cruz M"). The comma form ("Testa, M") bolds only the surname, pinned by
     test_citation_author_split_additional_dimensions.
 
     Returns `(before, name_to_bold, after)`, where `name_to_bold` is the
@@ -514,7 +514,7 @@ def _lacks_title_and_year(entry: dict) -> bool:
 def _resolve_uid_owner_surname(uid: str, publications: list[dict]) -> str:
     """The CV owner's surname as the citations spell it, from the document uid.
 
-    A uid such as "2003_Quennevillejs_Cv" can carry the owner's initials glued to
+    A uid such as "2003_Examplejs_Cv" can carry the owner's initials glued to
     the surname, but "Smith" ends in the same lower-case tail, and no rule on
     the uid alone can tell the two apart (#665 item 1). So the uid's last name
     is used as written when any citation names that author, and is stripped of
@@ -529,9 +529,9 @@ def _resolve_uid_owner_surname(uid: str, publications: list[dict]) -> str:
 
 
 def _name_initial(name: str) -> str:
-    """The given-name initial in a stage-4 name: after a comma ("Wende,
-    Michael E."), the trailing initials ("Eil R"), or the first of several
-    words ("Michael E. Wende"); '' for a lone word."""
+    """The given-name initial in a stage-4 name: after a comma ("Testa,
+    Michael E."), the trailing initials ("Roe R"), or the first of several
+    words ("Michael E. Testa"); '' for a lone word."""
     surname, comma, given = name.partition(",")
     if comma:
         return next((ch.upper() for ch in given if ch.isalpha()), '')
@@ -675,7 +675,7 @@ class BibliographySection:
         if cv_owner and cv_owner.get('last_name'):
             cv_owner_last_name = cv_owner['last_name']
         elif document_uid:
-            # Fallback: extract from document_uid (e.g., "2015_Wende" -> "Wende")
+            # Fallback: extract from document_uid (e.g., "2015_Testa" -> "Testa")
             cv_owner_last_name = _resolve_uid_owner_surname(
                 document_uid,
                 [pub for code in pub_codes for pub in entries_by_code.get(code, [])])

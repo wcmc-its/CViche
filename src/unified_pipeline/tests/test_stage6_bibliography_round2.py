@@ -516,10 +516,10 @@ def test_plain_mode_renders_citation_without_ins_and_keeps_author_bold():
 # and hyphenated surname. These add the dimensions that file does not: which
 # initials shapes the regex actually matches, case-insensitive owner matching,
 # owner-fallback-only-when-target-absent, no-owner/no-target -> no match, and
-# the "Wende, M" comma form the docstring claims matches but the regex (per
+# the "Testa, M" comma form the docstring claims matches but the regex (per
 # the lead's finding, common ticket item) cannot -- pinned here, not changed.
 
-_SPLIT_CITATION = "Wende ME, Smith J. A study of things. J Things. 2023;1:1-9."
+_SPLIT_CITATION = "Testa ME, Smith J. A study of things. J Things. 2023;1:1-9."
 
 
 @pytest.mark.parametrize(
@@ -527,44 +527,44 @@ _SPLIT_CITATION = "Wende ME, Smith J. A study of things. J Things. 2023;1:1-9."
     [
         # Initials variants the regex does match.
         (
-            "Wende ME, Smith J. A study of things. J Things. 2023;1:1-9.",
-            None, "wende",
-            ("", "Wende ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+            "Testa ME, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "testa",
+            ("", "Testa ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
         ),
         (
-            "Wende M., Smith J. A study of things. J Things. 2023;1:1-9.",
-            None, "wende",
-            ("", "Wende M", "., Smith J. A study of things. J Things. 2023;1:1-9."),
+            "Testa M., Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "testa",
+            ("", "Testa M", "., Smith J. A study of things. J Things. 2023;1:1-9."),
         ),
         (
-            "Wende M, Smith J. A study of things. J Things. 2023;1:1-9.",
-            None, "wende",
-            ("", "Wende M", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+            "Testa M, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "testa",
+            ("", "Testa M", ", Smith J. A study of things. J Things. 2023;1:1-9."),
         ),
         # Case-insensitive owner match: mixed-case citation, upper-case owner.
         (
-            "WENDE ME, Smith J. A study of things. J Things. 2023;1:1-9.",
-            None, "wende",
-            ("", "WENDE ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+            "TESTA ME, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "testa",
+            ("", "TESTA ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
         ),
         # Owner fallback used only because target_name is absent from the
         # citation -- present as an argument, but not a substring of it.
         (
-            _SPLIT_CITATION, "Nobody Q", "wende",
-            ("", "Wende ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+            _SPLIT_CITATION, "Nobody Q", "testa",
+            ("", "Testa ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
         ),
         # Empty owner + no target -> no match at all.
         (
             "No matching author here at all.", None, "",
             ("No matching author here at all.", "", ""),
         ),
-        # The "Wende, M" comma form: trailing initials join the surname only
+        # The "Testa, M" comma form: trailing initials join the surname only
         # across whitespace (`_trailing_initials_end`), not a comma, so only
-        # the bare surname "Wende" is bolded.
+        # the bare surname "Testa" is bolded.
         (
-            "Wende, M, Smith J. A study of things. J Things. 2023;1:1-9.",
-            None, "wende",
-            ("", "Wende", ", M, Smith J. A study of things. J Things. 2023;1:1-9."),
+            "Testa, M, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "testa",
+            ("", "Testa", ", M, Smith J. A study of things. J Things. 2023;1:1-9."),
         ),
     ],
 )
@@ -600,11 +600,11 @@ _TAIL = ". A study of things. J Things. 2023;1:1-9."
         ("O\u2019Neil P, Doe A" + _TAIL, None, "O'Neil", "O\u2019Neil P"),
         ("Alvarez\u2010Diaz M, Doe A" + _TAIL, None, "Alvarez-Diaz", "Alvarez\u2010Diaz M"),
         # Only stand-alone capital initials (at most three) join the surname.
-        ("Wende and colleagues" + _TAIL, None, "Wende", "Wende"),
-        ("Wende Michael, Doe A" + _TAIL, None, "Wende", "Wende"),
-        ("Wende MEJ, Doe A" + _TAIL, None, "Wende", "Wende MEJ"),
-        ("Wende MEJK, Doe A" + _TAIL, None, "Wende", "Wende"),
-        ("Wende" + _TAIL, None, "Wende", "Wende"),
+        ("Testa and colleagues" + _TAIL, None, "Testa", "Testa"),
+        ("Testa Michael, Doe A" + _TAIL, None, "Testa", "Testa"),
+        ("Testa MEJ, Doe A" + _TAIL, None, "Testa", "Testa MEJ"),
+        ("Testa MEJK, Doe A" + _TAIL, None, "Testa", "Testa"),
+        ("Testa" + _TAIL, None, "Testa", "Testa"),
         # Particles that open the author widen the bold run leftward.
         ("Doe A, de la Cruz M" + _TAIL, None, "Cruz", "de la Cruz M"),
         ("Van Der Berg K, Doe A" + _TAIL, None, "Berg", "Van Der Berg K"),
@@ -618,7 +618,7 @@ _TAIL = ". A study of things. J Things. 2023;1:1-9."
         ("Doe A, Mu\u00f1ozz A" + _TAIL, None, "Mu\u00f1oz", ""),
         ("Doe A, Mun\u0303ozz A" + _TAIL, None, "Mu\u00f1oz", ""),
         # A surname followed by non-name text does not swallow the whitespace.
-        ("Doe A, Wende (with others)" + _TAIL, None, "Wende", "Wende"),
+        ("Doe A, Testa (with others)" + _TAIL, None, "Testa", "Testa"),
         # A target whose initials differ from the citation's still finds the
         # author through its surname, whichever side carries more initials.
         ("Quill JD, Doe A" + _TAIL, "Quill J", "Nobody", "Quill JD"),
@@ -637,19 +637,19 @@ _TAIL = ". A study of things. J Things. 2023;1:1-9."
         ("News: Marrows research" + _TAIL, None, "Marrow", ""),
         ("News: Marrow'Sun M" + _TAIL, None, "Marrow", ""),
         # Only capital initials (at most three) are trimmed off a target.
-        ("Wende ME, Doe A" + _TAIL, "Wende Jr", "Nobody", ""),
-        ("Wende ME, Doe A" + _TAIL, "Wende MEJK", "Nobody", ""),
+        ("Testa ME, Doe A" + _TAIL, "Testa Jr", "Nobody", ""),
+        ("Testa ME, Doe A" + _TAIL, "Testa MEJK", "Nobody", ""),
         # The target wins over the owner when both are present.
-        ("Wende ME, Smith J" + _TAIL, "Smith J", "Wende", "Smith J"),
+        ("Testa ME, Smith J" + _TAIL, "Smith J", "Testa", "Smith J"),
         # Blank names never match, and a blank target still falls to the owner.
         ("Doe A" + _TAIL, "  ", "", ""),
-        ("Doe A, Wende M" + _TAIL, "  ", "Wende", "Wende M"),
+        ("Doe A, Testa M" + _TAIL, "  ", "Testa", "Testa M"),
         # A title-shaped target (a colon, or over four words) is skipped for
         # the owner surname, so the title inside the citation is never bolded.
-        ("Wende M. Fictional Notes: Essays" + _TAIL,
-         "Fictional Notes: Essays", "Wende", "Wende M"),
-        ("Wende M. The Long Fictional Book Title" + _TAIL,
-         "The Long Fictional Book Title", "Wende", "Wende M"),
+        ("Testa M. Fictional Notes: Essays" + _TAIL,
+         "Fictional Notes: Essays", "Testa", "Testa M"),
+        ("Testa M. The Long Fictional Book Title" + _TAIL,
+         "The Long Fictional Book Title", "Testa", "Testa M"),
         # A four-word name is still a name.
         ("Doe A, de la Cruz M" + _TAIL, "de la Cruz M", "Nobody", "de la Cruz M"),
     ],
@@ -670,13 +670,13 @@ def test_plain_and_tracked_writers_bold_the_same_substring_through_the_shared_sp
     citation = _SPLIT_CITATION
 
     para_plain = gen.doc.paragraphs[0].insert_paragraph_before("")
-    gen._add_citation_with_bold_author(para_plain, citation, None, "Wende")
+    gen._add_citation_with_bold_author(para_plain, citation, None, "Testa")
     plain_bold_text = "".join(r.text for r in para_plain.runs if r.bold)
 
     gen2 = WCMTemplateGenerator(verbose=False, emit_track_changes=True)
     gen2.doc = Document(gen2.template_path)
     para_tracked = gen2.doc.paragraphs[0].insert_paragraph_before("")
-    gen2._add_citation_with_bold_author_as_insertion(para_tracked, citation, None, "Wende")
+    gen2._add_citation_with_bold_author_as_insertion(para_tracked, citation, None, "Testa")
     ins_elem = para_tracked._p.find(qn("w:ins"))
     assert ins_elem is not None
     tracked_bold_text = "".join(
@@ -685,7 +685,7 @@ def test_plain_and_tracked_writers_bold_the_same_substring_through_the_shared_sp
         if r.find(qn("w:rPr")) is not None and r.find(qn("w:rPr")).find(qn("w:b")) is not None
     )
 
-    assert plain_bold_text == tracked_bold_text == "Wende ME"
+    assert plain_bold_text == tracked_bold_text == "Testa ME"
 
 
 # --- T1 item 3: _CitationEnrichment.from_raw non-mapping fallback ---
@@ -899,17 +899,17 @@ def test_citation_author_split_target_matches_its_own_token_not_a_longer_initial
 
 def test_fill_bibliography_bolds_the_owner_from_a_uid_with_appended_initials():
     # #665 item 1, call-site wire: with no cv_owner last_name the fill falls
-    # back to the uid, whose "Quennevillejs" carries the initials; the citation
-    # spells the surname "Quenneville", so only the confirmed/stripped resolver bolds it.
-    entry = _citation_entry("Quenneville JS, Roe B. A study. J Med. 2020;1:1-2.", None, 2020)
+    # back to the uid, whose "Examplejs" carries the initials; the citation
+    # spells the surname "Example", so only the confirmed/stripped resolver bolds it.
+    entry = _citation_entry("Example JS, Roe B. A study. J Med. 2020;1:1-2.", None, 2020)
     gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
     gen.doc = Document(gen.template_path)
 
-    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="2001_Quennevillejs_Cv")
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="2001_Examplejs_Cv")
 
     header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
     para = gen.doc.paragraphs[header_idx + 2]
-    assert [r.text for r in para.runs if r.bold is True] == ["Quenneville JS"]
+    assert [r.text for r in para.runs if r.bold is True] == ["Example JS"]
 
 
 def test_fill_bibliography_bolds_a_whole_uid_surname_the_citation_spells_in_full():
@@ -934,12 +934,12 @@ def test_uid_owner_surname_kept_whole_when_a_citation_names_it():
 
 
 def test_uid_owner_surname_strips_appended_initials_when_no_citation_names_it():
-    pubs = [_citation_entry("Quenneville JS, Doe J. A study. J Med. 2020.", None, 2020)]
-    assert bibliography._resolve_uid_owner_surname("2003_Quennevillejs_Cv", pubs) == "Quenneville"
+    pubs = [_citation_entry("Example JS, Doe J. A study. J Med. 2020.", None, 2020)]
+    assert bibliography._resolve_uid_owner_surname("2003_Examplejs_Cv", pubs) == "Example"
 
 
 def test_uid_owner_surname_with_no_publications_falls_back_to_the_guess():
-    assert bibliography._resolve_uid_owner_surname("2003_Quennevillejs_Cv", []) == "Quenneville"
+    assert bibliography._resolve_uid_owner_surname("2003_Examplejs_Cv", []) == "Example"
 
 
 def test_uid_owner_surname_is_empty_for_a_run_id():
@@ -1055,29 +1055,29 @@ def test_untitled_undated_entries_are_declined_not_numbered():
 
 
 @pytest.mark.parametrize("target_name, surname", [
-    ("Wende, Michael E.", "Wende"),
+    ("Testa, Michael E.", "Testa"),
     ("Tarn-Ellery, K.", "Tarn-Ellery"),
     ("Pell-Rowan FM", "Pell-Rowan"),
-    (", Wende", ", Wende"),
+    (", Testa", ", Testa"),
     # A bare trailing comma is not the "Surname, Given" form.
-    ("Wende Michael,", "Wende Michael,"),
+    ("Testa Michael,", "Testa Michael,"),
     # Spaced initials all go (#1394).
-    ("Wende M. E.", "Wende"),
+    ("Testa M. E.", "Testa"),
     ("Garza Ruiz M. E.", "Garza Ruiz"),
-    ("Wende M.E.", "Wende"),
+    ("Testa M.E.", "Testa"),
 ])
 def test_target_surname_takes_the_part_before_a_comma(target_name, surname):
     assert bibliography._target_surname(target_name) == surname
 
 
 def test_citation_author_split_trailing_comma_target_bolds_the_surname_only():
-    citation = "Doe Jane, Wende Michael. A study of mice. J Med. 2020;1:1-2."
-    assert bibliography._citation_author_split(citation, "Wende Michael,", "Wende")[1] == "Wende"
+    citation = "Doe Jane, Testa Michael. A study of mice. J Med. 2020;1:1-2."
+    assert bibliography._citation_author_split(citation, "Testa Michael,", "Testa")[1] == "Testa"
 
 
 def test_citation_author_split_full_name_target_finds_the_surname():
-    citation = "Smith J, Wende ME" + _TAIL
-    assert bibliography._citation_author_split(citation, "Wende, Michael E.", "")[1] == "Wende ME"
+    citation = "Smith J, Testa ME" + _TAIL
+    assert bibliography._citation_author_split(citation, "Testa, Michael E.", "")[1] == "Testa ME"
 
 
 def _alias(*surnames, initials="M", parts=()):
@@ -1085,12 +1085,12 @@ def _alias(*surnames, initials="M", parts=()):
 
 
 def test_citation_author_split_owner_alias_is_the_last_resort():
-    citation = "Smith J, Wendee ME" + _TAIL
-    assert bibliography._citation_author_split(citation, None, "Wende")[1] == ""
-    assert bibliography._citation_author_split(citation, None, "Wende", _alias("Wendee"))[1] == "Wendee ME"
+    citation = "Smith J, Testae ME" + _TAIL
+    assert bibliography._citation_author_split(citation, None, "Testa")[1] == ""
+    assert bibliography._citation_author_split(citation, None, "Testa", _alias("Testae"))[1] == "Testae ME"
     # An exact owner match wins over the alias.
-    citation = "Wendee A, Wende ME" + _TAIL
-    assert bibliography._citation_author_split(citation, None, "Wende", _alias("Wendee"))[1] == "Wende ME"
+    citation = "Testae A, Testa ME" + _TAIL
+    assert bibliography._citation_author_split(citation, None, "Testa", _alias("Testae"))[1] == "Testa ME"
 
 
 @pytest.mark.parametrize("citation, alias, bolded", [
@@ -1139,10 +1139,10 @@ def test_citation_author_split_widens_a_spaced_compound(citation, owner, alias, 
 
 
 @pytest.mark.parametrize("name, initial", [
-    ("Wende, Michael E.", "M"),
-    ("Eil R", "R"),
-    ("Michael E. Wende", "M"),
-    ("Wende", ""),
+    ("Testa, Michael E.", "M"),
+    ("Roe R", "R"),
+    ("Michael E. Testa", "M"),
+    ("Testa", ""),
     ("", ""),
 ])
 def test_name_initial(name, initial):
@@ -1162,24 +1162,24 @@ def test_fill_bibliography_bolds_the_plausible_owner_spelling():
     # Stage 4's spelling is on no paper; the papers' close spelling is the
     # owner's. (With stage 4's spelling on a paper, a close one is someone
     # else: test_stage6_owner_alias.py, #1394.)
-    typos = [_citation_entry(f"Roe B, Wendee ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+    typos = [_citation_entry(f"Roe B, Testae ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
              for n in range(3)]
-    gen, bolds = _fill(typos, {"last_name": "Wende", "first_name": "Michael"})
-    assert bolds == [["Wendee ME"]] * 3
+    gen, bolds = _fill(typos, {"last_name": "Testa", "first_name": "Michael"})
+    assert bolds == [["Testae ME"]] * 3
     assert gen.stats["target_names_bolded"] == 3
 
 
 def test_fill_bibliography_alias_reaches_the_tracked_writer():
     typos = []
     for n in range(2):
-        typo = _citation_entry(f"Roe B, Wendee ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+        typo = _citation_entry(f"Roe B, Testae ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
         typo["enrichment_status"] = "enriched"
-        typo["text"] = f"Roe B, Wendee ME. A study of mice {n}."
+        typo["text"] = f"Roe B, Testae ME. A study of mice {n}."
         typos.append(typo)
     gen = WCMTemplateGenerator(verbose=False, emit_track_changes=True)
     gen.doc = Document(gen.template_path)
 
-    gen._fill_bibliography({"S1": typos}, cv_owner={"last_name": "Wende", "first_name": "Michael"})
+    gen._fill_bibliography({"S1": typos}, cv_owner={"last_name": "Testa", "first_name": "Michael"})
 
     assert gen.stats["target_names_bolded"] == 2
 
@@ -1292,21 +1292,21 @@ def test_citation_author_split_takes_every_target_with_no_confirmed_owner():
 
 
 def test_fill_bibliography_records_the_bibliography_bold_as_a_render_warning():
-    typos = [_citation_entry(f"Roe B, Wendee ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+    typos = [_citation_entry(f"Roe B, Testae ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
              for n in range(3)]
-    gen, _ = _fill(typos, {"last_name": "Wende", "first_name": "Michael"})
+    gen, _ = _fill(typos, {"last_name": "Testa", "first_name": "Michael"})
     [record] = [w for w in gen._section_failures
                 if w["check"] == bibliography.OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK]
     assert record["severity"] == "INFO"
     assert record["evidence"] == [f"{bibliography.OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK}=3", "owner_spellings=1"]
     # A count, never the name.
-    assert "Wende" not in record["message"] + "".join(record["evidence"])
+    assert "Testa" not in record["message"] + "".join(record["evidence"])
 
 
 def test_fill_bibliography_no_render_warning_when_stage4_names_suffice():
-    entries = [_citation_entry(f"Wende ME, Roe B. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+    entries = [_citation_entry(f"Testa ME, Roe B. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
                for n in range(3)]
-    gen, _ = _fill(entries, {"last_name": "Wende", "first_name": "Michael"})
+    gen, _ = _fill(entries, {"last_name": "Testa", "first_name": "Michael"})
     assert not [w for w in gen._section_failures
                 if w["check"] == bibliography.OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK]
 

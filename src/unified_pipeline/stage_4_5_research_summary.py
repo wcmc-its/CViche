@@ -1246,7 +1246,7 @@ def main():
     )
     parser.add_argument(
         'input',
-        help="Input JSON file or document UID (e.g., '2015_Wende')"
+        help="Input JSON file or document UID (e.g., '9999_Doe_Jane_CV')"
     )
     parser.add_argument(
         '-o', '--output',

@@ -149,14 +149,13 @@ Run as `PYTHONPATH=<arm>/src python3 scripts/render_gate.py <farm> <out>
   calls, and calling it changes nothing.
 - **Mutation** (the #550 write-back removed, restored after): `paragraph
   CHANGED 3`, `fingerprint CHANGED 3` -- FAIL, and the deltas are exactly
-  the five values the write-back exists to carry: `jalbrecht@som.umaryland.edu`
-  on `2003_Albrechtjs_Cv`; a business address, `412-623-7764` and
-  `plo4@pitt.edu` on `2054_Opresko_Cv`; a street address on
-  `NSUJZG_2027_Eil_Robert`. A gate that could not see this could not see
-  #550 at all.
+  the five values the write-back exists to carry: a work email on farm
+  2003; a business address, an office phone and a work email on farm
+  2054; a street address on `NSUJZG`. A gate that could not see this
+  could not see #550 at all.
 - **Blast radius of #740's review round** (label classifier, whole-document
   scan, contact-line consumption, alias collapse): `paragraph CHANGED 1` --
-  `NSUJZG_2027_Eil_Robert` gains `eil@ohsu.edu`, which is the
+  `NSUJZG` gains its work email, which is the
   `E-Mail Address:` label #740 had disclosed as unrecovered and filed as
   #730. No other document changed. Removing the `tables[:3]` and
   `paragraphs[:20]` bounds cost nothing on this corpus.

@@ -302,7 +302,7 @@ def missing_evidence(outputs_dir: Path) -> list[str]:
 #: accident of the broad heuristic. Residual gap the pattern still cannot
 #: see: a stage failure recorded as a raw Python exception message with no
 #: type name in it, e.g. `'int' object is not iterable` (1 of the 66 scored
-#: farm uids, ODAWYA_2002_Holtz, carries exactly this in
+#: farm uids, ODAWYA, carries exactly this in
 #: meta.stats.t_validation.error and stays non-fatal) -- driving this from
 #: structured stage error metadata instead of exception text is #745.
 FATAL_ERROR_PATTERN = re.compile(

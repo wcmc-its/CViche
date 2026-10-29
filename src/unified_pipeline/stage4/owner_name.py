@@ -290,7 +290,7 @@ def extract_cv_owner_name(
     without brittle regex.
 
     Args:
-        document_uid: Document identifier (e.g., "2015_Wende")
+        document_uid: Document identifier (e.g., "2015_Testa")
         mapped_entries: List of all mapped entries
         docx_path: Optional path to the source .docx. When the body-derived
             tier below finds no name at all (`last_name` AND `full_name` both
@@ -324,7 +324,7 @@ def extract_cv_owner_name(
 
     # Helper to extract last name from document_uid as fallback.
     #
-    # This works for filename-style uids ('2097_Upton_Cv' -> 'Upton') and is
+    # This works for filename-style uids ('2097_Roe_Cv' -> 'Roe') and is
     # worth keeping for them. It must NOT fire for an opaque uid: 'web151' was
     # written in as the owner's surname on every CV whose name extraction
     # returned nothing (#457). A manufactured surname is worse than an empty
@@ -334,7 +334,7 @@ def extract_cv_owner_name(
     def fallback_from_uid():
         import re
         if document_uid:
-            # Case-insensitive: '_CV' was not stripped, so '2026_OBrien_CV'
+            # Case-insensitive: '_CV' was not stripped, so '2026_McDoe_CV'
             # yielded the literal 'CV' as the surname.
             uid_clean = re.sub(r'_cv$', '', document_uid, flags=re.IGNORECASE)
             # Remove random prefix like "WSP0KQ_"
@@ -832,7 +832,7 @@ def find_target_name_in_authors(text: str, cv_owner_last_name: str) -> str:
         author_clean = re.sub(r'[\*†‡§¶#\^\d]+', '', author).strip()
 
         # Check if last name matches (word boundary to avoid partial matches)
-        # e.g., "Wende" should match "Wende ME" but not "Wendell J"
+        # e.g., "Testa" should match "Testa ME" but not "Testall J"
         if re.search(rf'\b{re.escape(last_name_lower)}\b', author_clean.lower()):
             matches.append(author)
 

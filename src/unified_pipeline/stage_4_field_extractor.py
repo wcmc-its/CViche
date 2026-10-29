@@ -245,8 +245,8 @@ def run_validation(output_path: str) -> None:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         logger.info("Usage: python stage_4_field_extractor.py <document_uid_or_path>")
-        logger.info("  document_uid_or_path: Either the document UID (e.g., '2005_Bpg')")
-        logger.info("                        or path to CV document (e.g., 'path/to/2005_Bpg.docx')")
+        logger.info("  document_uid_or_path: Either the document UID (e.g., '9999_Doe_Jane_CV')")
+        logger.info("                        or path to CV document (e.g., 'path/to/9999_Doe_Jane_CV.docx')")
         logger.info("  (the LLM model is configured in llm_config.yaml)")
         sys.exit(1)
 
