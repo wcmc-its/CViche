@@ -128,12 +128,20 @@ _DATE_RANGE_RE = re.compile(
     r"|(?:[A-Za-z]{3,9}\.? )?(?:(?:19|20)\d{2}|\d{1,2}))\b"
     r"|(?i:present|current|ongoing|now|to date)\b)")
 
-# A tab part must be at least this long to be a dated record (the same floor as
-# `RECORD_DATE_LINE_MIN_CHARS` for a date-led line) and at most the second
-# length: a longer part is prose about a record, not one. Its date range sits
-# within `DATED_SEGMENT_EDGE_CHARS` of either end: a range in the middle of the
-# text belongs to a sentence or to a record wrapped across two parts.
-DATED_SEGMENT_MIN_CHARS = 20
+# A tab part must be at least this long to be a dated record and at most the
+# second length: a longer part is prose about a record, not one. Its date range
+# sits within `DATED_SEGMENT_EDGE_CHARS` of either end: a range in the middle of
+# the text belongs to a sentence or to a record wrapped across two parts.
+# ponytail: 12, not the 20 of `RECORD_DATE_LINE_MIN_CHARS` for a date-led line,
+# keeps an officer post beside its society's line ("President 2010-2012", 19
+# chars; "Member 1974-1977", 16) a record of its own (#1243). A shorter part
+# ("Rep 2001-02") stays a detail. Set on the #1243 census (460 stored runs,
+# 2026-10-29): 12 changes the parts of 47 entries and the render of 7. Its one
+# over-match writes the two per-state terms of a row that renders them as one
+# span (BNYLDF 209). A short part still needs words beside its range, and its
+# line two distinct ranges and half its parts dated. Revisit if a short part
+# that is no record (a room or course number with a year) starts splitting lines.
+DATED_SEGMENT_MIN_CHARS = 12
 DATED_SEGMENT_MAX_CHARS = 200
 DATED_SEGMENT_EDGE_CHARS = 12
 # A line is a run of records only when its dated parts give at least this many

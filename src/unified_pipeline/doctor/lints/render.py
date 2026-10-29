@@ -512,11 +512,13 @@ def _tab_parts(text: object) -> set[str]:
             for part in tab_record_segments(line)}
 
 
-def _held_by_extraction(segment: str, fields: dict) -> bool:
+def _held_by_extraction(segment: str, fields: dict, code: str | None) -> bool:
     """Whether a tab part is the record stage 4 extracted, which a table
     renders cell by cell (a mentee line, a grant header row), not a lost one:
-    the same two filters stage 6's recovery pass applies to a tab part (#1243)."""
-    return segment_held_by_fields(segment, fields) or segment_already_rendered(segment, fields)
+    the same two filters stage 6's recovery pass applies to a tab part, a
+    mentee's parts read as details of the one mentee (#1243)."""
+    return (segment_held_by_fields(segment, fields, one_record=code in MENTEE_CODES)
+            or segment_already_rendered(segment, fields))
 
 
 def _bare_date_lines(text: object) -> int:
@@ -718,7 +720,7 @@ def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
                 continue
             absent = [r for r in records
                       if _record_rendered(r, h.text, output) is False
-                      and not (r in tab_parts and _held_by_extraction(r, fields))]
+                      and not (r in tab_parts and _held_by_extraction(r, fields, code))]
         absent = [r for r in absent
                   if not offered_as_subpoint(r, subpoints, e.get('element_idx_start'))]
         if not absent:

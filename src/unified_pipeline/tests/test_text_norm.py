@@ -180,7 +180,7 @@ _ONE_YEAR_POSTS = ("Quokka College of Pharmacy, 1979-present\tFounding Member, 1
 
 def test_tab_record_segments_reads_parts_dated_by_one_year_beside_two_ranges():
     assert text_norm.tab_record_segments(_ONE_YEAR_POSTS) == [
-        "Quokka College of Pharmacy, 1979-present", "Founding Member, 1979",
+        "Quokka College of Pharmacy, 1979-present", "Founding Member, 1979", "Fellow, 1985",
         "Research Affairs Committee, 1985", "Chairperson, Awards Committee, 1987-1988"]
     # A year at the start dates a part too; a year in the middle does not.
     assert text_norm.tab_record_segments(
@@ -204,7 +204,20 @@ def test_tab_record_segments_does_not_date_details_after_a_label_by_their_years(
 
 
 def test_tab_record_segments_needs_parts_long_enough_to_carry_words():
-    assert text_norm.tab_record_segments("Chair 2010-2012\tMember 2013-2015") == []
+    # #1243: a part of 12 characters is a record, one of 11 is not.
+    assert text_norm.tab_record_segments("Dean 2001-02\tHead 2003-04") == ["Dean 2001-02", "Head 2003-04"]
+    assert text_norm.tab_record_segments("Rep 2001-02\tHead 2003-04") == []
+
+
+def test_tab_record_segments_reads_a_short_officer_post_beside_its_society_as_a_record():
+    # #1243 (HZGJFM 65, IZJADE 511, VQFSDI 37): posts of 12 to 19 characters
+    # were read as details of the society's line, so the render lost them.
+    assert text_norm.tab_record_segments(
+        "Quokka Society of Norvale, 1999-present\tMember 1974-1977\tPresident 2010-2012"
+    ) == ["Quokka Society of Norvale, 1999-present", "Member 1974-1977", "President 2010-2012"]
+    assert text_norm.tab_record_segments(
+        "1993-2004 Member, Board of Directors, Wombat Clinic\t1997-99 President\tPast-President"
+    ) == ["1993-2004 Member, Board of Directors, Wombat Clinic", "1997-99 President"]
 
 
 def test_fold_quotes_maps_typographic_apostrophes_and_quotes_to_ascii():

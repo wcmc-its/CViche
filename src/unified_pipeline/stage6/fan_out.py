@@ -295,7 +295,9 @@ _FORMATTED_KEYS = ('formatted_text', 'formatted_citation')
 # A citation that writes several records' titles already renders them all,
 # with venue and place their fields may not hold (EOAHMI GHCIXA S8: a
 # fan-out lost "Vancouver, Canada"), so that split, and one whose citation
-# writes no record's title, is still declined.
+# writes no record's title, is still declined. Records that share one title
+# are the exception: the citation's years can name one of them
+# (`_hit_cited_by_year`).
 _FORMATTED_TEXT_KEY = 'formatted_text'
 _FORMATTED_CITATION_KEY = 'formatted_citation'
 # What 5d writes beside the citation (`apply_formatted_fields`); the
@@ -1269,9 +1271,12 @@ def _citation_record(fields: Mapping[str, Any],
                      records: Sequence[Mapping[str, Any]]) -> int | None:
     """The index of the one record whose title stage 5d's citation writes,
     or None: no citation, no record's title in it, or several (a citation
-    of the whole list, which no single record may carry)."""
+    of the whole list, which no single record may carry) that the citation's
+    years do not tell apart (`_hit_cited_by_year`)."""
     hits = _cited_records(fields, records)
-    return hits[0] if len(hits) == 1 else None
+    if len(hits) == 1:
+        return hits[0]
+    return _hit_cited_by_year(fields, records, hits)
 
 
 def _cited_records(fields: Mapping[str, Any],
@@ -1281,9 +1286,45 @@ def _cited_records(fields: Mapping[str, Any],
     citation = _title_words(fields.get(_FORMATTED_CITATION_KEY))
     if not citation:
         return []
-    titles = [_title_words(next((record[key] for key in _TITLE_KEYS if record.get(key)), ''))
-              for record in records]
+    titles = [_record_title(record) for record in records]
     return [i for i, title in enumerate(titles) if title and f' {title} ' in f' {citation} ']
+
+
+def _record_title(record: Mapping[str, Any]) -> str:
+    """`record`'s title (`_TITLE_KEYS`), as `_title_words` reads it."""
+    return _title_words(next((record[key] for key in _TITLE_KEYS if record.get(key)), ''))
+
+
+# A year a citation or a record's date field writes, matched by `_hit_cited_by_year`.
+_CITATION_YEAR_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+
+
+def _record_years(record: Mapping[str, Any]) -> frozenset[str]:
+    """The years `record`'s date fields write (`_is_date_key`)."""
+    return frozenset(year for key, value in record.items() if _is_date_key(key)
+                     for year in _CITATION_YEAR_RE.findall(str(value)))
+
+
+def _hit_cited_by_year(fields: Mapping[str, Any], records: Sequence[Mapping[str, Any]],
+                       hits: Sequence[int]) -> int | None:
+    """The one of `hits`, the records whose title the citation writes, that it
+    names by year, or None.
+
+    #1243 (HNQBOI 19): stage 4 split one title written for two years into a
+    record per year, and 5d cited it once, with one of the years; the citation
+    writes both records' title, so the split was declined and the entry's
+    other records were lost. When every hit has one title, the hit whose date years
+    all appear in the citation is the one it names, if exactly one does.
+    Hits with different titles are a citation of the whole list. A citation
+    that writes the year of every hit (one article split twice in one year,
+    BCTOGR 2166; a talk cited with all its venues and years, EYTHNB 89) names
+    no single one, and neither does one beside an undated hit: no years are
+    in every citation."""
+    if len({_record_title(records[i]) for i in hits}) != 1:
+        return None
+    cited_years = frozenset(_CITATION_YEAR_RE.findall(str(fields.get(_FORMATTED_CITATION_KEY) or '')))
+    named = [i for i in hits if _record_years(records[i]) <= cited_years]
+    return named[0] if len(named) == 1 else None
 
 
 def _fan_out_stage4_records(entry: Mapping[str, Any], schema: frozenset[str],

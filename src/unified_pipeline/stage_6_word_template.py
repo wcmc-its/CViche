@@ -883,14 +883,18 @@ def _record_line_lost(line: str, code: str, entry: dict, records: EntryRecords,
         rendered = render_check.sibling_record_rendered(
             line, records.siblings.get(line), view.haystack, view.line_token_sets,
             view.t_line_token_sets, records.twins.get(line))
+    # A mentee's tab parts are details of the one mentee its fields hold (#1243).
+    one_record = code in _MENTEE_CODES
     if rendered is None and line in records.tab_parts:
         # Too few words for the overlap test (#1243).
-        rendered = short_tab_part_rendered(line, records.fields, view.t_line_token_sets)
+        rendered = short_tab_part_rendered(line, records.fields, view.t_line_token_sets,
+                                           one_record=one_record)
     if rendered is not False:
         # Rendered (possibly reformatted), or too short to verify either
         # way — never re-insert.
         return False
-    if line in records.tab_parts and segment_held_by_fields(line, records.fields):
+    if line in records.tab_parts and segment_held_by_fields(line, records.fields,
+                                                            one_record=one_record):
         return False  # a tab part of the record stage 4 extracted (#1243)
     if segment_already_rendered(line, records.fields):
         # The record that DID render from extracted fields: a grant table

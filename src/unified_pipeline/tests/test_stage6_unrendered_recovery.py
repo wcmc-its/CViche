@@ -205,9 +205,11 @@ def test_tab_part_the_extracted_fields_hold_is_not_recovered():
     gen._recover_unrendered_records({"N3B": [entry]})
 
     assert len(gen.doc.paragraphs) == before
-    assert segment_held_by_fields("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)", entry["extracted_fields"])
+    # A mentee entry is one record: the words of a part are enough.
+    assert segment_held_by_fields("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)", entry["extracted_fields"],
+                                  one_record=True)
     assert not segment_held_by_fields("Chairperson of Marsupial Outreach 5/2017-10/2020",
-                                      entry["extracted_fields"])
+                                      entry["extracted_fields"], one_record=True)
 
 
 def test_tab_parts_of_an_entry_stage_4_split_into_records_are_not_recovered():
@@ -444,12 +446,117 @@ def test_short_tab_part_rendered_needs_its_years_on_the_line():
     sets = [{"secretary", "wombat", "panel", "2005", "2007"}]
     assert short_tab_part_rendered("Secretary, 2009-2011", {}, sets) is False
     assert short_tab_part_rendered("Secretary, 2005-2007", {}, sets) is True
-    assert short_tab_part_rendered("Secretary, 2009-2011", {"role": "Secretary"}, []) is True
+    assert short_tab_part_rendered(
+        "Secretary, 2009-2011", {"role": "Secretary", "start_date": "2009", "end_date": "2011"}, []) is True
     assert short_tab_part_rendered("COMMITTEES 1993-1994", {}, []) is None
     # #1243: a part dated by one year cannot be told from the row whose range
     # cell holds that year ("Fellow, Quokka Society" beside "2015-Present").
     assert short_tab_part_rendered("Elected fellow 2015.", {}, []) is None
     assert short_tab_part_rendered("Elected fellow 2015-2016.", {}, []) is False
+
+
+_SECRETARY_2004_2010 = {"role": "Secretary", "organization": "Quokka Society",
+                        "start_date": "2004", "end_date": "2010"}
+
+
+def test_field_words_vouch_for_a_tab_part_only_within_the_fields_years():
+    # #1243: the fields hold the words of a sibling term as well as of their
+    # own record, so a part they vouch for must sit inside their years too.
+    fields = _SECRETARY_2004_2010
+    assert short_tab_part_rendered("Secretary, 2005-2007", fields, []) is True
+    assert short_tab_part_rendered("Secretary, 2004-2010", fields, []) is True
+    assert short_tab_part_rendered("Secretary, 2001-2003", fields, []) is False
+    assert short_tab_part_rendered("Secretary, 2009-2011", fields, []) is False
+    # Outside the span, the part is still found on an output line.
+    assert short_tab_part_rendered("Secretary, 2001-2003", fields, [{"secretary", "2001", "2003"}]) is True
+    # Fields that write no year hold no part's years; a part with no year has none to hold.
+    assert short_tab_part_rendered("Secretary, 2005-2007", {"role": "Secretary"}, []) is False
+    assert segment_held_by_fields("Secretary of the Quokka Society", fields)
+    assert segment_held_by_fields("Secretary of the Quokka Society 2005-2007", fields)
+    assert not segment_held_by_fields("Secretary of the Quokka Society 2001-2003", fields)
+
+
+def test_an_open_tab_part_is_within_the_fields_years_only_when_they_are_open():
+    fields = _SECRETARY_2004_2010
+    assert short_tab_part_rendered("Secretary, 2009-present", fields, []) is False
+    assert short_tab_part_rendered("Secretary, 2009-present", {**fields, "end_date": "Present"}, []) is True
+    assert short_tab_part_rendered("Secretary, 2005-2007", {**fields, "end_date": "Present"}, []) is True
+    # An open-end word inside another word is no open end.
+    assert segment_held_by_fields("Representative of the Quokka Society 2005-2007",
+                                  {**fields, "role": "Representative"})
+
+
+def test_a_one_record_entry_s_tab_part_needs_only_its_words_held():
+    fields = _SECRETARY_2004_2010
+    assert short_tab_part_rendered("Secretary, 2001-2003", fields, [], one_record=True) is True
+    assert segment_held_by_fields("Secretary of the Quokka Society 2001-2003", fields, one_record=True)
+    assert not segment_held_by_fields("Treasurer of the Quokka Society 2005-2007", fields, one_record=True)
+
+
+def test_a_tab_part_with_the_fields_words_and_other_years_is_recovered():
+    # #1243 (FLYBMX 219, VQFSDI 234, web056 367, BNYLDF 82): the field words
+    # vouched for the sibling term, so the render lost it. VQFSDI 234's shape:
+    # the fields keep the presidency; the board seat has their words.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q2",
+        "text": "Quokka Guild of Norvale:\tBoard of Directors 2002-2008\tBoard President 2005-2006",
+        "extracted_fields": {"committee_name": "Board of Directors", "role": "Board President",
+                             "organization": "Quokka Guild of Norvale",
+                             "start_date": "2005", "end_date": "2006"},
+    }
+    gen.doc.add_paragraph("Board President, Board of Directors, Quokka Guild of Norvale 2005-2006")
+
+    gen._recover_unrendered_records({"Q2": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Board of Directors 2002-2008" in t for t in bullets)
+    assert not any("Board President" in t for t in bullets)
+    assert gen.stats["unrendered_records_recovered"] == 1
+
+
+def test_a_short_term_before_the_extracted_term_is_recovered():
+    # #1243 (SIYORB 97, VQFSDI 237): an 18-character co-chair term was too
+    # short to be a tab part, and its one word sits in the chair role.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": "Wombat Coverage Initiative:\tCo-Chair 2006-2009\tFinance committee chair 2007-2009",
+        "extracted_fields": {"role": "Finance committee chair", "organization": "Wombat Coverage Initiative",
+                             "start_date": "2007", "end_date": "2009"},
+    }
+    gen.doc.add_paragraph("Finance committee chair, Wombat Coverage Initiative 2007-2009")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Co-Chair 2006-2009" in t for t in bullets)
+    assert gen.stats["unrendered_records_recovered"] == 1
+
+
+def _recovered_mentor_parts(code):
+    """The bullets the pass writes for a mentee's line coded `code`."""
+    gen = _generator()
+    entry = {
+        "taxonomy_code": code,
+        "text": "Quimby Farrow  Wombat work study program mentor  2017-2018\tProgram mentor 2017-2019",
+        "extracted_fields": {"mentee_name": "Quimby Farrow", "site_position": "Wombat work study program mentor",
+                             "mentee_level": "Undergraduate", "start_date": "2017", "end_date": "2018"},
+    }
+    gen.doc.add_paragraph("Quimby Farrow | Undergraduate | Wombat work study program mentor")
+    before = _bulleted_texts(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({code: [entry]})
+
+    return [t for t in _bulleted_texts(gen.doc.paragraphs) if t not in before]
+
+
+def test_a_mentee_s_tab_parts_the_fields_hold_are_details_whatever_their_years():
+    # #1243 (GDGSWJ 88, web205 378): a mentee's programs, each with its own
+    # years, are details of the one mentee the row renders. The same line
+    # coded as a membership is a record per part.
+    assert _recovered_mentor_parts("N3B") == []
+    assert _recovered_mentor_parts("Q1") == ["Program mentor 2017-2019"]
 
 
 def test_tab_parts_dated_by_one_year_the_render_dropped_are_recovered():

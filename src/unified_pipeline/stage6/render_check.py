@@ -27,6 +27,7 @@ comment above them.
 """
 import re
 from collections import Counter
+from typing import NamedTuple
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
@@ -326,24 +327,87 @@ def _field_strings(value: object) -> list[str]:
     return [value] if isinstance(value, str) else []
 
 
-def segment_held_by_fields(segment: str, extracted_fields: dict) -> bool:
-    """True when every distinctive word of `segment` sits in a scalar field value.
+def segment_held_by_fields(segment: str, extracted_fields: dict, *, one_record: bool = False) -> bool:
+    """True when every distinctive word of `segment` sits in a scalar field value
+    and its years fall within the fields' years (`_fields_hold`).
 
     A tab part of a one-record entry (a mentee's name and level, then his
     fellowship, then his papers, each part dated) is the record the structured
     row renders cell by cell, so no output line carries its words together and
     the per-line check reads it as missing (#1243: the recovery pass wrote the
-    mentee line a second time). A part whose words stage 4 holds in a scalar
-    field is the extracted record, never a lost one; a part with a word no
-    scalar field holds is still checked, and so is a part held only by a list
-    field (`additional_roles` items that stage 6 does not print)."""
+    mentee line a second time). A part whose words and years stage 4 holds in
+    its scalar fields is the extracted record, never a lost one; a part with a
+    word no scalar field holds is still checked, and so is a part held only by
+    a list field (`additional_roles` items that stage 6 does not print), or a
+    part dated outside the fields' years (a sibling term of the record)."""
     words = set(_RENDER_TOKEN_RE.findall(_norm(segment)))
-    return bool(words) and words <= _scalar_field_words(extracted_fields)
+    return bool(words) and _fields_hold(words, segment, extracted_fields, one_record)
+
+
+def _fields_hold(words: set[str], segment: str, extracted_fields: dict, one_record: bool) -> bool:
+    """Whether the entry's scalar fields hold `words`, the distinctive words of
+    the tab part `segment`, and its years too (`_years_within_field_span`).
+
+    The words alone do not tell a record from its sibling term: a residency
+    held twice, or a board seat beside the presidency the fields keep, has the
+    words of the record stage 4 extracted and other years (#1243 census:
+    FLYBMX 219, VQFSDI 234, web056 367, BNYLDF 82). For a `one_record` entry the
+    words suffice: a mentee's line names one mentee, and its programs and
+    posts, each with years of its own, are the mentee's details (GDGSWJ 88,
+    web205 378)."""
+    if not words <= _scalar_field_words(extracted_fields):
+        return False
+    return one_record or _years_within_field_span(segment, extracted_fields)
 
 
 def _scalar_field_words(extracted_fields: dict) -> set[str]:
     """The distinctive words of an entry's scalar field values (`_field_strings`)."""
     return set(_RENDER_TOKEN_RE.findall(_norm(" ".join(_field_strings(extracted_fields)))))
+
+
+# An open end ("2015-present", an `end_date` of "Present") read as a year: later
+# than any year a CV writes, so only another open end reaches it.
+_OPEN_END_YEAR = 9999
+# The field whose open end leaves the extracted record's years open.
+_END_DATE_FIELD = 'end_date'
+
+
+class _YearSpan(NamedTuple):
+    """The first and last year of a record, `last` `_OPEN_END_YEAR` when open."""
+    first: int
+    last: int
+
+
+def _is_open_end(text: str) -> bool:
+    """Whether `text` writes an open end (`_OPEN_TERM_WORDS`) as a whole word."""
+    return not _OPEN_TERM_WORDS.isdisjoint(re.findall(r"[^\W\d_]+", _norm(text)))
+
+
+def _field_year_span(extracted_fields: dict) -> _YearSpan | None:
+    """The span of the years the entry's scalar field values write
+    (`_field_strings`), open when `end_date` is; None when they write none."""
+    years = [int(year) for year in _YEAR_RE.findall(" ".join(_field_strings(extracted_fields)))]
+    if not years:
+        return None
+    end = extracted_fields.get(_END_DATE_FIELD)
+    open_end = isinstance(end, str) and _is_open_end(end)
+    return _YearSpan(min(years), _OPEN_END_YEAR if open_end else max(years))
+
+
+def _years_within_field_span(segment: str, extracted_fields: dict) -> bool:
+    """Whether every year of `segment`, an open end as `_OPEN_END_YEAR`, falls
+    within the span of the entry's field years (`_field_year_span`).
+
+    A span, not the set of the years: a record the fields date 2010-2016 holds
+    "Member 2010-2014", though no field writes 2014 (a subset test read 9 such
+    parts of the #1243 census farm as lost). Every year of the part must be
+    inside, so a sibling term that begins before the record or runs past its
+    end is not. Fields that write no year hold no year of a part."""
+    span = _field_year_span(extracted_fields)
+    years = {int(year) for year in _YEAR_RE.findall(segment)}
+    if _is_open_end(segment):
+        years.add(_OPEN_END_YEAR)
+    return all(span is not None and span.first <= year <= span.last for year in years)
 
 
 # The dates of a short tab part, with any month number: "2009-2011", "1996-97",
@@ -380,12 +444,13 @@ def short_tab_part_words(part: str) -> set[str] | None:
 
 
 def short_tab_part_rendered(part: str, extracted_fields: dict,
-                            output_token_sets: list[set]) -> bool | None:
+                            output_token_sets: list[set], *, one_record: bool = False) -> bool | None:
     """Whether a short dated tab part (`short_tab_part_words`) is in the output.
 
-    True when stage 4 holds all its words in a scalar field: it is the
-    extracted record, which the structured row renders cell by cell (a mentee's
-    name, with "Dates:" and the years in rows of their own). Otherwise True only
+    True when stage 4 holds all its words in a scalar field and its years
+    within the fields' years (`_fields_hold`): it is the extracted record,
+    which the structured row renders cell by cell (a mentee's name, with
+    "Dates:" and the years in rows of their own). Otherwise True only
     when one output line holds all its words and its years: `output_token_sets`
     are `_record_tokens` of each line, and the years keep siblings apart
     ("Secretary, 2009-2011" is not "Secretary, 2013-2015"). None when the part
@@ -397,7 +462,7 @@ def short_tab_part_rendered(part: str, extracted_fields: dict,
     words = short_tab_part_words(part)
     if words is None or edge_date_range(part) is None:
         return None
-    if words <= _scalar_field_words(extracted_fields):
+    if _fields_hold(words, part, extracted_fields, one_record):
         return True
     tokens = words | set(_YEAR_RE.findall(part))
     return any(tokens <= line_tokens for line_tokens in output_token_sets)
