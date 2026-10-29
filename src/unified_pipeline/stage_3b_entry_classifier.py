@@ -107,7 +107,7 @@ from unified_pipeline.stage3b.context import (  # noqa: F401
 # where every classification call site now lives; patching this module's copy
 # would cover only the flag-gated block-coherence closure in run_stage_3b.
 from unified_pipeline.stage3b.fragment_merge import merge_fragment_text
-from unified_pipeline.stage3b.header_pin import apply_header_pin
+from unified_pipeline.stage3b.header_pin import apply_header_pin, apply_non_seat_pins
 from unified_pipeline.stage3b.io import (  # noqa: F401
     _normalize_taxonomy_mappings,
     _safe_float,
@@ -224,6 +224,41 @@ def _person_name_from_uid(document_uid: str | None) -> str | None:
     # Skip the numeric prefix and CV/vita/resume suffixes.
     name_parts_clean = [p for p in name_parts if not p.isdigit() and p.lower() not in ('cv', 'vita', 'resume')]
     return ' '.join(name_parts_clean)
+
+
+def _apply_service_kind_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
+    """Stage 3b's corrections of a P or Q2 row that is no service the owner
+    gave on a body, in order; returns (entries, {stats key: that step's
+    stats}) for post_correction_stats.
+
+    9.  Training/compliance corrections (P -> B2 for trainings received).
+    9b. (#946 item 4) Extramural event medical volunteering P -> T. After every
+        corrector that can produce P (2: D -> P, 7: O -> P).
+    9c. (#1580) A Q2 or P row that is no seat on a body: consulting -> D3, a
+        meeting attended -> B2 (`apply_non_seat_pins`). After step 2, whose
+        committee words would send a company advisory-board row back from D
+        to Q2 or P, and after T-validation, which coded some of these rows Q2.
+    """
+    print()
+    print("9. Training/compliance corrections (P → B2)...")
+    entries, training_stats = apply_training_compliance_corrections(entries)
+    if training_stats['corrections_applied'] > 0:
+        print(f"   ✓ Corrected {training_stats['corrections_applied']} training/compliance codes")
+        for detail in training_stats['correction_details'][:3]:
+            corr = detail['correction']
+            print(f"     - P → B2: {corr['reason'][:60]}...")
+    else:
+        print("   ✓ No training/compliance corrections needed")
+
+    entries, event_volunteer_stats = apply_event_volunteer_corrections(entries)
+    logger.info("Stage 3b: %d event medical-volunteer row(s) P -> T",
+                event_volunteer_stats['corrections_applied'])
+
+    entries, non_seat_stats = apply_non_seat_pins(entries)
+    logger.info("Stage 3b: %d Q2/P row(s) that are no seat on a body recoded",
+                non_seat_stats['corrections_applied'])
+    return entries, {'training_compliance': training_stats, 'event_volunteer': event_volunteer_stats,
+                     'non_seat': non_seat_stats}
 
 
 def _apply_mentee_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
@@ -595,25 +630,9 @@ def run_stage_3b(
     else:
         print("   ✓ No stray position fragments to reconcile")
 
-    # 9. Training/compliance corrections (P → B2 for trainings received)
-    print()
-    print("9. Training/compliance corrections (P → B2)...")
-    all_classified, training_stats = apply_training_compliance_corrections(all_classified)
-    post_correction_stats['training_compliance'] = training_stats
-    if training_stats['corrections_applied'] > 0:
-        print(f"   ✓ Corrected {training_stats['corrections_applied']} training/compliance codes")
-        for detail in training_stats['correction_details'][:3]:
-            corr = detail['correction']
-            print(f"     - P → B2: {corr['reason'][:60]}...")
-    else:
-        print("   ✓ No training/compliance corrections needed")
-
-    # 9b. (#946 item 4) Extramural event medical volunteering P → T. After every
-    #     corrector that can produce P (2: D → P, 7: O → P).
-    all_classified, event_volunteer_stats = apply_event_volunteer_corrections(all_classified)
-    post_correction_stats['event_volunteer'] = event_volunteer_stats
-    logger.info("Stage 3b: %d event medical-volunteer row(s) P -> T",
-                event_volunteer_stats['corrections_applied'])
+    # 9, 9b, 9c. P/Q2 rows that are no service on a body (see _apply_service_kind_corrections).
+    all_classified, service_kind_stats = _apply_service_kind_corrections(all_classified)
+    post_correction_stats.update(service_kind_stats)
 
     # 10. Invited talk corrections (S8 → R for invited conference talks)
     print()
@@ -708,12 +727,13 @@ def run_stage_3b(
         reasoning_stats['corrections_made'] +
         grant_stats['corrections_applied'] +
         appointment_funding_stats['corrections_applied'] +
-        event_volunteer_stats['corrections_applied'] +
+        service_kind_stats['event_volunteer']['corrections_applied'] +
+        service_kind_stats['non_seat']['corrections_applied'] +
         teaching_stats['corrections_applied'] +
         leadership_stats['corrections_applied'] +
         adjunct_stats['corrections_applied'] +
         position_reconcile_stats['corrections_applied'] +
-        training_stats['corrections_applied'] +
+        service_kind_stats['training_compliance']['corrections_applied'] +
         invited_stats['corrections_applied']
     )
     print()
@@ -775,7 +795,7 @@ def run_stage_3b(
                 "teaching_leadership_corrections": teaching_stats['corrections_applied'],
                 "leadership_level_corrections": leadership_stats['corrections_applied'],
                 "adjunct_position_corrections": adjunct_stats['corrections_applied'],
-                "training_compliance_corrections": training_stats['corrections_applied'],
+                "training_compliance_corrections": service_kind_stats['training_compliance']['corrections_applied'],
                 "invited_talk_corrections": invited_stats['corrections_applied']
             },
             "qa_flags": {

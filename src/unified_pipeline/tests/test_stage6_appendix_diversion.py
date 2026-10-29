@@ -294,6 +294,20 @@ def _appendix_numbered_lines(doc: Document) -> list[str]:
     return [t for t in tail if t[:1].isdigit() and ". " in t[:5]]
 
 
+def test_a_list_narrative_does_not_end_the_appendix(tmp_path):
+    """#2028: a stage-4 `narrative` that is a list (an older shape) is joined
+    for its comment; it used to raise in `_add_entry_comments`, ending the
+    Appendix at that entry so every later one was lost."""
+    listed = _t_entry("ZZ_LISTED reviewed abstracts for an example society", "ZZ", ["Peer Review"], 1)
+    listed["extracted_fields"] = {"narrative": ["Reviewed abstracts each year", "for the annual meeting"]}
+    later = _t_entry("ZZ_LATER served on an example advisory board", "ZZ", ["Peer Review"], 2)
+    doc, sidecar = _render(tmp_path, "TESTLN", [_OWNER_ENTRY, listed, later])
+
+    lines = _appendix_numbered_lines(doc)
+    assert any("ZZ_LISTED" in line for line in lines) and any("ZZ_LATER" in line for line in lines)
+    assert not [w for w in sidecar["warnings"] if w.get("check") == "section_render_failed"]
+
+
 def test_positive_one_unrouted_code_three_entries(tmp_path):
     entries = [_OWNER_ENTRY,
                _t_entry("ZZ_ONE reviewed grant applications for the Foundation "

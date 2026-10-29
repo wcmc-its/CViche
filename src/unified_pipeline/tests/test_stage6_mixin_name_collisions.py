@@ -222,7 +222,6 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Patents & Inventions: table reposition failed for entry %d of %d; table left at document end instead of under the section heading': 'warning',
     'Percent Effort entry activity %r maps to %r, which has no row in the template table; entry not written': 'warning',
     'Percent Effort entry has an extra cell; entry not written: %r': 'warning',
-    'Percent Effort entry spans multiple rows; entry not written: %r': 'warning',
     'Percent Effort: %s already written as %r; conflicting entry %r not written': 'warning',
     'Percent Effort: could not find a valid table after the section header; entries not written': 'warning',
     'Percent Effort: could not find the section header in the template; entries not written': 'warning',
@@ -398,7 +397,7 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
     fails this guard until it is added to the contract table on purpose.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
-    assert len(text_level_records) == 132, (
+    assert len(text_level_records) == 131, (
         "literal call-site count under stage6/sections/ changed -- update "
         "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
         "text now repeats)"

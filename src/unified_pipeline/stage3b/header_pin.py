@@ -20,7 +20,10 @@ sub-heading is L3 (#1977), the same leaf-only way. `is_note_not_record` names
 the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code`
 (#1251) recodes a mentee's own awards, listed under the owner's mentoring, to N4.
 `mentor_grant_pin_code` (#1710) recodes a grant listed under a heading that names
-the owner as mentor or sponsor to N2.
+the owner as mentor or sponsor to N2. `someone_elses_pin_code` (#1573) sends a
+paper under an acknowledgements heading, and a "mentee" under a review panel's
+or a laboratory staff heading, to the Appendix (T), and an abstract that names
+its award under an abstracts heading to S8.
 An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
 An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
@@ -33,9 +36,14 @@ that opens, after an optional date, with "Chief Resident(cy)" or "Chief Fellow" 
 A reviewer pin (#1413) recodes an unsure Q4C journal name to Q4D when the
 "Reviewer for the following journals:" line heading its list went to the model
 in an earlier batch.
+`non_seat_pin_code` (#1580) recodes a Q2 or P row that is no seat on a body:
+consulting, a company's advisory board and expert work in litigation are D3,
+and a meeting the owner attended is B2.
 
 Pure functions over one hierarchy group's classified entries and its
-`TaxonomyContext`; no LLM, no I/O. Imports only `.context`.
+`TaxonomyContext`, except `apply_non_seat_pins`, which reads the whole CV's
+entries after T-validation (where some of those rows got their Q2) and needs
+no context; no LLM, no I/O. Imports only `.context`.
 """
 
 import logging
@@ -386,6 +394,82 @@ _MENTOR_GRANT_HEADING = re.compile(
 )
 _MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is a mentored trainee grant"
 
+# --- #1573: rows a heading says are someone else's are not the owner's records ---
+#
+# Batch YUYVIG. Papers listed under an acknowledgements lead line are other
+# groups' papers that thank the owner (ECXGAT 2156-2204: S1, S2, S4, S5), and
+# rendered as the owner's bibliography. The applicants of an internal
+# grant-review panel (ECXGAT 1293-1299, N3B) and a laboratory's technical
+# staff (IZIXVF 284-305, N3B and N3) rendered as the owner's past mentees.
+# Both go to the Appendix (T), which prints the line as the source wrote it and
+# claims nothing for the owner; a T set here is final for T-validation.
+# The heading is the row's own hierarchy level or, on a run whose headings
+# stage 1b lost (ECXGAT placed none), the nearest lead line above the row in
+# its group (`is_heading_line`), read off the rows as the model coded them
+# (`next_lead`). A lead line's list holds the rows it makes someone else's,
+# and, under a reviewing line, service and administrative rows
+# (`_REVIEW_LIST_CODE`: ECXGAT 1289-1291, P). Any other row ends it: a T
+# section heading that is dated, numbered or long ("5. Mentoring"), a row of
+# another code (web26: a "Reviewer:" line, then a training row and two
+# committees, then a postdoc list), a mentee row the line does not move. A row
+# the pin moves is never a new lead line, so a short pinned row does not split
+# its list (IZIXVF-01's complaint). A lead line is a heading, not a record: a
+# line with a comma or semicolon ("Ad hoc grant reviewer, <Foundation>") is
+# one, unless it is coded T or ends in a colon.
+# Only a level or line that is "Acknowledg(e)ments" alone, or with a
+# parenthesised qualifier ("(partial list)"), moves a publication: a
+# publications heading that only mentions them ("... (acknowledging grant
+# support)", "Acknowledgements and Publications") keeps its rows. A level or
+# lead line that names trainees, a thesis, mentoring or training keeps
+# a mentee row, whatever else it names (a fellows-and-staff level, a level of
+# staff the owner trained, a thesis-review line), and so does a staff level
+# under a mentoring or supervision parent ("MENTORING > Staff").
+# Reviewing is read off the lead line only: stage 1b's hierarchy drifts a
+# student-thesis list under its sibling journal-reviewer and study-section-panel
+# levels (wave-1 2030_* 710-738, 2025_* 360),
+# while a staff level is the mentoring section's own sub-heading (IZIXVF).
+_SOMEONE_ELSES_CODE = "T"
+_ACKNOWLEDGEMENTS_HEADING = re.compile(
+    r"^\W*(?:[\dA-Za-z]{1,3}[.)]\s*)?acknowledge?ments?\b\W*(?:\([^)]*\)\W*)?$", re.I)
+_ACKNOWLEDGED_WHY = "A paper listed under the CV's acknowledgements is another group's work"
+_MENTEE_CODES = frozenset({"N3", "N3A", "N3B"})
+_REVIEWED_HEADING = re.compile(r"\breview(?:s|er|ers|ing)?\b|\bapplicants?\b|\bpanels?\b", re.I)
+_STAFF_HEADING = re.compile(r"\bstaff\b|\btechnicians?\b|\blab(?:oratory)?\s+managers?\b", re.I)
+_TRAINEE_WORD = re.compile(
+    r"student|fellow|train|mentee|mentor|post-?doc|resident|scholar|advisee|thes[ie]s"
+    r"|dissertation|supervis", re.I)
+# A parent level that makes a staff level the owner's mentoring (IZIXVF's parent
+# level lists its students, postdocs and staff, and names neither).
+_MENTORING_PARENT = re.compile(r"mentor|mentee|supervis", re.I)
+_NOT_A_MENTEE_WHY = "Listed under a heading of people the owner reviewed or employed, not trained"
+# A lead line heads the rows after it: undated, short, not a list item, not a
+# mentee, and not punctuated as a record unless it is a note or ends in a colon.
+_HEADING_LINE_MAX_WORDS = 12
+_FOUR_DIGIT_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+_LIST_ITEM_LEAD = re.compile(r"^\W*(?:\(?\d{1,3}[.)]|\(?[A-Za-z][.)]\s|[-\u2013\u2022\u00b7\u25e6*])")
+_RECORD_PUNCTUATION = re.compile(r"[,;]")
+_LEAD_LINE_END = ":"
+# The rows a reviewing lead line heads besides the mentee rows it moves.
+_REVIEW_LIST_CODE = re.compile(r"^(?:P|Q\w*)$")
+
+# --- #1573: a trainee's award stated inside an abstract is the abstract's ---
+#
+# ULHCAP 1415, under PUBLICATIONS > Abstracts: an abstract by a trainee alone
+# that ends with the prize it won at a meeting came back H at 0.75 and
+# rendered in the owner's Honors, and its title nowhere. A row that
+# opens with an author list ("Doe, JD.", "Doe J, Roe K.": a surname, then
+# initials that a comma, semicolon or period ends) under a leaf level naming
+# abstracts is an abstract (S8). An award line there with no author list ("Best
+# Abstract Award, <meeting>"), or one that opens with an award word and a
+# society's acronym ("Winner, <ACRONYM> Travel Award"), keeps its H. A mentee's
+# abstract under a students level is the mentee pin's (#1251), checked first.
+_ABSTRACTS_HEADING = re.compile(r"\babstracts\b", re.I)
+_AUTHOR_LEAD = re.compile(
+    r"^[\s\u2022*\-\d.)]*"
+    r"(?!(?i:winners?|recipients?|finalists?|semi-?finalists?|awardees?|nominees?|honou?rees?|laureates?)\b)"
+    r"[A-Z][A-Za-z'\u2019-]+,?\s+(?:[A-Z]\.?\s?){1,3}(?=[,;.])")
+_ABSTRACT_WITH_AWARD_WHY = "An abstract listed under the CV's abstracts, whatever award it names"
+
 # --- #1413: a journal listed under a reviewer lead-in is a review, not a board seat ---
 #
 # "Reviewer for the following journals and conferences:" heads a flat list of
@@ -420,6 +504,213 @@ _BOARD_HEADING = re.compile(r"board", re.I)
 _HEADING_ROW = re.compile(
     r"\b(?:activities|positions|roles|appointments|services|responsibilities)\W*$", re.I)
 _REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for these journals"
+
+# --- #1580: a Q2 or P row that is no seat on a body ---
+#
+# The prompt's rule 15 sends advisory consulting to Q2 as external service, so
+# consultancies, a company's advisory board and expert work in litigation
+# rendered as Service on Boards rows (UVZNIC 97-103, XNWSZN 1252/1256, AOJEQD
+# 46/49, CKDDEG 646, HBALTD 38) or, coded P, as an institutional committee
+# (WBZIDP 46/47). They are Other Professional Positions (D3). A row is one when:
+# - its line names the owner consulting, and no body one sits on, no seat or
+#   office, it is no citation, and its heading is not a list of talks (Q2 only: a
+#   P "Consultant" row is the owner's own institution's project, EYTHNB 279;
+#   "<Company> Consultant Focus Group" under Invited Presentations is a talk),
+#   and the line says more than the role and its dates: "Consultant | 2012 -
+#   2013" is one record fanned out of a society committee's roster whose other
+#   records name the committee (MEZVNA 124.5, 124.10), a seat on it;
+# - its line names an advisory or consulting board and a company, and no
+#   public body, society or school ("<Pharma>, Scientific Advisory Board");
+# - its line names litigation or a law firm, and expert or consulting work;
+# - its nearest heading names consulting, and its line names a company, no
+#   public body and no body one sits on (EJPAIA 175 under "Scientific Advisory
+#   Boards and Consultantships"). "<Pharma> Inc. Board of Directors" under
+#   "Consulting", or a company's monitoring committee under "Consultancies and
+#   Committees > Committees", is a seat. A company named without a company word
+#   ("Scientific Advisory Board, <Startup>", UVZNIC 105) cannot be told from an
+#   academic program's board ("<University Program>, Advisory Board", EJPAIA
+#   181), so it stays Q2.
+# Testimony and the other activities of the owner's decision on #1580
+# (2026-10-27) stay Q2 or P (`_names_stay_activity`), and so does "Consultant,
+# <Society> Ethics Committee": a seat, as is "Consulting Editor, <Journal>".
+_NON_SEAT_SOURCE_CODES = frozenset({"Q2", "P"})
+_BOARD_SERVICE_CODE = "Q2"
+_CONSULTING_CODE = "D3"
+# The owner's own consulting: "<Center> Consultants' Conference" and "<Region>
+# Consultants Collaborative" name a meeting or a body.
+_CONSULTING_WORD = re.compile(r"\bconsult(?:ant|ancy|ancies|antships?|ing|ed)\b(?!['\u2019])", re.I)
+_SEAT_BODY = re.compile(
+    r"\b(?:(?:sub)?committees?|boards?(?![\s-]+certified)|councils?|commissions?|panels?"
+    r"|task\s*forces?|(?:working|advisory|technical|expert|steering)\s*groups?|workgroups?"
+    r"|study\s+sections?|coalitions?|alliances?)\b", re.I)
+_SEAT_OR_OFFICE = re.compile(r"\b(?:members?|(?:co-?)?chair\w*|president|secretary|treasurer|editors?)\b", re.I)
+# What a bare role-and-dates line holds besides the consulting word and its
+# numbers: month names and the words of a range.
+_DATE_WORD = re.compile(
+    r"\b(?:present|current|to|since|until|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
+    r"|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b", re.I)
+_LETTER = re.compile(r"[^\W\d_]")
+_TALKS_HEADING = re.compile(r"\b(?:presentations?|lectures?|talks?|speeches)\b", re.I)
+# A citation: an author list and a year in parentheses ("Doe, J. (2031) ...").
+_CITATION_YEAR = re.compile(r"\((?:19|20)\d{2}[a-z]?\)")
+_COMPANY = re.compile(
+    r"\b(?:inc|llc|llp|ltd|corp|corporation|company|companies|pharma|pharmaceuticals?|therapeutics"
+    r"|biotech(?:nology)?|biosciences?|biopharma(?:ceuticals?)?|gmbh|plc)\b", re.I)
+_ADVISORY_BOARD = re.compile(r"\b(?:advisory|consulting)\s+(?:board|panel|council|committee)s?\b", re.I)
+# Plural too ("<City> Health and Hospitals Corporation" is a public body),
+# except the nouns a company is named with in the plural ("<Name> Centers,
+# Inc.", web244 797.2; "<Name> Networks").
+_PUBLIC_BODY = re.compile(
+    r"\b(?:national|federal|states?|united\s+states|governments?|ministr(?:y|ies)|agenc(?:y|ies)|nih"
+    r"|institutes?|societ(?:y|ies)|associations?|foundations?|academ(?:y|ies)|colleges?|universit(?:y|ies)"
+    r"|schools?|departments?|councils?|commissions?|hospitals?|cent(?:er|re)|trust|fund"
+    r"|program(?:me)?|network|alliances?|coalitions?|consorti(?:um|a)|blood\s+banks?)\b", re.I)
+_LITIGATION = re.compile(r"\blitigations?\b|\b(?:law|legal)\s+firms?\b", re.I)
+_EXPERT_OR_CONSULTING = re.compile(r"\bexpert\b|\bconsult", re.I)
+_TESTIMONY = re.compile(r"\btestif(?:y|ied|ies|ying|ier)\b|\btestimon(?:y|ies)\b", re.I)
+# The owner's decision on #1580 (2026-10-27) keeps in the committee tables,
+# with testimony, external examining, the review of a report, a promotion or
+# tenure case, a department or a program, hosting a visit, community service,
+# advocacy and volunteering, though a line writes them with a consulting word
+# ("Promotions Consultant, Department of <Science>, <University>", JJYBKP 281;
+# "Consultant/reviewer for <Agency> on <a report>", web204 386; "<Event>
+# consultant and reviewer", web198 420) or as attendance. A line naming one is
+# never pinned (`_names_stay_activity`). Stage 6's `NON_SEAT_ACTIVITY_RE` names
+# the same activities for the Role cell; stage 3b keeps its own list, since it
+# imports only `.context`. Advocacy and community service are
+# `_ADVOCACY_OR_SERVICE_DAY`, below. Hosting and volunteering (`_STAY_ACTIVITY`)
+# veto on any line. Of the reviews:
+# - external examining, and the review of a promotion or tenure case, a
+#   candidate or a report (`_STAY_REVIEW`), veto whatever kind of review the
+#   line calls them ("peer review of promotion dossiers", "tenure case review");
+# - a bare examiner or reviewer, and the review of a department, program, center
+#   or institute ("review of the <Center>", "program review";
+#   `_STAY_BODY_REVIEW`), veto unless the line calls them a review the
+#   decision does not name (`_OTHER_REVIEW`): grant and manuscript review
+#   have their own routers, an expert review is the issue's expert work, a
+#   protocol or case review is consulting work ("<Name> Centers, Inc. | Review
+#   of research protocols", web244 797.2), and a medical examiner is an office;
+# - on a line naming litigation or a law firm no review word vetoes: review
+#   there is expert work in litigation, the issue's D3 ("Litigation consultant
+#   and chart reviewer, <Firm>"). Testimony, advocacy, hosting and volunteering
+#   still do.
+# "Health promotion" is no promotion case.
+_STAY_ACTIVITY = re.compile(r"\b(?:hosted|hosting|hosts?\s+(?:of|for|to)|volunteer(?:s|ed|ing)?)\b", re.I)
+_STAY_REVIEW = re.compile(
+    r"\b(?:external\s+examin(?:ing|ation)|report\s+reviews?"
+    r"|(?<!health\s)(?:promotions?|tenure)\s+(?:consult\w*|review\w*|referee\w*|cases?)"
+    r"|review(?:s|ers?)?\s+(?:of|for)\s+(?:\S+\s+){0,4}?(?:promotions?|tenure|candidates?|reports?))\b", re.I)
+_STAY_BODY_REVIEW = re.compile(
+    r"\b(?:examiners?|reviewers?"
+    r"|reviews?\s+(?:of|for)\s+(?:\S+\s+){0,4}?(?:departments?|programs?|cent(?:er|re)s?|institutes?)"
+    r"|(?:departments?|programs?|cent(?:er|re)s?|institutes?)\s+reviews?)\b", re.I)
+_OTHER_REVIEW = re.compile(
+    r"\b(?:grant|manuscript|journal|article|paper|abstract|proposal|application|ad\s+hoc|peer|expert"
+    r"|protocol|case|medical)\s+(?:reviews?|reviewers?|examiners?)\b", re.I)
+_CONSULTING_WHY = "Consulting, a company's advisory board or expert work in litigation is a professional position, not a seat on a body"
+#
+# A meeting the owner attended (#1691's rule, B2): under a nearest heading
+# that names attendance ("Scientific Meetings Attended": LTTYWI 1084-1101,
+# coded Q2 by T-validation), or on a line that opens as attendance ("Attendee
+# <Day>", MQLKPQ 109; "Participant, <Meeting>", LWMSPJ 342), when the line
+# names an event, or that heading does (LTTYWI 1095 misspells "Congress"),
+# and no part the owner played in it: a chair, organizer, moderator, speaker,
+# a talk, an abstract or poster, panelist, a seat, a service provided
+# ("Participant, <Day> - provided <a service>", VGHNZD 570), work on a
+# guideline or consensus (SEKQUI 264), or an author list of two names or more
+# ("<City> DC," is a place, LTTYWI 1099). An attendance heading above a leaf
+# that names something else ("Meetings Attended > National Committees") says
+# nothing about the leaf's rows. A line naming advocacy or a day of service
+# ("Participant, <Society> Hill Day"; a hill day under "Meetings Attended",
+# OQIDBN 775) is advocacy or community service, which stays Q2 (the owner's
+# decision on #1580), under any heading: the veto (`_names_stay_activity`)
+# reads `_ADVOCACY_OR_SERVICE_DAY` before both pins.
+_ATTENDED_CODE = "B2"
+_ATTENDANCE_HEADING = re.compile(r"\b(?:attended|attendance)\b", re.I)
+_ATTENDANCE_LEAD = re.compile(
+    r"^\W*(?:(?:19|20)\d{2}(?:\s*[-\u2013\u2014]\s*(?:(?:19|20)?\d{2}|present))?\W*)?"
+    r"(?:attended|attendee|participant|participated\s+in)\b", re.I)
+_ADVOCACY_OR_SERVICE_DAY = re.compile(
+    r"\b(?:advoca\w*|hill\s+days?|lobby\w*|rall(?:y|ies)|days?\s+of\s+service|service\s+days?"
+    r"|community\s+service|service\s+to\s+(?:the\s+)?community)\b", re.I)
+_EVENT = re.compile(
+    r"\b(?:meetings?|conferences?|congress(?:es)?|symposi(?:um|a|ums)|workshops?|courses?|summits?"
+    r"|forums?|seminars?|webinars?|conventions?|day)\b", re.I)
+_OWNERS_PART = re.compile(
+    r"\b(?:(?:co-?)?chair\w*|organi[sz]\w*|moderat\w*|speaker|keynote|present(?:ed|er|ing|ation)"
+    r"|lectur\w*|faculty|instructor|facilitat\w*|panelist|discussant|judge|host\w*|delegate"
+    r"|representative|members?|committees?|boards?|director|provid(?:ed|ing)|volunteer\w*|served|taught"
+    r"|talks?|spoke|abstracts?|posters?|oral|guidelines?|consensus)\b",
+    re.I)
+_ATTENDED_WHY = "A meeting the owner attended is an educational experience, not service"
+_MIN_AUTHOR_NAMES = 2
+_ET_AL = re.compile(r"\bet\s+al\b", re.I)
+
+
+def _is_consulting(code: str, text: str, levels: list[str]) -> bool:
+    """A consultancy, a company's advisory board, or expert work in litigation (#1580)."""
+    company = bool(_COMPANY.search(text)) and not _PUBLIC_BODY.search(text)
+    leaf = levels[-1] if levels else ""
+    if (_CONSULTING_WORD.search(text) and not _SEAT_BODY.search(text) and not _SEAT_OR_OFFICE.search(text)
+            and not (_has_author_list(text) and _CITATION_YEAR.search(text))
+            and not _TALKS_HEADING.search(leaf) and not _names_only_the_role(text)):
+        return code == _BOARD_SERVICE_CODE or company
+    if _ADVISORY_BOARD.search(text) and company:
+        return True
+    if _LITIGATION.search(text) and _EXPERT_OR_CONSULTING.search(text):
+        return True
+    return company and bool(_CONSULTING_WORD.search(leaf)) and not _SEAT_BODY.search(text)
+
+
+def _names_only_the_role(text: str) -> bool:
+    """Whether a line holds nothing but the consulting role and its dates."""
+    return not _LETTER.search(_DATE_WORD.sub(" ", _CONSULTING_WORD.sub(" ", text)))
+
+
+def _is_attended_meeting(text: str, levels: list[str]) -> bool:
+    """A meeting or event the owner attended, playing no part in it (#1580, #1691)."""
+    leaf = levels[-1] if levels else ""
+    by_heading = bool(_ATTENDANCE_HEADING.search(leaf))
+    by_lead = bool(_ATTENDANCE_LEAD.match(text))
+    event = _EVENT.search(text) or (by_heading and _EVENT.search(leaf))
+    return ((by_heading or by_lead) and bool(event)
+            and not _OWNERS_PART.search(text) and not _names_authors(text))
+
+
+def _names_authors(text: str) -> bool:
+    """An author list of two names or more, or "et al" (one name-and-initials
+    is as often a place: "<City> DC,")."""
+    names = _AUTHOR_LIST.findall(_PLACE_INITIALS.sub("", text))
+    return len(names) >= _MIN_AUTHOR_NAMES or bool(_ET_AL.search(text))
+
+
+def _names_stay_activity(text: str) -> bool:
+    """Whether a line names testimony or another activity the owner's decision
+    on #1580 keeps in the committee tables. On a litigation line only the
+    activities, not the reviews, count."""
+    if _TESTIMONY.search(text) or _ADVOCACY_OR_SERVICE_DAY.search(text) or _STAY_ACTIVITY.search(text):
+        return True
+    if _LITIGATION.search(text):
+        return False
+    return bool(_STAY_REVIEW.search(text) or _STAY_BODY_REVIEW.search(_OTHER_REVIEW.sub(" ", text)))
+
+
+def non_seat_pin_code(entry: dict) -> tuple[str, str] | None:
+    """(code, why) for a Q2 or P row that is no seat on a body, else None (#1580):
+    consulting, a company's advisory board or expert work in litigation is D3
+    (`_is_consulting`), a meeting attended is B2 (`_is_attended_meeting`). A
+    line naming an activity the owner's decision keeps in the committee tables
+    is never pinned (`_names_stay_activity`)."""
+    code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
+    if code not in _NON_SEAT_SOURCE_CODES or _names_stay_activity(text):
+        return None
+    levels = [str(level) for level in entry.get("hierarchy") or []]
+    if _is_consulting(code, text, levels):
+        return _CONSULTING_CODE, _CONSULTING_WHY
+    if _is_attended_meeting(text, levels):
+        return _ATTENDED_CODE, _ATTENDED_WHY
+    return None
+
 
 # A line that only points elsewhere ("<label> - see section N") or is only a
 # URL is a note, not a record: a T it was given must survive T-validation.
@@ -683,6 +974,66 @@ def mentor_grant_pin_code(entry: dict) -> tuple[str, str] | None:
     return _MENTOR_GRANT_CODE, _MENTOR_GRANT_WHY
 
 
+def is_heading_line(entry: dict) -> bool:
+    """An undated, short, unnumbered line that is not a mentee row and not
+    punctuated as a record (unless it is a note or ends in a colon): it heads
+    the rows after it (#1573)."""
+    text = (entry.get("text") or "").strip()
+    return (entry.get("taxonomy_code") not in _MENTEE_CODES
+            and not _FOUR_DIGIT_YEAR.search(text)
+            and len(text.split()) <= _HEADING_LINE_MAX_WORDS
+            and not _LIST_ITEM_LEAD.match(text)
+            and (entry.get("taxonomy_code") == _APPENDIX_CODE or text.endswith(_LEAD_LINE_END)
+                 or not _RECORD_PUNCTUATION.search(text)))
+
+
+def next_lead(entry: dict, lead: str) -> str:
+    """The lead line still open after `entry`, read off the row as the model
+    coded it: `lead` while the row is one of its list's rows (one it makes
+    someone else's, or a service row under a reviewing line), else the row's
+    own text when it is a heading line, else ""."""
+    if lead and someone_elses_pin_code(entry, lead):
+        return lead
+    if is_heading_line(entry):
+        return (entry.get("text") or "").strip()
+    reviewing = _REVIEWED_HEADING.search(lead)
+    return lead if reviewing and _REVIEW_LIST_CODE.match(entry.get("taxonomy_code") or "") else ""
+
+
+def _non_mentee_heading(levels: list[str], lead: str) -> bool:
+    """The leaf level names staff under no mentoring parent, or the lead line
+    names reviewing or staff; a leaf, then a lead line, naming trainees settles
+    it first."""
+    leaf, parents = (levels[-1], levels[:-1]) if levels else ("", [])
+    if _TRAINEE_WORD.search(leaf):
+        return False
+    if _STAFF_HEADING.search(leaf):
+        return not any(_MENTORING_PARENT.search(level) for level in parents)
+    if _TRAINEE_WORD.search(lead):
+        return False
+    return bool(_REVIEWED_HEADING.search(lead) or _STAFF_HEADING.search(lead))
+
+
+def someone_elses_pin_code(entry: dict, lead: str) -> tuple[str, str] | None:
+    """(code, why) for a row its heading says is another person's, else None (#1573).
+
+    `lead` is the lead line still open above the row in its group (`next_lead`), or "".
+    A publication under an acknowledgements level or line is T; a mentee row
+    under a staff leaf, or a reviewing or staff line, is T; an H that opens with
+    an author list under an abstracts leaf is S8.
+    """
+    code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
+    levels = [str(level) for level in entry.get("hierarchy") or []]
+    leaf = levels[-1] if levels else ""
+    if _PUBLICATION_CODE.match(code) and any(_ACKNOWLEDGEMENTS_HEADING.match(h) for h in [*levels, lead]):
+        return _SOMEONE_ELSES_CODE, _ACKNOWLEDGED_WHY
+    if code in _MENTEE_CODES and _non_mentee_heading(levels, lead):
+        return _SOMEONE_ELSES_CODE, _NOT_A_MENTEE_WHY
+    if code == _HONOR_CODE and _ABSTRACTS_HEADING.search(leaf) and _AUTHOR_LEAD.match(text):
+        return _ABSTRACT_CODE, _ABSTRACT_WITH_AWARD_WHY
+    return None
+
+
 def is_lead_in(text: str) -> bool:
     """A short line that ends in a colon: it introduces the rows after it (#1413)."""
     stripped = (text or "").strip()
@@ -771,13 +1122,36 @@ def _recode(entry: dict, code: str, why: str) -> dict:
     }
 
 
+def apply_non_seat_pins(entries: Iterable[dict]) -> tuple[list[dict], dict]:
+    """Recode every Q2 or P row of the CV that `non_seat_pin_code` pins.
+
+    Runs over the whole CV after T-validation, not per group: T-validation is
+    where some of these rows got their Q2 (LTTYWI's meetings). A recoded entry
+    keeps the model's answer in `pre_pin_code`, as with the other pins.
+    Returns (entries, stats) in the post-correction stats shape."""
+    out, details = [], []
+    for entry in entries:
+        pinned = non_seat_pin_code(entry)
+        if pinned:
+            details.append({"element_idx": entry.get("element_idx_start"),
+                            "correction": {"from": entry["taxonomy_code"], "to": pinned[0], "reason": pinned[1]}})
+            entry = _recode(entry, *pinned)
+        out.append(entry)
+    if details:
+        logger.info("Stage 3b non-seat pin: %d entr%s recoded", len(details), "y" if len(details) == 1 else "ies")
+    return out, {"corrections_applied": len(details), "correction_details": details}
+
+
 def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
-             after_unseen_reviewer_lead_in: bool) -> tuple[str, str] | None:
-    """(code, why) for one model answer: the header pin, then the mentor-grant, mentee, content and reviewer pins."""
+             after_unseen_reviewer_lead_in: bool, lead: str) -> tuple[str, str] | None:
+    """(code, why) for one model answer: the header pin, then the mentor-grant,
+    mentee, someone-else's, content and reviewer pins. A mentee's abstract under
+    a students level is the mentee's (N4), not the owner's (S8)."""
     header_code = header_pin_code(entry, pin, leaf)
     if header_code:
         return header_code, _HEADER_PIN_WHY
-    return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee) or content_pin_code(entry)
+    return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee)
+            or someone_elses_pin_code(entry, lead) or content_pin_code(entry)
             or reviewer_pin_code(entry, after_unseen_reviewer_lead_in))
 
 
@@ -795,24 +1169,26 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
     Returns (entries, number recoded). A recoded entry keeps the model's answer
     in `pre_pin_code` / `pre_pin_reasoning`; `classification_source` stays
     "llm" (stage 3b's zero-classification gate counts it). The header pin is
-    checked first, then the mentor-grant pin (#1710), the mentee pin (#1251), a
-    content pin and the reviewer pin (#1413).
+    checked first, then the mentor-grant pin (#1710), the mentee pin (#1251),
+    the someone-else's pin (#1573), a content pin and the reviewer pin (#1413).
 
     `batch_size` is the number of entries per classification call the group was
     sent in, in the order given here; None means the group went in one call, so
     the model saw every lead-in and the reviewer pin never applies.
     """
     pin, leaf = pinned_header_code(context), leaf_header_code(context)
-    out, recoded, after_mentee, reviewer_lead_in_at = [], 0, False, None
+    out, recoded, after_mentee, reviewer_lead_in_at, lead = [], 0, False, None, ""
     for position, entry in enumerate(entries):
+        as_coded = entry  # the lead line is read off the model's codes, not the pins' (#1573)
         if entry.get("classification_source") == _MODEL_SOURCE:
             unseen_lead_in = _in_later_batch(position, reviewer_lead_in_at, batch_size)
-            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in)
+            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in, lead)
             if pinned and pinned[0] != entry.get("taxonomy_code"):
                 recoded += 1
                 entry = _recode(entry, *pinned)
         after_mentee = after_mentee or entry.get("taxonomy_code") in _MENTEE_RECORD_CODES
         reviewer_lead_in_at = _next_reviewer_lead_in(entry, position, reviewer_lead_in_at)
+        lead = next_lead(as_coded, lead)
         out.append(entry)
     if recoded:
         logger.info("Stage 3b header pin: %d entr%s recoded", recoded, "y" if recoded == 1 else "ies")

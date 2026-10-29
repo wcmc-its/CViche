@@ -16,12 +16,15 @@ from unified_pipeline.stage3b.context import TaxonomyContext  # noqa: E402
 from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     HEADER_PIN_MIN_CONFIDENCE,
     apply_header_pin,
+    apply_non_seat_pins,
     content_pin_code,
     is_note_not_record,
     is_reviewer_lead_in,
     leaf_header_code,
     mentee_pin_code,
+    non_seat_pin_code,
     pinned_header_code,
+    someone_elses_pin_code,
 )
 
 
@@ -1315,3 +1318,675 @@ def test_reviewer_pin_is_not_flipped_back_by_the_reasoning_check():
     (corrected,), _ = apply_reasoning_corrections([{**out[-1], "taxonomy_confidence": 0.95}], min_confidence=0.80)
     assert corrected["taxonomy_code"] == "Q4D"
 
+
+
+# --- #1573: rows a heading says are someone else's -------------------------------
+
+ACK_LEAD = "ACKNOWLEDGMENTS (selected)"
+COLLAPSED = ("Personal Data",)  # a run whose headings stage 1b lost (ECXGAT placed none)
+
+
+def _codes(out):
+    return [e["taxonomy_code"] for e in out]
+
+
+def test_papers_under_an_acknowledgements_lead_line_go_to_the_appendix():
+    # ECXGAT 2154-2204: other groups' papers listed under an acknowledgements line.
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("S1", "Doe, J., and A. Roe. 2031. An example virus study. J. Example Biol. 12, 34-56.",
+                  confidence=0.9, hierarchy=COLLAPSED),
+             _row("S4", "Roe, A. 2032. An example chapter, in: Example Methods. Example Press.",
+                  confidence=0.9, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 2 and _codes(out) == ["T", "T", "T"]
+    assert [e.get("pre_pin_code") for e in out[1:]] == ["S1", "S4"]
+    assert "acknowledgements" in out[1]["classification_reasoning"]
+
+
+@pytest.mark.parametrize("heading", [
+    ("Acknowledgments", "Journal articles"),
+    ("PUBLICATIONS", "C. Acknowledgements"),
+])
+def test_a_paper_under_an_acknowledgements_level_goes_to_the_appendix(heading):
+    paper = _row("S1", "Doe J. An example study. Example J. 2031;1:2-9.", hierarchy=heading)
+    (out,), n = apply_header_pin([paper], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "T"
+
+
+@pytest.mark.parametrize("heading", [
+    ("PUBLICATIONS", "Peer-reviewed articles (acknowledging grant support marked *)"),
+    ("PUBLICATIONS", "Reviewer Acknowledgements"),
+])
+def test_the_owners_paper_under_a_heading_that_only_mentions_acknowledgements_stays(heading):
+    paper = _row("S1", "Owner A, Doe J. An example study. Example J. 2031;1:2-9.", hierarchy=heading)
+    out, n = apply_header_pin([paper], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["S1"]
+
+
+def test_an_acknowledgements_list_ends_at_a_row_it_does_not_head():
+    # A dated teaching row after the acknowledged papers: the papers below it are the owner's.
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("K1", "2031 Lecturer, Example Course, Example University", hierarchy=COLLAPSED),
+             _row("S1", "Owner A. An example study. Example J. 2031;1:2-9.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "K1", "S1"]
+
+
+def test_a_new_lead_line_ends_the_acknowledgements_list():
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("T", "PUBLICATIONS", hierarchy=COLLAPSED),
+             _row("S1", "Owner A. An example study. Example J. 2031;1:2-9.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "T", "S1"]
+
+
+@pytest.mark.parametrize("lead", [
+    "Reviewers:", "Grant reviewing (partial list)", "Applicants", "Example Foundation Panel",
+    "Technical staff", "Laboratory technicians", "Lab managers",
+])
+def test_a_mentee_row_under_a_reviewing_or_staff_lead_line_is_not_a_mentee(lead):
+    group = [_row("T", lead, hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example \u2013 An example proposal.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["T", "T"]
+
+
+def test_staff_under_a_staff_heading_are_not_mentees():
+    # IZIXVF 284-305: a laboratory's technical staff, coded N3B and N3.
+    heading = ("4. Laboratory Members: Students and Staff.",
+               "B. Laboratory Technicians and Managers.")
+    group = [_row("N3B", "1. Alex Example, Laboratory technician", hierarchy=heading),
+             _row("N3", "2. Sam Example, Lab manager", hierarchy=heading)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 2 and _codes(out) == ["T", "T"]
+    assert "reviewed or employed" in out[0]["classification_reasoning"]
+
+
+def test_grant_review_applicants_under_a_review_lead_line_are_not_mentees():
+    # ECXGAT 1288-1299: the lead line, two P rows, then applicants coded N3B.
+    group = [_row("T", "Internal pilot grant review (selected)", hierarchy=COLLAPSED),
+             _row("P", "Alex Example – An example proposal (18 Dec-2031).", hierarchy=COLLAPSED),
+             _row("N3B", "Sam Example – Another example proposal (18 Dec-2031).", hierarchy=COLLAPSED),
+             _row("N3A", "Kim Example – A third example proposal (18 Dec-2031).", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 2 and _codes(out) == ["T", "P", "T", "T"]
+
+
+def test_a_thesis_under_a_bare_reviewer_lead_line_is_not_a_mentee():
+    # DYLJXC 401-403: a thesis the owner reviewed for another university.
+    group = [_row("Q4D", "Reviewer:", hierarchy=("Service", "International")),
+             _row("N3B", 'Alex Example 2031 "An example thesis title" Example University',
+                  hierarchy=("Service", "International"))]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["Q4D", "T"]
+
+
+@pytest.mark.parametrize("heading", [
+    ("MENTORING", "Research Trainees (annual progress review)"),   # names trainees
+    ("TEACHING", "Trainees", "Technicians the owner trained"),        # staff the owner trained
+    ("MENTORING", "Postdoctoral fellows and staff"),
+    ("MENTORING", "Supervision of research staff"),                    # kept: supervision is mentoring work
+    ("MENTORING", "Dissertation committees and staff"),
+    # stage 1b's hierarchy drift: a student-thesis list under a sibling review level (wave-1 2030_*)
+    ("SERVICE", "Professional Service", "Manuscript Reviewer"),
+    ("SERVICE", "Professional Service", "Review Panels and Advisory Boards"),
+])
+def test_the_owners_mentee_under_a_heading_that_mentions_review_or_staff_stays(heading):
+    mentee = _row("N3B", "2031 Alex Example. An example thesis title.", hierarchy=heading)
+    out, n = apply_header_pin([mentee], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["N3B"]
+
+
+def test_a_mentee_under_a_trainee_lead_line_stays():
+    group = [_row("T", "Thesis review committees", hierarchy=COLLAPSED),
+             _row("N3B", "2031 Alex Example. An example thesis title.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "N3B"]
+
+
+def test_a_review_list_ends_at_a_row_it_does_not_head():
+    # web26: a "Reviewer:" line far above a postdoc list, with a training row in between.
+    group = [_row("Q4D", "Reviewer (about eighty manuscripts)", hierarchy=COLLAPSED),
+             _row("C", "2031-2032 Example Fellowship, Example University", hierarchy=COLLAPSED),
+             _row("N3B", "2031-2032 Alex Example, PhD (Example University)", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["Q4D", "C", "N3B"]
+
+
+def test_a_mentee_row_is_never_a_lead_line():
+    # An undated named-mentee line naming review does not head the rows after it.
+    group = [_row("N3B", "Alex Example, grant reviewer", hierarchy=COLLAPSED),
+             _row("N3B", "2031 Sam Example. An example thesis title.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["N3B", "N3B"]
+
+
+def test_a_dated_or_numbered_line_is_not_a_lead_line():
+    for lead in ("Grant review panel, 2031", "1. Grant review panel"):
+        group = [_row("Q3", lead, hierarchy=COLLAPSED),
+                 _row("N3B", "Alex Example – An example proposal.", hierarchy=COLLAPSED)]
+        out, n = apply_header_pin(group, NO_PIN_CTX)
+        assert n == 0 and _codes(out) == ["Q3", "N3B"], lead
+
+
+def test_a_long_line_is_not_a_lead_line():
+    long_lead = "Grant review panel for the example program of the example foundation and its many partners"
+    group = [_row("T", long_lead, hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example – An example proposal.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "N3B"]
+
+
+ABSTRACTS = ("PUBLICATIONS", "Abstracts")
+
+
+@pytest.mark.parametrize("text", [
+    # ULHCAP 1415: a trainee's abstract that names the prize it won.
+    "Doe, JD. An example antidote study. Winner, Example Early Career Prize. "
+    "Example Symposium 2031. Oral abstract.",
+    "Doe J, Roe K. An example study. Best Poster, Example Meeting 2031.",
+])
+def test_an_abstract_naming_its_award_under_an_abstracts_heading_is_an_abstract(text):
+    (out,), n = apply_header_pin([_row("H", text, confidence=0.75, hierarchy=ABSTRACTS)], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "S8" and out["pre_pin_code"] == "H"
+    assert out["classification_reasoning"].startswith("An abstract listed under the CV's abstracts")
+
+
+@pytest.mark.parametrize("code,text,heading", [
+    ("H", "Best Abstract Award, Example Society Annual Meeting, 2031", ABSTRACTS),       # the owner's own award
+    ("H", "Doe, JD. An example study. Winner, Example Prize 2031.", ("HONORS AND AWARDS",)),
+    ("K4", "Doe, JD. An example study. Example Symposium 2031.", ABSTRACTS),            # not an H
+])
+def test_an_award_line_or_another_heading_keeps_its_code(code, text, heading):
+    out, n = apply_header_pin([_row(code, text, hierarchy=heading)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == [code]
+
+
+def test_someone_elses_pins_are_not_flipped_back_by_the_reasoning_check():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row("S1", "Doe, J. 2031. An example study. J. Example Biol. 12, 34-56.", hierarchy=COLLAPSED),
+             _row("N3B", "1. Alex Example, Laboratory technician", hierarchy=("Technical Staff",)),
+             _row("H", "Doe, JD. An example study. Winner, Example Prize 2031.", hierarchy=ABSTRACTS)]
+    out, _ = apply_header_pin(group, NO_PIN_CTX)
+    corrected, _ = apply_reasoning_corrections([{**e, "taxonomy_confidence": 0.95} for e in out[1:]],
+                                               min_confidence=0.80)
+    assert _codes(corrected) == ["T", "T", "S8"]
+
+
+def test_someone_elses_pin_code_reads_the_lead_it_is_given():
+    staff = _row("N3B", "Alex Example, Example role", hierarchy=COLLAPSED)
+    assert someone_elses_pin_code(staff, "") is None
+    assert someone_elses_pin_code(staff, "Technical staff")[0] == "T"
+    assert someone_elses_pin_code(staff, "Grant applicants reviewed")[0] == "T"
+
+
+# --- #1573 review round: where a lead line's list ends, and what may be a lead line ---
+
+OTHER_PAPER = "Doe J, Roe K. Another example study. Example J. 2031;1:2-9."
+OWN_PAPER = "Owner A, Doe J. An example study. Example J. 2032;3:4-9."
+OWN_STUDENT = "2031 Alex Example, PhD student. An example thesis title."
+
+
+@pytest.mark.parametrize("heading", [
+    "PUBLICATIONS (2010-2032)",                     # dated
+    "5. Publications",                              # numbered
+    "C. Peer-reviewed publications",                # lettered
+    "Publications in peer reviewed journals listed in reverse chronological order, most recent first",
+])
+def test_an_acknowledgements_list_ends_at_a_section_heading_that_is_not_a_lead_line(heading):
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED), _row("S1", OTHER_PAPER, hierarchy=COLLAPSED),
+             _row("T", heading, hierarchy=COLLAPSED), _row("S1", OWN_PAPER, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["T", "T", "T", "S1"]
+
+
+@pytest.mark.parametrize("heading", ["5. Mentoring", "MENTORING (2015-2032)"])
+def test_a_review_list_ends_at_a_section_heading_that_is_not_a_lead_line(heading):
+    group = [_row("T", "Grant Review Committees", hierarchy=COLLAPSED),
+             _row("Q3", "2031 Member, Example Study Section", hierarchy=COLLAPSED),
+             _row("T", heading, hierarchy=COLLAPSED), _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "Q3", "T", "N3B"]
+
+
+@pytest.mark.parametrize("record", [
+    ("Q3", "Ad hoc grant reviewer, Example Foundation"),
+    ("Q4D", "Reviewer, Example Journal"),
+    ("Q3", "Grant reviewer; Example Foundation"),
+])
+def test_a_line_punctuated_as_a_record_is_not_a_lead_line(record):
+    group = [_row(*record, hierarchy=COLLAPSED), _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == [record[0], "N3B"]
+
+
+@pytest.mark.parametrize("lead", [
+    ("T", "Technical staff, laboratory"),               # a note line may hold a comma
+    ("Q3", "Grant review panels, internal:"),           # so may a line that ends in a colon
+])
+def test_a_note_or_colon_line_with_a_comma_is_still_a_lead_line(lead):
+    group = [_row(*lead, hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example \u2013 An example proposal.", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == [lead[0], "T"]
+
+
+@pytest.mark.parametrize("group,expected", [
+    # undated, short staff rows: each moved row would otherwise read as a new lead line
+    ([("T", "Technical staff"), ("N3B", "Alex Example, lab assistant"),
+      ("N3B", "Sam Example, lab assistant"), ("N3", "Kim Example, lab assistant")], ["T", "T", "T", "T"]),
+    # an undated acknowledged book, then two more acknowledged papers
+    ([("T", ACK_LEAD), ("S3", "Doe J. An example book. Example Press."),
+      ("S1", OTHER_PAPER), ("S1", OTHER_PAPER)], ["T", "T", "T", "T"]),
+    ([("T", "Internal grant review (partial list)"), ("N3B", "Alex Example - An example proposal"),
+      ("N3B", "Sam Example - Another example proposal")], ["T", "T", "T"]),
+])
+def test_a_row_the_pin_moves_does_not_split_its_list(group, expected):
+    out, _ = apply_header_pin([_row(code, text, hierarchy=COLLAPSED) for code, text in group], NO_PIN_CTX)
+    assert _codes(out) == expected
+
+
+def test_a_review_list_runs_on_through_its_service_rows():
+    group = [_row("T", "Grant reviewing (partial list)", hierarchy=COLLAPSED),
+             _row("Q3", "2031 Example Foundation pilot awards", hierarchy=COLLAPSED),
+             _row("N3B", "Alex Example \u2013 An example proposal (2031).", hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 1 and _codes(out) == ["T", "Q3", "T"]
+
+
+@pytest.mark.parametrize("service_code", ["P", "Q2"])
+def test_an_acknowledgements_list_ends_at_a_service_row(service_code):
+    group = [_row("T", ACK_LEAD, hierarchy=COLLAPSED),
+             _row(service_code, "2031 Member, Example Committee", hierarchy=COLLAPSED),
+             _row("S1", OWN_PAPER, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", service_code, "S1"]
+
+
+def test_a_mentees_abstract_under_a_students_level_is_the_mentees():
+    # The mentee pin (#1251) is read before the abstracts rule: the row is the trainee's.
+    abstract = _row("H", "Doe J, Roe K. An example title. First place, Example Meeting 2031.",
+                    hierarchy=("Trainees", "Abstracts presented by students"))
+    (out,), n = apply_header_pin([abstract], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "N4"
+
+
+def test_an_acknowledged_metrics_line_is_someone_elses_not_the_owners_bibliometric():
+    stub = _row("S1", "Doe 2031 Example Journal. Times cited 12", hierarchy=("ACKNOWLEDGEMENTS",))
+    assert content_pin_code(stub)[0] == "S0"
+    (out,), n = apply_header_pin([stub], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "T"
+
+
+@pytest.mark.parametrize("text", [
+    "Winner, AHA Abstract Achievement Award, 2031",
+    "Recipient, AHA Travel Award for abstract, 2031",
+    "Finalist, ATS. Abstract Scholarship 2031",
+    "Selected, ASH Abstract Achievement Award, 2031",   # an acronym, not initials: no period or comma after it
+])
+def test_an_award_line_with_an_award_word_or_a_societys_acronym_keeps_its_h(text):
+    out, n = apply_header_pin([_row("H", text, hierarchy=ABSTRACTS)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["H"]
+
+
+def test_an_abstracts_parent_over_an_honors_leaf_keeps_the_h():
+    award = _row("H", "Doe, JD. An example study. Example Prize 2031.", hierarchy=("ABSTRACTS", "Honors and awards"))
+    out, n = apply_header_pin([award], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["H"]
+
+
+@pytest.mark.parametrize("heading", [
+    ("MENTORING", "Staff"),
+    ("Mentees", "Research staff"),
+    ("Supervised personnel", "Technicians"),
+])
+def test_staff_under_a_mentoring_parent_stay_mentees(heading):
+    out, n = apply_header_pin([_row("N3B", "1. Alex Example, Laboratory technician", hierarchy=heading)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["N3B"]
+
+
+@pytest.mark.parametrize("code,heading", [
+    ("S1", ("Acknowledgements and Publications",)),
+    ("S9", ("Acknowledgements in the press",)),
+    ("S1", ("PUBLICATIONS", "Acknowledgments of support (grants)")),
+])
+def test_a_level_that_says_more_than_acknowledgements_keeps_its_papers(code, heading):
+    out, n = apply_header_pin([_row(code, OWN_PAPER, hierarchy=heading)], NO_PIN_CTX)
+    assert n == 0 and _codes(out) == [code]
+
+
+def test_a_lead_line_that_says_more_than_acknowledgements_keeps_its_papers():
+    group = [_row("T", "Acknowledgements and publications", hierarchy=COLLAPSED),
+             _row("S1", OWN_PAPER, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "S1"]
+
+
+def test_a_staff_list_ends_at_a_service_row():
+    # Only a reviewing line's list runs on through service rows (ECXGAT 1289-1291).
+    group = [_row("T", "Technical staff", hierarchy=COLLAPSED),
+             _row("Q2", "2031 Member, Example Committee", hierarchy=COLLAPSED),
+             _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "Q2", "N3B"]
+
+
+def test_a_review_list_ends_at_a_publication_row():
+    group = [_row("T", "Grant reviewing (partial list)", hierarchy=COLLAPSED),
+             _row("S1", OWN_PAPER, hierarchy=COLLAPSED),
+             _row("N3B", OWN_STUDENT, hierarchy=COLLAPSED)]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and _codes(out) == ["T", "S1", "N3B"]
+
+
+# --- #1580: a Q2 or P row that is no seat on a body ---------------------------
+
+def _service(code, text, *heading):
+    return {"text": text, "taxonomy_code": code, "taxonomy_confidence": 0.75,
+            "classification_reasoning": "external advisory service (Q2)", "classification_source": "llm",
+            "hierarchy": list(heading or ("Professional Service",)), "element_idx_start": 95}
+
+
+@pytest.mark.parametrize("entry", [
+    # a consultancy coded Q2 (HBALTD 38, EYTHNB 459)
+    _service("Q2", "2031-present  Consultant, Example Health Rhythms"),
+    _service("Q2", "Consultantships with several pharmaceutical companies, 2031 to present.", "Consultantships"),
+    # a company's advisory board (UVZNIC 102, AOJEQD 46), coded Q2 or P (WBZIDP 47)
+    _service("Q2", "2031  Scientific Advisory Board, Example Pharmaceuticals, Inc., Example City"),
+    _service("Q2", "2031  Scientific Advisory Board, Example Biosciences, Example City"),
+    _service("P", "2031 Founder, Chair of the Scientific Advisory Board, Example Pharma.",
+             "Professional Honors"),
+    # expert work in litigation (UVZNIC 98, XNWSZN 1256, ZASOTV 184)
+    _service("Q2", "2031  Expert Opinion, Example & Example, LLP, Litigation regarding an example drug",
+             "Consulting Appointments"),
+    _service("Q2", "Expert Witness for an Example Patent Case, Example Litigation\t2031-present", "Consulting"),
+    # a review word beside litigation or a law firm is that expert work too (the issue's item 1)
+    _service("Q2", "Expert witness/reviewer, product liability litigation, Doe & Roe LLP, 2031-2033"),
+    _service("Q2", "Medical-legal consultant and reviewer for law firms, 2031-present"),
+    _service("Q2", "Litigation consultant and chart reviewer, Doe Law Firm, 2031"),
+    _service("Q2", "Consultant and reviewer, patent litigation, Example Law Firm, 2031"),
+    _service("Q2", "Consultant, peer review of an expert report for Example Litigation, 2031"),
+    # a company under a consulting heading, with no consulting word on its line (EJPAIA 175)
+    _service("Q2", "Example Biologics Corporation, Example City, 2031 to 2032",
+             "Scientific Advisory Boards and Consultantships"),
+    # a year in parentheses alone does not make a consultancy a citation
+    _service("Q2", "Consultant, Example Health Rhythms (2031)"),
+])
+def test_consulting_is_another_professional_position(entry):
+    assert non_seat_pin_code(entry)[0] == "D3"
+
+
+@pytest.mark.parametrize("entry", [
+    # a consultant's seat on a society's named committee
+    _service("Q2", "Consultant, Example Society Ethics Committee, 2031"),
+    # an advisory board of a public body, society, foundation or school stays a board
+    _service("Q2", "2031  Scientific Advisory Board, Example Foundation, Inc."),
+    _service("Q2", "2031  Advisory Board, Example Institute of Health"),
+    # a company named without a company word cannot be told from a school's program (EJPAIA 181)
+    _service("Q2", "Example University Research Program, Advisory Board, 2031",
+             "Scientific Advisory Boards and Consultantships"),
+    # testimony stays Q2 (the owner's decision, 2026-10-27), and so does expert work outside litigation
+    _service("Q2", "Consulted and testified on Example Bill 31-1234, 2031", "Community Involvement"),
+    _service("Q2", "Expert Witness, Example Agency hearings, 2031-32"),
+    # an institution's own consulting project coded P names no company
+    _service("P", "Consultant\tExample Health System\tExample Quality Project\t2031", "Departmental"),
+    # a board of directors is a seat, not consulting
+    _service("Q2", "2031 - 2032  Example Board of Directors"),
+    # a public body's, a hospital's or a blood bank's advisory board is no company's
+    _service("Q2", "2031  Scientific Advisory Board, Example Children's Hospital, Inc."),
+    _service("Q2", "2031  Example Inc. Medical Advisory Board, Example Blood Bank"),
+    _service("Q2", "United States Example Convention, Inc., Example Advisory Committee, 2031"),
+    # consulting inside a body, a seat or an office, a citation, or a list of talks
+    _service("Q2", "Consultant, Example Technical Advisory Group 2031"),
+    _service("Q2", "Example Health Coalition, consultant 2031"),
+    _service("Q2", "2031 Member, External Consultant to the Example Department"),
+    _service("Q2", "Consultant: Example Foundation, 2031. President: Example Association, 2032-"),
+    _service("Q2", "Doe, J. (2031) A consulting career. Interview with Example Consulting."),
+    _service("Q2", "12. Example Pharma Consultant Focus Group; Example City 2031", "Invited Presentations"),
+    # a meeting or a body named after consultants is not the owner consulting
+    _service("Q2", "Example Center Consultants\u2019 Conference (2031 - present)"),
+    _service("Q2", "Example Consultant\u2019s Forum, 2031"),
+    _service("Q2", "\u201cExample Care.\u201d Example Regional Consultants Collaborative, Example City, 2031"),
+    # litigation that names no expert or consulting work
+    _service("Q2", "Example Bar Association Litigation Section, 2031"),
+    # a company's board of directors is a seat
+    _service("Q2", "Example Pharma Inc. Board of Directors, 2031"),
+    # only Q2 and P are read
+    _service("D3", "2031-present  Consultant, Example Health Rhythms"),
+    _service("Q1", "2031  Scientific Advisory Board, Example Pharmaceuticals, Inc."),
+])
+def test_a_seat_or_a_public_board_stays_where_the_model_put_it(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("entry", [
+    # under a heading that names attendance (LTTYWI 1084-1101, coded Q2 by T-validation)
+    _service("Q2", "31. Annual Meeting of the Example College, Example City, September 26-27, 2031.",
+             "Scientific Meetings Attended"),
+    _service("Q2", "36. World Congress of Example Studies, Example City, September 23-27, 2031.",
+             "Scientific Meetings Attended"),
+    # on a line that opens as attendance (MQLKPQ 109, LWMSPJ 342)
+    _service("Q2", "Attendee Example Appreciation Day 2031, 2032", "Affiliations and Activities"),
+    _service("P", "Participant, Example Program Directors Meeting, 12/11-12/14, Example City", "Other Service"),
+    _service("Q2", "2031 Participant, Example Workshop on Methods, Example City", "Other Service"),
+    # the event named by the attendance heading only, or by a heading of attendance (MEHOQM 143)
+    _service("Q2", "36. World Congres of Example Studies, Example City, September 23-27, 2031.",
+             "Scientific Meetings Attended"),
+    _service("Q2", "Example Society Annual Meeting: 2031, 2032", "Convention & Symposium Attendance"),
+    # a place's initials are no author list (LTTYWI 1099)
+    _service("Q2", "Annual Meeting of the Example College, Example City DC, September 19-20, 2031.",
+             "Scientific Meetings Attended"),
+    _service("Q2", "Annual Meeting of the Example College, Example, D.C., 2031; Satellite Session, Example, D.C.",
+             "Scientific Meetings Attended"),
+])
+def test_a_meeting_the_owner_attended_is_other_education(entry):
+    assert non_seat_pin_code(entry)[0] == "B2"
+
+
+@pytest.mark.parametrize("entry", [
+    # an attended meeting the owner chaired, organized or spoke at
+    _service("Q2", "Chair, Annual Meeting of the Example Society, Example City, 2031", "Meetings Attended"),
+    _service("Q2", "Organizer, Example Workshop on Methods, 2031", "Meetings Attended"),
+    _service("Q2", "Participant and member of Planning Committee, Example Experts Meeting, 2031", "Conferences"),
+    # an author list is the owner's talk or abstract
+    _service("Q2", "Doe J, Roe K. An example title. Annual Meeting of the Example Society, 2031.", "Meetings Attended"),
+    _service("Q2", "Doe J et al. An example title. Annual Meeting of the Example Society, 2031.", "Meetings Attended"),
+    _service("Q2", "Panelist, Example Annual Meeting, 2031", "Meetings Attended"),
+    _service("Q2", "2031 Participant, Example Health Day - provided screenings to patients", "Public Service"),
+    # no event on the line or on the attendance heading (another heading's event does not count)
+    _service("Q2", "Example Society of Example Studies, 2031", "Attendance"),
+    _service("Q2", "Participant, Example Data Working Party, 2031", "Conferences"),
+    _service("Q2", "Participant, Example Workgroup on Data Standards, 2031", "Other Service"),
+])
+def test_an_attended_meeting_with_a_part_the_owner_played_stays(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("entry", [
+    # a P consultancy that names a company (WBZIDP 222's shape coded P)
+    _service("P", "2031 Consultant, Example Therapeutics", "Other Activities"),
+    # a company under a nearest heading that names consulting, its line naming no body (BYFQBG 186)
+    _service("Q2", "Example Ltd,      SAB   2031 \u2013 present", "Consultancies/Scientific Advisory Board"),
+    # a consulting role with more than its dates on the line
+    _service("Q2", "Senior Consultant | 2031 - 2032", "Professional Organizations"),
+    # a company named with a plural noun (web244 797.2)
+    _service("Q2", "2031 | Example Centers, Inc. | Review of research protocols", "Professional Consulting"),
+])
+def test_more_consulting_is_another_professional_position(entry):
+    assert non_seat_pin_code(entry)[0] == "D3"
+
+
+@pytest.mark.parametrize("entry", [
+    # a line that is only the role and its dates: one record of a committee roster (MEZVNA 124.5, 124.10)
+    _service("Q2", "Consultant | 2031 - 2032", "Professional Organizations"),
+    _service("Q2", "Consultant      . | 2031 - 2033", "Professional Organizations"),
+    _service("Q2", "Consultant, Jan 2031 - present", "Professional Organizations"),
+    _service("Q2", "Consultant, September 2029 to 2031", "Professional Organizations"),
+    _service("Q2", "Consultant since 2031 (current)", "Professional Organizations"),
+    _service("Q2", "Consultant until 2031", "Professional Organizations"),
+    # a company named under a heading whose consulting word is a level up (the leaf names committees)
+    _service("Q2", "Example Biologics Corporation, 2031", "Consultancies and Committees", "Committees"),
+    # a company's board or committee under a consulting heading is a seat
+    _service("Q2", "Example Pharma Inc. Board of Directors, 2031", "Consulting"),
+    _service("Q2", "2031 | Example Pharma, Inc. | Data Monitoring Committee for an example vaccine",
+             "Professional Consulting"),
+    # an editor is an office
+    _service("Q2", "Consulting Editor, Example Journal of Methods, 2031"),
+    # a public body named in the plural is no company
+    _service("P", "2031 Consultant, Example City Health and Hospitals Corporation", "Other Activities"),
+    _service("Q2", "Example City Health and Hospitals Corporation, 2031", "Consulting"),
+])
+def test_a_bare_role_a_seat_or_a_public_body_is_not_consulting(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("entry", [
+    # advocacy and a day of service stay Q2 (the owner's decision on #1580)
+    _service("Q2", "Participant, Example Society Hill Day, 2031", "Other Service"),
+    _service("Q2", "2031 Participant, Example Society Advocacy Day", "Other Service"),
+    _service("Q2", "Participant, Example Day of Service, 2031", "Community Service"),
+    # a talk, an abstract or a guideline the owner worked on is a part played (SEKQUI 264)
+    _service("Q2", "Attended the Example Society Annual Meeting; gave a talk on example methods, 2031", "Other Service"),
+    _service("Q2", "Participant, Example Annual Meeting, oral abstract, 2031", "Other Service"),
+    _service("Q2", "2031 Participant, Example Consensus Conference on Methods", "National Leadership Positions"),
+    _service("Q2", "2031 Participant, Example Conference 2.0 \u2013 revisions to the Example Training Guidelines",
+             "National Leadership Positions"),
+    _service("Q2", "Example Society Annual Meeting, poster session judge, 2031", "Meetings Attended"),
+    _service("Q2", "2031 Attended the Example Annual Meeting; poster on example methods", "Other Service"),
+    # an attendance heading above a leaf that names something else
+    _service("Q2", "Example Society Annual Meeting, 2031", "Meetings Attended", "National Committees"),
+])
+def test_advocacy_a_part_played_or_another_leaf_is_no_attended_meeting(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("entry", [
+    # the owner's decision on #1580 keeps these in the committee tables, though the
+    # line writes them with a consulting word (JJYBKP 281/287, web204 368/386, web198 420)
+    _service("Q2", "2. Promotions Consultant for Department of Example Science, Example University, 2031"),
+    _service("Q2", "Tenure review consultant, Example Pharma Inc., 2031"),
+    _service("Q2", "Consultant/reviewer for Example Analytics Corporation on a report of example methods, 2031"),
+    _service("Q2", "2031  Example Foundation Hackathon consultant and reviewer", "Reviewer"),
+    _service("Q2", "Consultant for Example Ventures Corporation, Review of the Example Bioscience Center, 2031"),
+    _service("Q2", "External examiner and consultant, Example Pharma Inc., 2031"),
+    _service("Q2", "Consultant, Example Pharma Inc.; hosted a visit of its example delegation, 2031"),
+    _service("Q2", "Volunteer consultant, Example Health Rhythms, 2031"),
+    _service("Q2", "Consultant, Example Therapeutics community service days, 2031"),
+    _service("Q2", "Consultant on patient advocacy, Example Pharma Inc., 2031"),
+    # a company's advisory board, a litigation line and a consulting heading do not outrank them
+    _service("Q2", "Volunteer, Scientific Advisory Board, Example Pharmaceuticals, Inc., 2031"),
+    _service("Q2", "Advocacy for an example cause, Example & Example, LLP, litigation consultant, 2031"),
+    _service("Q2", "Expert witness, testified in example litigation for Doe Law Firm, 2031"),
+    _service("Q2", "Volunteer litigation consultant, Example Legal Aid, 2031"),
+    _service("Q2", "Example Biologics Corporation, external examiner, 2031 to 2032",
+             "Scientific Advisory Boards and Consultantships"),
+    # nor does a meeting attended, under an attendance heading too (OQIDBN 775's shape),
+    # and testimony vetoes it too
+    _service("Q2", "Example Society Advocacy Meeting, 2031", "Meetings Attended"),
+    _service("Q2", "2031-2033 Example Capitol Hill Day", "Continuing Education", "Meetings Attended, National"),
+    _service("Q2", "Example Society Lobby Day, State Capitol, 2031", "Meetings Attended"),
+    _service("Q2", "Day of Service, Example Medical Association Annual Meeting, 2031", "Meetings Attended"),
+    _service("Q2", "Attended the Example Report Review Meeting, 2031", "Other Service"),
+    _service("Q2", "Attended the Example Hearing Meeting and testified, 2031", "Other Service"),
+])
+def test_an_activity_the_owners_decision_keeps_is_never_pinned(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("activity", [
+    "external examiner", "examiners", "external examining for Example University", "external examination",
+    "reviewer", "reviewers", "report review", "report reviews",
+    "promotion review", "promotions consulting", "tenure referee", "a tenure case",
+    "review of an example candidate", "review of the Example Department", "reviews for an example program",
+    "review of the Example Imaging Center", "review of the Example Institute", "review of a draft report",
+    "review of example promotions", "review for tenure",
+    "hosted a visit", "hosting a delegation", "host of an example visit", "hosts for example fellows",
+    "an example program review", "department reviews", "a center review", "a centre review", "institute reviews",
+    "community service", "service to the community", "service to community",
+    "advocacy", "patient advocate", "advocates", "advocated for example care", "advocating for example care",
+    "the Example Society Hill Day", "hill days", "lobbying on research funding", "a lobby day", "a rally for example care",
+    "rallies", "a day of service", "days of service", "a service day", "service days",
+    "volunteer", "volunteers", "volunteered", "volunteering",
+])
+def test_each_activity_word_of_the_owners_decision_keeps_a_consultancy_unpinned(activity):
+    assert non_seat_pin_code(_service("Q2", "Consultant, Example Pharma Inc., 2031"))[0] == "D3"
+    assert non_seat_pin_code(_service("Q2", f"Consultant, Example Pharma Inc., {activity}, 2031")) is None
+
+
+_OTHER_REVIEW_KINDS = ["grant", "manuscript", "journal", "article", "paper", "abstract", "proposal",
+                       "application", "ad hoc", "peer", "expert", "protocol", "case", "medical"]
+
+
+@pytest.mark.parametrize("kind", _OTHER_REVIEW_KINDS)
+def test_a_review_or_examiner_the_owners_decision_does_not_name_leaves_a_consultancy_pinned(kind):
+    for role in ("reviewer", "reviewers", "review of the Example Program", "reviews for the Example Center",
+                 "reviewer for the Example Department", "examiner", "examiners"):
+        entry = _service("Q2", f"Consultant, Example Pharma Inc., {kind} {role}, 2031")
+        assert non_seat_pin_code(entry)[0] == "D3", role
+
+
+@pytest.mark.parametrize("kind", _OTHER_REVIEW_KINDS)
+def test_a_promotion_tenure_candidate_or_report_review_stays_whatever_kind_the_line_calls_it(kind):
+    assert non_seat_pin_code(_service("Q2", "Consultant, Example University, 2031"))[0] == "D3"
+    for review in ("reviewer for promotion and tenure", "reviewers for faculty promotions",
+                   "review of promotion dossiers", "reviews for tenure", "review of an example candidate",
+                   "reviewer of a draft report"):
+        entry = _service("Q2", f"Consultant, {kind} {review}, Example University, 2031")
+        assert non_seat_pin_code(entry) is None, review
+
+
+@pytest.mark.parametrize("text", [
+    "Consultant, tenure case review, Example University, 2031",
+    "Consultant and promotion case reviewer, Example University, 2031",
+    "External peer reviewer for tenure, Example University; consultant, 2031",
+    "Consultant, expert reviewer for the Example Department of Medicine program review, Example University, 2031",
+])
+def test_a_case_or_program_review_named_with_another_review_word_stays(text):
+    assert non_seat_pin_code(_service("Q2", text)) is None
+
+
+@pytest.mark.parametrize(("entry", "code"), [
+    # reviews and examiners the decision does not name keep their routes
+    (_service("Q2", "2031 | Example Centers, Inc. | Review of research protocols", "Professional Consulting"), "D3"),
+    (_service("Q2", "2031-present Consultant, Example Department of Labor, example case reviews"), "D3"),
+    (_service("Q2", "Consultant, Example Office of the Chief Medical Examiner, 2031"), "D3"),
+    (_service("Q2", "Consultant and grant reviewer, Example Pharma Inc., 2031"), "D3"),
+    (_service("Q2", "2031 Expert Reviewer, Doe v. Roe, expert review for Example Law Firm",
+              "Consultantships"), "D3"),
+    (_service("Q2", "Health promotion consultant, Example Wellness Inc., 2031"), "D3"),
+    # a community word that is no community service, nor is a body named for community services
+    (_service("Q2", "Consultant, community engagement strategy, Example Trust Program, 2031"), "D3"),
+    (_service("Q2", "Consultant, Example County Department of Community Services, 2031"), "D3"),
+    # a stay word inside a longer word is none
+    (_service("Q2", "Consultant, Example Vaccines Inc., host tolerance assays, 2031"), "D3"),
+    (_service("Q2", "Consultant, Example Analytics Inc., review of reporting software, 2031"), "D3"),
+    # a review word in the name of a meeting attended
+    (_service("Q2", "Participant, Example Realist Review Workshop, Example City, 2031", "Other Service"), "B2"),
+])
+def test_a_review_the_owners_decision_does_not_name_keeps_its_route(entry, code):
+    assert non_seat_pin_code(entry)[0] == code
+
+
+def test_advocacy_outranks_the_cvs_own_attendance_heading():
+    # One precedence for every advocacy and service-day word (OQIDBN 775's shape): it stays Q2,
+    # while a plain meeting under the same heading is attended.
+    heading = ("Continuing Education", "Meetings Attended, National")
+    assert non_seat_pin_code(_service("Q2", "2031-2033 Example Annual Meeting", *heading))[0] == "B2"
+    assert non_seat_pin_code(_service("Q2", "2031-2033 Example Capitol Hill Day", *heading)) is None
+
+
+def test_apply_non_seat_pins_keeps_the_models_answer_and_counts_each_recode():
+    consulting = _service("Q2", "2031-present  Consultant, Example Health Rhythms")
+    seat = _service("Q2", "Member, Example Society Ethics Committee, 2031")
+    out, stats = apply_non_seat_pins([consulting, seat])
+    assert _codes(out) == ["D3", "Q2"]
+    assert out[0]["pre_pin_code"] == "Q2" and "(category D3)" in out[0]["classification_reasoning"]
+    assert out[1] is seat and consulting["taxonomy_code"] == "Q2"
+    assert stats["corrections_applied"] == 1
+    assert stats["correction_details"] == [{"element_idx": 95, "correction": {
+        "from": "Q2", "to": "D3", "reason": non_seat_pin_code(consulting)[1]}}]
+    assert stats["correction_details"][0]["correction"]["reason"].startswith("Consulting")
+    assert non_seat_pin_code(_service("Q2", "Attendee Example Day 2031"))[1].startswith("A meeting the owner attended")

@@ -19,8 +19,15 @@ this way: Q1's Organization, a Q2 row's Name of Committee (both
 `sections/service.py`) and a P row's Activity/Committee
 (`sections/administrative_activities.py`, #1346), and sections never import
 one another (CODING_STANDARDS.md §1.3).
+
+The same two sections read the Role cell of a row that is not a seat on a
+body off its source line (`names_non_seat_activity`, `own_activity_role`,
+#1580), for the same reason; Q2 also takes a body its line never names out of
+such a row's Name of Committee (`name_without_unstated_body`).
 """
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from ..parsing.dates import DATE_DASH, OPEN_END, SHORT_END_YEAR, YEAR, YEAR_OR_OPEN_SPAN
 from .fields import _cell_text
@@ -214,3 +221,165 @@ def _line_without_shown_role_and_dates(text: object, role: object, start_date: o
     if line == text.strip(_LINE_EDGE_CHARS) or _YEAR_RE.search(line):
         return text
     return line
+
+
+# --- #1580: the Role cell of a row that is not a committee or board seat ---
+#
+# Stage 3b codes consulting, testimony, volunteering, advocacy, attending,
+# external examining, report review and hosted visits Q2 or P, so each one
+# renders as a committee row. Owner decision on #1580 (2026-10-27): they stay
+# in those tables, and the Role cell carries the role or activity word the
+# source line writes. It is never an invented "Member" or "Committee Member"
+# (TYGUXX 227: an external Ph.D. examiner; ZASOTV 645: an oral-exam
+# participant), and it is blank only when the line states no role.
+#
+# Such a row names the activity on its own line or in a heading above it,
+# and its own line names no body one sits on and no seat or office. A bare
+# "community" names an organization as often as a service ("Community <Name>
+# Network"), so only "community service" and its kin count.
+# "Consultant, <Society> Ethics Committee", "Volunteer board member,
+# <Foundation>" and "Chair, <Meeting>" are seats. On a line that names the
+# owner hosting someone, what follows the hosting is the guest's: "Invited and
+# hosted Dr. <Name>, Director, <Lab>" holds the guest's office, not a seat of
+# the owner's (ECXGAT 2138), while "Chair and host, <Meeting>" and "Host
+# Committee member" hold the owner's.
+NON_SEAT_ACTIVITY_RE = re.compile(
+    r'\b(?:consult(?:ant|ants|ancy|ancies|antships?|ing|ed)|expert\s+(?:opinion|witness)'
+    r'|witness(?:es)?|testimon(?:y|ies)|testif(?:y|ied|ies|ying)'
+    r'|volunteer(?:s|ed|ing)?|outreach|advoca(?:cy|tes?|ting)'
+    r'|community\s+(?:and\s+\w+\s+)?(?:service|outreach|engagement|activit(?:y|ies)|involvement)'
+    r'|service\s+to\s+(?:the\s+)?community'
+    r'|attend(?:ed|ee|ees|ance)|examin(?:er|ers|ing|ation|ations)|exams?'
+    r'|host(?:s|ed|ing)?|report\s+reviews?)\b',
+    re.IGNORECASE)
+# A body one sits on, or membership of one: a role naming this claims a seat.
+# "SAB" is a scientific advisory board ("<Company>   SAB   2031 - present",
+# BYFQBG 184), in capitals only.
+_BODY_NAME = (
+    r'(?:sub)?committees?|boards?(?!\s*-?\s*certif)|(?-i:SABs?)|councils?|commissions?|panels?'
+    r'|task\s*forces?|(?:working|work|advisory|steering|expert|study|writing)\s+groups?'
+    r'|workgroups?|cabinets?|senates?|study\s+sections?|consorti(?:um|a)|coalitions?|alliances?'
+    r'|trustees?')
+_SEAT_BODY = rf'{_BODY_NAME}|members?|membership'
+# An office, which a line also names when the row is a seat ("Chair, <Meeting>").
+_SEAT_OFFICE = (
+    r'(?:co-?)?chair\w*|president|secretary|treasurer|directors?|officer|(?:co-?)?founder'
+    r'|coordinator|(?:co-?)?organi[sz]er|moderator|convener|editor')
+SEAT_ON_LINE_RE = re.compile(rf'\b(?:{_SEAT_BODY}|{_SEAT_OFFICE})\b', re.IGNORECASE)
+MEMBERSHIP_ROLE_RE = re.compile(rf'\b(?:{_SEAT_BODY})\b', re.IGNORECASE)
+_BODY_NAME_RE = re.compile(rf'\b(?:{_BODY_NAME})\b', re.IGNORECASE)
+# A Name of Committee led by a body, up to a colon ("Thesis Committee: <title>").
+_BODY_LEAD_RE = re.compile(rf'^[^:]*\b(?:{_BODY_NAME})\b[^:]*:\s*(?=\S)', re.IGNORECASE)
+# The owner hosting someone, which the rest of the line is about.
+_HOSTING_RE = re.compile(
+    r'\b(?:hosted|hosting|hosts?\s+(?:for|of|to))\b(?!\s+(?:the\s+)?(?:sub)?committee)', re.IGNORECASE)
+# The owner's role or activity as a line writes it ("External Ph.D. Examiner",
+# "Clinic Volunteer", "Testimony before ..."): one person's, so never a plural
+# or a possessive, which name others or a body ("Organized training for 40
+# volunteers", "<Center> Consultants' Conference", FINSIS 86).
+OWN_ACTIVITY_ROLE_RE = re.compile(
+    r"\b(?:(?:expert|external|invited)\s+(?:(?:ph\.?\s?d\.?|doctoral|thesis|dissertation)\s+)?)?"
+    r"(?:examiner|appraiser|reviewer|volunteer|host|testimony|witness|ambassador|delegate|panelist|exhibitor"
+    r"|consultant|advocate|advocacy|participant|attendee)\b(?!['\u2019])",
+    re.IGNORECASE)
+# Words of a role that a line need not write ("Volunteer with <Clinic>" for
+# "<Clinic> volunteer").
+_ROLE_FILLER_WORDS = frozenset({'a', 'an', 'and', 'at', 'behalf', 'by', 'for', 'from', 'in', 'of',
+                                'on', 'or', 'the', 'to', 'with'})
+# A role word the line writes in another form shares this many first letters
+# with it ("Organizer" for "Organized the ...", "Recruiter" for "Recruiting").
+_ROLE_STEM_LENGTH = 6
+# A line verb whose role noun shares no first letters with it ("Co-led the
+# <project>" for stage 4's "Co-lead", SPINJC 93).
+_IRREGULAR_ROLE_FORMS: Mapping[str, str] = MappingProxyType({'led': 'lead'})
+_WORD_RE = re.compile(r"[^\W\d_]+")
+# Roles stage 4 joined ("Consultant/Witness").
+_JOINED_ROLES_RE = re.compile(r'\s*/\s*')
+
+
+def names_non_seat_activity(text: str, headings: list[str]) -> bool:
+    """Whether a Q2 or P row is an activity, not a seat on a body (#1580):
+    its line or a heading above it names one (`NON_SEAT_ACTIVITY_RE`), and
+    the owner's part of its line (all of it, or what comes before the owner
+    hosting someone, `_HOSTING_RE`) names no body and no seat or office
+    (`SEAT_ON_LINE_RE`)."""
+    hosting = _HOSTING_RE.search(text)
+    if SEAT_ON_LINE_RE.search(text[:hosting.start()] if hosting else text):
+        return False
+    return any(NON_SEAT_ACTIVITY_RE.search(part) for part in (text, *headings))
+
+
+def _line_words(text: str) -> list[str]:
+    return [_IRREGULAR_ROLE_FORMS.get(word, word) for word in _WORD_RE.findall(text.lower())]
+
+
+def _role_words(role: str) -> list[str]:
+    return [word for word in _WORD_RE.findall(role.lower()) if word not in _ROLE_FILLER_WORDS]
+
+
+def _written_in(word: str, words: list[str]) -> bool:
+    """Whether `word` is one of `words`, or a form of one (`_ROLE_STEM_LENGTH`)."""
+    return any(other.startswith(word[:_ROLE_STEM_LENGTH]) for other in words)
+
+
+def line_states_role(role: str, text: str) -> bool:
+    """Whether the line writes `role`: each of its words but a filler as a
+    word of the line or a form of one (`_ROLE_STEM_LENGTH`: "Organizer" for
+    "Organized the ...",
+    "Consultant/Testifier" for "Consulted on and testified for ...",
+    `_IRREGULAR_ROLE_FORMS`: "Co-lead" for "Co-led ...")."""
+    line_words = _line_words(text)
+    words = _role_words(role)
+    return bool(words) and all(_written_in(word, line_words) for word in words)
+
+
+def _own_role_word(text: str) -> str:
+    """The first role or activity word `text` writes (`OWN_ACTIVITY_ROLE_RE`),
+    as written, a heading's capitals aside ("EXTERNAL EXAMINER"); else ''."""
+    match = OWN_ACTIVITY_ROLE_RE.search(text)
+    if not match:
+        return ''
+    word = match.group()
+    return word.title() if word.isupper() else word
+
+
+def own_activity_role(role: str, text: str, heading: str = '') -> str:
+    """The Role cell of a row that is not a seat (#1580).
+
+    Stage 4's `role`, when the line or the nearest heading the CV files the
+    row under (`heading`) states it (`line_states_role`: "External Examiner"
+    under "<...> External Examiner", "Organizer" for "Organized the ...").
+    Of roles stage 4 joined, the ones stated stay ("Consultant/Witness" for
+    "Consulted on and testified for ..." is "Consultant", RFNZAS 695). A role
+    neither states is stage 4's own reading: the line's own role word takes
+    its place only when it is a word of that role ("Examiner" for stage 4's
+    "External Examiner"), else nothing -- a role word in a title the line
+    names ("How to be an <X> Advocate, Workshop", stage 4's "Workshop
+    leader") is no role of the owner's. A role claiming membership of a body
+    (`MEMBERSHIP_ROLE_RE`, which the line cannot name: it would not be such a
+    row), or no role, gives way to the line's own role or activity word, else
+    the heading's ("External Ph.D. Examiner" over TYGUXX 227's candidate and
+    thesis, whose stage-4 role was "Committee Member"), else ''."""
+    if role and not MEMBERSHIP_ROLE_RE.search(role):
+        source = f'{text}\n{heading}'
+        stated = [part for part in _JOINED_ROLES_RE.split(role) if part and line_states_role(part, source)]
+        if stated:
+            return role if line_states_role(role, source) else '/'.join(stated)
+        word = _own_role_word(text)
+        return word if any(_written_in(part, _line_words(role)) for part in _role_words(word)) else ''
+    return _own_role_word(text) or _own_role_word(heading)
+
+
+def name_without_unstated_body(name: str, text: str) -> str:
+    """A non-seat row's Name of Committee less a body its line never names
+    (#1580): stage 4 filed an external examiner's line naming a candidate and
+    a thesis as "Thesis Committee: <title>" (TYGUXX 227) or "PhD Thesis
+    Defense Committee" (ZCTARO 533), a seat the CV does not claim. A
+    "<body>:" lead goes whole; a body word elsewhere goes alone. A name whose
+    body the line names, or that names none, is returned as it is."""
+    if not _BODY_NAME_RE.search(name) or _BODY_NAME_RE.search(text):
+        return name
+    without_lead = _BODY_LEAD_RE.sub('', name, count=1)
+    if without_lead != name:
+        return without_lead
+    return ' '.join(_BODY_NAME_RE.sub(' ', name).split()).strip(_EDGE_PUNCTUATION)

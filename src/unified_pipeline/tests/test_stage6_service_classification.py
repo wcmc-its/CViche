@@ -84,6 +84,7 @@ from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _is_known_org_line,
     _is_q2_journal_reviewer,
     _matches_word_start,
+    _role_is_another_persons,
     _route_q2_grant_reviews,
     _split_q2_lines,
 )
@@ -716,3 +717,224 @@ def test_fill_service_renders_a_q2_grant_review_under_grant_reviewing():
     ]})
 
     assert ["", "Zorblax Research Trust", ""] in _table_rows_after_label(gen, "Grant Reviewing")
+
+
+# ---------------------------------------------------------------------------
+# #1573 (DYLJXC 444-534): a host's title on a site-visit line is not the owner's role
+
+
+@pytest.mark.parametrize("role,text", [
+    ("Director", "Example Rural Health Program\tDirector, A. Example, M.D. Example Research"),
+    ("Director", "Example Health Society\tDirectors, Alex and Sam Example, M.D.\tExample City"),
+    ("Chief of Surgery", "Professor A. Example, M.D., Chief of Surgery,\tExample National Hospital"),
+    ("Chief Physician", "Example Children's Hospital\tDr. Alex Example, Chief Physician\tExample City"),
+    ("Medical Director", "Toured Example Hospital\tAlex Example, M.D., Medical Director Example Town"),
+    ("Head of Research", "Example Institute\tHead of Research, Alex Example, Ph.D."),
+    ("Head of Department", "Example Hospital\tProf. A. Example, Head of Department"),
+    # the line opens with the host; the title sits in a later cell
+    ("Research Lead", "Professor A. B. Example, Dept. of Example,\tResearch Lead, Example Hospital"),
+])
+def test_a_role_written_against_another_person_is_that_persons(role, text):
+    assert _role_is_another_persons(role, text)
+
+
+@pytest.mark.parametrize("role,text", [
+    ("Visiting Professor", "Visiting Professor, Example University, summer sabbatical 2031"),
+    ("Co-Director", "Co-Director with Dr. Alex Example, Example Symposium, 2031"),   # a word between
+    ("Chair", "Example Hospital, Springfield, MD\tChair, Example Committee"),       # MD the state
+    ("Member", "Member, Example Board (chaired by Professor Example)"),
+    ("Chair of Example Council", "Professor Emeritus, Chair of Example Council"),  # the owner's own titles
+    ("Director", "Example Program, 2031"),                                       # not on the line
+    ("Chair", "Professor A. B. Example, Example Hospital"),                      # not on a host's line
+    # the owner's role opens the line; the same word later sits against another person
+    ("Panellist", "Panellist, Example Public Forum. Moderator: Dr. Alex Example, Panellists: Sam Example."),
+    ("", "Example Hospital\tDr. Alex Example, Chief Physician"),              # no role at all
+    ("", "Professor A. B. Example, Example Hospital"),
+])
+def test_the_owners_own_role_on_a_visit_or_service_line_stays(role, text):
+    assert not _role_is_another_persons(role, text)
+
+
+def test_fill_service_drops_the_hosts_title_and_keeps_the_owners_role():
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    host = {**_q2("Example Rural Hospital\tDr. Alex Example, Chief Physician\tExample City", "International",
+                  role="Chief Physician", organization="Example Rural Hospital"), "element_idx_start": 8}
+    own = _q2("Visiting Professor, Example University, 2031", "International",
+              role="Visiting Professor", organization="Example University")
+    entries = {"Q2": [host, own]}
+
+    gen._fill_service(entries)
+
+    rows = [[cell.text for cell in row.cells] for table in gen.doc.tables for row in table.rows]
+    assert ["Example Rural Hospital", "", "", ""] in rows
+    assert ["Example University", "Visiting Professor", "", ""] in rows
+    assert not any("Chief Physician" in cell for row in rows for cell in row)
+    assert host["extracted_fields"]["role"] == "Chief Physician"  # the caller's entry is not mutated
+
+
+@pytest.mark.parametrize("role,text", [
+    # a committee, prize or symposium named after a person: the role is the owner's
+    ("Co-Chair", "Co-Chair, Dr. Alex Example Remembrance Day Committee, Example Society"),
+    ("Chair", "Dr. J. Example Founders Prize Committee, Chair"),
+    ("Organizer", "Professor A. Example Memorial Symposium, Organizer"),
+    # a spelled-out Professor with no initials is a rank (GDGSWJ 335's shape)
+    ("Chair", "Assistant Professor Search Committee, Chair"),
+    ("Chair", "Visiting Professor Selection Panel, Chair"),
+    ("Chair", "Associate Professor Promotions Review, Chair"),
+    ("Member", "Clinical Assistant Professor Hiring   Committee member, Example University 2031"),
+    # a candidate does not hold the degree; a program is not a person
+    ("Thesis Examiner", "Thesis Examiner, Alex Example, Ph.D. candidate"),
+    ("Thesis Examiner", "Thesis Examiner, Alex Example, PhD candidate"),
+    ("Director", "Example Program\tDirector, Graduate Studies Program, PhD"),
+])
+def test_a_name_that_is_not_another_persons_keeps_the_owners_role(role, text):
+    assert not _role_is_another_persons(role, text)
+
+
+def test_another_persons_title_after_an_examiners_line_is_still_theirs():
+    # KUUKNJ 533's shape: the supervisor named after the owner's examining line.
+    line = "2031 External examiner, Alex Example's doctoral defence, Supervisor Dr Sam Example\tExample Department"
+    assert _role_is_another_persons("Supervisor", line)
+
+
+def test_a_cleared_role_is_not_filled_with_the_default_board_role():
+    # 'Member' would be a new claim: the row names a committee, but the role was the host's title.
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    host = _q2("Example Hospital\tDr. Alex Example, Chief Physician", "Service on Committees",
+               role="Chief Physician", organization="Example Hospital")
+    roleless = {**_q2("Example Advisory Committee, Example Society", "Service on Committees",
+                      organization="Example Society"), "element_idx_start": 9}
+
+    gen._fill_service({"Q2": [host, roleless]})
+
+    rows = [[cell.text for cell in row.cells] for table in gen.doc.tables for row in table.rows]
+    assert ["Example Hospital", "", "", ""] in rows
+    assert ["Example Society", "Member", "", ""] in rows  # the default still fills a role-less committee row
+
+
+# ---------------------------------------------------------------------------
+# #1580: a Q2 row that is no seat on a body shows the role its line writes
+
+
+def _board_rows(entries):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_service({"Q2": entries})
+    return [[cell.text for cell in row.cells] for table in gen.doc.tables for row in table.rows]
+
+
+@pytest.mark.parametrize("entry,expected", [
+    # an external examiner whose line states no role: stage 4's "Committee Member" goes, and so
+    # does the thesis committee its committee name invented (TYGUXX 227)
+    (_q2("2031  Example University, Ph.D. Candidate: A. Example,\tTitle: Example Methods", "External Ph.D. Examiner",
+         committee_name="Thesis Committee: Example Methods", role="Committee Member",
+         organization="Example University", start_date="2031", end_date="2031"),
+     ["Example Methods", "External Ph.D. Examiner", "Example University", "2031"]),
+    # the examiner's own word is on the line, so it is the role
+    (_q2("External Examiner, Example University, 2031", "Outside Service", role="Committee Member",
+         organization="Example University", start_date="2031", end_date="2031"),
+     ["", "External Examiner", "Example University", "2031"]),
+    # a role-less funder under a consulting heading gets no "Member" from the heading (EJPAIA 167-174)
+    (_q2("Example Research Trust, 2031", "Scientific Advisory Boards and Consultantships",
+         organization="Example Research Trust", start_date="2031", end_date="2031"),
+     ["", "", "Example Research Trust", "2031"]),
+    # a volunteer keeps the organization in its own cell (PPMTJH 177, SXPHOG 582)
+    (_q2("Example Free Clinic\tClinic Volunteer, 2031", "Community Service",
+         role="Clinic Volunteer", organization="Example Free Clinic", start_date="2031", end_date="2031"),
+     ["", "Clinic Volunteer", "Example Free Clinic", "2031"]),
+    # no stage-4 role: the activity word the line writes (SIJYJZ 950)
+    (_q2("2031 Example Society advocacy visits, Example Agency", "Outreach/Science Advocacy",
+         committee_name="Advocacy visits, Example Agency", organization="Example Society", start_date="2031"),
+     ["Advocacy visits, Example Agency", "advocacy", "Example Society", "2031"]),
+    # a role stage 4 put in its own words for the activity claims no seat and stays
+    (_q2("Consulting for example firms on patent cases 2031-present", "Consulting",
+         role="Consultant", organization="Example firms", start_date="2031", end_date="present"),
+     ["", "Consultant", "Example firms", "2031-Present"]),
+])
+def test_a_row_that_is_no_seat_shows_the_role_its_line_writes(entry, expected):
+    assert expected in _board_rows([entry])
+
+
+@pytest.mark.parametrize("entry,expected", [
+    # a consultant's seat on a society's named committee
+    (_q2("Consultant, Example Society Ethics Committee, 2031", "Consulting",
+         role="Consultant", committee_name="Ethics Committee", organization="Example Society", start_date="2031"),
+     ["Ethics Committee", "Consultant", "Example Society", "2031"]),
+    # a volunteer board member of a foundation board
+    (_q2("Volunteer board member, Example Foundation, 2031", "Volunteer and Community Service",
+         role="Board Member", organization="Example Foundation", start_date="2031"),
+     ["Example Foundation", "Board Member", "", "2031"]),
+    # a genuine review panel member whose source states "Member"
+    (_q2("Member, Example Expert Review Panel, 2031", "Ad Hoc Review Panels",
+         role="Member", committee_name="Example Expert Review Panel", start_date="2031"),
+     ["Example Expert Review Panel", "Member", "", "2031"]),
+    # a role-less committee under a body heading still gets the default role
+    (_q2("Example Steering Committee, Example Society, 2031", "Committees",
+         committee_name="Example Steering Committee", organization="Example Society", start_date="2031"),
+     ["Example Steering Committee", "Member", "Example Society", "2031"]),
+    # an organizer's line is a seat, whatever its heading
+    (_q2("Organizer, Example Annual Meeting, 2031", "Community Outreach",
+         role="Organizer", organization="Example Society", start_date="2031"),
+     ["Example Society", "Organizer", "", "2031"]),
+])
+def test_a_seat_keeps_its_role_and_its_committee_cell(entry, expected):
+    assert expected in _board_rows([entry])
+
+
+def test_a_host_title_cleared_on_a_non_seat_row_is_not_refilled_from_the_line():
+    # #1573's mark wins: the line's own words are another person's, so the cell stays blank.
+    entry = {**_q2("Hosted visit of Example Hospital\tDr. Alex Example, Chief Physician, 2031", "Visits",
+                   role="Chief Physician", organization="Example Hospital", start_date="2031")}
+    rows = _board_rows([entry])
+    assert ["", "", "Example Hospital", "2031"] in rows
+
+
+def test_a_heading_given_as_a_string_still_marks_an_examiner_row():
+    entry = {"text": "2031  Example University, Ph.D. Candidate: A. Example", "taxonomy_code": "Q2",
+             "hierarchy": "External Ph.D. Examiner", "element_idx_start": 7,
+             "extracted_fields": {"committee_name": "Thesis Committee: A. Example", "role": "Committee Member",
+                                  "organization": "Example University", "start_date": "2031"}}
+    assert ["A. Example", "External Ph.D. Examiner", "Example University", "2031"] in _board_rows([entry])
+
+
+def test_a_seat_keeps_a_committee_name_its_line_does_not_spell_out():
+    # Only a non-seat row loses a body its line never names: a seat's committee name is the seat.
+    entry = _q2("Member, Example Society, 2031", "Committees", role="Member",
+                committee_name="Example Society Steering Committee", start_date="2031")
+    assert ["Example Society Steering Committee", "Member", "", "2031"] in _board_rows([entry])
+
+
+def test_hosted_visits_render_alike_whatever_the_guests_title():
+    # ECXGAT 2138/2147: a guest's office after the hosting is no seat of the owner's, so both
+    # hosted visits keep the organization in its own cell, and read alike.
+    rows = _board_rows([
+        _q2("Invited and hosted Dr. A. Example, Director, Example Laboratory. Example Institute, 2031", "Personal Data",
+            role="Host", organization="Example Institute", start_date="2031"),
+        _q2("Invited and hosted B. Example, CEO of Example Products, Inc., at Example Institute, 2031", "Personal Data",
+            role="Host", organization="Example Institute", start_date="2031"),
+    ])
+    assert rows.count(["", "Host", "Example Institute", "2031"]) == 2
+
+
+def test_a_role_word_on_a_line_whose_role_was_another_persons_is_not_taken():
+    # The line's roles are another person's (#1573's mark): its own words stay out of the Role cell.
+    entry = _q2("Hospital volunteer program visit, Example Hospital\tDr. Alex Example, Chief Physician, 2031",
+                "Visits", role="Chief Physician", organization="Example Hospital", start_date="2031")
+    assert ["", "", "Example Hospital", "2031"] in _board_rows([entry])
+
+
+def test_the_role_a_non_seat_line_writes_is_taken_out_of_its_committee_cell():
+    # No committee and no organization: the cell is the line less the role the Role cell shows.
+    entry = _q2("External Examiner, Example University Thesis Defense, 2031", "Outside Service",
+                role="Committee Member", start_date="2031", end_date="2031")
+    assert ["Example University Thesis Defense", "External Examiner", "", "2031"] in _board_rows([entry])
+
+
+def test_a_split_volunteer_record_keeps_its_organization_and_no_committee():
+    from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM
+    entry = {**_q2("Clinic volunteer with Example Health Mission (2031)", "Volunteer and Community Service",
+                   role="Clinic volunteer", organization="Example Health Mission",
+                   start_date="2031", end_date="2031"), FANNED_OUT_FROM: {"index": 0, "count": 2}}
+    assert ["", "Clinic volunteer", "Example Health Mission", "2031"] in _board_rows([entry])

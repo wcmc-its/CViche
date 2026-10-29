@@ -631,7 +631,7 @@ def test_is_affiliation_heading_needs_both_words_of_a_pair(heading, expected):
     assert _is_affiliation_heading(heading) is expected
 
 
-# --- #1463: a WCM-format source's E/G/J block is copied verbatim -----------
+# --- #1463: a WCM-format source's E/G block is copied verbatim; J never (#2028)
 
 _WCM_SOURCE_HEADINGS = ["PERSONAL DATA", "EDUCATION", "PROFESSIONAL POSITIONS & EMPLOYMENT", "EMPLOYMENT STATUS",
                         "LICENSURE, BOARD CERTIFICATION", "INSTITUTIONAL/HOSPITAL AFFILIATION", "HONORS, AWARDS",
@@ -640,7 +640,8 @@ _WCM_SOURCE_HEADINGS = ["PERSONAL DATA", "EDUCATION", "PROFESSIONAL POSITIONS & 
 
 def _wcm_source(tmp_path, employment_lines: list[str]) -> str:
     """A synthetic WCM-format source: filled E (`employment_lines`), G left
-    as the template's empty label table, J a table the fixed-row writer can't hold."""
+    as the template's empty label table, J an effort row plus a row the
+    fixed-row table has no slot for."""
     doc = Document()
     for heading in _WCM_SOURCE_HEADINGS:
         doc.add_paragraph(heading)
@@ -651,9 +652,10 @@ def _wcm_source(tmp_path, employment_lines: list[str]) -> str:
             table = doc.add_table(rows=1, cols=2)
             table.cell(0, 0).text = "Primary Hospital Affiliation:"
         elif heading.startswith("PERCENT EFFORT"):
-            table = doc.add_table(rows=2, cols=2)
+            table = doc.add_table(rows=3, cols=2)
             table.cell(0, 0).text, table.cell(0, 1).text = "Activity", "Current % effort"
-            table.cell(1, 0).text, table.cell(1, 1).text = "DISTINCTIVE_J_ACTIVITY coordination", "15%"
+            table.cell(1, 0).text, table.cell(1, 1).text = "Teaching", "15%"
+            table.cell(2, 0).text, table.cell(2, 1).text = "DISTINCTIVE_J_SOURCE_ROW", "5%"
     path = tmp_path / "source.docx"
     doc.save(str(path))
     return str(path)
@@ -667,7 +669,7 @@ def _passthrough_entries():
         _OWNER_ENTRY,
         *({"text": line, "taxonomy_code": "T", "hierarchy": ["EMPLOYMENT STATUS"],
            "extracted_fields": {}, "element_idx_start": 1 + i} for i, line in enumerate(_E_LINES)),
-        {"text": "DISTINCTIVE_J_ACTIVITY coordination | 15%", "taxonomy_code": "T",
+        {"text": "Teaching | 15%", "taxonomy_code": "T",
          "hierarchy": ["PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES"],
          "extracted_fields": {}, "element_idx_start": 5},
         {"text": "Member, DISTINCTIVE_G_AFFIL Research Institute", "taxonomy_code": "T",
@@ -678,13 +680,33 @@ def _passthrough_entries():
 def test_wcm_source_blocks_are_copied_and_their_entries_leave_the_appendix(tmp_path):
     doc, _ = _render(tmp_path, _passthrough_entries(), original_doc_path=_wcm_source(tmp_path, _E_LINES))
     full, appendix = _full_text(doc), _appendix_text(doc)
-    # E and J: copied whole, so the lines the writers refuse render in place.
-    for marker in ("DISTINCTIVE_E_EMPLOYER", "DISTINCTIVE_E_REFUSED_LABEL", "DISTINCTIVE_J_ACTIVITY"):
+    # E: copied whole, so the line its writer refuses renders in place.
+    for marker in ("DISTINCTIVE_E_EMPLOYER", "DISTINCTIVE_E_REFUSED_LABEL"):
         assert marker in full and marker not in appendix, marker
     # The copy replaced E's placeholder: the template's status options are gone.
     assert "Voluntary (self-employed" not in full
     # G's source block is unfilled template text, so G's writer ran as before.
     assert "DISTINCTIVE_G_AFFIL" in full and "DISTINCTIVE_G_AFFIL" not in appendix
+
+
+def test_a_wcm_source_j_block_is_never_copied_its_writer_fills_the_fixed_rows(tmp_path):
+    """#2028: J's source block is not copied, even when filled; the template's
+    fixed-row table is filled from the parsed rows instead."""
+    doc, _ = _render(tmp_path, _passthrough_entries(), original_doc_path=_wcm_source(tmp_path, _E_LINES))
+    assert "DISTINCTIVE_J_SOURCE_ROW" not in _full_text(doc)
+    teaching = [[c.text for c in row.cells] for tb in doc.tables for row in tb.rows if row.cells[0].text == "Teaching"]
+    assert teaching and teaching[0][1] == "15%"
+    assert "Teaching | 15%" not in _appendix_text(doc)
+
+
+def test_a_filled_wcm_source_g_block_is_still_copied(tmp_path):
+    """#2028 keeps the copy for G: a filled source G block renders verbatim."""
+    path = _wcm_source(tmp_path, _E_LINES)
+    source = Document(path)
+    source.tables[0].cell(0, 1).text = "DISTINCTIVE_G_SOURCE_HOSPITAL"
+    source.save(path)
+    doc, _ = _render(tmp_path, _passthrough_entries(), original_doc_path=path)
+    assert "DISTINCTIVE_G_SOURCE_HOSPITAL" in _full_text(doc)
 
 
 def test_without_a_source_the_writers_run_as_before(tmp_path):
@@ -699,12 +721,12 @@ def test_a_block_holding_protected_data_is_not_copied(tmp_path):
     full = _full_text(doc)
     assert "01/02/1970" not in full
     assert "DISTINCTIVE_E_REFUSED_LABEL" in _appendix_text(doc)  # E fell back to its writer
-    assert "DISTINCTIVE_J_ACTIVITY" not in _appendix_text(doc)  # J was still copied
+    assert "Teaching | 15%" not in _appendix_text(doc)  # J's writer wrote its row
 
 
 def test_a_copied_block_consumes_only_its_own_sections_entries(tmp_path):
     """An unrelated entry whose words happen to be in a copied block still reaches the Appendix."""
-    stray = {"text": "Coordination of DISTINCTIVE_J_ACTIVITY", "taxonomy_code": "T",
+    stray = {"text": "Name of Current Employer DISTINCTIVE_E_EMPLOYER", "taxonomy_code": "T",
              "hierarchy": ["COMMUNITY SERVICE"], "extracted_fields": {}, "element_idx_start": 7}
     doc, _ = _render(tmp_path, [*_passthrough_entries(), stray], original_doc_path=_wcm_source(tmp_path, _E_LINES))
-    assert "Coordination of DISTINCTIVE_J_ACTIVITY" in _appendix_text(doc)
+    assert "Name of Current Employer DISTINCTIVE_E_EMPLOYER" in _appendix_text(doc)

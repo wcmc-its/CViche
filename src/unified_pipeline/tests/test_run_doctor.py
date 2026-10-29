@@ -4105,6 +4105,17 @@ def test_group_credit_dropped_caps_a_credit_at_max_words(credit, fires):
     assert [s for s, _ in _group_findings(entry, _GROUP_DROPPED_LINE)] == (["WARN"] if fires else [])
 
 
+def test_a_citation_is_judged_past_the_source_heading_note_stage_6_adds():
+    # RBPXCD (#1573): a rebuilt line, long beside its source, under a "not a listed
+    # author" heading. The note's words must not push it below the pairing share.
+    from unified_pipeline.stage6.sections.bibliography import SOURCE_HEADING_NOTE
+    entry = _cited(1004, _GROUP_SOURCE, authors=_GROUP_PEOPLE, title=_CITE_TITLE)
+    rebuilt = f"{_GROUP_DROPPED_LINE} doi:10.5555/sg.45. PMID:31234567."
+    noted = rebuilt + SOURCE_HEADING_NOTE.format(label="Group papers (not a listed author)")
+    assert _group_findings(entry, rebuilt) != []
+    assert _group_findings(entry, noted) == _group_findings(entry, rebuilt)
+
+
 def test_group_credit_dropped_is_a_registered_lint():
     from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
     assert "group_credit_dropped" in KNOWN_LINTS
@@ -4128,6 +4139,13 @@ def test_owner_lint_prevalence_is_the_measured_farm_fraction():
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["owner_missing_from_citation"] == round(30 / 63, 3)
     assert LINT_PREVALENCE["etal_added"] == round(59 / 63, 3)
+
+
+def test_summary_lint_prevalence_is_the_measured_pair_fraction():
+    """Pairs with a finding over S1554-R's 296 stored (uid, summary, stage-4)
+    pairs, measured 2026-10-27 (#1554); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["summary_unsupported_claim"] == round(55 / 296, 3)
 
 
 def test_run_doctor_reads_the_tracked_insertion_not_the_deleted_source(tmp_path):
