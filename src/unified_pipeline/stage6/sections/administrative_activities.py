@@ -62,7 +62,12 @@ from ..formatting import (
     format_date_range,
     with_extra_date_spans,
 )
-from ..normalization import _committee_cell_text, _line_without_shown_role_and_dates
+from ..normalization import (
+    _committee_cell_text,
+    _line_without_shown_role_and_dates,
+    names_non_seat_activity,
+    own_activity_role,
+)
 from ..parsing import _looks_like_multiple_records, _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from ..supplementary import ADMINISTRATIVE_ACTIVITY_FIELDS
@@ -223,6 +228,20 @@ def _name_with_institution(activity: str, institution: str) -> str:
     return f"{activity.strip()}, {institution}"
 
 
+def _row_role(entry: _AdminActivityEntry, role: str) -> str:
+    """The Role cell of a P row: stage 4's `role`, except on a row that is
+    not a seat on a committee (`names_non_seat_activity`, #1580), which shows
+    the role its line or its nearest heading writes, else nothing (ZASOTV
+    645: "Dissertation Committee Member" for an oral-exam participant)."""
+    text = str(entry.get('text') or '')
+    headings = entry.get('hierarchy') or []
+    if isinstance(headings, str):
+        headings = [headings]
+    if not names_non_seat_activity(text, [str(heading) for heading in headings]):
+        return role
+    return own_activity_role(role, text, str(headings[-1]) if headings else '')
+
+
 class AdministrativeActivitiesSection:
     """Section P writers, mixed into `WCMTemplateGenerator`."""
 
@@ -300,11 +319,11 @@ class AdministrativeActivitiesSection:
                         rows.append((entry, (
                             _name_with_institution(
                                 record.activity, record.institution),
-                            record.role, dates)))
+                            _row_role(entry, record.role), dates)))
                 continue
 
             record = _CommitteeRecord.from_raw(fields)
-            activity, role = record.activity, record.role
+            activity, role = record.activity, _row_role(entry, record.role)
             # What extraction actually produced, kept apart from `activity`
             # itself: the parenthetical fallback below overwrites `activity`
             # with the stripped raw text (including any second line) when

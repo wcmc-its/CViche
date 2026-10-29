@@ -850,3 +850,70 @@ class TestEveryRowIsRecordedAgainstItsEntry:
 
         assert gen._row_receipts.elements_for(nameless) == []
         assert len(gen._row_receipts.elements_for(named)) == 1
+
+
+class TestNonSeatRowShowsTheRoleItsLineWrites:
+    """#1580: a P row that is no seat on a committee (an oral-exam participant,
+    ZASOTV 645) shows the role its line writes, never stage 4's invented
+    "Dissertation Committee Member"; a seat keeps its role."""
+
+    @staticmethod
+    def _p(text, heading, **fields):
+        return {"text": text, "taxonomy_code": "P", "extracted_fields": fields,
+                "hierarchy": ["Thesis Reader and Oral Examination Participation", heading]}
+
+    def test_an_exam_participant_loses_a_committee_seat_the_line_does_not_name(self):
+        entry = self._p("A. Example\tPhD, Example Studies\t12/8/31\tAn example dissertation title",
+                        "Preliminary Oral Exam Participation", role="Dissertation Committee Member",
+                        start_date="2031", end_date="2031")
+        [(_activity, role, _dates)] = _rows(entry)
+        assert role == ""
+
+    def test_the_examiners_own_word_on_the_line_is_the_role(self):
+        entry = self._p("A. Example, PhD, Example Studies, 2031, Examiner", "Final Oral Exams",
+                        committee_name="A. Example, PhD, Example Studies", role="Committee Member",
+                        start_date="2031", end_date="2031")
+        [(_activity, role, _dates)] = _rows(entry)
+        assert role == "Examiner"
+
+    def test_a_committee_seat_under_the_same_heading_keeps_its_role(self):
+        entry = self._p("Member, Example Doctoral Admissions Committee, 2031", "Final Oral Exams",
+                        committee_name="Example Doctoral Admissions Committee", role="Member",
+                        start_date="2031", end_date="2031")
+        [(_activity, role, _dates)] = _rows(entry)
+        assert role == "Member"
+
+    def test_a_role_stage_4_put_in_its_own_words_stays(self):
+        entry = self._p("2031  Co-led the Example Project", "Service to Community",
+                        committee_name="Example Project", role="Co-lead", start_date="2031")
+        [(_activity, role, _dates)] = _rows(entry)
+        assert role == "Co-lead"
+
+    def test_the_nearest_heading_gives_the_role_the_line_does_not(self):
+        # TYGUXX 227's shape coded P: the examiner role is the heading's, the seat stage 4's own
+        entry = self._p("A. Example\tPhD, Example Studies\t2031", "External Examiner",
+                        role="Committee Member", start_date="2031", end_date="2031")
+        [(_activity, role, _dates)] = _rows(entry)
+        assert role == "External Examiner"
+
+    def test_a_role_the_line_does_not_write_goes(self):
+        # stage 4 read the examiner role off the heading; the line names a candidate and a thesis
+        entry = self._p("A. Example\tPhD, Example Studies\t2031\tAn example dissertation title",
+                        "Final Oral Exams", role="External Examiner", start_date="2031", end_date="2031")
+        [(_activity, role, _dates)] = _rows(entry)
+        assert role == ""
+
+    def test_a_heading_given_as_a_string_still_marks_the_row(self):
+        entry = {"text": "A. Example\tPhD, Example Studies\t2031", "taxonomy_code": "P",
+                 "hierarchy": "Oral Examination Participation",
+                 "extracted_fields": {"committee_name": "A. Example", "role": "Dissertation Committee Member",
+                                      "start_date": "2031", "end_date": "2031"}}
+        [(_activity, role, _dates)] = _rows(entry)
+        assert role == ""
+
+    def test_each_record_of_a_listed_entry_gets_the_same_rule(self):
+        entry = self._p("A. Example, PhD, 2031\\nB. Example, PhD, 2032, examined", "Final Oral Exams",
+                        committee_name=[
+                            {"committee_name": "A. Example, PhD", "role": "Committee Member", "start_date": "2031"},
+                            {"committee_name": "B. Example, PhD", "role": "Examiner", "start_date": "2032"}])
+        assert [role for _activity, role, _dates in _rows(entry)] == ["", "Examiner"]

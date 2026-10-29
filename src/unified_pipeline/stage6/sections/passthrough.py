@@ -5,11 +5,14 @@
     J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES
 
 Every other section in the template is rebuilt from stage-4 fields. These
-three are short, already structured in the source CV, and structured the same
-way the WCM template wants them, so they are copied across instead -- which is
-what "passthrough" means here and why the three share one module and one entry
-point. `_fill_passthrough_sections` is dispatched once from `generate` and is
-nothing but the three calls.
+three are short and structured in the source CV much as the WCM template wants
+them -- which is what "passthrough" means here and why the three share one
+module and one entry point. `_fill_passthrough_sections` is dispatched once
+from `generate` and is nothing but the three calls. A WCM-format source's E
+and G blocks are copied across verbatim (#1463); J's never is (#2028): the
+template's J is a fixed-row table, and a source's J block can hold whole
+course, clinical, committee and research lists that already render in their
+own sections, so J is always filled by its writer from the parsed rows.
 
 The writers select their input by HIERARCHY first: none of the three sections
 has a code of its own on the live path, so the main signal that an entry
@@ -300,16 +303,12 @@ def _map_percent_effort_activity(raw: str) -> str | None:
     return _PERCENT_EFFORT_ACTIVITY_SYNONYMS.get(_normalize_percent_effort_activity(raw))
 
 
-def _percent_effort_row_has_newline(text: str) -> bool:
-    """Whether `text` fuses several source rows into one candidate, e.g.
-    "Teaching | 10% | Yes\\nClinical | 20% | No" -- which would otherwise
-    parse as one row with a corrupted third cell ("Yes\\nClinical") and the
-    later row(s) vanishing entirely. Checked for EVERY candidate, before
-    parsing and regardless of what it turns out to be (data row or header),
-    since a multi-line candidate can never be a genuine single row of
-    either kind.
-    """
-    return '\n' in text
+def _percent_effort_lines(text: str) -> list[str]:
+    """The source rows a candidate holds, one per line. A candidate can fuse
+    several ("Teaching | 10% | Yes\\nClinical | 20% | No", or a whole table
+    under one entry, #2028); parsed whole it would read as one row with a
+    corrupted third cell ("Yes\\nClinical") and the later rows vanishing."""
+    return [line.strip() for line in text.split('\n') if line.strip()]
 
 
 def _percent_effort_row_has_extra_cells(text: str) -> bool:
@@ -446,6 +445,12 @@ def _percent_effort_row_index(table) -> dict[str, int]:
 # J-coded row from some other table, say) still reaches the Appendix.
 _COPIED_ENTRY_TOKEN_COVERAGE = 0.8
 _ENTRY_TOKEN_RE = re.compile(r"[a-z]{3,}|\d+")
+# The letters whose source block is copied verbatim. J is not one (#2028):
+# its fixed-row table is always filled by `_fill_percent_effort`, because a
+# source's J block can hold anything under that heading -- an old-form CV's
+# course, clinical, committee and research lists, even the next sections --
+# and every one of those lines already renders in its own section.
+_VERBATIM_LETTERS = frozenset({'E', 'G'})
 
 
 def _passthrough_letter(text: str) -> str | None:
@@ -484,8 +489,9 @@ class PassthroughSection:
         - G. INSTITUTIONAL/HOSPITAL AFFILIATION
         - J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260)
 
-        A WCM-format source's own E/G/J block is copied verbatim instead
+        A WCM-format source's own E/G block is copied verbatim instead
         (#1463, `_copy_source_blocks`); that letter's writer then doesn't run.
+        J's never is (#2028): `_fill_percent_effort` always runs.
 
         Args:
             all_entries: All entries from the pipeline (to search by hierarchy)
@@ -512,14 +518,16 @@ class PassthroughSection:
         return consumed
 
     def _copy_source_blocks(self, original_doc_path: str | None) -> dict[str, set[str]]:
-        """Copy each filled E/G/J block of a WCM-format source over the
+        """Copy each filled E/G block of a WCM-format source over the
         template's placeholder (#1463). Returns {letter: tokens of the copied
         text} for the letters copied. Any failure costs only that letter,
         whose writer then runs as before; the path each letter took is logged."""
         if not original_doc_path:
             return {}
         try:
-            source = capture_source_blocks(original_doc_path, _passthrough_letter)
+            source = {letter: elements for letter, elements
+                      in capture_source_blocks(original_doc_path, _passthrough_letter).items()
+                      if letter in _VERBATIM_LETTERS}
         except Exception:
             logger.warning("Passthrough: could not read source %s; writers run", original_doc_path, exc_info=True)
             return {}
@@ -822,9 +830,10 @@ class PassthroughSection:
 
         Selects candidates by hierarchy OR `taxonomy_code == 'J'` (dedup can
         leave only a mis-hierarchied copy, #260/9TUVGW; see the module
-        docstring). A multi-line candidate is refused outright, before
-        parsing (`_percent_effort_row_has_newline`). Everything else is
-        parsed and activity-mapped FIRST: an unmapped activity may still be
+        docstring). A multi-line candidate is split into its rows
+        (`_percent_effort_lines`), each placed on its own
+        (`_place_percent_effort_row`), and the entry is consumed only when
+        every row is. Each row is parsed and activity-mapped FIRST: an unmapped activity may still be
         the source table's own header row (`_is_percent_effort_header_row`,
         checked regardless of cell count -- the real 13-CV corpus header has
         4, uid 1FRABQ), consumed with nothing written. Only a MAPPED
@@ -866,49 +875,51 @@ class PassthroughSection:
         consumed = []
         written: dict[str, PercentEffortRow] = {}
         for entry in candidates:
-            text = entry.get('text', '').strip()
-            if _percent_effort_row_has_newline(text):
-                logger.warning("Percent Effort entry spans multiple rows; entry not written: %r", text)
-                continue
-
-            parsed = _parse_percent_effort_row(text)
-            if parsed is None:
-                continue
-
-            activity = _map_percent_effort_activity(parsed.activity)
-            if activity is None:
-                if _is_percent_effort_header_row(activity, parsed.percent, text):
-                    consumed.append(entry)
-                continue
-            if parsed.percent is None:
-                continue
-
-            if _percent_effort_row_has_extra_cells(text):
-                logger.warning("Percent Effort entry has an extra cell; entry not written: %r", text)
-                continue
-
-            row_idx = row_index.get(activity)
-            if row_idx is None:
-                logger.warning(
-                    "Percent Effort entry activity %r maps to %r, which has "
-                    "no row in the template table; entry not written",
-                    parsed.activity, activity)
-                continue
-
-            prior = written.get(activity)
-            if prior is not None:
-                if (parsed.percent, parsed.involves_trainees) == (prior.percent, prior.involves_trainees):
-                    consumed.append(entry)  # a true duplicate copy of what's already written
-                else:
-                    logger.warning(
-                        "Percent Effort: %s already written as %r; conflicting "
-                        "entry %r not written", activity, prior, parsed)
-                continue
-
-            self._write_percent_effort_row(table, row_idx, parsed)
-            written[activity] = parsed
-            consumed.append(entry)
+            lines = _percent_effort_lines(entry.get('text', ''))
+            placed = [self._place_percent_effort_row(table, row_index, written, line) for line in lines]
+            if placed and all(placed):
+                consumed.append(entry)
         return consumed
+
+    def _place_percent_effort_row(self, table: Table, row_index: dict[str, int],
+                                  written: dict[str, PercentEffortRow], text: str) -> bool:
+        """Write one source row `text` into its template row (recording it in
+        `written`) by `_fill_percent_effort`'s rules; True when the row is
+        consumed -- written, a true duplicate, or the header row."""
+        parsed = _parse_percent_effort_row(text)
+        if parsed is None:
+            return False
+
+        activity = _map_percent_effort_activity(parsed.activity)
+        if activity is None:
+            return _is_percent_effort_header_row(activity, parsed.percent, text)
+        if parsed.percent is None:
+            return False
+
+        if _percent_effort_row_has_extra_cells(text):
+            logger.warning("Percent Effort entry has an extra cell; entry not written: %r", text)
+            return False
+
+        row_idx = row_index.get(activity)
+        if row_idx is None:
+            logger.warning(
+                "Percent Effort entry activity %r maps to %r, which has "
+                "no row in the template table; entry not written",
+                parsed.activity, activity)
+            return False
+
+        prior = written.get(activity)
+        if prior is not None:
+            if (parsed.percent, parsed.involves_trainees) == (prior.percent, prior.involves_trainees):
+                return True  # a true duplicate copy of what's already written
+            logger.warning(
+                "Percent Effort: %s already written as %r; conflicting "
+                "entry %r not written", activity, prior, parsed)
+            return False
+
+        self._write_percent_effort_row(table, row_idx, parsed)
+        written[activity] = parsed
+        return True
 
     def _write_percent_effort_row(self, table, row_idx: int, parsed: PercentEffortRow) -> None:
         """Write `parsed`'s percent (and Yes/No, if parsed) into the

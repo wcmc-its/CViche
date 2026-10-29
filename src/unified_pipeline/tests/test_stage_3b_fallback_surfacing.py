@@ -1012,3 +1012,57 @@ def test_reviewer_journals_in_a_batch_without_the_lead_in_come_out_q4d(monkeypat
     assert {e["taxonomy_code"] for e in entries} == {"Q4D"}
     assert [e["text"] for e in entries if e.get("pre_pin_code") == "Q4C"] == [
         "Example Journal of Topic 14", "Example Journal of Topic 15"]
+
+
+def test_run_recodes_a_company_advisory_board_after_the_committee_corrector(monkeypatch, tmp_path):
+    """#1580: a company's advisory board reaches the artifact as D3 even when
+    the model answered D3 and post-correction 2 then read its committee words
+    and sent it to P, because the non-seat pin runs after step 2; its stats
+    sit under meta.stats.post_classification_corrections and count in the
+    total."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code="D3"))
+    mappings = [{"title": "PROFESSIONAL POSITIONS",
+                 "taxonomy_options": [{"code": "D3", "confidence": 0.9}], "children": []}]
+    entries = [{"element_type": "text",
+                "text": "2031 Member, Scientific Advisory Board, Example Pharmaceuticals, Inc., Example City",
+                "hierarchy": ["PROFESSIONAL POSITIONS"]}]
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, mappings)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    [entry] = output["entries"]
+    assert (entry["taxonomy_code"], entry["pre_pin_code"]) == ("D3", "P")
+    corrections = output["meta"]["stats"]["post_classification_corrections"]
+    assert corrections["committee"]["corrections_made"] == 1
+    assert corrections["non_seat"]["corrections_applied"] == 1
+    assert output["meta"]["stats"]["total_post_corrections"] == 2
+
+
+def test_run_still_counts_a_training_received_in_the_summary(monkeypatch, tmp_path):
+    """Step 9 moved into `_apply_service_kind_corrections` with step 9c (#1580):
+    its count still reaches the artifact's summary and the total."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code="P"))
+    mappings = [{"title": "INSTITUTIONAL SERVICE",
+                 "taxonomy_options": [{"code": "P", "confidence": 0.9}], "children": []}]
+    entries = [{"element_type": "text", "text": "2031 Title IX Training, Example University",
+                "hierarchy": ["INSTITUTIONAL SERVICE"]}]
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, mappings)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    assert output["entries"][0]["taxonomy_code"] == "B2"
+    assert output["meta"]["post_correction_summary"]["training_compliance_corrections"] == 1
+    assert output["meta"]["stats"]["total_post_corrections"] == 1
+    assert output["meta"]["stats"]["post_classification_corrections"]["non_seat"]["corrections_applied"] == 0
