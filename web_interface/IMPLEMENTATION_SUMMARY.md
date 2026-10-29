@@ -153,7 +153,7 @@ VITE v5.0.7  ready in XXX ms
 ```bash
 # Upload a CV
 curl -X POST http://localhost:8000/api/upload \
-  -F "file=@../data/sample_cvs/word/2025_Denckla_Cv.docx"
+  -F "file=@../data/sample_cvs/word/9999_Doe_Jane_CV.docx"
 
 # Get run status (replace RUN_ID)
 curl http://localhost:8000/api/run/ABC123/status
@@ -300,7 +300,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data))
 
 1. Start both servers
 2. Open http://localhost:3000
-3. Upload `data/sample_cvs/word/2025_Denckla_Cv.docx`
+3. Upload `data/sample_cvs/word/9999_Doe_Jane_CV.docx`
 4. Watch the magic happen! 🎉
 
 ## Next Steps

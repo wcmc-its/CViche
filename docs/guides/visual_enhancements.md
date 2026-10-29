@@ -19,7 +19,7 @@
 4. Bold text → 0.70
 5. Ends with colon → 0.65
 
-**Result**: 27 headers detected on 2009_Mucci CV
+**Result**: 27 headers detected on the farm 2009 CV
 
 ### After: Composite Visual Scoring
 
@@ -40,7 +40,7 @@
 10. Zero indent → +0.15
 11. Whitespace → +0.10
 
-**Result**: **44 headers detected** on 2009_Mucci CV (+63% improvement)
+**Result**: **44 headers detected** on the farm 2009 CV (+63% improvement)
 
 ---
 
@@ -53,7 +53,7 @@
 ```
 **Score**: +0.50 confidence boost
 
-**Example from 2009_Mucci**:
+**Example from farm 2009**:
 - "CURRICULUM VITAE" → 1.00 confidence (centered + all_caps + bold)
 
 ---
@@ -96,8 +96,8 @@ Professional Experience
 ### 5. **Whitespace Patterns** ✨ NEW
 **Why it matters**: Formatted headers often have spacing/tabs
 ```
-Name:                 	Lorelei Ann Mucci
-Home Address: 	105 Manchester Road
+Name:                 	Jane Q. Doe
+Home Address: 	123 Example Road
 ```
 **Score**: +0.10 confidence boost
 
@@ -115,7 +115,7 @@ Education:          ← 0.0in indent (header)
 
 ## Test Results
 
-### 2009_Mucci_March.docx
+### 2009_March.docx
 
 | Metric | Before | After | Change |
 |--------|--------|-------|--------|
@@ -142,7 +142,7 @@ Education:          ← 0.0in indent (header)
 
 **High 0.95 Scores** (contact info detected):
 ```
-[0.95] Home Address: 	105 Manchester Road
+[0.95] Home Address: 	123 Example Road
   → Signals: bold_before_plain, no_indent, whitespace
 
 [0.95] Office Address: 	Harvard T.H. Chan School...
@@ -151,10 +151,10 @@ Education:          ← 0.0in indent (header)
 
 **Good 0.80 Scores** (detailed fields):
 ```
-[0.80] Phone:      	    	(617) 432-1732
+[0.80] Phone:      	    	(555) 555-0100
   → Signals: bold, no_indent, whitespace
 
-[0.80] Email:                	lmucci@hsph.harvard.edu
+[0.80] Email:                	jdoe@example.edu
   → Signals: bold, no_indent, whitespace
 ```
 
@@ -166,7 +166,7 @@ Education:          ← 0.0in indent (header)
 **Problem**: Large CVs (>170KB) must be split into sections
 **Solution**: More accurate headers = better section boundaries
 
-**Example - 2009_Mucci CV**:
+**Example - farm 2009 CV**:
 - 864 paragraphs total
 - 44 sections detected (avg ~20 paragraphs per section)
 - Largest section: "Original Articles" = 208 paragraphs → split into 5 chunks
@@ -286,7 +286,7 @@ From `docx_structure_extractor.py` - preserves ALL Word formatting:
 
 ### Manual Spot-Check
 
-Reviewed 44 detected headers from 2009_Mucci CV:
+Reviewed 44 detected headers from the farm 2009 CV:
 
 **True Positives**: 41/44 (93.2%)
 - All major sections detected correctly
@@ -427,7 +427,7 @@ if elem.get('space_after') and elem.get('space_after') > avg_space * 1.5:
 
 ### Production Ready
 
-✅ Tested on 2009_Mucci CV (171KB, 864 paragraphs)
+✅ Tested on the farm 2009 CV (171KB, 864 paragraphs)
 ✅ 93.2% true positive rate
 ✅ No rate limit errors (chunked approach)
 ✅ Compatible with existing pipeline

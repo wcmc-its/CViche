@@ -22,7 +22,7 @@ npm run dev
 
 ### 3. Upload a CV
 - Open http://localhost:3000
-- Upload `../data/sample_cvs/word/2025_Denckla_Cv.docx`
+- Upload `../data/sample_cvs/word/9999_Doe_Jane_CV.docx`
 - Watch the **REAL** pipeline process it!
 
 ---
@@ -69,7 +69,7 @@ npm run dev
 ### Pipeline Viewer
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  ← Back   Run #ABC123 • 2025_Denckla_Cv.docx            │
+│  ← Back   Run #ABC123 • 9999_Doe_Jane_CV.docx           │
 │  Cost: $0.20 • Tokens: 1000 • running                    │
 ├─────────────┬────────────────────────────────────────────┤
 │ Sidebar     │  Step 1: Identify Sections                 │
@@ -79,7 +79,7 @@ npm run dev
 │ ✅ Step 3   │  Logs:                                      │
 │ ⚙️  Step 4   │  ┌──────────────────────────────────────┐ │
 │ ⏳ Step 5   │  │ Initializing CV segmenter...        │ │
-│ ⏳ Step 6   │  │ Processing 2025_Denckla_Cv.docx...  │ │
+│ ⏳ Step 6   │  │ Processing 9999_Doe_Jane_CV.docx... │ │
 │ ⏳ Step 7   │  │ Found 15 sections                   │ │
 │ ⏳ Step 8   │  │ Extracted 237 entries               │ │
 │ ⏳ Step 9   │  │ Approach: word-chunked-hierarchical │ │
@@ -134,9 +134,9 @@ npm run dev
 ```bash
 # Start the servers (see Quick Start above)
 # Then test with these CVs:
-../data/sample_cvs/word/2025_Denckla_Cv.docx
-../data/sample_cvs/word/2024_Dabelko_Schoeny.docx
-../data/sample_cvs/word/2004_Almasri_Mahmoud.docx
+../data/sample_cvs/word/9999_Doe_Jane_CV.docx
+../data/sample_cvs/word/9998_Roe_Richard.docx
+../data/sample_cvs/word/9997_Example_Alex.docx
 ```
 
 ### Check Real Outputs

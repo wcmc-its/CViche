@@ -147,7 +147,7 @@ npm run dev
 
 ### 3. Upload a CV
 1. Visit http://localhost:3000
-2. Upload `data/sample_cvs/word/2025_Denckla_Cv.docx`
+2. Upload `data/sample_cvs/word/9999_Doe_Jane_CV.docx`
 3. Click "Start Pipeline"
 
 ### 4. Watch the Magic! ✨
@@ -155,7 +155,7 @@ npm run dev
 **Step 1 logs** (real output):
 ```
 Initializing CV segmenter...
-Processing 2025_Denckla_Cv.docx...
+Processing 9999_Doe_Jane_CV.docx...
 Found 15 sections
 Extracted 237 entries
 Approach: word-chunked-hierarchical

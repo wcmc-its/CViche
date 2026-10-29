@@ -297,13 +297,13 @@ cd "CV parsing - AI project"
 python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]
 
 # Example - run full pipeline:
-python3 run_full_pipeline.py 2071_Zuschlag_Cv
+python3 run_full_pipeline.py 9999_Doe_Jane_CV
 
 # Or with full path:
-python3 run_full_pipeline.py 'data/sample_cvs/word/2071_Zuschlag_Cv.docx'
+python3 run_full_pipeline.py 'data/sample_cvs/word/9999_Doe_Jane_CV.docx'
 
 # Override the Bedrock model for this run (default: llm_config.yaml's `default:` block):
-CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0 python3 run_full_pipeline.py 2071_Zuschlag_Cv
+CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0 python3 run_full_pipeline.py 9999_Doe_Jane_CV
 ```
 
 **Arguments:**
@@ -318,37 +318,37 @@ Run individual stages when you want to re-process just one step:
 
 ```bash
 # Run only Stage 1a (hierarchy extraction)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 1a
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 1a
 
 # Run only Stage 1b (index mapping)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 1b
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 1b
 
 # Run only Stage 2 (entry extraction)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 2
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 2
 
 # Run only Stage 3a (header taxonomy mapping)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 3a
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3a
 
 # Run only Stage 3b (entry classification)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 3b
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3b
 
 # Run both Stage 3a and 3b together
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 3
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3
 
 # Run only Stage 4 (field extraction)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 4
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 4
 
 # Run only Stage 4.5 (research summary generation)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 4.5
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 4.5
 
 # Run only Stage 5 (PubMed enrichment)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 5
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 5
 
 # Run only Stage 5b (institution enrichment)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 5b
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 5b
 
 # Run only Stage 6 (WCM Word template generation)
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 6
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 6
 ```
 
 **Stage dependencies:**
@@ -449,7 +449,7 @@ outputs/
 ### Stage 1a Output (`_segmented.json`)
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "hierarchy": [
     {
       "text": "Education",
@@ -472,7 +472,7 @@ This is the contract between Stage 2 and Stage 3:
 
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "total_entries": 155,
   "entries": [
     {
@@ -496,7 +496,7 @@ This is the contract between Stage 2 and Stage 3:
 ### Stage 3a Output (`_header_taxonomy.json`) — Header Mappings
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "stage": "3a",
   "stage_name": "Header Taxonomy Mapping",
   "mappings": [
@@ -527,7 +527,7 @@ This is the contract between Stage 2 and Stage 3:
 ### Stage 3b Output (`_classified.json`) — Classification Output
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "total_entries": 155,
   "entries_classified": 155,
   "total_cost": 0.042,
@@ -570,7 +570,7 @@ This is the contract between Stage 2 and Stage 3:
 ### Stage 4 Output (`_fields.json`) — Structured Field Extraction
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "stage": "4",
   "stage_name": "Field Extraction",
   "total_entries": 155,
@@ -635,7 +635,7 @@ See `config/field_schemas_v1.json` for complete field definitions.
 ### Stage 4.5 Output (`_research_summary.json`) — Research Summary
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "stage": "4.5",
   "stage_name": "Research Summary Generation",
   "cv_owner": {
@@ -660,7 +660,7 @@ See `config/field_schemas_v1.json` for complete field definitions.
 ### Stage 5 Output (`_enriched.json`) — PubMed Enrichment
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "stage": "5",
   "stage_name": "PubMed Enrichment",
   "source_stage": "4",
@@ -708,7 +708,7 @@ See `config/field_schemas_v1.json` for complete field definitions.
 ### Stage 5b Output (`_institution_enriched.json`) — Institution Enrichment
 ```json
 {
-  "document_uid": "2071_Zuschlag_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "stage": "5b",
   "stage_name": "Institution Enrichment",
   "source_stage": "5",
@@ -1334,13 +1334,13 @@ Version-specific behaviors documented in:
 **Manual testing workflow**:
 ```bash
 # Run on sample CV
-python3 run_full_pipeline.py 'data/sample_cvs/word/2071_Zuschlag_Cv.docx' '2071_Zuschlag_Cv'
+python3 run_full_pipeline.py 'data/sample_cvs/word/9999_Doe_Jane_CV.docx' '9999_Doe_Jane_CV'
 
 # Compare output to known-good result
-diff outputs/stage_3b_classified_entries/2071_Zuschlag_Cv_classified.json expected/2071_Zuschlag_Cv_classified.json
+diff outputs/stage_3b_classified_entries/9999_Doe_Jane_CV_classified.json expected/9999_Doe_Jane_CV_classified.json
 ```
 
-**Canonical test CV**: `2071_Zuschlag_Cv.docx` — used for regression testing
+**Canonical test CV**: farm 2071 (the commands above use the invented `9999_Doe_Jane_CV` in its place) — used for regression testing
 
 ---
 
@@ -1405,10 +1405,10 @@ This project is a **CLI tool**, not an importable Python library.
 **Intended usage**:
 ```bash
 # Run full pipeline
-python3 run_full_pipeline.py 2097_Upton_Cv
+python3 run_full_pipeline.py 9999_Doe_Jane_CV
 
 # Run single stage
-python3 run_full_pipeline.py 2097_Upton_Cv --stage 2a
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 2a
 ```
 
 **Not intended for**:

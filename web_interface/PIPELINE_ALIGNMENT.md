@@ -186,7 +186,7 @@ All JSON output formats are **100% compatible** between CLI and web interface:
 ### Segmented CV Format
 ```json
 {
-  "document_uid": "2025_Denckla_Cv",
+  "document_uid": "9999_Doe_Jane_CV",
   "format": "docx",
   "meta": {
     "num_top_level_groups": 12,
@@ -227,7 +227,7 @@ To verify that both pipelines produce identical results:
 ### 1. Run CLI Pipeline
 ```bash
 cd "/Users/paulalbert/Library/CloudStorage/Dropbox/Index/ReCiter/Scholar Signals - An LLM Pipeline/CV parsing - AI project"
-python run_pipeline.py full "data/sample_cvs/word/2025_Denckla_Cv.docx"
+python run_pipeline.py full "data/sample_cvs/word/9999_Doe_Jane_CV.docx"
 ```
 
 ### 2. Run Web Pipeline
@@ -247,17 +247,17 @@ npm run dev
 ```bash
 # Compare segmentation outputs
 diff \
-  "outputs/stage_1_segmentation/2025_Denckla_Cv_segmented.json" \
+  "outputs/stage_1_segmentation/9999_Doe_Jane_CV_segmented.json" \
   "web_interface/backend/outputs/{run_id}/step_1_output.json"
 
 # Compare taxonomy mapping
 diff \
-  "outputs/stage_2_taxonomy_mapping/2025_Denckla_Cv_mapped.json" \
+  "outputs/stage_2_taxonomy_mapping/9999_Doe_Jane_CV_mapped.json" \
   "web_interface/backend/outputs/{run_id}/step_4_output.json"
 
 # Compare publications parsing
 diff \
-  "outputs/stage_3_parsing/publications/2025_Denckla_Cv_publications_parsed.json" \
+  "outputs/stage_3_parsing/publications/9999_Doe_Jane_CV_publications_parsed.json" \
   "web_interface/backend/outputs/{run_id}/section_publications_parsed.json"
 ```
 

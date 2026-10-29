@@ -38,7 +38,7 @@ Successfully integrated the **Unified Pipeline (Stages 1-3)** with **Legacy Adva
 
 ### Publications (Section S - Bibliography)
 - ✅ **Subsection categorization**: Peer-Reviewed Research Articles, Reviews, Chapters, Books, etc.
-- ✅ **Author name abbreviation**: "Zahida Y" instead of "Yaseen Zahida"
+- ✅ **Author name abbreviation**: "Doe J" instead of "Jane Doe"
 - ✅ **Author name bolding**: CV owner's name appears in bold
 - ✅ **NLM citation format**: Professional medical bibliography style
 - ✅ **Arial font** (11pt) throughout
@@ -78,17 +78,17 @@ Successfully integrated the **Unified Pipeline (Stages 1-3)** with **Legacy Adva
 
 ---
 
-## 📊 Test Results (2079_Zahida CV)
+## 📊 Test Results (farm 2079 CV)
 
 ### Input
 - Complex hierarchical CV with 3-level nesting
 - 30 entries across multiple sections
 - Publications with full author names
 
-### Output (`2079_Zahida_wcm_template.docx`)
+### Output (farm 2079's `*_wcm_template.docx`)
 - ✅ **3 publications** in Peer-Reviewed Research Articles subsection
-- ✅ **Authors abbreviated**: "Zahida Y, et al"
-- ✅ **Author names bolded**: "**Zahida Y**" (CV owner highlighted)
+- ✅ **Authors abbreviated**: "Doe J, et al"
+- ✅ **Author names bolded**: "**Doe J**" (CV owner highlighted)
 - ✅ **12 education entries** in EDUCATION table
 - ✅ **3 academic positions** in Academic Appointments table
 - ✅ **1 other position** in Other Professional Positions table

@@ -833,15 +833,15 @@ python src/unified_pipeline/config.py
 
 ```bash
 # Full pipeline
-python3 run_full_pipeline.py data/sample_cvs/word/2097_Upton_Cv.docx
+python3 run_full_pipeline.py data/sample_cvs/word/9999_Doe_Jane_CV.docx
 
 # Full pipeline (by UID only - looks in data/sample_cvs/word/)
-python3 run_full_pipeline.py 2097_Upton_Cv
+python3 run_full_pipeline.py 9999_Doe_Jane_CV
 
 # Run specific stage only
-python3 run_full_pipeline.py 2097_Upton_Cv --stage 2
-python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a
-python3 run_full_pipeline.py 2097_Upton_Cv --stage 4
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 2
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 3a
+python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 4
 
 # Models come from src/unified_pipeline/config/llm_config.yaml, not a flag (docs/LLM_MODELS.md)
 ```
@@ -1199,9 +1199,9 @@ Full pricing table, including older Claude generations and non-Anthropic Bedrock
 
 ```json
 {
-  "document_uid": "2015_Wende",
+  "document_uid": "9999_Doe_Jane_CV",
   "stage": "4",
-  "cv_owner": {"last_name": "Wende"},
+  "cv_owner": {"last_name": "Doe"},
   "schema_version": "1.1",
   "stats": {
     "total_entries": 248,
@@ -1212,15 +1212,15 @@ Full pricing table, including older Claude generations and non-Anthropic Bedrock
     {
       "element_idx_start": 42,
       "taxonomy_code": "S1",
-      "text": "Wende ME, Smith J. Title. Journal. 2023;45:123.",
+      "text": "Doe JA, Smith J. Title. Journal. 2023;45:123.",
       "extracted_fields": {
-        "authors": "Wende ME, Smith J",
+        "authors": "Doe JA, Smith J",
         "year": "2023",
         "title": "Title",
         "journal": "Journal",
         "volume": "45",
         "pages": "123",
-        "target_name": "Wende ME"
+        "target_name": "Doe JA"
       }
     }
   ]
@@ -1368,7 +1368,7 @@ python src/unified_pipeline/test_pipeline_stages.py
 Enable prompt logging:
 ```bash
 export PROMPT_LOG_DIR=./prompt_logs_debug
-python3 run_full_pipeline.py 2097_Upton_Cv
+python3 run_full_pipeline.py 9999_Doe_Jane_CV
 ```
 
 Prompt logs saved to `src/unified_pipeline/prompt_logs/` with request/response details.

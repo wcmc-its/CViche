@@ -195,7 +195,7 @@ cd web_interface/backend
 pytest tests/
 
 # Test the CLI pipeline directly
-python3 run_full_pipeline.py data/sample_cvs/word/2097_Upton_Cv.docx
+python3 run_full_pipeline.py data/sample_cvs/word/9999_Doe_Jane_CV.docx
 ```
 
 ---
