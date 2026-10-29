@@ -380,8 +380,9 @@ Lints, ranked by the severity of the failure class they catch:
                           coded unlike the dated list under it (IEUPKK-18,
                           RINASX-14) and an undated role under a dated block
                           rendered with no dates (IEUPKK-14/-17), both INFO.
-                          Reads stage 4 and the docx's rows. A row stage 6
-                          filled from a sub-heading (#985) is no bare role
+                          Reads stage 4 and the docx's rows. A bare role
+                          stage 6 filled from a sub-heading (#985) whose row
+                          prints the name is skipped
 14ae. orphaned_fragments  a stage-3b fragment whose text is not in the entry
                           it belongs to, so no record holds it (#1256:
                           JNATFN's title tail, MQJAVH's examiner sessions).

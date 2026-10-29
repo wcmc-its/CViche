@@ -69,6 +69,7 @@ from .sections.administrative_activities import (
     _CommitteeRecord,
     _first_committee_alias,
     _name_with_institution,
+    _row_role,
 )
 from .sections.leadership import _first_held, _with_division
 from .sections.memberships import (
@@ -81,8 +82,7 @@ from .sections.mentoring import _mentee_name_is_award_title, _normalize_mentee
 from .sections.service import (
     _MEMBERSHIP_BODY_RE,
     EXTRAMURAL_ORGANIZATION_FIELDS,
-    _board_committee_text,
-    _is_board_role_title,
+    _board_row_cells,
     _route_q2_entries,
     _route_q2_grant_reviews,
     _without_another_persons_role,
@@ -451,7 +451,10 @@ def _administrative_cells(entry: Mapping[str, Any], fields: Mapping[str, Any]) -
     """P, as `_parse_administrative_activity_rows` writes its one-row path:
     (name with institution, role). The renderer only appends the institution
     (`_name_with_institution`), to the committee name or, with none, to the
-    line less its role and dates. Not that path: a list of records under the
+    line less its role and dates. The Role cell is the renderer's own
+    (`_row_role`): on a row that is no seat on a committee (#1580) it is the
+    role the line writes, not stage 4's, so a name stage 4 wrote into the
+    role prints nowhere. Not that path: a list of records under the
     committee name (each prints its own institution), 3+ lines, 2 lines with
     no committee name, or a raw pipe."""
     text = str(entry.get('text') or '')
@@ -461,9 +464,10 @@ def _administrative_cells(entry: Mapping[str, Any], fields: Mapping[str, Any]) -
     lines = entry_lines(text)
     if len(lines) >= 3 or (len(lines) > 1 and not record.activity) or ('|' in text and not has_built_text(entry)):
         return None
+    role = _row_role(entry, record.role)
     activity = record.activity or _line_without_shown_role_and_dates(
-        fallback_text(entry), record.role, record.start_date, record.end_date)
-    return _name_with_institution(activity, record.institution), record.role
+        fallback_text(entry), role, record.start_date, record.end_date)
+    return _name_with_institution(activity, record.institution), role
 
 
 def _extramural_leadership_cells(entry: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[object, ...] | None:
@@ -485,35 +489,21 @@ def _extramural_leadership_cells(entry: Mapping[str, Any], fields: Mapping[str, 
 
 
 def _board_cells(entry: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[object, ...] | None:
-    """Q2, as `_fill_service_boards` writes it: (committee, role,
-    organization). With no committee name the organization moves into the
-    committee cell, and with neither the committee cell prints the line less
-    its role and dates. Not that path: a row `_fill_service` reroutes to
-    journal or grant reviewing, whole or a line of it; the rest of a row of
-    several lines is read as the boards writer gets it, its board lines."""
+    """Q2, as `_fill_service_boards` writes it: the writer's own cells
+    (`_board_row_cells`: committee, role, organization, dates). With no
+    committee name the organization moves into the committee cell, and with
+    neither the committee cell prints the line less its role and dates. A row
+    that is no seat on a body (#1580) keeps its organization in its own cell,
+    so a filled one no longer prints that line, and shows the role its line
+    writes. Not that path: a row `_fill_service` reroutes to journal or grant
+    reviewing, whole or a line of it; the rest of a row of several lines is
+    read as the boards writer gets it, its board lines."""
     entry = _without_another_persons_role({**entry, 'extracted_fields': dict(fields)})
     journal, boards = _route_q2_entries([entry])
     grants, boards = _route_q2_grant_reviews(boards)
     if journal or grants:
         return None
-    entry = boards[0]
-    fields = entry['extracted_fields']
-    committee = _board_committee_text(fields)
-    role = _cell_text(fields.get('role'))
-    organization = _cell_text(fields.get('organization'))
-    if not committee and ', ' in role:
-        role_word, rest = role.split(', ', 1)
-        if _is_board_role_title(role_word.strip().lower()):
-            role, committee = role_word.strip(), rest.strip()
-    if not committee:
-        committee, organization = organization, ''
-    if not committee and is_split_record(entry):
-        committee = _organization_left_in_text(fallback_text(entry), fields.get('role'),
-                                               fields.get('start_date'), fields.get('end_date'))
-    elif not committee:
-        committee = _line_without_shown_role_and_dates(entry.get('text', ''), fields.get('role'),
-                                                       fields.get('start_date'), fields.get('end_date'))
-    return committee, role, organization
+    return _board_row_cells(boards[0])
 
 
 def _membership_cells(entry: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[object, ...] | None:

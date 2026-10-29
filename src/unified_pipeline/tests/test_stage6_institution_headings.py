@@ -827,6 +827,30 @@ def test_a_row_is_filled_only_on_a_renderer_path_that_prints_the_fill(row: dict,
     assert (value is not None) is filled
 
 
+# #1580's committee-row cells: a Q2 or P row that is no seat on a body shows
+# the role its line writes, and a Q2 one keeps its organization in its own
+# cell (`service._board_row_cells`, `administrative_activities._row_role`).
+# Each case: the row, whether it is filled, and words of its own line.
+_NON_SEAT_ROWS = {
+    # the Role cell is the line's "Volunteer", not stage 4's role naming the
+    # institution, so the row prints the name only once it is filled
+    'P role': (_entry('P', 'Volunteer, Health Fair, 2019', 12, committee_name='Health Fair',
+                      role='Volunteer at Example University', start_date='2019'), True, 'Health Fair'),
+    'Q2 role': (_entry('Q2', 'Volunteer, Annual Meeting, 2019', 12, committee_name='Annual Meeting',
+                       role=f'Volunteer for {SOCIETY}', start_date='2019'), True, 'Annual Meeting'),
+    # a body the line never names leaves the Name of Committee, which prints
+    # the line instead; a filled organization would turn that line off
+    'Q2 body': (_entry('Q2', 'Consultant, guideline drafting, 2019', 12, committee_name='Working Group',
+                       role='Consultant', start_date='2019'), False, 'guideline drafting'),
+}
+
+
+@pytest.mark.parametrize('case', sorted(_NON_SEAT_ROWS))
+def test_a_non_seat_row_is_filled_as_its_committee_row_renders(case: str) -> None:
+    row, filled, _ = copy.deepcopy(_NON_SEAT_ROWS[case])
+    assert (_row_outcome(row) is not None) is filled
+
+
 def test_a_row_naming_its_own_organization_as_a_dict_of_blanks_keeps_it() -> None:
     """A value that is not blank is the row's own, even one that prints as nothing."""
     row = _committee('Board', 12, institution={'note': None})
@@ -892,3 +916,20 @@ def test_the_rendered_row_that_prints_its_own_text_keeps_its_words(tmp_path, mon
     own = [line for line in rows if 'Fernhollow' in line]
     assert own and not any(heading['text'] in line for line in own)
     assert sum(heading['text'] in line for line in rows if 'Fernhollow' not in line) >= 2
+
+
+@pytest.mark.parametrize('case', sorted(_NON_SEAT_ROWS))
+def test_the_rendered_non_seat_row_keeps_its_words_and_prints_the_name_when_filled(
+        tmp_path, monkeypatch, case: str) -> None:
+    """#1580's writers, end to end: the filled row prints the heading's name,
+    and the row left unfilled still prints its own line."""
+    row, filled, own_words = copy.deepcopy(_NON_SEAT_ROWS[case])
+    code = row['taxonomy_code']
+    name = SOCIETY if code == 'Q2' else 'Example University'
+    heading = _society() if code == 'Q2' else _entry('P', name, 10, institution=name)
+    first, last = _PLAIN_ROWS[code]()
+    rows = _rendered_rows(tmp_path, monkeypatch, f'TESTNS{sorted(_NON_SEAT_ROWS).index(case)}',
+                          [heading, first, row, last])
+    own = [line for line in rows if own_words in line]
+    assert len(own) == 1
+    assert (name in own[0]) is filled
