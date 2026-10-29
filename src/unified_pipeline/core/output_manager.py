@@ -11,11 +11,11 @@ derives as `Path(cv_path).stem`. So the file handle is that stem, unchanged.
 Usage:
     from core.output_manager import OutputManager
 
-    om = OutputManager("2071_Zuschlag_Cv.docx")
+    om = OutputManager("9999_Doe_Jane_CV.docx")
 
-    stage1a_path = om.get_stage1a_json_path()  # stage_1a_segmentation/2071_Zuschlag_Cv_segmented.json
-    stage1b_path = om.get_stage1b_path()        # stage_1b_hierarchy_mapping/2071_Zuschlag_Cv_hierarchy_mapped.json
-    stage2_path = om.get_stage2_path()          # stage_2_entry_extraction/2071_Zuschlag_Cv_entries.json
+    stage1a_path = om.get_stage1a_json_path()  # stage_1a_segmentation/9999_Doe_Jane_CV_segmented.json
+    stage1b_path = om.get_stage1b_path()        # stage_1b_hierarchy_mapping/9999_Doe_Jane_CV_hierarchy_mapped.json
+    stage2_path = om.get_stage2_path()          # stage_2_entry_extraction/9999_Doe_Jane_CV_entries.json
 """
 
 from pathlib import Path
@@ -71,7 +71,7 @@ class OutputManager:
     def _extract_file_handle(self) -> str:
         """
         The input's file stem, exactly as both drivers derive `document_uid`
-        (`Path(cv_path).stem`): "2071_Zuschlag_Cv.docx" -> "2071_Zuschlag_Cv".
+        (`Path(cv_path).stem`): "9999_Doe_Jane_CV.docx" -> "9999_Doe_Jane_CV".
 
         No processing suffix is stripped. Stripping one made "X_entries.docx"
         and "X.docx" share the handle "X" -- one CV's stage outputs overwrote

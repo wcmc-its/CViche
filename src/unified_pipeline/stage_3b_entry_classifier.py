@@ -845,7 +845,7 @@ def run_stage_3b(
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python stage_3b_entry_classifier.py <document_uid>")
-        print("  document_uid: Document identifier (e.g., 2086_Jones_Webb)")
+        print("  document_uid: Document identifier (e.g., 9999_Doe_Jane_CV)")
         print()
         print("Prerequisites:")
         print("  - Stage 2 output: outputs/stage_2_entry_extraction/{uid}_entries.json")

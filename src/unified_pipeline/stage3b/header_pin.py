@@ -342,8 +342,8 @@ _MENTEE_HEADING = re.compile(
     r"\b(?:students?|mentees?|trainees?|advisees?|fellows\s+mentored)\b", re.I
 )
 # The same people in the plural: a heading listing them, so its rows are theirs
-# without a mentee line above (2082_Dr_Scot "Undergraduate Honor Students'
-# Achievements", 2068_Yount_Cv "MENTORING MASTERS STUDENT TRAINEES"). The singular
+# without a mentee line above (farm 2082 "Undergraduate Honor Students'
+# Achievements", farm 2068 "MENTORING MASTERS STUDENT TRAINEES"). The singular
 # is the owner's own student-era record ("Student/Trainee Awards", web210).
 _MENTEE_PLURAL_HEADING = re.compile(
     r"\b(?:students|mentees|trainees|advisees|fellows\s+mentored)\b", re.I

@@ -334,7 +334,7 @@ def _chapter_series(fields: dict, enrichment: dict) -> str:
     publisher: an article with a stray publisher names no book, so it stays
     an article. And PubMed's record must be that chapter. One stored CV
     line holds two chapters, PubMed matched the first and stage 4 read the
-    book of the second (2054_Opresko_Cv 396). Without the title check its
+    book of the second (farm 2054 396). Without the title check its
     citation would join one chapter's title to the other's book. A publisher
     that carries a year is a citation tail stage 4 swept in, not a
     publisher; the book trailer would print it whole, so the PubMed journal
