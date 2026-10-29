@@ -72,6 +72,7 @@ from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.log_redaction import redacted_error_label
+from unified_pipeline.stage4.context_headings import _is_heading_shaped
 from unified_pipeline.stage4.extraction import (
     UnextractedContentReport,
     calculate_unextracted_content,
@@ -100,6 +101,7 @@ from unified_pipeline.stage6.fan_out import (
     record_text,
     unrendered_list_warnings,
 )
+from unified_pipeline.stage6.institution_headings import consume_institution_headings
 
 # Every name below is re-exported from this module by being imported here: it is
 # the public import surface (tests/test_stage6_import_surface.py pins 21 of them).
@@ -2274,6 +2276,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._section_failures.extend(d2_leadership_reroute_warnings(leadership_moved))
         self._section_failures.extend(p_grant_review_reroute_warnings(grant_reviews_moved))
         self._section_failures.extend(outcome_mentee_warnings(annotate_outcome_mentees(coded)))
+        consume_institution_headings(coded, entries_by_code, _is_heading_shaped, warnings=self._section_failures)
 
         if self.verbose:
             logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")

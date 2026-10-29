@@ -109,6 +109,62 @@ def test_n4_outcome_detected_before_and_after_mismatch_rewrite():
     assert not _is_mentoring_outcome({"taxonomy_code": "N3B", "taxonomy_code_original": "N3A"})
 
 
+# --- #985: an institution sub-heading fills the rows under it (`stage6/institution_headings.py`) ---
+# Pinned through `_group_entries_by_code`, so it fails if the pass stops
+# reaching the groups. The pass's own cases are in test_stage6_institution_headings.py.
+
+def test_an_institution_sub_heading_fills_its_rows_and_leaves_its_group() -> None:
+    def committee(name: str, el: int) -> dict:
+        return {"taxonomy_code": "P", "text": f"{name}, 2001-2003", "element_idx_start": el,
+                "hierarchy": ["Institutional Service"],
+                "extracted_fields": {"committee_name": name, "start_date": "2001"}}
+
+    heading = {"taxonomy_code": "Q2", "text": "Quillmoor University", "element_idx_start": 10,
+               "hierarchy": ["Institutional Service"],
+               "extracted_fields": {"organization": "Quillmoor University"}}
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([heading, committee("Admissions Committee", 11),
+                                         committee("Search Committee", 12)])
+    assert sorted(groups) == ["P"]
+    assert [e["extracted_fields"].get("institution") for e in groups["P"]] == ["Quillmoor University"] * 2
+    assert [w["evidence"] for w in gen._section_failures if w["check"] == "institution_heading_consumed"] == [
+        ["element_idx_start 10 filled 11, 12"]]
+
+
+def test_an_institution_sub_heading_run_ends_at_a_sub_heading_stage_4_reads_as_one() -> None:
+    """The grouping hands the pass stage 4's weak heading-shape test: a bare
+    Title-Case line ends the run, so the rows after it keep their own cells."""
+    def committee(name: str, el: int, dated: bool = True) -> dict:
+        return {"taxonomy_code": "P", "text": f"{name}, 2001-2003" if dated else name,
+                "element_idx_start": el, "hierarchy": ["Institutional Service"],
+                "extracted_fields": {"committee_name": name}}
+
+    heading = {"taxonomy_code": "P", "text": "Quillmoor University", "element_idx_start": 10,
+               "hierarchy": ["Institutional Service"],
+               "extracted_fields": {"institution": "Quillmoor University"}}
+    entries = [heading, committee("Admissions Committee", 11), committee("Search Committee", 12),
+               committee("Council on Example Affairs", 13, dated=False),
+               committee("Budget Committee", 14), committee("Planning Committee", 15)]
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code(entries)
+    assert [e["extracted_fields"].get("institution") for e in groups["P"]] == [
+        "Quillmoor University", "Quillmoor University", None, None, None]
+
+
+def test_an_institution_sub_heading_fills_rows_by_the_code_stage_6_routed_them_to() -> None:
+    """The pass runs after routing: bare N3 mentees `_route_bare_mentee`
+    resolves to N3B are filled for the mentee table, which prints the
+    institution; under their stage-3b code N3 they would get nothing."""
+    hierarchy = ["Graduate Student Mentorship", "Thesis Advisor"]
+    heading = {"taxonomy_code": "N3B", "text": "Quillmoor University", "element_idx_start": 20,
+               "hierarchy": hierarchy, "extracted_fields": {"site_position": "Quillmoor University"}}
+    mentees = [{"taxonomy_code": "N3", "text": f"{name}, Neuroscience Program, Ph.D. 2002",
+                "element_idx_start": el, "hierarchy": hierarchy,
+                "extracted_fields": {"mentee_name": name, "end_date": "2002"}}
+               for el, name in ((21, "A. Student"), (22, "B. Student"))]
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([heading, *mentees])
+    assert [e["extracted_fields"].get("institution") for e in groups["N3B"]] == ["Quillmoor University"] * 2
+
+
 # --- #946 item 3: hierarchy-mismatch reroute (`_correct_mismatch_if_needed`) ---
 # Synthetic entries shaped like stage 3b's `hierarchy_mismatch_detail`. Driven
 # through `_group_entries_by_code`, the grouping `generate()` renders from, so

@@ -221,14 +221,17 @@ Lints, ranked by the severity of the failure class they catch:
                           stored value "2003-04-2005-09" or "2009-Summer", or
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
-                          EBYSBC classes E9 and E21 had no doctor finding
+                          EBYSBC classes E9 and E21 had no doctor finding.
+                          A row stage 6 filled from a sub-heading (#985) is
+                          tied by that heading's name too
 14r. junk_or_header_row   a stage-4 entry that is no record of its own,
                           rendered as one: a group header (an institution or
                           organization alone, dated only under teaching), a
                           lead-in label ending in ':', a date fragment with
                           no words ('47.', '1997-'), or an undated D1 above
                           or below the dated appointments repeating one of
-                          their titles (EBYSBC E8, E10, E29); WARN
+                          their titles (EBYSBC E8, E10, E29); WARN. Not a
+                          sub-heading stage 6 moved into its rows (#985)
 14r. teaching_postcheck   a teaching line stage 5c wrote, and stage 6
                           renders, that misstates its stage-4 record: 5c's
                           own post-check (#1349) re-applied -- a date apart
@@ -377,7 +380,9 @@ Lints, ranked by the severity of the failure class they catch:
                           coded unlike the dated list under it (IEUPKK-18,
                           RINASX-14) and an undated role under a dated block
                           rendered with no dates (IEUPKK-14/-17), both INFO.
-                          Reads stage 4 and the docx's rows
+                          Reads stage 4 and the docx's rows. A bare role
+                          stage 6 filled from a sub-heading (#985) whose row
+                          prints the name is skipped
 14ae. orphaned_fragments  a stage-3b fragment whose text is not in the entry
                           it belongs to, so no record holds it (#1256:
                           JNATFN's title tail, MQJAVH's examiner sessions).
@@ -1881,9 +1886,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, so it is gated by that
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
-             optional=("blocks",)),
+             optional=("blocks", "stage_6_report")),
     LintSpec("junk_or_header_row", lint_junk_or_header_row, ("stage_4", "table_rows"),
-             optional=("blocks",)),
+             optional=("blocks", "stage_6_report")),
     LintSpec("teaching_postcheck", lint_teaching_postcheck, ("stage_5d",)),
     LintSpec("contact_slot_lost", lint_contact_slot_lost, ("stage_4", "table_rows")),
     LintSpec("pubmed_title_truncated", lint_pubmed_title_truncated, ("stage_5_enrichment",)),
@@ -1907,7 +1912,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("citation_field_dropped", lint_citation_field_dropped, ("stage_4", "blocks")),
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
-             optional=("blocks",)),
+             optional=("blocks", "stage_6_report")),
     LintSpec("orphaned_fragments", lint_orphaned_fragments, ("stage_3b",)),
     LintSpec("stage4_unplaced_items", lint_stage4_unplaced_items, ("stage_4",)),
     LintSpec("summary_unsupported_claim", lint_summary_unsupported_claim,

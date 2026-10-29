@@ -8105,6 +8105,79 @@ def test_junk_or_header_row_warns_on_a_lead_in_label_less_its_first_word():
     assert _junk_hits([_junk4("Reviewers:", "Q4D", 5)], [[[":"]]]) == []
 
 
+def _consumed_heading_report(heading: int, rows: list[int]) -> dict:
+    """A render-warnings sidecar recording that stage 6 consumed the heading
+    at `heading` into `rows` (#985, `stage6/institution_headings.py`)."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+    )
+    return {"warnings": [{"check": CONSUMED_HEADING_CHECK, CONSUMED_HEADINGS_KEY: [[heading, rows]]}]}
+
+
+def test_junk_or_header_row_does_not_read_a_heading_stage_6_moved_into_its_rows():
+    """#985, the NJIKGI 172 shape: stage 6 consumed the society line and filled
+    the rows under it, so a short row now holding its name is a record, not the
+    header's row. Without the sidecar's record the lint reads it as one."""
+    entries = [_junk4("Example Widget Society", "Q2", 172, organization="Example Widget Society"),
+               _junk4("Fernhollow Panels, 2011-2013", "P", 174, committee_name="Fernhollow Panels")]
+    rows = [[["Fernhollow Panels, Example Widget Society", "", "2011-2013"]]]
+    assert _junk_hits(entries, rows) == [("WARN", "entry 172 (Q2)", "header_only")]
+    assert lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(172, [174])) == []
+    another = lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(99, [174]))
+    assert [f["message"].split(":")[0] for f in another] == ["entry 172 (Q2)"]
+
+
+def test_date_cell_shape_reads_a_row_stage_6_filled_with_its_heading_name():
+    """#985, the SXPHOG 426 shape: stage 6 filled a committee row with its
+    society's name. Read without it, the name ties the row's date to a talk
+    held at that society in the same year, which never says "present"."""
+    society = "Northfield Association of Imaginary Pharmacy"
+    stage4 = {"entries": [
+        _entry(f"Doe J. Which Test Is Best? {society}. June 2019.", start=426, hierarchy=["Talks"],
+               taxonomy_code="R", extracted_fields={"title": "Which Test Is Best?", "location": society,
+                                                    "date": "2019-06"}),
+        _entry(society, start=548, hierarchy=["Service"], taxonomy_code="I",
+               extracted_fields={"organization": society}),
+        _entry("Member, Experiential Section January 2019 - present", start=552, hierarchy=["Service"],
+               taxonomy_code="Q2", extracted_fields={"committee_name": "Experiential Section",
+                                                     "start_date": "2019", "end_date": "present"}),
+    ]}
+    rows = [[["Experiential Section", "Member", society, "2019-Present"]]]
+    assert [f["message"].split(":")[0] for f in lint_date_cell_shape(stage4, rows, [])] == ["entry 426 (R)"]
+    assert lint_date_cell_shape(stage4, rows, [], _consumed_heading_report(548, [552])) == []
+    assert lint_date_cell_shape(stage4, rows, [], _kept_heading_report(548, [552])) == []
+    # Listed more often than stage 4 has records (stage 6 fanned out a list
+    # its fields hold): every record is filled.
+    assert lint_date_cell_shape(stage4, rows, [], _consumed_heading_report(548, [552, 552])) == []
+
+
+def _kept_heading_report(heading: int, rows: list[int]) -> dict:
+    """A render-warnings sidecar recording that stage 6 filled `rows` with the
+    society line at `heading` and kept that line as its own row (#985)."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+        KEPT_HEADINGS_KEY,
+    )
+    return {"warnings": [{"check": CONSUMED_HEADING_CHECK, CONSUMED_HEADINGS_KEY: [],
+                          KEPT_HEADINGS_KEY: [[heading, rows]]}]}
+
+
+def test_junk_or_header_row_still_reads_a_heading_stage_6_kept_as_its_own_row():
+    """#985: a heading stage 6 filled its rows from and kept as its own row
+    (`institution_headings._keeps_its_row`, a society line coded I) renders,
+    so it is read as before; only a consumed heading renders no row. The
+    record is read by element index, whatever the code."""
+    entries = [_junk4("Example Widget Society", "Q2", 172, organization="Example Widget Society"),
+               _junk4("Fernhollow Panels, 2011-2013", "P", 174, committee_name="Fernhollow Panels")]
+    rows = [[["Example Widget Society", "", ""]], [["Fernhollow Panels, Example Widget Society", "", "2011-2013"]]]
+    assert _junk_hits(entries, rows) == [("WARN", "entry 172 (Q2)", "header_only")]
+    kept = lint_junk_or_header_row({"entries": entries}, rows, [], _kept_heading_report(172, [174]))
+    assert [f["message"].split(":")[0] for f in kept] == ["entry 172 (Q2)"]
+    assert lint_junk_or_header_row({"entries": entries}, rows, [], _consumed_heading_report(172, [174])) == []
+
+
 def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_path):
     """The LINT_REGISTRY row must hand the lint the docx's body paragraphs
     (`blocks`, optional): a header bulleted as a paragraph is seen only there.
@@ -8127,6 +8200,49 @@ def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_pa
     hits = [f for f in payload["findings"] if f["lint"] == "junk_or_header_row"]
     assert [(f["severity"], f["evidence"]) for f in hits] == [
         ("WARN", ["Example Widget Institute"])]
+
+
+def test_run_doctor_hands_the_render_warnings_to_junk_and_date_lints(tmp_path):
+    """#985: the LINT_REGISTRY rows of junk_or_header_row and date_cell_shape
+    must hand each lint the render-warnings sidecar (`stage_6_report`,
+    optional), where stage 6 records the heading it consumed and the rows it
+    filled. Invented values; the same run with and without that record."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+    )
+    society = "Northfield Association of Imaginary Pharmacy"
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [
+        _entry(society, start=96, hierarchy=["Service"], taxonomy_code="Q2",
+               extracted_fields={"organization": society}),
+        _entry("Member, Experiential Section January 2019 - present", start=97, hierarchy=["Service"],
+               taxonomy_code="Q2", extracted_fields={"committee_name": "Experiential Section",
+                                                     "start_date": "2019", "end_date": "present"}),
+        _entry(f"Doe J. Which Test Is Best? {society}. June 2019.", start=98, hierarchy=["Talks"],
+               taxonomy_code="R", extracted_fields={"title": "Which Test Is Best?", "location": society,
+                                                    "date": "2019-06"})]
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_table(rows=1, cols=4)
+    for cell, value in zip(output.tables[-1].rows[0].cells,
+                           ("Experiential Section", "Member", society, "2019-Present"), strict=True):
+        cell.text = value
+    output.add_paragraph(f"Fernhollow Panels, {society}")
+    output.save(str(docx_path))
+
+    def hits(warnings: list[dict]) -> list[tuple[str, str]]:
+        _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                     {"document_uid": _UID, "warnings": warnings, "dedup_decisions": []})
+        return sorted((f["lint"], f["message"].split(":")[0]) for f in run_doctor(root, _UID)["findings"]
+                      if f["lint"] in ("junk_or_header_row", "date_cell_shape"))
+
+    assert hits([]) == [("date_cell_shape", "entry 98 (R)"), ("junk_or_header_row", "entry 96 (Q2)")]
+    assert hits([{"check": CONSUMED_HEADING_CHECK, "code": None, "section": None, "message": "",
+                  "evidence": [], "severity": "INFO", CONSUMED_HEADINGS_KEY: [[96, [97]]]}]) == []
 
 
 # ------------------------------------------ lint 14y: fanout_cell_residue
@@ -9137,6 +9253,173 @@ def test_group_header_context_reports_a_bare_role_under_a_header_once():
     assert [shape for _, _, shape in hits] == ["children_lost_header"]
 
 
+def _filled_office_block():
+    """#985, the ZDCXIV 332 shape: a society line stage 6 filled the office
+    under it from, so the office's row prints the society although stage 4's
+    fields name none; another office's row of the same role renders alone."""
+    entries = [_grp4("Example Widget Society", "I", 10, organization="Example Widget Society"),
+               _grp4("President 1988-1990", "Q1", 11, role="President",
+                     start_date="1988", end_date="1990")]
+    rows = [[["Example Widget Society", "President", "1988-1990"], ["", "President", "1994-1995"]]]
+    return entries, rows
+
+
+def _grp_report_hits(entries, table_rows, blocks, report):
+    return [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
+            for f in lint_group_header_context({"entries": entries}, table_rows, blocks, report)]
+
+
+def test_group_header_context_reads_a_row_stage_6_filled_as_holding_its_role():
+    """#985: read from stage 4 alone, the filled office is a bare role, and it
+    takes the other office's headless row as its own. The record says stage 6
+    printed the heading's name on it, consumed or kept, so it is no bare role."""
+    entries, rows = _filled_office_block()
+    without = ("WARN", "entry 10 (I)", "role_without_holder")
+    assert _grp_hits(entries, rows) == [without]
+    assert _grp_report_hits(entries, rows, [], None) == [without]
+    assert _grp_report_hits(entries, rows, [], {"warnings": []}) == [without]
+    assert _grp_report_hits(entries, rows, [], _consumed_heading_report(10, [11])) == []
+    assert _grp_report_hits(entries, rows, [], _kept_heading_report(10, [11])) == []
+    assert _grp_report_hits(entries, rows, [], _consumed_heading_report(10, [12])) == [without]
+
+
+def test_group_header_context_reads_the_record_by_the_index_stage_4_wrote():
+    """Stage 4 may write element_idx_start as a string; stage 6 records the
+    value as it found it, so the lint looks a row up by that value, not by
+    its numeric position."""
+    entries, rows = _filled_office_block()
+    for entry in entries:
+        entry["element_idx_start"] = entry["element_idx_end"] = str(entry["element_idx_start"])
+    assert _grp_report_hits(entries, rows, [], _consumed_heading_report("10", ["11"])) == []
+
+
+def test_group_header_context_still_reads_a_headless_role_stage_6_did_not_fill():
+    """#985: the record spares only the rows it lists; a course's bare roles
+    (the RINASX-06 shape) still draw their WARN beside a filled office."""
+    entries, rows = _filled_office_block()
+    entries += _course_block()
+    course = ("WARN", "entry 140 (K1)", "role_without_holder")
+    assert _grp_report_hits(entries, rows, _COURSE_BLOCKS, None) == [
+        ("WARN", "entry 10 (I)", "role_without_holder"), course]
+    assert _grp_report_hits(entries, rows, _COURSE_BLOCKS,
+                            _consumed_heading_report(10, [11])) == [course]
+
+
+_GRP_SOCIETY = "Example Widget Society"
+
+
+def _committee_line_roles(*roles):
+    """#985: a society line stage 4 filed as a committee, a line the bare
+    roles under it can be held in (not a group header), then one bare role
+    per (element index, role, start year, end year)."""
+    return [_grp4(_GRP_SOCIETY, "Q2", 10, committee_name=_GRP_SOCIETY)] + [
+        _grp4(f"{role} {start}-{end}", "Q1", idx, role=role, start_date=start, end_date=end)
+        for idx, role, start, end in roles]
+
+
+def _grp_report_messages(entries, table_rows, report):
+    return [f["message"] for f in lint_group_header_context({"entries": entries}, table_rows, [], report)]
+
+
+def test_group_header_context_names_a_partly_filled_run_by_the_line_above_it():
+    """#985: a filled row whose row prints the name is passed over, so the
+    roles stage 6 left headless keep the one finding they drew without the
+    record, named by the line above them: the filled row neither starts a
+    run of its own nor splits one in two. A filled row that is no bare role
+    (a dated committee) still ends the run, as it did without the record."""
+    first = _committee_line_roles((11, "President", "1988", "1990"), (12, "Treasurer", "1991", "1992"))
+    first_rows = [[[_GRP_SOCIETY, "President", "1988-1990"], ["", "Treasurer", "1991-1992"]]]
+    middle = _committee_line_roles((11, "Treasurer", "1991", "1992"), (12, "President", "1988", "1990"),
+                                   (13, "Secretary", "1993", "1994"))
+    middle_rows = [[["", "Treasurer", "1991-1992"], [_GRP_SOCIETY, "President", "1988-1990"],
+                    ["", "Secretary", "1993-1994"]]]
+    committee = _committee_line_roles((12, "Treasurer", "1991", "1992"))
+    committee.append(_grp4("Program Committee, 2001-2003", "Q2", 11, committee_name="Program Committee",
+                           start_date="2001", end_date="2003"))
+    committee_rows = [[[_GRP_SOCIETY, "Program Committee", "2001-2003"], ["", "Treasurer", "1991-1992"]]]
+    for entries, rows, filled, subject, count in (
+            (first, first_rows, 11, "entry 10 (Q2)", "1 role line"),
+            (middle, middle_rows, 12, "entry 10 (Q2)", "2 role lines"),
+            (committee, committee_rows, 11, "entry 12 (Q1)", "1 role line")):
+        without = _grp_report_messages(entries, rows, None)
+        assert [m.split(": ")[0] for m in without] == [subject] and without[0].endswith(count)
+        assert _grp_report_messages(entries, rows, _consumed_heading_report(10, [filled])) == without
+
+
+def test_group_header_context_reads_a_listed_row_that_prints_no_name_as_before():
+    """#985: the record says what stage 6 wrote; a row counts as filled only
+    when a row showing it shows the heading's name, at
+    GROUP_HEADER_SHOWN_SHARE of its words. Otherwise a listed role is read
+    as before: rendered alone, or beside too few of the name's words, it
+    takes a headless row of its role (the last row is another entry's) and
+    still draws its WARN."""
+    entries = _committee_line_roles((11, "President", "1988", "1990"))
+    entries.append(_grp4("Example Guild", "I", 20, heading="Other", organization="Example Guild"))
+    without = [("WARN", "entry 10 (Q2)", "role_without_holder")]
+
+    def hits(shown, report):
+        rows = [[[shown, "President", "1988-1990"], ["", "President", "1994-1995"]]]
+        return _grp_report_hits(entries, rows, [], report)
+
+    for heading, shown in ((10, ""), (10, "Northfield Widget Guild"), (10, "Society"), (20, "")):
+        assert hits(shown, None) == without
+        assert hits(shown, _consumed_heading_report(heading, [11])) == without
+    for heading, shown in ((10, "Example Widget Soc."), (20, "Guild")):
+        assert hits(shown, None) == without
+        assert hits(shown, _consumed_heading_report(heading, [11])) == []
+    # Its own row did not render, or another entry's row shows the name.
+    report = _consumed_heading_report(10, [11])
+    for rows in ([[["", "President", "1994-1995"]]],
+                 [[["", "President", "1988-1990"], [_GRP_SOCIETY, "Treasurer", "1991-1992"]]]):
+        assert _grp_report_hits(entries, rows, [], report) == without
+    # Its row is found by its words and years, not its date fields' words.
+    ongoing = _committee_line_roles((11, "President", "2019", "ongoing"))
+    rows = [[[_GRP_SOCIETY, "President", "2019-Present"], ["", "President", "1994-1995"]]]
+    assert _grp_report_hits(ongoing, rows, [], None) == without
+    assert _grp_report_hits(ongoing, rows, [], report) == []
+
+
+def test_group_header_context_reads_the_record_only_for_a_code_stage_6_fills():
+    """#985: the record names rows by element index, and a K or L line
+    stage 4 split from the same source element as a filled office shares
+    it. Stage 6 never fills K or L rows, so the course role is read as
+    before and still draws its WARN, and the K lines count no record of the
+    index, so the office is filled. The last row is another entry's."""
+    entries = _committee_line_roles((11, "President", "1988", "1990")) + [
+        _grp4("Widget Course 1951-present", "K1", 11, heading="Teaching", course_title="Widget Course",
+              start_date="1951", end_date="present"),
+        _grp4("Coordinator 1956-1958", "K3", 11, heading="Teaching", role="Coordinator",
+              start_date="1956", end_date="1958")]
+    rows = [[[_GRP_SOCIETY, "President", "1988-1990"], ["", "Coordinator", "1956-1958"],
+             ["", "President", "1994-1995"]]]
+    course = ("WARN", "entry 11 (K1)", "role_without_holder")
+    assert _grp_report_hits(entries, rows, [], None) == [("WARN", "entry 10 (Q2)", "role_without_holder"),
+                                                         course]
+    assert _grp_report_hits(entries, rows, [], _consumed_heading_report(10, [11])) == [course]
+
+
+def test_group_header_context_reads_a_fanned_out_row_as_filled_only_once_per_record():
+    """#985: stage 6 fans an entry out into one row per stage-4 record, and
+    the record lists the index once per row it filled. Listed fewer times
+    than the entry has records, a row of it was left headless, so it is
+    read as before; listed for each, it is filled. Two entries stage 4 split
+    from one source element share its index, and count a record each. The
+    last row is another entry's, of the same role."""
+    fanned = _committee_line_roles()
+    fanned.append(_grp4("President 1988-1990; 1994-1995", "Q1", 11, role="President",
+                        start_date="1994", end_date="1995", stage4_records=[
+                            {"role": "President", "start_date": "1988", "end_date": "1990"},
+                            {"role": "President", "start_date": "1994", "end_date": "1995"}]))
+    split = _committee_line_roles((11, "President", "1988", "1990"), (11, "President", "1994", "1995"))
+    rows = [[[_GRP_SOCIETY, "President", "1988-1990"], [_GRP_SOCIETY, "President", "1994-1995"],
+             ["", "President", "2001-2002"]]]
+    without = [("WARN", "entry 10 (Q2)", "role_without_holder")]
+    for entries in (fanned, split):
+        assert _grp_report_hits(entries, rows, [], None) == without
+        assert _grp_report_hits(entries, rows, [], _consumed_heading_report(10, [11])) == without
+        assert _grp_report_hits(entries, rows, [], _consumed_heading_report(10, [11, 11])) == []
+
+
 def _lead_block(lead_text="Thesis Committees, Example State University", code="K2", **fields):
     """An undated lead line, then three dated mentee lines coded N3B
     (the IEUPKK-18 shape)."""
@@ -9310,6 +9593,62 @@ def test_run_doctor_wires_group_header_context_with_the_rendered_rows(tmp_path):
     hits = [f for f in payload["findings"] if f["lint"] == "group_header_context"]
     assert [(f["severity"], f["evidence"][0]) for f in hits] == [
         ("WARN", "entry 141 (K3): 1956-1958 - Workshop Coordinator")]
+
+
+def _filled_office_run(tmp_path):
+    """The clean run with `_filled_office_block` added to stage 4 and the
+    docx, and a function that writes a render-warnings sidecar holding one
+    institution-heading record with `consumed` under its consumed key (no
+    record for None) and returns run_doctor's findings."""
+    from unified_pipeline.stage6.institution_headings import (
+        CONSUMED_HEADING_CHECK,
+        CONSUMED_HEADINGS_KEY,
+    )
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    entries, rows = _filled_office_block()
+    data["entries"].extend(entries)
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    table = output.add_table(rows=len(rows[0]), cols=3)
+    for row, values in zip(table.rows, rows[0], strict=True):
+        for cell, value in zip(row.cells, values, strict=True):
+            cell.text = value
+    output.save(str(docx_path))
+
+    def findings(consumed: object) -> list[dict]:
+        warnings = [] if consumed is None else [
+            {"check": CONSUMED_HEADING_CHECK, "code": None, "section": None, "message": "",
+             "evidence": [], "severity": "INFO", CONSUMED_HEADINGS_KEY: consumed}]
+        _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                     {"document_uid": _UID, "warnings": warnings, "dedup_decisions": []})
+        return run_doctor(root, _UID)["findings"]
+    return findings
+
+
+def _group_header_subjects(findings: list[dict]) -> list[str]:
+    return [f["message"].split(": ")[0] for f in findings if f["lint"] == "group_header_context"]
+
+
+def test_run_doctor_hands_the_render_warnings_to_group_header_context(tmp_path):
+    """#985: the LINT_REGISTRY row hands the lint the render-warnings sidecar
+    (`stage_6_report`, optional), where stage 6 records the rows it filled.
+    The same run with and without that record."""
+    findings = _filled_office_run(tmp_path)
+    assert _group_header_subjects(findings(None)) == ["entry 10 (I)"]
+    assert _group_header_subjects(findings([[10, [11]]])) == []
+
+
+@pytest.mark.parametrize("consumed", [5, True, [[[10], [11]]], [[10, [[11]]]], {"10": [11]}])
+def test_run_doctor_skips_a_malformed_heading_record(tmp_path, consumed):
+    """#985: a malformed institution-heading record is skipped, as its
+    reader documents: no lint that reads it errors, and the WARN the run
+    draws without the record is kept."""
+    found = _filled_office_run(tmp_path)(consumed)
+    assert [f["message"] for f in found if f["severity"] == "ERROR"] == []
+    assert _group_header_subjects(found) == ["entry 10 (I)"]
 
 
 def test_group_header_context_reads_entries_in_source_order():
