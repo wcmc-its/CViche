@@ -121,7 +121,7 @@ from unified_pipeline.stage_errors import (  # noqa: E402
 _GRANT_FSMB = ("Federation of State Medical Boards (FSMB) Foundation Grant | "
                "Shapiro, M. (PI) | Role: Co-PI | Amount: $75,000 | Status: Awarded 2026")
 _GRANT_TEMPLETON = ("John Templeton Foundation Online Funding Inquiry (OFI) | "
-                    "Jung, E. (PI) | Role: PI | Amount: $1,400,000 | "
+                    "Tester, E. (PI) | Role: PI | Amount: $1,400,000 | "
                     "Status: Submitted 2026, Under review")
 _GRANT_NBME = ("National Board of Medical Examiners (NBME) Stemmler Fund | "
                "Shapiro, M. (PI) | Role: PI | Status: Not funded")
@@ -4996,9 +4996,9 @@ def test_run_doctor_wires_date_cell_shape_through_to_the_verdict(tmp_path):
 
 def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
     blocks = [("p", "M. RESEARCH"),
-              ("p", "• FY2023 Award VPR-23-001 | Jung, E. (PI) | Needs "
+              ("p", "• FY2023 Award VPR-23-001 | Tester, E. (PI) | Needs "
                     "assessment | Status: Awarded."),
-              ("p", "• NBME Stemmler Grant | Jung, E. (PI) | Use of AI | "
+              ("p", "• NBME Stemmler Grant | Tester, E. (PI) | Use of AI | "
                     "Status: Submitted."),
               # grant tables legitimately synthesize ' | ' row joins
               ("table", "Title | PI | Amount | Status")]
@@ -5029,8 +5029,8 @@ def test_pipe_leaks_quiet_below_cluster_threshold_and_in_appendix():
 
 
 def test_pipe_leaks_flags_pipe_free_fused_citation():
-    fused = ("31. Hyer A, Jung E. AI confidence. OLC Accelerate 2025; "
-             "2025 November 20; Orlando, FL. Weissman P, Samuel A. Teaching "
+    fused = ("31. Exampler A, Tester E. AI confidence. OLC Accelerate 2025; "
+             "2025 November 20; Orlando, FL. Mockley P, Fixturo A. Teaching "
              "large courses. AMEE; 2024 August 26; Basel, Switzerland.")
     blocks = [("p", "S. BIBLIOGRAPHY"), ("p", fused),
               ("p", "30. Normal citation. Journal of Things; 2024 May; 12(3).")]
@@ -5065,7 +5065,7 @@ def test_pipe_leaks_initials_between_wedges_are_not_a_second_citation():
 
 _HONORS_HEADER = ["Name of award", "Organization", "Date awarded (yyyy)"]
 _BLOB = ("Basic Science Innovation in Education Award – Runner-up "
-         "Presentation. Saibal Day, Eulho Jung, and Thomas Flagg. Basic "
+         "Presentation. Alex Mockley, Erin Tester, and Sam Exampler. Basic "
          "Science Innovation in Education. Uniformed Services University "
          "Education Day, Bethesda, MD, August 2025.")
 

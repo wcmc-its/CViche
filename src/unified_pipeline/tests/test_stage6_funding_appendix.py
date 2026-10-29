@@ -131,12 +131,12 @@ _FSMB_FIELDS = {
 
 _FSMB_SEGMENT = (
     "Federation of State Medical Boards (FSMB) Foundation Grant | Shapiro, M. "
-    "(PI), Jung, E. (Co-PI) | Improving Access to Healthcare in Rural and "
+    "(PI), Tester, E. (Co-PI) | Improving Access to Healthcare in Rural and "
     "Underserved Areas | Role: Co-PI | Amount: $75,000 | Status: Awarded 2026."
 )
 
 _TEMPLETON_SEGMENT = (
-    "John Templeton Foundation Online Funding Inquiry (OFI) | Jung, E. (PI) | "
+    "John Templeton Foundation Online Funding Inquiry (OFI) | Tester, E. (PI) | "
     "Developing Intellectual Humility in Clinical Judgment | Role: PI | "
     "Amount: $1,400,000 | Status: Submitted 2026, Under review."
 )
@@ -180,7 +180,7 @@ def test_source_boilerplate_negatives():
         "Updated the curriculum for the MS4 elective",
         "Revised institutional guidelines for resident supervision",
         "Prepared expert testimony for federal court",
-        "CURRICULUM VITAE\nEulho Jung",  # multi-line: real preamble block
+        "CURRICULUM VITAE\nErin Tester",  # multi-line: real preamble block
         "Curriculum Vitae Committee, School of Medicine",
         "",
         None,
@@ -230,7 +230,7 @@ def test_reconsider_routes_unrendered_siblings_home(monkeypatch):
     segments = [
         (_FSMB_SEGMENT, "M2A"),       # already rendered — must vanish
         (_TEMPLETON_SEGMENT, "M2C"),  # cross-code — routed
-        ("SDRME Review Paper Grant | Jung, E. (Co-PI) | Metacognitive "
+        ("SDRME Review Paper Grant | Tester, E. (Co-PI) | Metacognitive "
          "Reflection Training | Status: Under review.", "M2A"),  # same-code — routed
     ]
     monkeypatch.setattr(gen, "_reclassify_entry_segments", lambda text, code: segments)
