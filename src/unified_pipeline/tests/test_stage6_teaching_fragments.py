@@ -1558,3 +1558,127 @@ def test_an_entry_of_several_raw_lines_is_one_entry_whatever_its_record_count():
                                             stage4_records=_records(2)))
     assert [p.text for p in paragraphs] == ["Fictional Course 0, Fictional Course 1"]
     assert [_entry_level(gen, p) for p in paragraphs] == ["0"]
+
+
+# --- a stacked row: one bullet per course (#2019) ----------------------------
+
+# One source table row whose title cell stacks four lines over a date cell
+# stacking three, blank padding lines between them, as stage 2 joins it.
+_STACKED_ROW = ("Kite Physics Tutor\n    Pond Optics Lecturer\n    \n    Tide Seminar Director\n"
+                "        Workshops given -Knots, Sails | 2001\n    2002-2004\n    \n    2005, 2007")
+
+
+def _stacked_records():
+    return [{"course_title": "Kite Physics", "role": "Tutor", "start_date": "2001"},
+            {"course_title": "Pond Optics", "role": "Lecturer", "start_date": "2002",
+             "end_date": "2004"},
+            {"course_title": "Tide Seminar", "role": "Director", "start_date": "2005"},
+            {"course_title": "Tide Seminar", "start_date": "2007"},
+            {"course_title": "Workshops given -Knots, Sails"}]
+
+
+def _stacked_entry(text=_STACKED_ROW, records=None, **entry):
+    records = _stacked_records() if records is None else records
+    fields = {**records[-1], "formatted_text": "2001 - Kite Physics, Tutor",
+              "stage4_records": records}
+    return {"taxonomy_code": "K1", "text": text, "extracted_fields": fields,
+            "element_type": "table_row", "element_idx_start": "9.2", "element_idx_end": "9.2",
+            **entry}
+
+
+def _stacked_pieces(entry):
+    items = teaching._stacked_row_items(entry)
+    return None if items is None else [item.pieces for item in items]
+
+
+def test_a_stacked_row_is_one_item_per_course_in_the_sources_words():
+    """Each record's line of the title cell, the next date line, and an
+    undated record's line inline after the item above it; two records on
+    one line are one item."""
+    assert _stacked_pieces(_stacked_entry()) == [
+        ("Kite Physics Tutor", "2001"), ("Pond Optics Lecturer", "2002-2004"),
+        ("Tide Seminar Director", "2005, 2007", "Workshops given -Knots, Sails")]
+
+
+def test_a_stacked_rows_record_not_in_the_source_keeps_the_source_line_and_no_bold():
+    records = _stacked_records()
+    records[1] = {**records[1], "course_title": 'Pond "Optics"'}
+    entry = _stacked_entry(text=_STACKED_ROW.replace("Pond Optics", "Pond ”Optics”"), records=records)
+    items = teaching._stacked_row_items(entry)
+    assert items[1].pieces == ("Pond ”Optics” Lecturer", "2002-2004")
+    assert items[1].title_fields == {} and items[0].title_fields == records[0]
+
+
+def test_a_stacked_rows_date_goes_through_the_card_date_path():
+    entry = _stacked_entry(text=_STACKED_ROW.replace("| 2001", "| 2001-03"))
+    assert _stacked_pieces(entry)[0] == ("Kite Physics Tutor", "March 2001")
+
+
+@pytest.mark.parametrize("change", [
+    {"text": _STACKED_ROW.replace("2002-2004", "2003-2004")},          # a year it does not name
+    {"text": _STACKED_ROW.replace("\n    2002-2004", "")},              # a date line short
+    {"text": _STACKED_ROW.replace("Tutor\n", "Tutor\n    Lab Notes\n")},  # a line no record claims
+    {"text": _STACKED_ROW + " | Example Hall"},                          # a third cell
+    {"text": _STACKED_ROW.replace("2005, 2007", "2005, 2007 weekly")},  # not a date cell
+    {"element_type": "paragraph"},
+    {"element_idx_end": "9.3"},
+    {"records": _stacked_records()[:1]},
+    {"records": [_stacked_records()[4], *_stacked_records()[:4]]},      # undated first
+    {"records": [*_stacked_records(), {"course_title": "Sails", "start_date": "2009"}]},
+    # a title line left over after the last record
+    {"text": "Kite Physics Tutor\nPond Optics Lecturer\nLab Notes | 2001\n2002",
+     "records": _stacked_records()[:2]},
+    # a record verbatim only past a line no record claims
+    {"text": "Kite Physics Tutor\nLab Notes\nPond Optics Lecturer | 2001\n2002\n2003",
+     "records": [_stacked_records()[0], {"course_title": "Pond Optics", "start_date": "2002"},
+                 {"course_title": "Pond Optics", "start_date": "2003"}]},
+    # one course over two dates is one item, not a list
+    {"text": "Kite Physics Tutor | 2001, 2003",
+     "records": [_stacked_records()[0], {"course_title": "Kite Physics", "start_date": "2003"}]},
+])
+def test_a_stacked_row_that_does_not_pair_up_keeps_its_rendering(change):
+    records = change.pop("records", None)
+    assert teaching._stacked_row_items(_stacked_entry(records=records, **change)) is None
+
+
+def test_a_stacked_row_renders_one_entry_bullet_per_course():
+    """Each item is its own entry bullet in source order (#2019): the
+    record's title bold, the gap on each, the blank line above the first."""
+    from unified_pipeline.stage6.formatting import is_entry_end
+
+    gen, paragraphs = _rendered_card(_stacked_entry())
+    assert [p.text for p in paragraphs] == [
+        "Kite Physics Tutor, 2001", "Pond Optics Lecturer, 2002-2004",
+        "Tide Seminar Director, 2005, 2007, Workshops given -Knots, Sails"]
+    assert [_entry_level(gen, p) for p in paragraphs] == ["0", "0", "0"]
+    assert [[r.text for r in p.runs if r.bold] for p in paragraphs] == [
+        ["Kite Physics"], ["Pond Optics"], ["Tide Seminar"]]
+    assert all(is_entry_end(p._p.pPr) for p in paragraphs)
+    blank = gen.doc.paragraphs[1]
+    assert blank.text == "" and gen.doc.paragraphs[2].text == paragraphs[0].text
+
+
+def test_a_stacked_row_that_does_not_pair_up_renders_as_before():
+    entry = _stacked_entry(text=_STACKED_ROW.replace("2002-2004", "2003-2004"))
+    _gen, paragraphs = _rendered_card(entry)
+    assert len(paragraphs) == 1
+    assert paragraphs[0].text.startswith("Kite Physics Tutor Pond Optics Lecturer")
+
+
+def test_a_stacked_rows_repeated_line_is_one_item_per_repeat():
+    """A record verbatim on its line and the next takes the next: the same
+    course listed twice is two items."""
+    entry = _stacked_entry(text="Kite Physics Tutor\nKite Physics Tutor | 2001\n2003",
+                           records=[{"course_title": "Kite Physics", "start_date": "2001"},
+                                    {"course_title": "Kite Physics", "start_date": "2003"}])
+    assert _stacked_pieces(entry) == [("Kite Physics Tutor", "2001"), ("Kite Physics Tutor", "2003")]
+
+
+def test_a_stacked_rows_record_with_no_title_or_role_is_not_verbatim():
+    """A record holding only dates locates nothing: it takes the next line,
+    and that item's title is not bold."""
+    records = _stacked_records()
+    records[1] = {"start_date": "2002", "end_date": "2004"}
+    items = teaching._stacked_row_items(_stacked_entry(records=records))
+    assert items[1].pieces == ("Pond Optics Lecturer", "2002-2004")
+    assert items[1].title_fields == {}

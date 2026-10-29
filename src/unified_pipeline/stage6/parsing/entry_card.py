@@ -228,7 +228,7 @@ def _word_bounded(text: str, start: int, end: int) -> bool:
             and (end == len(text) or not text[end].isalnum()))
 
 
-def _verbatim_span(text: str, value: str, start: int = 0) -> tuple[int, int] | None:
+def verbatim_span(text: str, value: str, start: int = 0) -> tuple[int, int] | None:
     """Where `value` sits in `text` at or after `start`, character for
     character and word-bounded."""
     at = text.find(value, start)
@@ -247,7 +247,7 @@ def find_span(text: str, value: str, start: int = 0) -> tuple[int, int] | None:
     tokens = _WORD.findall(value)
     if not tokens:
         return None
-    exact = _verbatim_span(text, value, start)
+    exact = verbatim_span(text, value, start)
     if exact:
         return exact
     pattern = r'(?<![^\W_])' + r'[\W_]+'.join(map(re.escape, tokens)) + r'(?![^\W_])'
@@ -483,7 +483,7 @@ def title_span(line: str, fields: Mapping | None) -> tuple[int, int] | None:
         if (not value or len(_WORD.findall(value)) > MAX_HEAD_WORDS
                 or _DATE_TOKEN.match(value.strip())):
             continue
-        span = _verbatim_span(line, value.strip())
+        span = verbatim_span(line, value.strip())
         if span and _is_one_cell(line[slice(*span)]):
             return span
     return None

@@ -93,11 +93,12 @@ _BULLET_FALLBACKS = {
 # Every function that calls `_insert_entry_lines`: the clinical bullet
 # fallback, taken when L cannot use a table, and teaching, which is not a
 # fallback -- it writes every entry, the template having no teaching table
-# at all (one call for an entry, one for each record of a multi-record one).
+# at all (one call for an entry, one for each record of a multi-record one
+# or each item of a stacked row).
 _ENTRY_LINE_WRITERS = {
     ("stage6/sections/clinical_practice.py", "_insert_multiline_as_bullets"),
     ("stage6/sections/teaching.py", "_insert_teaching_entry"),
-    ("stage6/sections/teaching.py", "_insert_record_entries"),
+    ("stage6/sections/teaching.py", "_insert_entry_bullets"),
 }
 
 

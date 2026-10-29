@@ -79,6 +79,12 @@ entries into 41 bullets, 16 of them a bare date. Raw text therefore keeps the
 newline-only split (`entry_lines`) on both of the paths that read it.
 
 WHERE THE TEXT COMES FROM
+One table row whose title cell stacks several courses over a date cell
+stacking their dates is read first (`_stacked_row_items`, #2019): stage 4's
+records say which title line is which course, and each course is an entry
+bullet of its own, holding its source line and its date line. Anything that
+does not pair up exactly falls through to the reconstruction below.
+
 `_teaching_entry_lines` is the whole reconstruction, as a pure function: fields
 in, the bullet strings out, no Word object touched. It picks between three
 sources of text, in order:
@@ -113,6 +119,8 @@ teaching activity.
 import logging
 import re
 import zipfile
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TypedDict
 
 from docx.opc.exceptions import PackageNotFoundError
@@ -120,6 +128,7 @@ from docx.oxml.ns import qn
 from docx.table import _Row
 
 from unified_pipeline.core.docx_structure_extractor import (
+    _is_date_only_text,
     get_paragraph_text,
     open_source_docx,
 )
@@ -132,6 +141,7 @@ from unified_pipeline.log_redaction import redacted_error_label
 
 from ..formatting import (
     DATE_SPAN_SEPARATOR,
+    card_date,
     envelope_date_spans,
     extra_date_spans,
     format_date_range,
@@ -140,7 +150,12 @@ from ..formatting import (
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..parsing.dates import _MONTH_NAME_TO_NUM, _SEASON_TOKENS, _parse_date_components
-from ..parsing.entry_card import sub_list_parts
+from ..parsing.entry_card import (
+    HEAD_ANCHOR_FIELDS,
+    ORG_ANCHOR_FIELDS,
+    sub_list_parts,
+    verbatim_span,
+)
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -502,6 +517,118 @@ def _card_source(entry: _TeachingEntry, raw_lines: list[str], levels: list[bool]
     return _LEADING_LIST_NUMBER_RE.sub('', line, count=1)
 
 
+# The stage-4 fields that say which line of a stacked row's title cell a
+# record is (`_record_lines`); the date fields say whether it has a date.
+_RECORD_TEXT_FIELDS = (*HEAD_ANCHOR_FIELDS, *ORG_ANCHOR_FIELDS, 'course_code')
+_RECORD_DATE_FIELDS = ('start_date', 'end_date', 'date')
+# A stacked row is a list: one course is the wrapped row `wrapped_row_text`
+# already reads (#987).
+_MIN_STACKED_ITEMS = 2
+
+
+@dataclass(frozen=True)
+class _StackedItem:
+    """One item of a stacked row (`_stacked_row_items`): the source pieces
+    its bullet joins, in page order, and the record whose title is bold
+    ({} when a record on its line was not verbatim, so nothing is bold)."""
+    pieces: tuple[str, ...]
+    title_fields: Mapping
+
+
+def _is_verbatim_in(record: Mapping, line: str) -> bool:
+    """Every title, role, organization and code value of `record` is in
+    `line` character for character (`verbatim_span`), and it has one."""
+    slots = [value.strip() for key in _RECORD_TEXT_FIELDS
+             if isinstance(value := record.get(key), str) and value.strip()]
+    return bool(slots) and all(verbatim_span(line, slot) for slot in slots)
+
+
+def _record_lines(records: list, lines: list[str]) -> list[tuple[int, bool]] | None:
+    """(line index, verbatim) per record, walking `records` and `lines` in
+    source order, or None when they do not pair up.
+
+    A record found verbatim on the line before it stays there (a second
+    span of the same course), unless it is verbatim on the next line too;
+    otherwise it takes the next line, found verbatim or not. A record whose
+    slots are verbatim only on a later line means a line no record claims,
+    so the row is refused, as it is when a line is left over."""
+    at, paired = -1, []
+    for record in records:
+        found = [i for i in range(max(at, 0), len(lines)) if _is_verbatim_in(record, lines[i])]
+        if at >= 0 and found[:1] == [at] and at + 1 not in found:
+            paired.append((at, True))
+        elif at + 1 in found or (not found and at + 1 < len(lines)):
+            at += 1
+            paired.append((at, bool(found)))
+        else:
+            return None
+    return paired if at == len(lines) - 1 else None
+
+
+def _record_year(record: Mapping) -> int | None:
+    """The year `record` starts in, or None when it states no date."""
+    value = next((record[key] for key in _RECORD_DATE_FIELDS
+                  if isinstance(record.get(key), str) and record[key].strip()), '')
+    return _parse_date_components(value.strip())[0] if value else None
+
+
+def _stacked_row_items(entry: _TeachingEntry) -> list[_StackedItem] | None:
+    """One item per course of a table row whose title cell stacks several
+    courses over a date cell stacking their dates (#2019), or None.
+
+    The cells cannot be paired by line: blank padding lines can make their
+    counts differ, and `wrapped_row_text` then reads the row as one
+    course. Stage 4's records, in source order, pair them instead, and are
+    used only as anchors (`_record_lines`): every piece is a source line.
+    A dated item takes the next date line, which must name each of its
+    records' start years; an undated record's line joins the item above it,
+    inline. None, and the row keeps its rendering, unless the row is two
+    cells, title then date-only lines, and every title and date line is
+    printed exactly once."""
+    fields = entry.get('extracted_fields') or {}
+    records = fields.get(_STAGE4_RECORDS_KEY)
+    if (_record_count(fields) < 2 or not all(isinstance(r, dict) for r in records)
+            or entry.get('element_type') != 'table_row' or entry.get('element_idx_start') is None
+            or entry.get('element_idx_start') != entry.get('element_idx_end')):
+        return None
+    cells = [lines for cell in str(entry.get('text')).split(CELL_SEPARATOR)
+             if (lines := entry_lines(cell))]
+    if len(cells) != 2 or not all(map(_is_date_only_text, cells[1])):
+        return None
+    titles, dates = cells
+    paired = _record_lines(records, titles)
+    if paired is None:
+        return None
+    claims: dict[int, list[tuple[Mapping, bool]]] = {}  # line order: `paired` never goes back
+    for (line, verbatim), record in zip(paired, records, strict=True):
+        claims.setdefault(line, []).append((record, verbatim))
+    groups: list[tuple[list[str], list[Mapping], bool]] = []  # lines, records, verbatim
+    for line, held in claims.items():
+        line_records = [record for record, _ in held]
+        if groups and all(_record_year(record) is None for record in line_records):
+            groups[-1][0].append(titles[line])  # undated: continues the item above
+        else:
+            groups.append(([titles[line]], line_records, all(v for _, v in held)))
+    return _dated_items(groups, dates, str(entry.get('taxonomy_code') or ''))
+
+
+def _dated_items(groups: list[tuple[list[str], list[Mapping], bool]], dates: list[str],
+                 taxonomy_code: str) -> list[_StackedItem] | None:
+    """`groups` (an item's title lines, records, all verbatim) with the
+    date line each takes, in order, or None when the dates do not pair."""
+    if len(groups) != len(dates) or len(groups) < _MIN_STACKED_ITEMS:
+        return None
+    items = []
+    for (lines, records, verbatim), date in zip(groups, dates, strict=True):
+        years = [_record_year(record) for record in records]
+        if any(year is None or not re.search(rf'(?<!\d){year}(?!\d)', date) for year in years):
+            return None
+        shown = card_date(date, records[0], taxonomy_code, f'{lines[0]}{CELL_SEPARATOR}{date}')
+        items.append(_StackedItem(pieces=(lines[0], shown, *lines[1:]),
+                                  title_fields=records[0] if verbatim else {}))
+    return items
+
+
 # What can go wrong opening the source CV or indexing into it. Anything else is
 # a code bug and must surface, not read as "this CV has no hierarchy" (§5.4).
 _SOURCE_READ_ERRORS = (OSError, KeyError, IndexError, zipfile.BadZipFile, PackageNotFoundError)
@@ -716,6 +843,10 @@ class TeachingSection:
         raw_lines = entry_lines(original_text)
         levels = (self._source_cell_levels.flags_for(entry, raw_lines)
                   if self._source_cell_levels else None)
+        if not levels and (items := _stacked_row_items(entry)):
+            self._insert_entry_bullets(insert_idx, entry, [
+                (list(item.pieces), item.title_fields) for item in items], is_first_visible)
+            return
         card_text = _card_source(entry, raw_lines, levels)
         if card_text and self._insert_entry_card(insert_idx, card_text, entry,
                                                  add_blank_before=is_first_visible):
@@ -740,7 +871,10 @@ class TeachingSection:
             return
 
         if not levels and _lines_are_records(fields, lines, raw_lines):
-            self._insert_record_entries(insert_idx, entry, lines, is_first_visible)
+            records = fields.get(_STAGE4_RECORDS_KEY)
+            self._insert_entry_bullets(insert_idx, entry, [
+                ([line], record if isinstance(record, dict) else None)
+                for line, record in zip(lines, records, strict=True)], is_first_visible)
             return
         # One entry bullet holding the lines inline, a source cell's
         # sub-bullets (#423) a sub-level under it (#2019). The entry rides its
@@ -748,13 +882,15 @@ class TeachingSection:
         self._insert_entry_lines(insert_idx, lines, entry, add_blank_before=is_first_visible,
                                  children=levels, receipt_on_last=True)
 
-    def _insert_record_entries(self, insert_idx: int, entry: _TeachingEntry,
-                               lines: list[str], is_first_visible: bool) -> None:
-        """One entry bullet per stage-4 record of `entry`, each of `lines`
-        (`_lines_are_records`, #1556 c), its own title in bold. Inserted
-        backwards, so they land in source order; the entry rides the last."""
-        records = (entry.get('extracted_fields') or {}).get(_STAGE4_RECORDS_KEY)
-        for j, (line, record) in enumerate(reversed(list(zip(lines, records, strict=True)))):
-            self._insert_entry_lines(insert_idx, [line], entry if j == 0 else None,
-                                     add_blank_before=is_first_visible and j == len(lines) - 1,
-                                     title_fields=record if isinstance(record, dict) else None)
+    def _insert_entry_bullets(self, insert_idx: int, entry: _TeachingEntry,
+                              bullets: list[tuple[list[str], Mapping | None]],
+                              is_first_visible: bool) -> None:
+        """One entry bullet per `(pieces, title_fields)` of `bullets`, its
+        pieces inline and its own title in bold: stage 5c's lines of a
+        multi-record entry (`_lines_are_records`, #1556 c), or the items of
+        a stacked row (`_stacked_row_items`). Inserted backwards, so they
+        land in source order; the entry rides the last."""
+        for j, (pieces, title_fields) in enumerate(reversed(bullets)):
+            self._insert_entry_lines(insert_idx, pieces, entry if j == 0 else None,
+                                     add_blank_before=is_first_visible and j == len(bullets) - 1,
+                                     title_fields=title_fields)
