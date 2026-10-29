@@ -55,11 +55,13 @@ from docx.shared import Pt  # noqa: E402
 from unified_pipeline.core.render_check import entry_lines  # noqa: E402
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     ENTRY_GAP_AFTER_PT,
+    is_entry_bullet,
     is_entry_end,
     plain_entry_level,
 )
-from unified_pipeline.stage6.sections.clinical_practice import (
-    _bullet_parts,  # noqa: E402
+from unified_pipeline.stage6.sections.clinical_practice import (  # noqa: E402
+    _bullet_parts,
+    _l3_card_source,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -147,6 +149,8 @@ def _entry(text, **fields):
 
 TAB_JOINED = "Attending Physician\tNYP Weill Cornell\t2015-2020"
 TAB_JOINED_PARTS = ["Attending Physician", "NYP Weill Cornell", "2015-2020"]
+# #2019: an entry's parts print inline, in one entry bullet.
+TAB_JOINED_LINE = "Attending Physician, NYP Weill Cornell, 2015-2020"
 
 # A raw pipe-column entry (Title | Institution | Dates): ONE item, matching
 # every table-fill branch's own treatment of '|' as a column separator.
@@ -155,6 +159,7 @@ PIPE_COLUMN_RENDERED = "Volunteer Clinic — NYP Weill Cornell — 2020-2023"
 
 MIXED_DELIMITER_CASE = "Alpha\nBeta\tGamma\nDelta"
 MIXED_DELIMITER_PARTS = ["Alpha", "Beta", "Gamma", "Delta"]
+MIXED_DELIMITER_LINE = "Alpha, Beta, Gamma, Delta"
 
 # A tab-joined entry long enough (>300 chars) and poorly enough extracted
 # (<50% coverage) to be a candidate for stage 6's content-overflow router.
@@ -167,6 +172,7 @@ OVERFLOW_SCOPE = (
 OVERFLOW_PARTS = ["Attending Physician, Division of General Internal Medicine",
                   "NYP Weill Cornell Medical Center", OVERFLOW_SCOPE, "2015-2020"]
 OVERFLOW_CASE = "\t".join(OVERFLOW_PARTS)
+OVERFLOW_LINE = ", ".join(OVERFLOW_PARTS)
 
 # L3 with the role field missing and the fragments after the role repeating
 # the very fields the composed bullet is built from.
@@ -177,20 +183,22 @@ L3_COMPOSED_BULLET = "Attending Physician, NYP Weill Cornell, 2015-2020"
 # --- (a) the production path: does the split reach the document? -------------
 
 @pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
-def test_tab_joined_entry_renders_one_bullet_per_fragment_end_to_end(code, filler, header):
+def test_tab_joined_entry_renders_every_fragment_inline_end_to_end(code, filler, header):
     """Pins the defect the review found: the fragment split never reached
     the rendered document.
 
     Through the real template this entry used to render as ONE bullet --
     "Attending Physician — NYP Weill Cornell 2015-2020" on L1/L2, and the
     bare "Attending Physician" on L3, with the other two fragments deleted.
+    #476 split them into one bullet each; #2019 prints them inline in the
+    entry's one bullet, cells joined by ", ".
     """
     gen, added = _render_through_template(filler, [_entry(TAB_JOINED)])
     # The blank template ships no clinical table, so all three subsections
     # take the bullet fallback. Assert it rather than assume it.
     assert gen.stats["tables_populated"] == 0, f"{code} took the table branch"
-    assert added == [""] + TAB_JOINED_PARTS
-    assert gen.stats["entries_inserted"] == len(TAB_JOINED_PARTS)
+    assert added == ["", TAB_JOINED_LINE]
+    assert gen.stats["entries_inserted"] == 1
 
 
 @pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
@@ -206,13 +214,13 @@ def test_pipe_columns_render_as_one_item_end_to_end(code, filler, header):
 
 
 @pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
-def test_mixed_newline_and_tab_renders_four_bullets_end_to_end(code, filler, header):
+def test_mixed_newline_and_tab_renders_four_parts_inline_end_to_end(code, filler, header):
     """Flattened CV content mixes both delimiters in one entry. Newline and
     tab were only ever tested apart; "A\\nB\\tC\\nD" is the shape that needs
     both rules at once."""
     gen, added = _render_through_template(filler, [_entry(MIXED_DELIMITER_CASE)])
     assert gen.stats["tables_populated"] == 0, f"{code} took the table branch"
-    assert added == [""] + MIXED_DELIMITER_PARTS
+    assert added == ["", MIXED_DELIMITER_LINE]
 
 
 def test_l3_keeps_every_fragment_when_no_role_field_was_extracted():
@@ -226,8 +234,8 @@ def test_l3_keeps_every_fragment_when_no_role_field_was_extracted():
     """
     gen, added = _render_through_template("_fill_clinical_practice_l3", [_entry(TAB_JOINED)])
     for fragment in TAB_JOINED_PARTS:
-        assert added.count(fragment) == 1, f"{fragment!r} not rendered exactly once"
-    assert added == [""] + TAB_JOINED_PARTS
+        assert " ".join(added).count(fragment) == 1, f"{fragment!r} not rendered exactly once"
+    assert added == ["", TAB_JOINED_LINE]
 
 
 def test_l3_composed_bullet_keeps_the_fragments_after_the_role():
@@ -250,8 +258,7 @@ def test_l3_composed_bullet_keeps_the_fragments_after_the_role():
     )
     assert added == [
         "",
-        "Program Director, NYP Weill Cornell, 2015-2020",
-        "Surgical residency rotation",
+        "Program Director, NYP Weill Cornell, 2015-2020, Surgical residency rotation",
     ]
 
 
@@ -296,7 +303,7 @@ def test_l3_drops_a_repeated_fragment_but_not_a_word_inside_a_longer_one():
         [_entry("Chair\tDivision of Bioethics\tEthics",
                 institution="Division of Bioethics", start_date="2015", end_date="2020")],
     )
-    assert added == ["", "Chair, Division of Bioethics, 2015-2020", "Ethics"]
+    assert added == ["", "Chair, Division of Bioethics, 2015-2020, Ethics"]
 
 
 @pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
@@ -314,10 +321,8 @@ def test_second_entry_renders_after_the_first_not_inside_it(code, filler, header
     ])
     assert added == [
         "",
-        "First entry part a",
-        "First entry part b",
-        "Second entry part a",
-        "Second entry part b",
+        "First entry part a, First entry part b",
+        "Second entry part a, Second entry part b",
     ]
 
 
@@ -332,8 +337,8 @@ def test_l1_bullet_drops_the_source_list_number():
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("12) Event physician\n(3) Team physician", ["Event physician", "Team physician"]),
-    ("Event physician\t2. Team physician", ["Event physician", "2. Team physician"]),
+    ("12) Event physician\n(3) Team physician", ["Event physician, Team physician"]),
+    ("Event physician\t2. Team physician", ["Event physician, 2. Team physician"]),
     ("2004. Event physician", ["2004. Event physician"]),
     ("3.5 sessions per week", ["3.5 sessions per week"]),
 ])
@@ -442,13 +447,15 @@ SHATTERED_LINES = [
 ]
 SHATTERED_CASE = "\t".join(SHATTERED_LINES)
 SHATTERED_FOLDED = [" ".join(SHATTERED_LINES[:6]), SHATTERED_LINES[6]]
+# The folded paragraph ends in a full stop: a space joins it, not ", " (#2019).
+SHATTERED_LINE = " ".join(SHATTERED_FOLDED)
 
 
 @pytest.mark.parametrize("filler", ["_fill_clinical_practice_l1", "_fill_clinical_practice_l2"])
 def test_shattered_paragraph_renders_as_one_bullet_not_one_per_line(filler):
     gen, added = _render_through_template(filler, [_entry(SHATTERED_CASE)])
     assert gen.stats["tables_populated"] == 0
-    assert added == ["", *SHATTERED_FOLDED]
+    assert added == ["", SHATTERED_LINE]
 
 
 def test_shattered_l3_overflow_renders_as_one_bullet_not_one_per_line():
@@ -459,7 +466,7 @@ def test_shattered_l3_overflow_renders_as_one_bullet_not_one_per_line():
                                  "start_date": "2015", "end_date": "2023"}
     gen, added = _render_through_template("_fill_clinical_practice_l3", [entry], route_overflow=True)
     assert gen.stats["overflow_bullets_added"] == 1
-    assert added == ["", *SHATTERED_FOLDED]
+    assert added == ["", SHATTERED_LINE]
 
 
 # --- (a2) the overflow router: does the split make stage 6 render it twice? --
@@ -495,9 +502,9 @@ def test_fragment_split_does_not_re_emit_the_entry_through_the_overflow_router(c
     assert gen.stats["tables_populated"] == 0, f"{code} took the table branch"
     assert gen._overflow_entries == [], "a fully rendered entry was queued for overflow"
     assert gen.stats["overflow_bullets_added"] == 0
-    assert added == [""] + OVERFLOW_PARTS
+    assert added == ["", OVERFLOW_LINE]
     for fragment in OVERFLOW_PARTS:
-        assert added.count(fragment) == 1, f"{fragment[:30]!r} rendered more than once"
+        assert " ".join(added).count(fragment) == 1, f"{fragment[:30]!r} rendered more than once"
 
 
 def test_a_genuinely_under_rendered_single_paragraph_entry_is_still_queued():
@@ -607,9 +614,10 @@ def test_pipe_stays_one_part():
 
 # --- (c) the bullet writer itself -------------------------------------------
 
-def test_positive_control_tab_joined_text_splits_into_two_bullets():
+def test_positive_control_tab_joined_text_joins_into_one_bullet():
     """`_insert_multiline_as_bullets` with a raw tab-joined text: two parts
-    in, exactly two bullet paragraphs out and nothing else.
+    in, exactly one bullet paragraph out holding both (#2019), and nothing
+    else.
 
     Asserting the whole paragraph sequence, not just membership, is the
     point -- a stray extra paragraph or a duplicated bullet used to pass an
@@ -620,18 +628,16 @@ def test_positive_control_tab_joined_text_splits_into_two_bullets():
         scratch.insert_idx, "Chair, Ethics Committee\tMember, IRB",
         entry=None, add_blank_before=False)
 
-    assert inserted == 2
+    assert inserted == 1
     texts = [p.text for p in scratch.gen.doc.paragraphs]
-    assert len(texts) == len(scratch.baseline) + 2
-    assert texts == [HEADING_TEXT, "Chair, Ethics Committee", "Member, IRB", SENTINEL_TEXT]
-    for bullet in ("Chair, Ethics Committee", "Member, IRB"):
-        assert texts.count(bullet) == 1
+    assert len(texts) == len(scratch.baseline) + 1
+    assert texts == [HEADING_TEXT, "Chair, Ethics Committee, Member, IRB", SENTINEL_TEXT]
     assert not any("\t" in t for t in texts)
 
 
-def test_add_blank_before_puts_one_spacer_above_the_first_bullet():
+def test_add_blank_before_puts_one_spacer_above_the_entry():
     """`add_blank_before=True` was never exercised. The spacer goes above
-    the FIRST bullet, not between the bullets or after the last one, and it
+    the entry, not after it, and it
     counts toward the return value -- the fillers advance their insertion
     index by that number, so a spacer it does not count slides every later
     entry one paragraph too high.
@@ -642,8 +648,8 @@ def test_add_blank_before_puts_one_spacer_above_the_first_bullet():
         entry=None, add_blank_before=True)
 
     texts = [p.text for p in scratch.gen.doc.paragraphs]
-    assert texts == [HEADING_TEXT, "", "Chair, Ethics Committee", "Member, IRB", SENTINEL_TEXT]
-    assert inserted == 3
+    assert texts == [HEADING_TEXT, "", "Chair, Ethics Committee, Member, IRB", SENTINEL_TEXT]
+    assert inserted == 2
     assert inserted == len(texts) - len(scratch.baseline)
 
 
@@ -659,16 +665,16 @@ def test_no_spacer_and_no_paragraphs_when_the_text_has_no_parts():
     assert [p.text for p in scratch.gen.doc.paragraphs] == scratch.baseline
 
 
-def test_mixed_delimiter_text_becomes_four_bullets():
+def test_mixed_delimiter_text_becomes_four_parts_of_one_bullet():
     """Tabs and newlines coexist in flattened CV content; "A\\nB\\tC\\nD"
     needs both rules applied to one text."""
     scratch = _scratch_document()
     inserted = scratch.gen._insert_multiline_as_bullets(
         scratch.insert_idx, MIXED_DELIMITER_CASE, entry=None, add_blank_before=False)
 
-    assert inserted == 4
+    assert inserted == 1
     texts = [p.text for p in scratch.gen.doc.paragraphs]
-    assert texts == [HEADING_TEXT] + MIXED_DELIMITER_PARTS + [SENTINEL_TEXT]
+    assert texts == [HEADING_TEXT, MIXED_DELIMITER_LINE, SENTINEL_TEXT]
 
 
 def test_negative_control_single_part_text_unchanged():
@@ -686,18 +692,42 @@ def test_negative_control_single_part_text_unchanged():
 
 
 def _entry_level(para):
-    """The level of an entry written without a bullet (#1943), read from its
-    left indent; None when it is a bullet (has numPr) or carries no indent."""
-    if para._p.pPr is None or para._p.pPr.numPr is not None:
+    """The level of a line of an L entry: an entry bullet's `w:ilvl`
+    (#2019), or an unbulleted line's read from its left indent (#1943).
+    None for a template bullet or no indent."""
+    if para._p.pPr is None:
         return None
+    if para._p.pPr.numPr is not None:
+        if not is_entry_bullet(para._p.pPr, para.part.numbering_part.element):
+            return None
+        return int(para._p.pPr.numPr.ilvl.val)
     left = para.paragraph_format.left_indent
     if left is None:
         return None
     return plain_entry_level(left.twips)
 
 
-def test_first_part_is_level_0_and_later_parts_are_level_1():
-    """#984: a title / hours / dates entry keeps its facts under the title."""
+def test_a_multi_part_entry_is_one_bullet_with_its_role_bold_once():
+    """#2019: the entry's one bullet holds every part; the stage-4 role is
+    bold where the first part has it, not where a later part repeats it."""
+    scratch = _scratch_document()
+    entry = {"taxonomy_code": "L1", "text": "x",
+             "extracted_fields": {"clinical_role": "Clinician"}}
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Clinician, Clinic\tClinician 8 hours per week", entry=entry)
+
+    numbering = scratch.gen.doc.part.numbering_part.element
+    (para,) = [p for p in scratch.gen.doc.paragraphs if "Clinician" in p.text]
+    assert para.text == "Clinician, Clinic, Clinician 8 hours per week"
+    assert is_entry_bullet(para._p.pPr, numbering)
+    assert [(r.text, bool(r.bold)) for r in para.runs] == [
+        ("Clinician", True), (", Clinic, Clinician 8 hours per week", False)]
+
+
+def test_title_hours_and_dates_print_inline_at_level_0():
+    """#984 put a title / hours / dates entry's facts a level under the
+    title; #2019 (Paul, 2026-10-27) prints them inline: the source wrote no
+    sub-list there."""
     scratch = _scratch_document()
     scratch.gen._insert_multiline_as_bullets(
         scratch.insert_idx, "Clinician, Clinic\t8 hours per week\t12/2016 to present",
@@ -705,22 +735,21 @@ def test_first_part_is_level_0_and_later_parts_are_level_1():
 
     paras = scratch.gen.doc.paragraphs
     levels = {p.text: _entry_level(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
-    assert levels == {"Clinician, Clinic": 0, "8 hours per week": 1, "12/2016 to present": 1}
+    assert levels == {"Clinician, Clinic, 8 hours per week, 12/2016 to present": 0}
 
 
-def test_two_part_entry_is_level_0_title_and_level_1_detail():
-    """A 2-part entry has a title and one detail; the detail is still level 1."""
+def test_two_part_entry_is_one_line():
     scratch = _scratch_document()
     scratch.gen._insert_multiline_as_bullets(
         scratch.insert_idx, "Title\tdetail", entry=None, add_blank_before=False)
 
     paras = scratch.gen.doc.paragraphs
     levels = {p.text: _entry_level(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
-    assert levels == {"Title": 0, "detail": 1}
+    assert levels == {"Title, detail": 0}
 
 
-def test_four_part_entry_keeps_every_detail_at_level_1():
-    """web24/web40 carry 4+ part entries; only the title is level 0."""
+def test_four_part_entry_is_one_line():
+    """web24/web40 carry 4+ part entries; every part joins the title's line."""
     scratch = _scratch_document()
     scratch.gen._insert_multiline_as_bullets(
         scratch.insert_idx, "Staff Radiologist\tMusculoskeletal\t14,000 studies\t500 procedures",
@@ -728,7 +757,7 @@ def test_four_part_entry_keeps_every_detail_at_level_1():
 
     paras = scratch.gen.doc.paragraphs
     levels = {p.text: _entry_level(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
-    assert levels == {"Staff Radiologist": 0, "Musculoskeletal": 1, "14,000 studies": 1, "500 procedures": 1}
+    assert levels == {"Staff Radiologist, Musculoskeletal, 14,000 studies, 500 procedures": 0}
 
 
 def test_single_part_entry_stays_level_0():
@@ -749,6 +778,7 @@ def test_l3_bullet_bare_start_year_is_not_rendered_as_present():
                 start_date="2015")],
     )
     assert gen.stats["tables_populated"] == 0
+    # An entry card (#2019): the year inline, where the source has it.
     assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015"]
 
 
@@ -769,9 +799,7 @@ def _has_entry_gap(para):
             and para.paragraph_format.space_after == Pt(ENTRY_GAP_AFTER_PT))
 
 
-def test_only_the_last_part_of_an_entry_carries_the_entry_gap():
-    # The parts of one entry stay tight (the List Paragraph style's contextual
-    # spacing); only the last part carries the gap to the next entry.
+def test_a_multi_part_entrys_one_paragraph_carries_the_entry_gap():
     scratch = _scratch_document()
     scratch.gen._insert_multiline_as_bullets(
         scratch.insert_idx, "Clinician, Clinic\t8 hours per week\t12/2016 to present",
@@ -779,10 +807,22 @@ def test_only_the_last_part_of_an_entry_carries_the_entry_gap():
 
     paras = scratch.gen.doc.paragraphs
     gaps = {p.text: _has_entry_gap(p) for p in paras if p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
-    assert gaps == {"": False, "Clinician, Clinic": False, "8 hours per week": False,
-                    "12/2016 to present": True}
-    inner = [p for p in paras if p.text in ("Clinician, Clinic", "8 hours per week")]
-    assert all(p.paragraph_format.space_after is None for p in inner)
+    assert gaps == {"": False, "Clinician, Clinic, 8 hours per week, 12/2016 to present": True}
+
+
+def test_only_the_last_item_of_a_sub_list_carries_the_entry_gap():
+    # A sub-list the source wrote stays tight under the entry (the List
+    # Paragraph style's contextual spacing); its last item carries the gap.
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Clinic Lead\tSelected Initiatives:\tWorkflow\tManual",
+        entry=None, add_blank_before=False)
+
+    paras = scratch.gen.doc.paragraphs
+    gaps = {p.text: (_has_entry_gap(p), _entry_level(p)) for p in paras
+            if p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    assert gaps == {"Clinic Lead, Selected Initiatives:": (False, 0), "Workflow": (False, 1),
+                    "Manual": (True, 1)}
 
 
 def test_a_single_part_entry_carries_the_entry_gap():
@@ -800,12 +840,155 @@ def test_each_entry_ends_in_the_entry_gap_end_to_end(code, filler, header):
         _entry("First entry part a\tFirst entry part b"),
         _entry("Second entry part a\tSecond entry part b"),
     ])
-    assert added == ["", "First entry part a", "First entry part b",
-                     "Second entry part a", "Second entry part b"]
+    assert added == ["", "First entry part a, First entry part b",
+                     "Second entry part a, Second entry part b"]
     gaps = {p.text: _has_entry_gap(p) for p in gen.doc.paragraphs if p.text in added[1:]}
-    assert gaps == {"First entry part a": False, "First entry part b": True,
-                    "Second entry part a": False, "Second entry part b": True}
+    assert gaps == {"First entry part a, First entry part b": True,
+                    "Second entry part a, Second entry part b": True}
 
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# --- #2019: an entry as a card ------------------------------------------------------
+# One entry bullet: the role (bold), its place and the dates inline, then the
+# rest of the entry's cells, inline too. Every word is the source's.
+
+_L_CARD_HEAD = "Attending Physician, Example Hospital, 2015-2020"
+_L_CARD_DETAIL = "Inpatient medicine service, 8 weeks per year"
+_L_CARD_LINE = f"{_L_CARD_HEAD}, {_L_CARD_DETAIL}"
+
+
+@pytest.mark.parametrize("filler, role_field", [
+    ("_fill_clinical_practice_l1", "clinical_role"),
+    ("_fill_clinical_practice_l2", "project_name"),
+])
+def test_an_l1_or_l2_entry_renders_as_a_card(filler, role_field):
+    entry = _entry(f"Attending Physician, Example Hospital\t2015-2020\t{_L_CARD_DETAIL}",
+                   **{role_field: "Attending Physician"}, institution="Example Hospital")
+    gen, added = _render_through_template(filler, [entry])
+    assert added == ["", _L_CARD_LINE]
+    para = next(p for p in gen.doc.paragraphs if p.text == _L_CARD_LINE)
+    assert [(run.text, bool(run.bold)) for run in para.runs] == [
+        ("Attending Physician", True), (_L_CARD_LINE[len("Attending Physician"):], False)]
+    assert _entry_level(para) == 0 and is_entry_bullet(
+        para._p.pPr, gen.doc.part.numbering_part.element)
+    assert is_entry_end(para._p.pPr)
+
+
+def test_cards_and_bullets_in_one_subsection_keep_their_order():
+    """The L callers advance their insertion index by what the writer
+    returns: a miscount interleaves one entry's lines into the next's (#476)."""
+    card = _entry(f"Attending Physician, Example Hospital\t2015-2020\t{_L_CARD_DETAIL}",
+                  clinical_role="Attending Physician", institution="Example Hospital",
+                  start_date="2015")
+    plain = _entry("Volunteer Clinic\tWeekend shifts", start_date="2010")
+    _gen, added = _render_through_template("_fill_clinical_practice_l1", [plain, card])
+    assert added == ["", _L_CARD_LINE, "Volunteer Clinic, Weekend shifts"]
+
+
+def test_an_l3_role_is_a_one_line_card_of_its_first_cell():
+    """What follows the first cell is the role's prose: the composed line
+    never printed it, and the sub-point pass (#1205) offers it."""
+    entry = _entry("Director, Example Wound Care Program, 2010-2015\tOversaw the clinic",
+                   leadership_role="Director", institution="Example Wound Care Program",
+                   start_date="2010", end_date="2015")
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert added == ["", "Director, Example Wound Care Program, 2010-2015"]
+
+
+def test_an_l3_role_whose_cell_lacks_a_composed_word_keeps_the_composed_line():
+    # The cell lacks a word the composed line prints ("Present").
+    entry = _entry("Clinic Lead, Harrowgate Hospital, 2015-", leadership_role="Clinic Lead",
+                   institution="Harrowgate Hospital", start_date="2015")
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015-Present"]
+
+
+def test_an_l3_role_with_details_in_its_cell_keeps_the_composed_line():
+    """An L3 card is the role line alone: words after the head, organization
+    and date are the role's prose, which the composed line never printed."""
+    entry = _entry("Clinic Lead, Harrowgate Hospital, 2015-2018, weekly huddles",
+                   leadership_role="Clinic Lead", institution="Harrowgate Hospital",
+                   start_date="2015", end_date="2018")
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015-2018"]
+
+
+def test_an_l3_role_of_several_cells_is_no_card():
+    """An L3 card is one line or none: a second cell is the role's prose."""
+    entry = _entry("Clinic Lead | Harrowgate Hospital | 2015-2018", leadership_role="Clinic Lead")
+    gen, _added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert gen._insert_entry_card(len(gen.doc.paragraphs) - 1, entry["text"], entry,
+                                  one_line=True) == 0
+
+
+def test_a_card_is_weighed_whole_by_the_overflow_router():
+    """The card's comments ride line 1, but the router must weigh every line
+    of it: measuring line 1 alone read a fully rendered card as under-rendered
+    and re-emitted its details a second time (#476's trap)."""
+    details = ("Inpatient medicine service covering the general wards, the step-down unit "
+               "and the overnight admissions team, with supervision of residents and students "
+               "on every rotation and a weekly teaching conference for the whole department "
+               "of medicine and its affiliated clinics")
+    entry = _low_coverage_entry(f"Attending Physician, Example Hospital\t2015-2020\t{details}", "L1")
+    entry["extracted_fields"] = {"clinical_role": "Attending Physician",
+                                 "institution": "Example Hospital"}
+    assert len(entry["text"]) > 300, "fixture no longer reaches the router's length threshold"
+    gen, added = _render_through_template("_fill_clinical_practice_l1", [entry], route_overflow=True)
+    assert added == ["", f"{_L_CARD_HEAD}, {details}"]
+    assert gen._overflow_entries == [] and gen.stats["overflow_bullets_added"] == 0
+
+
+def test_an_l3_role_read_from_the_text_is_a_card_when_another_field_anchors_it():
+    """No role field: the line's role is the text's first cell, and a title
+    field still anchors the card's head there."""
+    entry = _entry("Wound Care Initiative, Example Hospital, 2010-2015",
+                   project_name="Wound Care Initiative", institution="Example Hospital")
+    _gen, added = _render_through_template("_fill_clinical_practice_l3", [entry])
+    assert added == ["", "Wound Care Initiative, Example Hospital, 2010-2015"]
+
+
+def test_an_l3_card_source_drops_the_cvs_list_number():
+    composed = "Clinic Lead, Harrowgate Hospital, 2015-2018"
+    assert _l3_card_source(f"3. {composed}\tweekly huddles", composed) == composed
+    assert _l3_card_source(f"3. {composed} | weekly huddles", composed) == composed
+
+
+def test_an_l2_entry_whose_details_label_a_sub_list_keeps_it_as_sub_bullets():
+    """"Selected Initiatives:" heads the cells after it (the 038WKA L2 shape):
+    no card. The label joins the entry's line and its items are sub-bullets
+    under it, their marker at the entry's text (#2019)."""
+    entry = _entry("Practice Lead, Example Residency\tJanuary 2022 – May 2024\t"
+                   "Selected Initiatives:\tBuilt a referral workflow\tWrote a clinic manual",
+                   project_name="Practice Lead")
+    gen, added = _render_through_template("_fill_clinical_practice_l2", [entry])
+    assert added == ["", "Practice Lead, Example Residency, January 2022 – May 2024, "
+                         "Selected Initiatives:",
+                     "Built a referral workflow", "Wrote a clinic manual"]
+    paras = [p for p in gen.doc.paragraphs if p.text in added[1:]]
+    assert [_entry_level(p) for p in paras] == [0, 1, 1]
+    assert [p.paragraph_format.left_indent.twips for p in paras] == [360, 720, 720]
+    assert [r.text for p in paras for r in p.runs if r.bold] == ["Practice Lead"]
+
+
+def test_an_entry_with_a_sub_list_is_weighed_whole_by_the_overflow_router():
+    """The entry's comments ride its first paragraph, but the router weighs
+    the sub-list's paragraphs too (#476's trap): its line alone holds a
+    fraction of the source."""
+    items = [f"Initiative {n}: built and ran a regional referral workflow across the "
+             f"affiliated clinics" for n in "ABCD"]
+    entry = _low_coverage_entry("Practice Lead\tSelected Initiatives:\t" + "\t".join(items), "L2")
+    assert len(entry["text"]) > 300, "fixture no longer reaches the router's length threshold"
+    gen, added = _render_through_template("_fill_clinical_practice_l2", [entry], route_overflow=True)
+    assert added == ["", "Practice Lead, Selected Initiatives:", *items]
+    assert gen._overflow_entries == [] and gen.stats["overflow_bullets_added"] == 0
+
+
+def test_an_l1_card_prints_stage2s_cell_join_as_inline_cells():
+    entry = _entry("Attending Physician, Example Hospital | 2015-2020 | Inpatient service | "
+                   "8 weeks per year", clinical_role="Attending Physician",
+                   institution="Example Hospital")
+    _gen, added = _render_through_template("_fill_clinical_practice_l1", [entry])
+    assert added == ["", f"{_L_CARD_HEAD}, Inpatient service, 8 weeks per year"]

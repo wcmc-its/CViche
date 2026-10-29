@@ -1368,3 +1368,20 @@ def test_a_year_start_renders_its_month_end_as_a_year(start, end, code, expected
 def test_a_range_whose_start_has_a_month_or_end_has_none_is_unchanged(start, end, code, expected):
     assert format_date_range(start, end, code) == expected
 
+
+
+# --- card_date: an entry card's date slot (#2019) ----------------------------------
+
+@pytest.mark.parametrize("slot, fields, source, expected", [
+    # The source's own dash, spaced or not, is kept; "Present" follows it.
+    ("2013-", {"start_date": "2013"}, "Lecturer, Topic A, 2013-", "2013-Present"),
+    ("2013 –", {"start_date": "2013"}, "Lecturer, Topic A, 2013 –", "2013 – Present"),
+    # The slot does not name the record's start year: left as written.
+    ("Fall-", {"start_date": "2013"}, "Lecturer, 2013-, Topic A, Fall-", "Fall-"),
+    # Not an open range: nothing to close.
+    ("2013", {"start_date": "2013"}, "Lecturer, Topic A, 2013", "2013"),
+])
+def test_card_date_closes_an_open_range_the_field_path_reads_as_running(
+        slot, fields, source, expected):
+    from unified_pipeline.stage6.formatting import card_date
+    assert card_date(slot, fields, "K1", source) == expected

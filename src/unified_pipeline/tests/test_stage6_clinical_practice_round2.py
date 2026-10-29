@@ -629,7 +629,7 @@ class TestClinicalLeadershipLines:
 
         by_element = {p._p: p.text for p in gen.doc.paragraphs}
         assert [by_element[e] for e in gen._row_receipts.elements_for(earlier)] == [
-            "Director, Example Wound Care Program, Norvale General Hospital, 2010"]
+            "Director, Example Wound Care Program, Norvale General Hospital, 2010"]  # a card (#2019)
         assert [by_element[e] for e in gen._row_receipts.elements_for(later)] == [
             "Director, Example Wound Care Program, Norvale General Hospital, 2016"]
 
