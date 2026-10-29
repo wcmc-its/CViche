@@ -15,10 +15,10 @@ anything past the first pipe).
 than one part (a genuine newline-separated entry), it is returned unchanged
 -- migrating those to `entry_fragments` wholesale was tried and reverted
 after reading the actual corpus diff it produced (see the function's own
-docstring): 2054_Opresko_Cv's "1994 | American Chemical Society Award,\\n..."
+docstring): farm 2054's "1994 | American Chemical Society Award,\\n..."
 already has 2 lines and collided with the pre-existing (separate) "DATE |
 AWARD" mislabeling bug in the loop below, adding a spurious duplicate row;
-2068_Yount_Cv's single blind entry mixes a tab AND a '|', and splitting the
+farm 2068's single blind entry mixes a tab AND a '|', and splitting the
 '|' first defeats the tab-rejoin disambiguation, again producing a spurious
 row ("Research.com" on its own). Both are why the fix is scoped to a
 single-line, tab-free entry only -- disclosed here, not silently dropped.
@@ -100,7 +100,7 @@ from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa:
 # Genuinely multi-line, farm-derived shapes: entry_lines already returns >1
 # part for each of these, so _entry_parts must return them byte-identical.
 MULTILINE_CASES = [
-    # 2054_Opresko_Cv H entry shape: a pipe INSIDE the first of two newline
+    # farm 2054 H entry shape: a pipe INSIDE the first of two newline
     # lines. Splitting further on '|' here is what produced the spurious row
     # -- _entry_parts must not touch it.
     "1994 | American Chemical Society Award,\nLehigh Valley Chapter of ACS",
@@ -110,8 +110,8 @@ MULTILINE_CASES = [
 ]
 
 # Single-line (blind) shapes that must ALSO pass through untouched: a tab
-# anywhere in the line (038WKA's 3-tab-field award, 2082_Dr_Scot's
-# mid-sentence wrap artifact, 2068_Yount_Cv's tab+pipe combination).
+# anywhere in the line (038WKA's 3-tab-field award, farm 2082's
+# mid-sentence wrap artifact, farm 2068's tab+pipe combination).
 BLIND_TAB_CASES = [
     "Award Name\tOctober 2024\tSelected from a national pool of applicants.",
     "1997 – National Institute for Staff and Organizational Development (NISOD) Award for\tTeaching Excellence. Valencia Community College, Orlando, Florida.",
@@ -230,7 +230,7 @@ def test_negative_control_single_award_unchanged():
 
 
 def test_negative_control_farm_pipe_blind_year_first_shape_unchanged():
-    """2054_Opresko_Cv's actual shape: a single-line 'YEAR | Award, Org'
+    """farm 2054's actual shape: a single-line 'YEAR | Award, Org'
     entry. One bare year and one award-looking part survive `_entry_parts`'
     column filter, which is one award -- below the two a multi-award list
     needs -- so the entry is returned whole and renders from the clean

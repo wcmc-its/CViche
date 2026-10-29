@@ -173,7 +173,7 @@ def _render(tmp_path: Path, entries: list[dict[str, object]],
 
 def test_is_column_header_row_flags_the_424_shapes():
     """Ground truth for the gate expectation named in the ticket: both
-    2071_Zuschlag_Cv's degree-table header and 2054_Opresko_Cv's bare 'NAME:'
+    farm 2071's degree-table header and farm 2054's bare 'NAME:'
     row are majority column-label vocabulary."""
     assert _is_column_header_row("Year: Degree | Discipline | Institution/Location")
     assert _is_column_header_row("NAME:")
@@ -484,7 +484,7 @@ def test_appendix_max_chars_is_the_documented_200():
 # ------------------------------------------------------------ render-level
 
 def test_degree_table_header_row_dropped_from_appendix(tmp_path, caplog):
-    """Positive control 1 (2071_Zuschlag_Cv shape): a T-coded degree-table
+    """Positive control 1 (farm 2071 shape): a T-coded degree-table
     header row produces no appendix paragraph."""
     entries = [_NAME_ENTRY,
                _t_entry("Year: Degree | Discipline | Institution/Location", ["Education"], 1)]
@@ -500,7 +500,7 @@ def test_degree_table_header_row_dropped_from_appendix(tmp_path, caplog):
 
 
 def test_bare_name_header_row_dropped_from_appendix(tmp_path, caplog):
-    """Positive control 2 (2054_Opresko_Cv shape): a bare 'NAME:' row that
+    """Positive control 2 (farm 2054 shape): a bare 'NAME:' row that
     would otherwise render as the appendix's '1. NAME:' line is dropped."""
     entries = [_NAME_ENTRY, _t_entry("NAME:", ["Committee Membership"], 1)]
     text = _output_text(_render(tmp_path, entries, caplog))

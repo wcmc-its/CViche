@@ -20,7 +20,7 @@ that guard applies only to a value one of the two scans produced.
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_personal_data_fallback_writeback.py -p no:cacheprovider
 
-Positive control: a minimal .docx fixture holding the real 2054_Opresko_Cv
+Positive control: a minimal .docx fixture holding the real farm 2054
 shape -- a "BUSINESS ADDRESS:" table cell whose value embeds "Phone:" /
 "E-mail:" lines (confirmed by reading that source document directly; it is
 NOT three separate table rows) -- with empty A-entries, so the only source
@@ -72,20 +72,20 @@ W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
 
 
 def _make_source_docx(path: Path) -> None:
-    """The 2054_Opresko_Cv shape, read directly off that source document:
+    """The farm 2054 shape, read directly off that source document:
     one table, row 0 is a NAME: label, row 1 is a BUSINESS ADDRESS: label
     whose value embeds Phone:/E-mail: lines the fallback pulls back out."""
     doc = Document()
     table = doc.add_table(rows=2, cols=2)
     table.rows[0].cells[0].text = "NAME:"
-    table.rows[0].cells[1].text = "Patricia Opresko"
+    table.rows[0].cells[1].text = "Jane Roe"
     table.rows[1].cells[0].text = "BUSINESS ADDRESS:"
     table.rows[1].cells[1].text = (
         "University of Pittsburgh\n"
         "5117 Centre Avenue\n"
         "Pittsburgh, PA 15213\n"
         "Phone:\t412-623-7764\n"
-        "E-mail:\tplo4@pitt.edu"
+        "E-mail:\tjlr4@example.edu"
     )
     doc.save(str(path))
 
@@ -169,7 +169,7 @@ def test_recovered_contact_fields_are_written_back_into_empty_slots(tmp_path):
         "Work email stayed empty -- the fallback's recovered email was "
         "discarded instead of written back (#550)"
     )
-    assert rows.get("work email:") == "plo4@pitt.edu"
+    assert rows.get("work email:") == "jlr4@example.edu"
     assert rows.get("office telephone:", "") != "", (
         "Office telephone stayed empty -- the fallback's recovered phone "
         "was discarded instead of written back (#550)"
@@ -184,7 +184,7 @@ def test_recovered_contact_fields_are_written_back_into_empty_slots(tmp_path):
 
 def test_extracted_contact_fields_are_not_overwritten_by_recovered_ones(tmp_path):
     source = tmp_path / "source.docx"
-    _make_source_docx(source)  # carries plo4@pitt.edu / 412-623-7764 / 5117 Centre Avenue
+    _make_source_docx(source)  # carries jlr4@example.edu / 412-623-7764 / 5117 Centre Avenue
 
     rows, _gen = _render(
         tmp_path,
@@ -204,7 +204,7 @@ def test_extracted_contact_fields_are_not_overwritten_by_recovered_ones(tmp_path
     assert rows.get("office telephone:") == "555-000-1111"
 
     # None of the fallback's OWN values leaked in anywhere they didn't belong.
-    for leaked in ("plo4@pitt.edu", "412-623-7764", "5117 Centre Avenue"):
+    for leaked in ("jlr4@example.edu", "412-623-7764", "5117 Centre Avenue"):
         assert leaked not in json.dumps(rows), (
             f"recovered value {leaked!r} overwrote an already-extracted field"
         )
@@ -217,12 +217,12 @@ def test_write_back_is_per_field_not_wholesale(tmp_path):
     cases are both passed by a wrong recovery that assigns the three slots
     together -- a single ``if not work_email:`` guarding all three. This mixed
     case is the one that separates them, and it is the common corpus shape:
-    2054_Opresko_Cv's entries supply nothing while its source table supplies
+    farm 2054's entries supply nothing while its source table supplies
     address/phone/email, but a CV whose entries yield an email and whose
     address only exists in the source table needs BOTH halves.
     """
     source = tmp_path / "source.docx"
-    _make_source_docx(source)  # plo4@pitt.edu / 412-623-7764 / 5117 Centre Avenue
+    _make_source_docx(source)  # jlr4@example.edu / 412-623-7764 / 5117 Centre Avenue
 
     rows, _gen = _render(
         tmp_path,
@@ -260,7 +260,7 @@ def test_write_back_is_per_field_not_wholesale(tmp_path):
         "the address block's embedded E-mail line rode along into Office "
         "address because an email had already been found elsewhere"
     )
-    assert "plo4@pitt.edu" not in rows.get("office address:", "")
+    assert "jlr4@example.edu" not in rows.get("office address:", "")
 
 
 def test_an_embedded_phone_line_is_consumed_even_when_the_phone_is_known(tmp_path):
@@ -372,7 +372,7 @@ def test_a_complete_record_never_opens_the_source_document(tmp_path, monkeypatch
         tmp_path,
         entries=list(_COMPLETE_CONTACT_ENTRIES),
         original_doc_path=str(source),
-        cv_owner={"full_name": "Patricia Opresko"},
+        cv_owner={"full_name": "Jane Roe"},
     )
 
     assert opened == [], (
@@ -399,7 +399,7 @@ def test_a_record_missing_only_the_name_still_opens_the_source_document(
         "a record whose only missing field was the name skipped the source "
         "document, so the table scan that recovers a name never ran"
     )
-    assert _rendered_name(tmp_path / "out.docx") == "Patricia Opresko"
+    assert _rendered_name(tmp_path / "out.docx") == "Jane Roe"
 
 
 # --------------------------------------------------------------------------
@@ -411,9 +411,9 @@ def test_contact_table_after_the_first_three_tables_is_still_scanned(tmp_path):
     source = tmp_path / "source.docx"
     _make_label_table_docx(
         source,
-        rows=[("NAME:", "Patricia Opresko"),
+        rows=[("NAME:", "Jane Roe"),
               ("Office telephone:", "412-623-7764"),
-              ("Email:", "plo4@pitt.edu")],
+              ("Email:", "jlr4@example.edu")],
         leading_tables=4,
     )
 
@@ -423,8 +423,8 @@ def test_contact_table_after_the_first_three_tables_is_still_scanned(tmp_path):
         "the contact table is table 5 of the document and was skipped -- the "
         "scan stopped after the first three tables"
     )
-    assert rows.get("work email:") == "plo4@pitt.edu"
-    assert _rendered_name(tmp_path / "out.docx") == "Patricia Opresko"
+    assert rows.get("work email:") == "jlr4@example.edu"
+    assert _rendered_name(tmp_path / "out.docx") == "Jane Roe"
 
 
 def test_email_after_the_twentieth_paragraph_is_still_recovered(tmp_path):
@@ -432,13 +432,13 @@ def test_email_after_the_twentieth_paragraph_is_still_recovered(tmp_path):
     doc = Document()
     for index in range(24):
         doc.add_paragraph(
-            f"{index + 1}. Opresko PL. A paper with no contact details. 2019.")
-    doc.add_paragraph("Correspondence to: plo4@pitt.edu")
+            f"{index + 1}. Roe JL. A paper with no contact details. 2019.")
+    doc.add_paragraph("Correspondence to: jlr4@example.edu")
     doc.save(str(source))
 
     rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(source))
 
-    assert rows.get("work email:") == "plo4@pitt.edu", (
+    assert rows.get("work email:") == "jlr4@example.edu", (
         "the only email in the document is past paragraph 20 and was not "
         "recovered -- the paragraph scan stopped at a fixed count"
     )
@@ -473,16 +473,16 @@ def test_business_phone_and_business_email_do_not_land_in_the_address(tmp_path):
     _make_label_table_docx(
         source,
         rows=[("Business phone:", "412-623-7764"),
-              ("Business email:", "plo4@pitt.edu"),
+              ("Business email:", "jlr4@example.edu"),
               ("Business address:", "University of Pittsburgh\n5117 Centre Avenue")],
     )
 
     rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(source))
 
     assert rows.get("office telephone:") == "412-623-7764"
-    assert rows.get("work email:") == "plo4@pitt.edu"
+    assert rows.get("work email:") == "jlr4@example.edu"
     assert "5117 Centre Avenue" in rows.get("office address:", "")
-    for not_an_address in ("412-623-7764", "plo4@pitt.edu"):
+    for not_an_address in ("412-623-7764", "jlr4@example.edu"):
         assert not_an_address not in rows.get("office address:", ""), (
             f"{not_an_address!r} rendered as the Office address -- 'business' "
             "in the label was read as 'business address'"
@@ -504,11 +504,11 @@ def test_metadata_labels_ending_in_name_are_not_the_person_name(tmp_path, label)
 @pytest.mark.parametrize("label", ["NAME:", "Full name:"])
 def test_person_name_labels_are_still_recovered(tmp_path, label):
     source = tmp_path / "source.docx"
-    _make_label_table_docx(source, rows=[(label, "Patricia Opresko")])
+    _make_label_table_docx(source, rows=[(label, "Jane Roe")])
 
     _rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(source))
 
-    assert _rendered_name(tmp_path / "out.docx") == "Patricia Opresko"
+    assert _rendered_name(tmp_path / "out.docx") == "Jane Roe"
 
 
 # --------------------------------------------------------------------------
@@ -946,17 +946,17 @@ def test_is_personal_email_reads_the_key_the_domain_and_the_label(
 
 @pytest.mark.parametrize("case, cv_owner, entries, expected", [
     ("credentials beat full_name",
-     {"full_name_with_credentials": "Patricia L. Opresko, PhD\nDate prepared: June 2026",
-      "full_name": "Patricia Opresko"},
-     [], "Patricia L. Opresko, PhD"),
+     {"full_name_with_credentials": "Jane L. Roe, PhD\nDate prepared: June 2026",
+      "full_name": "Jane Roe"},
+     [], "Jane L. Roe, PhD"),
     ("full_name when there are no credentials",
-     {"full_name": "Patricia Opresko"}, [], "Patricia Opresko"),
+     {"full_name": "Jane Roe"}, [], "Jane Roe"),
     ("a LinkedIn slug when cv_owner has neither",
-     {}, [_a("https://www.linkedin.com/in/patricia-opresko")], "Patricia Opresko"),
+     {}, [_a("https://www.linkedin.com/in/jane-roe")], "Jane Roe"),
     ("the document uid when nothing else names the person",
      {}, [], "Testpdwb"),
     ("a last name alone is not a complete name",
-     {"last_name": "Opresko"}, [], "Testpdwb"),
+     {"last_name": "Roe"}, [], "Testpdwb"),
 ])
 def test_name_precedence(tmp_path, case, cv_owner, entries, expected):
     case_dir = tmp_path / case.replace(" ", "_")
@@ -1053,7 +1053,7 @@ def test_recovered_address_survives_a_gridspan_merged_label_cell(tmp_path):
     table.rows[0].cells[0].text = "Professional Address:"
     # python-docx returns the SAME cell object for every column a merge
     # spans -- row.cells[0] and row.cells[1] are now identical, exactly the
-    # NSUJZG_2027_Eil_Robert shape (label merged across columns 0-1, value
+    # NSUJZG shape (label merged across columns 0-1, value
     # in column 2).
     table.rows[0].cells[0].merge(table.rows[0].cells[1])
     table.rows[0].cells[2].text = "2720 S Moody Ave KCRB 2006, Portland, OR 97201"
@@ -1064,7 +1064,7 @@ def test_recovered_address_survives_a_gridspan_merged_label_cell(tmp_path):
     assert rows.get("office address:", "") != "professional address:", (
         "the merged label cell was read as its own value -- the Office "
         "address row now shows the bare label instead of the address "
-        "(#550 round 1, NSUJZG_2027_Eil_Robert)"
+        "(#550 round 1, NSUJZG)"
     )
     assert "2720 S Moody Ave" in rows.get("office address:", "")
 
@@ -1120,7 +1120,7 @@ def test_run_stage6_forwards_original_doc_path_to_the_fallback(tmp_path):
     run_stage6(input_path=str(ip), output_path=str(with_source), verbose=False,
                original_doc_path=str(source))
     rows = _personal_data_row_values(with_source)
-    assert rows["work email:"] == "plo4@pitt.edu"
+    assert rows["work email:"] == "jlr4@example.edu"
     assert rows["office telephone:"] == "412-623-7764"
     assert "5117 Centre Avenue" in rows["office address:"]
 
@@ -1289,7 +1289,7 @@ def test_a_clean_recovery_records_nothing_withheld(tmp_path):
     src = tmp_path / "source.docx"
     _make_source_docx(src)
     rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
-    assert rows["work email:"] == "plo4@pitt.edu"
+    assert rows["work email:"] == "jlr4@example.edu"
     assert gen._pii_result.withheld == []
     assert "withheld" not in _docx_texts(tmp_path / "out.docx")
 

@@ -291,7 +291,7 @@ def test_the_narration_is_not_copied_onto_stderr_as_well(tmp_path, monkeypatch, 
 _GOLDEN_DRIVER = '''
 import sys
 sys.path.insert(0, {root!r})
-sys.argv = ["run_full_pipeline.py", "2097_Upton_Cv", "--stage", "1a"]
+sys.argv = ["run_full_pipeline.py", "9999_Doe_Jane_CV", "--stage", "1a"]
 import run_full_pipeline as r
 r._OUTPUTS_ROOT = r.Path('src/unified_pipeline/outputs')  # keep artifacts under the cwd (#490)
 r.get_cv_hierarchy_chunked = lambda *, cv_path: (
@@ -301,13 +301,13 @@ r.configure_cli_logging()
 sys.exit(r.main())
 '''
 
-_OUT = 'src/unified_pipeline/outputs/stage_1a_segmentation/2097_Upton_Cv_segmented.json'
+_OUT = 'src/unified_pipeline/outputs/stage_1a_segmentation/9999_Doe_Jane_CV_segmented.json'
 _GOLDEN_STDOUT = [
     "=" * 80,
     "CV PROCESSING PIPELINE - STAGE 1A ONLY",
     "=" * 80,
-    "Input: data/sample_cvs/word/2097_Upton_Cv.docx",
-    "Document UID: 2097_Upton_Cv",
+    "Input: data/sample_cvs/word/9999_Doe_Jane_CV.docx",
+    "Document UID: 9999_Doe_Jane_CV",
     "",
     "=" * 80,
     "STAGE 1A: HIERARCHY EXTRACTION",
@@ -324,7 +324,7 @@ _GOLDEN_STDOUT = [
     "=" * 80,
     "PIPELINE COMPLETE",
     "=" * 80,
-    "Document: 2097_Upton_Cv",
+    "Document: 9999_Doe_Jane_CV",
     "Models: none (no LLM calls recorded)",
     "",
     "Outputs:",
@@ -362,7 +362,7 @@ def test_the_real_process_writes_exactly_these_lines_to_stdout(tmp_path):
     formatter; send the narration to stderr; add a print() back.
     """
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
-    (tmp_path / 'data/sample_cvs/word/2097_Upton_Cv.docx').write_bytes(b'PK\x03\x04fake')
+    (tmp_path / 'data/sample_cvs/word/9999_Doe_Jane_CV.docx').write_bytes(b'PK\x03\x04fake')
     driver = tmp_path / 'golden_driver.py'
     driver.write_text(_GOLDEN_DRIVER.format(root=str(_ROOT)))
     env = {k: v for k, v in os.environ.items()

@@ -1295,11 +1295,11 @@ def test_resolve_cv_path_for_run_survives_a_document_uid_too_long_for_the_regex(
     tmp_path, monkeypatch
 ):
     """document_uid routinely exceeds prompt_logger._RUN_ID_RE's 10-character
-    cap -- this very module's own docstring uses '2097_Upton_Cv' (13 chars)
+    cap -- this very module's own docstring uses '9999_Doe_Jane_CV' (16 chars)
     as the canonical example uid. Calling set_current_run_id(document_uid)
     directly raises ValueError; resolve_cv_path_for_run must derive a scope
     id that always satisfies the regex instead."""
-    long_uid = "2097_Upton_Cv"
+    long_uid = "9999_Doe_Jane_CV"
     assert not prompt_logger._RUN_ID_RE.match(long_uid), (
         "fixture uid no longer exercises the length trap -- pick a longer one")
     with pytest.raises(ValueError):

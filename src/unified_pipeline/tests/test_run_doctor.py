@@ -3737,7 +3737,7 @@ def test_owner_attribution_warns_on_a_students_awards_coded_as_the_owners():
 
 @pytest.mark.parametrize("code", ["H", "I", "D1", "D2", "D3"])
 def test_owner_attribution_a_plural_students_heading_needs_no_mentee_line(code):
-    # 2082_Dr_Scot 617-633: each line names its student, so no N3 line heads them.
+    # farm 2082 617-633: each line names its student, so no N3 line heads them.
     path = ["Teaching", "Undergraduate Honor Students’ Achievements"]
     findings = _mentee_outputs(_line_entry(624, "Ada Example. 2020. Attending law school.",
                                            code=code, hierarchy=path))
@@ -3772,7 +3772,7 @@ def test_owner_attribution_an_n4_line_also_heads_a_singular_students_heading():
 
 
 def test_owner_attribution_names_the_deepest_heading_naming_mentees():
-    # 2068_Yount_Cv 975: the leaf names a student, under a parent naming trainees.
+    # farm 2068 975: the leaf names a student, under a parent naming trainees.
     path = ["DOCTORAL TRAINEES (current and completed)", "Doctoral Student Paper Awards"]
     findings = _mentee_outputs(_line_entry(975, "Example, A. (2011). A paper.", code="H",
                                            hierarchy=path))

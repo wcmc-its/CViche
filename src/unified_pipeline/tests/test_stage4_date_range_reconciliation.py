@@ -254,7 +254,7 @@ def test_reconcile_date_range_empty_text_is_a_no_op():
 
 def test_condition_implausible_range_blocks_repair():
     # A course code shaped like "NNNN-NNNN" (the real gated shape from
-    # 2054_Opresko_Cv's K3 entries, round-1 finding 1) is not a year range;
+    # farm 2054's K3 entries, round-1 finding 1) is not a year range;
     # start > end and both fall outside the plausible bounds.
     fields = {"start_date": None, "end_date": None}
     text = "Completed MSELCT 5130-1020, no dates listed"

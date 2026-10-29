@@ -954,12 +954,12 @@ def test_rows_before_the_mentee_line_are_left_alone():
 
 
 @pytest.mark.parametrize("code,heading", [
-    # 2082_Dr_Scot: each row names its own student; no mentee line above.
+    # farm 2082: each row names its own student; no mentee line above.
     ("H", ("Teaching", "Undergraduate Honor Students’ Achievements")),
     ("D1", ("Teaching", "Undergraduate Honor Students’ Achievements")),
-    # 2068_Yount_Cv: a doctoral student's paper award.
+    # farm 2068: a doctoral student's paper award.
     ("H", ("TEACHING", "TEACHING AND MENTORING", "MASTERS STUDENT TRAINEES")),
-    # 2068_Yount_Cv 975: a singular leaf under a plural parent.
+    # farm 2068 975: a singular leaf under a plural parent.
     ("H", ("TEACHING", "TEACHING AND MENTORING", "DOCTORAL TRAINEES (current and completed)",
            "Doctoral Student Paper Awards")),
     ("H", ("Mentees",)),

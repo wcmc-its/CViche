@@ -354,7 +354,7 @@ class TestDatesOverlapOrMatch:
     # -- no proof available -> conservative True -----------------------------
 
     def test_same_year_missing_month_on_one_side_cannot_be_proven_disjoint(self):
-        # The live corpus shape (Opresko): an "Assistant Professor" role ending
+        # The live corpus shape (the farm-2054 owner's CV): an "Assistant Professor" role ending
         # a year-only "2014" against a "Tenured Associate Professor" role
         # starting "2014-03". Nothing in the CV says which month 2014 ended, so
         # nothing proves the two are disjoint -- True, and the content gates
