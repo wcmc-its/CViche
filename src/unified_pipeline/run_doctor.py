@@ -19,11 +19,9 @@ Lints, ranked by the severity of the failure class they catch:
                           as a Heading) absent from the 1a hierarchy AND
                           every entry hierarchy path ('PROFESSIONAL
                           EXPERIENCE' demoted to content); a Heading-styled
-                          line that is not ALL-CAPS is reported at INFO only
-                          when 1a promoted another line of its style and it
-                          does not head the contact block; a line of the
-                          Personal Data block (CV title, employer) is not a
-                          header
+                          line that is not ALL-CAPS is not a candidate; a
+                          line of the Personal Data block (CV title,
+                          employer) is not a header
 3. bucket_status          grant status vs the funding subsection the grant
                           actually rendered under in the stage-6 document
                           (the #214 rebucketing rules)
@@ -801,7 +799,6 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
 )
 from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     MISSED_HEADERS_WARN_COUNT,
-    HeadingLine,
     _header_key,
     _hierarchy_titles,
     lint_header_consumed_record,
@@ -1375,18 +1372,6 @@ _NAME_CREDENTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: A person line with the role marker in FRONT ('PI. Jane Q. Sample', 'Dr.
-#: John Example'; #539). Both halves must hold, so a header that merely
-#: starts with a marker ('PI. RESPONSIBILITIES') is not swallowed: an exact
-#: marker token, then a run of Title-case name words / initials that ends on a
-#: real (multi-letter, lower-case-bearing) name word. ALL-CAPS text is never
-#: matched -- a caps line after a marker reads as a header, not a name.
-_LEADING_ROLE_NAME_RE = re.compile(
-    r"^(?:PI|Dr|Prof|Mr|Mrs|Ms)\.\s+(?:[A-Z]\.?\s+){0,2}"
-    r"[A-Z][a-z][\w'’-]*(?:\s+(?:[A-Z]\.?|[A-Z][a-z][\w'’-]*)){0,3}$"
-)
-
-
 def _logical_cells(row) -> list:
     """The row's distinct cells. python-docx's ``row.cells`` repeats one
     gridSpan-merged cell once per layout-grid column it spans, so a merged
@@ -1423,36 +1408,6 @@ def _is_single_column(tbl) -> bool:
 _ENUM_TAB_RE = re.compile(r"^(\s*(?:[IVXLCivxlc]+|[A-Za-z])\.)\s*\t\s*")
 
 
-def _is_header_shaped(text: str) -> bool:
-    """Every candidate rule but case, style and bold: short, letters and no
-    digits, not template boilerplate, no tab, not a person line."""
-    if not 3 <= len(text) <= 60:
-        return False
-    if not any(ch.isalpha() for ch in text) or any(ch.isdigit() for ch in text):
-        return False
-    if is_source_boilerplate(text):
-        return False
-    # A section header is a standalone label. A tab means 'label<TAB>value'
-    # -- a data row that happens to be styled like a heading, e.g. the
-    # licensure rows 'Active\t\t\tMaryland' / 'Certification:\t\t\tAmerican
-    # Board of Surgery'. Segmentation is right not to promote these.
-    if "\t" in text:
-        return False
-    # The owner's name/credential line is document furniture, not a section:
-    # 'STANLEY J. SZEFLER, M.D.', 'LEE W. SHOCKLEY, MD, MBA, FACEP, FAAEM,
-    # CPE', 'CURRICULUM VITAE - JEFFREY R OLSEN, MD'. Anchored on the
-    # comma-suffix position so real headers that merely contain a comma
-    # ('ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:') survive.
-    return not (_NAME_CREDENTIAL_RE.search(text) or _LEADING_ROLE_NAME_RE.match(text))
-
-
-class HeaderLines(NamedTuple):
-    """One read of a source docx for missed_headers: the ALL-CAPS candidates
-    and every Heading-styled paragraph of the same walk (#1232)."""
-    candidates: list[str]
-    heading_lines: list[HeadingLine]
-
-
 def iter_header_candidates(docx_path: str) -> list[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS, and bold or
     styled as a Heading, from top-level paragraphs and single-column table
@@ -1461,35 +1416,42 @@ def iter_header_candidates(docx_path: str) -> list[str]:
     are data tables — their bold cells are column headers — and document
     furniture ('CURRICULUM VITAE', revision stamps) is not a header either.
     These are what stage 1a should have promoted to hierarchy nodes."""
-    return read_header_lines(docx_path).candidates
-
-
-def read_header_lines(docx_path: str) -> HeaderLines:
-    """`iter_header_candidates`' lines plus the `HeadingLine`s of the same
-    walk, from one read of the docx."""
     Document = _get_docx_document()
 
     candidates: list[str] = []
-    heading_lines: list[HeadingLine] = []
 
     def consider(para):
         text = _ENUM_TAB_RE.sub(r"\1 ", para.text.strip(), count=1)
-        style = getattr(para.style, "name", "") or ""
-        heading = style.startswith("Heading")
-        shaped = _is_header_shaped(text)
-        # Only an ALL-CAPS line is a candidate here, whatever its style (#1232,
+        if not 3 <= len(text) <= 60:
+            return
+        if not any(ch.isalpha() for ch in text) or any(ch.isdigit() for ch in text):
+            return
+        if is_source_boilerplate(text):
+            return
+        # A section header is a standalone label. A tab means 'label<TAB>value'
+        # -- a data row that happens to be styled like a heading, e.g. the
+        # licensure rows 'Active\t\t\tMaryland' / 'Certification:\t\t\tAmerican
+        # Board of Surgery'. Segmentation is right not to promote these.
+        if "\t" in text:
+            return
+        # The owner's name/credential line is document furniture, not a section:
+        # 'STANLEY J. SZEFLER, M.D.', 'LEE W. SHOCKLEY, MD, MBA, FACEP, FAAEM,
+        # CPE', 'CURRICULUM VITAE - JEFFREY R OLSEN, MD'. Anchored on the
+        # comma-suffix position so real headers that merely contain a comma
+        # ('ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:') survive.
+        if _NAME_CREDENTIAL_RE.search(text):
+            return
+        # Only an ALL-CAPS line is a candidate, whatever its style (#1232,
         # decided 2026-10-30). A Heading style alone admitted the record
         # titles, journal names and contact-block lines CVs style Heading 1-6:
         # on one batch 42 of 75 findings were such lines and none was a real
-        # miss. A mixed-case Heading-styled line is recorded instead, and
-        # `lint_missed_headers` reports it only when stage 1a promoted another
-        # line of its style (G2).
-        caps = text == text.upper()
-        if heading and text:
-            heading_lines.append(HeadingLine(text, style, shaped and not caps))
-        if not (shaped and caps):
+        # miss. The cost is a mixed-case Heading-styled section label that
+        # stage 1a truly missed, which is no longer reported. A role-marker
+        # name line ('PI. Jane Q. Sample', #539) is mixed-case, so it stays out.
+        if text != text.upper():
             return
-        if heading:
+        style = getattr(para.style, "name", "") or ""
+        if style.startswith("Heading"):
             candidates.append(text)
             return
         runs = [r for r in para.runs if r.text.strip()]
@@ -1518,7 +1480,7 @@ def read_header_lines(docx_path: str) -> HeaderLines:
         consider(para)
     for tbl in doc.tables:
         walk_table(tbl)
-    return HeaderLines(candidates, heading_lines)
+    return candidates
 
 
 # `_docx_text`, `_cell_text`, `_table_lines` and the body-order block walk
@@ -1832,7 +1794,6 @@ _VIEW_LABELS = {
     "source_lines": "source",
     "source_block_lines": "source",
     "candidates": "candidates",
-    "heading_lines": "candidates",
     "stage_1a": "stage_1a",
     "stage_1b": "stage_1b",
     "stage_2": "stage_2",
@@ -1867,7 +1828,7 @@ _VIEW_LABELS = {
 LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("segmentation", lint_segmentation, ("source_lines", "stage_1a", "stage_2")),
     LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2"),
-             optional=("stage_4", "heading_lines")),
+             optional=("stage_4",)),
     LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
     # `subpoints` (#1205) reads the same docx as `blocks`: prose a
     # tracked-deleted sub-point offers is delivered for review, not lost.
@@ -2191,10 +2152,8 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     views["source_block_lines"] = source_block_lines
     views["source_lines"] = (None if source_block_lines is None
                              else [line for _, line in source_block_lines])
-    header_lines = (_try(lambda: read_header_lines(str(source_path)), "candidates", _note)
-                    if source_path else None)
-    views["candidates"] = None if header_lines is None else header_lines.candidates
-    views["heading_lines"] = None if header_lines is None else header_lines.heading_lines
+    views["candidates"] = (_try(lambda: iter_header_candidates(str(source_path)), "candidates", _note)
+                           if source_path else None)
     views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                        if paths["stage_6_docx"] else None)
     views["deleted_blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"]), deleted=True),

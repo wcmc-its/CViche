@@ -48,7 +48,6 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     DUPLICATE_PASSAGE_MIN_BLOCKS,
     MISSED_HEADERS_WARN_COUNT,
-    HeadingLine,
     appendix_entry_count,
     honors_table_totals,
     iter_header_candidates,
@@ -110,7 +109,6 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     rank_lints,
     read_docx_blocks,
     read_docx_table_rows,
-    read_header_lines,
     run_doctor,
     unrouted_code_counts,
 )
@@ -869,24 +867,6 @@ def test_run_doctor_missed_headers_skips_mixed_case_heading_lines(tmp_path):
     assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", ["MENTORING"])]
 
 
-def test_run_doctor_missed_headers_reports_a_mixed_case_line_of_a_style_1a_promoted(tmp_path):
-    """#1232 G2, the wire: run_doctor hands the source's Heading-styled lines
-    to the lint. 'Grants' styled Heading 2 is the 1a header GRANTS, so another
-    mixed-case Heading 2 line is reported, at INFO; Heading 1 lines are not,
-    because 1a promoted no Heading 1 line."""
-    root = _build_clean_run(tmp_path)
-    source_path = root / "uploads" / f"{_UID}_cv.docx"
-    source = Document(str(source_path))
-    source.add_paragraph("Grants", style="Heading 2")
-    source.add_paragraph("Example Mentoring Activities", style="Heading 2")
-    source.add_paragraph("Example Record Alpha on Widgets", style="Heading 1")
-    source.save(str(source_path))
-
-    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "missed_headers"]
-    assert [(f["severity"], f["evidence"]) for f in findings] == [
-        ("INFO", ["Example Mentoring Activities"])]
-
-
 def test_run_doctor_reports_a_lost_source_table(tmp_path):
     """The wire: run_doctor reads the source docx once, and both the flat
     lines (coverage) and the block-tagged lines (table_lost) come from it."""
@@ -1128,10 +1108,6 @@ def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
     doc.save(path)
 
     assert iter_header_candidates(str(path)) == ["PI. RESPONSIBILITIES"]
-    # G2 (#1232) reads mixed-case Heading lines again: the name lines stay out.
-    assert [line.text for line in read_header_lines(str(path)).heading_lines if line.style_only] == [
-        "Dr. PUBLICATIONS", "Pi. Notes",
-        "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
 
 
 def test_iter_header_candidates_admits_a_heading_styled_line_only_when_all_caps(tmp_path):
@@ -1152,35 +1128,6 @@ def test_iter_header_candidates_admits_a_heading_styled_line_only_when_all_caps(
     doc.save(path)
 
     assert iter_header_candidates(str(path)) == ["SELECTED EXAMPLE LECTURES", "EXAMPLE SERVICE"]
-
-
-def test_read_header_lines_records_every_heading_styled_line(tmp_path):
-    """#1232 G2: one read gives the candidates and every Heading-styled line
-    with its style. `style_only` marks a mixed-case line that passes every
-    other candidate rule; a digit or a tab keeps a line from qualifying, and
-    an ALL-CAPS line is a candidate, not style-only."""
-    long_title = "An Example Record Title That Runs Well Past Sixty Characters Long"
-    doc = Document()
-    doc.add_paragraph("Example Appointments", style="Heading 2")
-    doc.add_paragraph("Example Degrees 2001", style="Heading 2")
-    doc.add_paragraph("Example\tValue", style="Heading 2")
-    doc.add_paragraph("Ex", style="Heading 2")
-    doc.add_paragraph(long_title, style="Heading 2")
-    doc.add_paragraph("EXAMPLE SERVICE", style="Heading 1")
-    doc.add_paragraph("", style="Heading 3")
-    doc.add_paragraph("Bold Example Line").runs[0].bold = True
-    path = tmp_path / "cv.docx"
-    doc.save(path)
-
-    lines = read_header_lines(str(path))
-    assert lines.candidates == ["EXAMPLE SERVICE"]
-    assert lines.heading_lines == [
-        HeadingLine("Example Appointments", "Heading 2", True),
-        HeadingLine("Example Degrees 2001", "Heading 2", False),
-        HeadingLine("Example\tValue", "Heading 2", False),
-        HeadingLine("Ex", "Heading 2", False),
-        HeadingLine(long_title, "Heading 2", False),
-        HeadingLine("EXAMPLE SERVICE", "Heading 1", False)]
 
 
 def test_iter_header_candidates_flattens_the_tab_after_an_enumeration_token(tmp_path):
@@ -1300,78 +1247,6 @@ def test_missed_headers_quiet_when_header_is_known():
     stage2 = {"entries": [_entry("Mentee record line long enough",
                                  hierarchy=["MENTORING"])]}
     assert lint_missed_headers(["MENTORING"], {"hierarchy": []}, stage2) == []
-
-
-_G2_STAGE1A = {"hierarchy": [{"text": "EXAMPLE GRANTS", "level": "H1", "children": []}]}
-
-
-def test_missed_headers_reports_a_style_only_line_only_when_1a_promoted_its_style():
-    """#1232 G2: a mixed-case line qualified by its Heading style alone is
-    reported when a line of the same style is a 1a header ('Example Grants');
-    a style 1a promoted no line of reports nothing, and neither does a run
-    whose 1a promoted nothing."""
-    lines = [HeadingLine("Example Grants", "Heading 1", True),
-             HeadingLine("Example Appointments", "Heading 1", True),
-             HeadingLine("Example appointments", "Heading 1", True),   # same key: once
-             HeadingLine("a.:", "Heading 1", True),                    # empty key
-             HeadingLine("Journal of Examples", "Heading 4", True),
-             HeadingLine("Example Service Record", "Heading 1", False)]
-    found = lint_missed_headers([], _G2_STAGE1A, {"entries": []}, None, lines)
-    assert [(f["severity"], f["message"], f["evidence"]) for f in found] == [(
-        "INFO", "header-like source line missing from segmentation: 'Example Appointments'",
-        ["Example Appointments"])]
-    assert lint_missed_headers([], {"hierarchy": []}, {"entries": []}, None, lines) == []
-
-    # A line that names an entry's hierarchy path is a known header too.
-    stage2 = {"entries": [_entry("A mentee record line long enough", hierarchy=["MENTORING"])]}
-    mentoring = [lines[0], HeadingLine("Mentoring", "Heading 1", True)]
-    assert lint_missed_headers([], _G2_STAGE1A, stage2, None, mentoring) == []
-
-    # A header 1a joined from two source lines promotes the first line's style.
-    wrapped = {"hierarchy": [{"text": "EXAMPLE GRANTS AND CONTRACTS", "level": "H1", "children": []}]}
-    lines = [HeadingLine("Example Grants and", "Heading 3", True),
-             HeadingLine("Example Awards Received", "Heading 3", True)]
-    found = lint_missed_headers([], wrapped, {"entries": []}, None, lines)
-    assert [f["evidence"] for f in found] == [["Example Awards Received"]]
-
-
-def test_missed_headers_style_only_lines_never_set_the_run_severity():
-    """G2 lines are not counted toward the WARN threshold: five ALL-CAPS
-    lines plus seven of them stay INFO."""
-    few = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT - 1)]
-    weak = [HeadingLine(f"Example Record {name}", "Heading 1", True)
-            for name in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta")]
-    lines = [HeadingLine("Example Grants", "Heading 1", True), *weak]
-    found = lint_missed_headers(few, _G2_STAGE1A, {"entries": []}, None, lines)
-    assert [f["evidence"][0] for f in found] == few + [line.text for line in weak]
-    assert {f["severity"] for f in found} == {"INFO"}
-
-
-def test_missed_headers_skips_a_style_only_line_that_heads_the_contact_block():
-    """G2: a label whose next stage-4 entry is Personal Data heads the
-    contact block ('Contact Information' over the address). Followed by any
-    other code, or with no stage 4, it is reported."""
-    lines = [HeadingLine("Example Grants", "Heading 2", True),
-             HeadingLine("Contact Information", "Heading 2", True)]
-    stage2 = {"entries": [_entry("Contact Information", start=7),
-                          _entry("An example table row", start="8.0"),
-                          _entry("An example closing line", start=20)]}
-
-    def stage4(code):
-        return {"cv_owner": _MH_STAGE4["cv_owner"], "entries": [
-            {"taxonomy_code": "T", "text": "Contact Information", "element_idx_start": 7},
-            {"taxonomy_code": "B1", "text": "An example table row", "element_idx_start": "8.0"},
-            {"taxonomy_code": code, "text": "Example Street, Example City", "element_idx_start": 9},
-            {"text": "An uncoded example line", "element_idx_start": 9}]}
-
-    assert lint_missed_headers([], _G2_STAGE1A, stage2, stage4("A"), lines) == []
-    assert len(lint_missed_headers([], _G2_STAGE1A, stage2, stage4("B1"), lines)) == 1
-    assert len(lint_missed_headers([], _G2_STAGE1A, stage2, None, lines)) == 1
-
-    # The owner's name and a Personal Data line are furniture here as well.
-    furniture = [HeadingLine("Jane Q. Sample", "Heading 2", True),
-                 HeadingLine("Example Street, Example City", "Heading 2", True)]
-    assert lint_missed_headers([], _G2_STAGE1A, stage2, stage4("A"), lines + furniture) == []
 
 
 # ------------------------------------------------------- lint 3: bucket/status
