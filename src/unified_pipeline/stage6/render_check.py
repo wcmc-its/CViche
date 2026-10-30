@@ -323,15 +323,18 @@ def tab_aware_record_lines(text: object) -> list[str]:
     return lines
 
 
-def dated_clause_lines(text: object, extracted_fields: dict) -> list[str]:
+def dated_clause_lines(text: object, extracted_fields: dict,
+                       record_word: re.Pattern[str] | None = None) -> list[str]:
     """The dated clauses (`dated_record_clauses`) of each line of `text` that
     `tab_record_segments` leaves whole, read tab part by tab part: records
     that share a line with no tab between them (#1243). A year the entry's
-    own titles and names write (`_name_field_values`) is no record's date.
-    Only the recovery pass reads them, as it reads `tab_aware_record_lines`."""
+    own titles and names write (`_name_field_values`) is no record's date,
+    and a clause without the `record_word` its section's records name is no
+    record. Only the recovery pass reads them, as it reads
+    `tab_aware_record_lines`."""
     names = _name_field_values(extracted_fields)
     return [clause for line in str(text or "").split("\n") if not tab_record_segments(line)
-            for part in line.split("\t") for clause in dated_record_clauses(part, names)]
+            for part in line.split("\t") for clause in dated_record_clauses(part, names, record_word)]
 
 
 def noted_clause_rendered(clause: str, haystack: str) -> bool:

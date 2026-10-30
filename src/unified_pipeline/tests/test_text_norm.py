@@ -367,22 +367,20 @@ def test_dated_record_clauses_reads_a_parenthetical_note_as_no_record():
         "Education Board (QEB) approved, national accreditation received Dec, 2023)") == []
 
 
-def test_dated_record_clauses_keeps_an_office_held_within_the_record():
+def test_dated_record_clauses_reads_an_office_held_within_the_record_as_no_record():
+    # #1243 review: the office in the aside, written alone, drops its board.
     assert text_norm.dated_record_clauses(
-        "Advisory Board, Quokka Research Programs, 1992-1998 (Chairman, 1996-1998)") == [
-        "Advisory Board, Quokka Research Programs, 1992-1998", "Chairman, 1996-1998"]
-    # More than OFFICE_ASIDE_MAX_WORDS words besides its dates is a note.
+        "Advisory Board, Quokka Research Programs, 2002-2008 (Chairman, 2006-2008)") == []
     assert text_norm.dated_record_clauses(
-        "Advisory Board, Quokka Research Programs, 1992-1998 (Chairman of its review panel, 1996-1998)") == []
-    assert text_norm.OFFICE_ASIDE_MAX_WORDS == 3
+        "Advisory Board, Quokka Research Programs, 2002-2008 (Chairman of its review panel, 2006-2008)") == []
 
 
 def test_dated_record_clauses_reads_a_line_that_opens_in_a_dated_parenthesis_as_offices():
     assert text_norm.dated_record_clauses("    (Vice Chair 2006-2008) (Chair 2008-2010)") == []
     # A list number is no aside.
     assert text_norm.dated_record_clauses(
-        "(14) Member, Quokka Council, 1983-1985. Chair, Wombat Board, 1985-1987") == [
-        "14) Member, Quokka Council, 1983-1985", "Chair, Wombat Board, 1985-1987"]
+        "(9) Member, Quokka Council, 1993-1995. Chair, Wombat Board, 1995-1997") == [
+        "(9) Member, Quokka Council, 1993-1995", "Chair, Wombat Board, 1995-1997"]
 
 
 def test_dated_record_clauses_reads_a_year_the_record_s_names_write_as_part_of_the_name():
@@ -422,7 +420,7 @@ def test_record_date_anchors_leave_out_a_year_inside_a_name(unit, dates):
     # after a state code, or joined to the date before, it is a date
     ("Member, Quokka Board, May 2012 Western Regional Meeting", ["2012"]),
     ("Member, Quokka Board, Fall 2010 Western Regional Meeting", ["2010"]),
-    ("Member, Quokka Board, 5/2012 Western Regional Meeting", ["2012"]),
+    ("Member, Quokka Board, 5/2012 Western Regional Meeting", ["5/2012"]),
     ("Member, Quokka Board, Crab Hollow, ZQ 1999 Wombat Annual Meeting", ["1999"]),
     ("Chair, Quokka Board; 1980 to 1982 Annual Meeting Committee", ["1980 to 1982"]),
 ])
@@ -562,3 +560,240 @@ def test_dated_record_clauses_reads_a_line_that_is_a_sentence_as_one_record():
             "stopped serving on these bodies entirely")
     assert text_norm.dated_record_clauses(unit) == []
     assert len(text_norm.dated_record_clauses(unit.split(". after")[0])) == 2
+
+
+# --- dated_record_clauses: #1243 review round ---
+
+
+@pytest.mark.parametrize("office", ["Vice-president,1989-1990", "Chairman, 2006-2008", "Vice Chair 2012-2014",
+                                    "Chair and Treasurer, 2003-2005",
+                                    "Consulting Editor 2011-2013", "Vice President from 2013-2016",
+                                    "President Elect (2014-2015)", "Chair-elect, 2016"])
+def test_dated_record_clauses_reads_an_office_alone_as_no_record(office):
+    # The office of the record before it, without its body.
+    assert text_norm.dated_record_clauses(f"Member, Quokka Society Board, 2001. {office}") == []
+    assert len(text_norm.dated_record_clauses("Member, Quokka Society Board, 2001. Treasurer, Wombat Council, 2003")) == 2
+
+
+def test_dated_record_clauses_reads_a_clause_inside_an_earlier_parenthesis_as_an_aside():
+    assert text_norm.dated_record_clauses(
+        "Quokka Society (elected fellow 2004; Burrow Committee Chairman, 2011-2016; Pouch Committee "
+        "2017-Present)") == []
+    # A clause after the parenthesis closes is a record again.
+    assert text_norm.dated_record_clauses(
+        "Quokka Burrow Committee (2001-2004); Wombat Pouch Committee (2003-2006; Chair 2004-2006); "
+        "Norvale Program Committee (1998-2001)") == [
+        "Quokka Burrow Committee (2001-2004)", "Wombat Pouch Committee (2003-2006)",
+        "Norvale Program Committee (1998-2001)"]
+
+
+def test_dated_record_clauses_keeps_a_note_after_a_date_with_its_clause():
+    assert text_norm.dated_record_clauses(
+        "Quokka Hiring Committee, Department of Wombats; 2010- 2011 (Chair). Wombat Selection Committee, "
+        "Department of Wombats; 2009.") == [
+        "Quokka Hiring Committee, Department of Wombats; 2010- 2011 (Chair)",
+        "Wombat Selection Committee, Department of Wombats; 2009"]
+    # Dates that only such notes separate are one record's.
+    assert text_norm.dated_record_clauses(
+        "Organizer, Quokka Burrow Symposia, 1992 (Wombat University), 1994 (Norvale University), and "
+        "2001 (Norvale University, with a co-chair)") == []
+
+
+@pytest.mark.parametrize("unit", [
+    "March 2011-May 2014 Associate Professor of Wombat Genetics, Quokka University. Associate of Quokka "
+    "Institute (2008-2013). Associate of the Wombat Center (2009-2014).",
+    "March 2011-May 2014 Associate Professor of Wombat Genetics, Quokka University. Associate of Quokka "
+    "Institute, 2008-2013. Associate of the Wombat Center, 2009-2014",
+    "March 2011-May 2014 Associate Professor of Wombat Genetics, Quokka University; Associate of Quokka "
+    "Institute, 2008-2013; Associate of the Wombat Center, 2009-2014 (honorary)",
+    "2001-present Professor of Pouch Care (2000-present) and Burrow Science (2001-2015), Quokka University",
+    "1984-2012 Director of Wombat Burrows, Departments of Pouch Care (l984-2012 and Marsupials - l988-1997) "
+    "Quokka Center for Burrow Science",
+])
+def test_dated_record_clauses_does_not_cut_a_date_led_line_whose_later_dates_end_clauses(unit):
+    assert text_norm.dated_record_clauses(unit) == []
+
+
+def test_dated_record_clauses_keeps_a_date_led_line_with_a_bracketed_later_date():
+    # Opened after a full stop, not after a word, the parenthesis is the date's own.
+    assert text_norm.dated_record_clauses("2001 Quokka Society Lecture. (2003) Wombat Council Lecture") == [
+        "2001 Quokka Society Lecture", "(2003) Wombat Council Lecture"]
+
+
+def test_dated_record_clauses_keeps_each_clause_s_own_month():
+    unit = ("10/2011 Quokka Hospital Pouch Care Forum #1 (regional) 2/2012 Quokka Hospital Pouch Care Forum #2 "
+            "(regional) 4/2013 Wombat Burrow Advisory Council Retreat, Norvale (national)")
+    assert text_norm.dated_record_clauses(unit) == [
+        "10/2011 Quokka Hospital Pouch Care Forum #1 (regional)", "2/2012 Quokka Hospital Pouch Care Forum #2 (regional)",
+        "4/2013 Wombat Burrow Advisory Council Retreat, Norvale (national)"]
+
+
+@pytest.mark.parametrize("unit, dates", [
+    ("Quokka Club Chapter October 2012-April2013 Wombat Student Organization October 2012-June 2013",
+     ["2012-April2013", "2012-June 2013"]),
+    ("Member, Quokka Study Section, 1990 to 1992 Wombat Collegium, 1994 to present", ["1990 to 1992",
+                                                                                    "1994 to present"]),
+    ("Member, Quokka Plan Committee, 2011-2 Member, Wombat Advisory Council, 2011-", ["2011-2", "2011-"]),
+    ("Member, Quokka Board, April2012. Chair, Wombat Council, 6/14/2014", ["April2012", "6/14/2014"]),
+])
+def test_record_date_anchors_read_a_date_whole(unit, dates):
+    anchors = text_norm.record_date_anchors(unit)
+    assert [unit[a.start:a.end] for a in anchors] == dates
+
+
+def test_dated_record_clauses_keep_a_date_open_at_their_end():
+    assert text_norm.dated_record_clauses("Member, Quokka Plan Committee, 2011-2 Member, Wombat Advisory Council, 2011-") == [
+        "Member, Quokka Plan Committee, 2011-2", "Member, Wombat Advisory Council, 2011-"]
+    assert text_norm.dated_record_clauses(
+        "Member, Quokka Study Section, 1990 to 1992 Wombat Collegium - member, 1994 to present") == [
+        "Member, Quokka Study Section, 1990 to 1992", "Wombat Collegium - member, 1994 to present"]
+
+
+def test_dated_record_clauses_reads_a_year_after_its_month_as_the_same_date():
+    # One talk, its date written twice.
+    assert text_norm.dated_record_clauses(
+        "03/2014 Quokka: The Hidden Wombat, Department of Burrows, Fall 2014 Lecture Series, Norvale "
+        "University") == []
+
+
+@pytest.mark.parametrize("unit, clauses", [
+    ("Member, Vision 2020 Steering Committee, 2015-2017. Chair, Strategic Plan 2025 Task Force, 2018-2021",
+     ["Member, Vision 2020 Steering Committee, 2015-2017", "Chair, Strategic Plan 2025 Task Force, 2018-2021"]),
+    ("2015 Grand Rounds, Wombat Hospital: Quokka Science. 2016 Grand Rounds, Quokka Hospital: The Wombat "
+     "Care Act of 2010", ["2015 Grand Rounds, Wombat Hospital: Quokka Science",
+                          "2016 Grand Rounds, Quokka Hospital: The Wombat Care Act of 2010"]),
+    # a year after a body, or between two offices, is a date
+    ("Quokka Burrow Gala Committee 2012 Wombat Pouch Drive Advisory Board 2012-2018",
+     ["Quokka Burrow Gala Committee 2012", "Wombat Pouch Drive Advisory Board 2012-2018"]),
+    ("Quokka Society Treasurer 2005 President, Wombat Council 2008",
+     ["Quokka Society Treasurer 2005", "President, Wombat Council 2008"]),
+    ("Quokka Society Treasurer 2005 Wombat Council Chair 2008",
+     ["Quokka Society Treasurer 2005", "Wombat Council Chair 2008"]),
+    ("Member, Quokka Hall 2005 President, Wombat Council 2008",
+     ["Member, Quokka Hall 2005", "President, Wombat Council 2008"]),
+    ("Member, Quokka Hall 2005 Professor, Wombat College 2008",
+     ["Member, Quokka Hall 2005", "Professor, Wombat College 2008"]),
+    ("Member, Quokka Hall 2005 Treasurer, Wombat Council 2008",
+     ["Member, Quokka Hall 2005", "Treasurer, Wombat Council 2008"]),
+    ("Quokka Professor 2005 Wombat Council Chair 2008", ["Quokka Professor 2005", "Wombat Council Chair 2008"]),
+])
+def test_record_date_anchors_read_a_year_inside_any_name_as_part_of_it(unit, clauses):
+    assert text_norm.dated_record_clauses(unit) == clauses
+
+
+@pytest.mark.parametrize("pointer", ["(see Leadership)", "(see pg. 4)", "see also: Teaching", "refer to Appendix",
+                                     "described in Section III", "see Quokka Section"])
+def test_dated_record_clauses_reads_any_pointer_as_no_record(pointer):
+    unit = f"2001 Member, Quokka Society Board. 2003 Treasurer, Wombat Council {pointer}"
+    assert text_norm.dated_record_clauses(unit) == []
+    # "See" as a name is no pointer.
+    assert len(text_norm.dated_record_clauses(
+        "2001 Member, Quokka Society Board. 2003 Treasurer, Holy See Wombat Council")) == 2
+
+
+def test_dated_record_clauses_reads_first_person_lines_as_narrative():
+    assert text_norm.dated_record_clauses(
+        "In 2005 I became Director of the Quokka Center. In 2010 I was named Chair of the Wombat "
+        "Department.") == []
+    assert text_norm.dated_record_clauses(
+        "Member, Quokka Board, 2001. Chair, Wombat Council, 2003, my first office") == []
+    # A roman numeral and a capitalised "Our" name no narrator.
+    assert len(text_norm.dated_record_clauses(
+        "Member, Phase I trials Committee, 2001. Chair, Our Lady of Wombat Hospital Board, 2003")) == 2
+
+
+def test_dated_record_clauses_closes_the_parenthesis_a_clause_opens():
+    assert text_norm.dated_record_clauses(
+        "Mentor, Quokka Program, 2014 Mentor, Wombat Pouch Support Program (since 2009)") == [
+        "Mentor, Quokka Program, 2014", "Mentor, Wombat Pouch Support Program (since 2009)"]
+
+
+def test_dated_record_clauses_leaves_a_pipe_row_whole():
+    assert text_norm.dated_record_clauses(
+        "Quokka Guest Professor | 2016-19 | Wombat University, Visiting Professorship (2016-2019)") == []
+
+
+def test_dated_record_clauses_needs_the_word_its_section_s_records_name():
+    positions = ("Quokka School of Medicine, Norvale, Wombatia (1981-1984) Assistant Professor of Pouch Care, "
+                 "Wombat, Wombatia (1984-1990)")
+    assert len(text_norm.dated_record_clauses(positions)) == 2
+    assert text_norm.dated_record_clauses(positions, record_word=text_norm.POSITION_TITLE_RE) == []
+    memberships = "Charter member, Quokka Society, Norvale Chapter, 1987, Chairperson, Pouch Committee, 1989"
+    assert len(text_norm.dated_record_clauses(memberships)) == 2
+    assert text_norm.dated_record_clauses(memberships, record_word=text_norm.ORGANIZATION_WORD_RE) == []
+    assert len(text_norm.dated_record_clauses("Member, Quokka Society, 1987. Member, Wombat Academy, 1989",
+                                              record_word=text_norm.ORGANIZATION_WORD_RE)) == 2
+
+
+@pytest.mark.parametrize("qualifier", ["Vice", "Deputy", "Senior", "Junior", "Interim", "Acting", "Consulting",
+                                       "Contributing", "Founding", "Elect", "Elected", "Past", "Honorary",
+                                       "Executive", "General"])
+def test_dated_record_clauses_reads_a_qualified_office_alone_as_no_record(qualifier):
+    assert text_norm.dated_record_clauses(f"Member, Quokka Society Board, 2001. {qualifier} Chair, 2003") == []
+    assert text_norm.dated_record_clauses(f"Member, Quokka Society Board, 2001. {qualifier} Wombat Chair, 2003") == [
+        "Member, Quokka Society Board, 2001", f"{qualifier} Wombat Chair, 2003"]
+
+
+@pytest.mark.parametrize("word", ["from", "since", "until", "then", "also", "and", "the"])
+def test_dated_record_clauses_reads_an_office_with_a_connective_alone_as_no_record(word):
+    assert text_norm.dated_record_clauses(f"Member, Quokka Society Board, 2001. Chair {word} 2003") == []
+
+
+def test_dated_record_clauses_leaves_a_note_that_holds_the_next_date_where_it_is():
+    assert text_norm.dated_record_clauses(
+        "Member, Quokka Committee, 2014-2017 (Chair 2015-2016). Member, Wombat Board, 2019") == [
+        "Member, Quokka Committee, 2014-2017", "Member, Wombat Board, 2019"]
+
+
+def test_dated_record_clauses_reads_a_date_with_no_words_before_it_as_an_aside():
+    assert text_norm.dated_record_clauses(
+        "Member, Quokka Board, 1988 (Wombat University), 1990 (Norvale University). Chair, Wombat Council, 1995") == [
+        "Member, Quokka Board, 1988 (Wombat University)", "Chair, Wombat Council, 1995"]
+
+
+def test_dated_record_clauses_gives_a_date_led_clause_the_note_after_its_date():
+    assert text_norm.dated_record_clauses("2001 (Quokka University Lecture), 2003 (Wombat University Lecture)") == [
+        "2001 (Quokka University Lecture)", "2003 (Wombat University Lecture)"]
+
+
+@pytest.mark.parametrize("unit", [
+    "I chaired the Quokka Society Board, 2001. Treasurer, Wombat Council, 2003",
+    "Member, Quokka Society Board, 2001. I led the Wombat Council, 2003",
+    "Member, Quokka Society Board, 2001; Treasurer, Wombat Council, 2003, and I founded its fund",
+    "Member, Quokka Society Board, 2001. Treasurer, Wombat Council, 2003, with our team",
+])
+def test_dated_record_clauses_reads_each_first_person_form_as_narrative(unit):
+    assert text_norm.dated_record_clauses(unit) == []
+
+
+def test_record_date_anchors_hold_the_years_of_a_glued_date():
+    unit = "Member, Quokka Board, May2016. Chair, Wombat Council, 2015-May2018"
+    assert [a.years for a in text_norm.record_date_anchors(unit)] == [frozenset({"2016"}),
+                                                                       frozenset({"2015", "2018"})]
+
+
+def test_dated_record_clauses_opens_only_a_parenthesis_closed_before_any_opens():
+    assert text_norm.dated_record_clauses("9) Member (elected), Quokka Council, 1993. Chair, Wombat Board, 1995") == [
+        "(9) Member (elected), Quokka Council, 1993", "Chair, Wombat Board, 1995"]
+    assert text_norm.dated_record_clauses("Member, Quokka Board (QB)), 1999. Chair, Wombat Council, 2001") == [
+        "Member, Quokka Board (QB)), 1999", "Chair, Wombat Council, 2001"]
+
+
+def test_a_position_names_any_title():
+    unit = "Teacher, Quokka High School, 2003-2004. Instructor, Wombat College, 2004-2006"
+    assert len(text_norm.dated_record_clauses(unit, record_word=text_norm.POSITION_TITLE_RE)) == 2
+
+
+@pytest.mark.parametrize("unit", ["Member, Quokka Hall:2005 Wombat Council, 2008",
+                                  "Member, Quokka Vision 2005/Wombat Council, 2008"])
+def test_record_date_anchors_read_a_year_beside_punctuation_as_a_date(unit):
+    # Only a space on both sides puts a year inside a name.
+    assert [unit[a.start:a.end] for a in text_norm.record_date_anchors(unit)] == ["2005", "2008"]
+
+
+def test_date_clauses_attach_no_note_for_the_doctor():
+    # The doctor's cut is the one it had before the recovery's (#1243 review):
+    # a note after a date opens the next clause, which it then reads as an aside.
+    part = "Member, Quokka Board, 2001 (Chair). Treasurer, Wombat Council, 2005"
+    assert [clause.text for clause in text_norm.date_clauses(part, text_norm.record_date_anchors(part))] == [
+        "Member, Quokka Board, 2001", " (Chair). Treasurer, Wombat Council, 2005"]

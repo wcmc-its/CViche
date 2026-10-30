@@ -9954,26 +9954,27 @@ def test_a_clause_whose_record_renders_beside_its_note_is_not_written_again():
     # #1243 census: committees named in one fused row; the source writes
     # each with an "(elected; <years>)" note, so no output line holds the
     # clause's words whole.
-    text = ("Quokka Dept: Associate Chair for Undergraduate Studies (2014-2017); Personnel "
-            "Committee (elected; 2006-08); Budgetary Subcommittee (elected; 2007-2008).")
-    entry = _clause_entry("P", text, committee_name="Quokka Dept: Associate Chair for Undergraduate Studies",
-                          start_date="2014", end_date="2017")
-    fused = ("Quokka Dept: Associate Chair for Undergraduate Studies; Personnel Committee; "
-             "Budgetary Subcommittee | | 2014-2017")
+    text = ("Quokka Dept: Associate Chair for Burrow Studies (2019-2022); Hiring "
+            "Committee (elected; 2011-13); Budget Subcommittee (elected; 2012-2013).")
+    entry = _clause_entry("P", text, committee_name="Quokka Dept: Associate Chair for Burrow Studies",
+                          start_date="2019", end_date="2022")
+    fused = ("Quokka Dept: Associate Chair for Burrow Studies; Hiring Committee; "
+             "Budget Subcommittee | | 2019-2022")
     assert _clause_bullets({"P": [entry]}, [fused]) == []
     # The same committees with no row naming them are recovered.
-    assert _clause_bullets({"P": [entry]}, ["Quokka Dept: Associate Chair for Undergraduate Studies | | 2014-2017"]) == [
-        "Budgetary Subcommittee (elected; 2007-2008", "Personnel Committee (elected; 2006-08"]
+    assert _clause_bullets({"P": [entry]}, ["Quokka Dept: Associate Chair for Burrow Studies | | 2019-2022"]) == [
+        "Budget Subcommittee (elected; 2012-2013)", "Hiring Committee (elected; 2011-13)"]
     # The note keeps the per-line check from vouching for the clause.
-    assert _rendered_on_line("Personnel Committee (elected; 2006-08", fused) is False
+    assert _rendered_on_line("Hiring Committee (elected; 2011-13", fused) is False
 
 
-def test_an_office_held_within_a_rendered_record_is_recovered():
-    text = "Advisory Board, Quokka Research Programs, 1992-1998 (Chairman, 1996-1998)"
+def test_an_office_held_within_a_rendered_record_is_not_written_alone():
+    # #1243 review: "Chairman, <years>" as a bullet of its own drops the board.
+    text = "Advisory Board, Quokka Research Programs, 2002-2008 (Chairman, 2006-2008)"
     entry = _clause_entry("Q1", text, role="Member", organization="Quokka Research Programs, Advisory Board",
-                          start_date="1992", end_date="1998")
-    assert _clause_bullets({"Q1": [entry]}, ["Quokka Research Programs, Advisory Board | Member | 1992-1998"]) == [
-        "Chairman, 1996-1998"]
+                          start_date="2002", end_date="2008")
+    assert recovery_candidates("Q1", entry) == []
+    assert _clause_bullets({"Q1": [entry]}, ["Quokka Research Programs, Advisory Board | Member | 2002-2008"]) == []
 
 
 @pytest.mark.parametrize("text", [
@@ -10022,9 +10023,10 @@ def test_the_sub_point_planner_reads_no_dated_clause_as_an_entry_record():
     gen.doc.add_paragraph("Quokka Society Board | Member | 1995-1996")
     view = _recovery_view(gen._rendered_output_lines(), {"Q1": [_clause_entry()]})
     assert _record_line_verdicts(view, "Q1", _clause_entry()) == []
-    # One record line besides the clauses is no entry the planner reads, as before.
+    # One record line besides the clauses is no entry the planner reads, as before,
+    # and no candidate of the recovery either (#1243 review).
     one_line = _clause_entry(text=f"{_QUOKKA_POSTS}\n1998-2001 Secretary, Norvale Quokka Guild Board")
-    assert len(recovery_candidates("Q1", one_line)) == 3
+    assert recovery_candidates("Q1", one_line) == _QUOKKA_POSTS.split(". ")
     assert _record_line_verdicts(view, "Q1", one_line) == []
     guild = ["1998-2001 Secretary, Norvale Quokka Guild Board", "2002-2004 President, Norvale Quokka Guild Board"]
     three_lines = _clause_entry(text="\n".join([_QUOKKA_POSTS, *guild]))
@@ -10048,3 +10050,50 @@ def test_a_date_field_names_no_year_of_a_dated_clause():
     entry = _clause_entry("Q1", text, organization="Quokka Society Board", start_date="Term 2010")
     assert dated_clause_lines(text, entry["extracted_fields"]) == text.split(". ")
     assert dated_clause_lines(text, {"title": "Quokka Society Board Term 2010"}) == []
+
+
+def test_a_lone_record_line_its_clauses_are_cut_from_is_no_candidate():
+    # #1243 review: the line opens with a date range, so `_record_lines` reads
+    # it as one record line. Beside its own clauses it was a candidate, and
+    # read as lost it printed whole, the rendered Member row included.
+    text = "2006-2008 Member, Quokka Admissions Committee, 2009-2012 Chair, Wombat Curriculum Committee"
+    entry = _clause_entry("P", text, committee_name="Quokka Admissions Committee", role="Member",
+                          start_date="2006", end_date="2008")
+    assert recovery_candidates("P", entry) == [
+        "2006-2008 Member, Quokka Admissions Committee", "2009-2012 Chair, Wombat Curriculum Committee"]
+    assert _clause_bullets({"P": [entry]}, ["Admissions | Member | 2006-2008"]) == [
+        "2009-2012 Chair, Wombat Curriculum Committee"]
+
+
+def test_a_clause_the_extracted_record_holds_is_not_written_again():
+    # Not the extracted clause (the first one is), but its words and years are
+    # the fields': read as a tab part, `segment_held_by_fields` keeps it.
+    # A short organization: no identifying field vouches (`segment_already_rendered`).
+    text = "Member, Quokka Board, 1995-96. Member, Quokka Board, 1997-99"
+    entry = _clause_entry("Q1", text, organization="Quokka Board", role="Member",
+                          start_date="1995", end_date="1999")
+    assert not segment_already_rendered("Member, Quokka Board, 1997-99", entry["extracted_fields"])
+    assert _clause_bullets({"Q1": [entry]}, ["Quokka Board | Member | 1995-1999"]) == []
+    # A later term the fields do not span is written.
+    later = _clause_entry("Q1", "Member, Quokka Board, 1995-96. Member, Quokka Board, 2003-05",
+                          organization="Quokka Board", role="Member", start_date="1995", end_date="1999")
+    assert _clause_bullets({"Q1": [later]}, ["Quokka Board | Member | 1995-1999"]) == ["Member, Quokka Board, 2003-05"]
+
+
+def test_a_dated_clause_names_what_its_section_s_records_name():
+    positions = ("Quokka School of Medicine, Norvale, Wombatia (1981-1984) Assistant Professor of Pouch Care, "
+                 "Wombat, Wombatia (1984-1990)")
+    assert recovery_candidates("D1", _clause_entry("D1", positions, title="Assistant Professor of Pouch Care")) == []
+    assert len(recovery_candidates("Q1", _clause_entry("Q1", positions))) == 2
+    memberships = "Charter member, Quokka Society, Norvale Chapter, 1987, Chairperson, Pouch Committee, 1989"
+    assert recovery_candidates("I", _clause_entry("I", memberships, organization="Quokka Society")) == []
+    assert len(recovery_candidates("P", _clause_entry("P", memberships))) == 2
+
+
+def test_a_recovered_dated_clause_keeps_its_own_month():
+    # #1243 review: cut at the year, each talk lost its month and took the next one's.
+    text = ("10/2011 Quokka Hospital Pouch Care Forum #1 (regional) 2/2012 Quokka Hospital Pouch Care Forum #2 "
+            "(regional) 4/2013 Wombat Burrow Advisory Council Retreat, Norvale (national)")
+    entry = _clause_entry("R", text, title="Wombat Burrow Advisory Council Retreat", date="2013-04")
+    assert sorted(_clause_bullets({"R": [entry]}, ["Wombat Burrow Advisory Council Retreat | Norvale | 2013"])) == [
+        "10/2011 Quokka Hospital Pouch Care Forum #1 (regional)", "2/2012 Quokka Hospital Pouch Care Forum #2 (regional)"]

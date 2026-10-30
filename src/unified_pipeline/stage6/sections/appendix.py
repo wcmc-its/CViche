@@ -217,6 +217,7 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from ...core.template_boilerplate import (
@@ -227,6 +228,7 @@ from ...core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
+from ...core.text_norm import ORGANIZATION_WORD_RE, POSITION_TITLE_RE
 from ..empty_slots import APPENDIX_HEADING
 from ..fan_out import LAST_STAGE4_RECORD, is_split_record
 from ..formatting import (
@@ -1853,6 +1855,13 @@ def recovery_text(entry: Mapping[str, object]) -> str:
 #: holding several dated records. Elsewhere a line's dates are its record's
 #: own (a degree and its honours, a grant and its periods, a citation).
 DATED_CLAUSE_SECTIONS = ('C', 'D', 'I', 'O', 'P', 'Q', 'R')
+#: What each dated clause of a section names when it is a record of its own
+#: (`dated_record_clauses`' `record_word`): a position its title, a
+#: membership its organization (#1243 review).
+DATED_CLAUSE_RECORD_WORDS = MappingProxyType({
+    'D': POSITION_TITLE_RE,
+    'I': ORGANIZATION_WORD_RE,
+})
 
 
 def dated_clause_candidates(code: str, entry: Mapping[str, object]) -> list[str]:
@@ -1863,14 +1872,19 @@ def dated_clause_candidates(code: str, entry: Mapping[str, object]) -> list[str]
     (`is_split_record`)."""
     if not code.startswith(DATED_CLAUSE_SECTIONS) or is_split_record(entry):
         return []
-    return dated_clause_lines(recovery_text(entry), entry.get('extracted_fields') or {})
+    return dated_clause_lines(recovery_text(entry), entry.get('extracted_fields') or {},
+                              DATED_CLAUSE_RECORD_WORDS.get(code[:1]))
 
 
 def recovery_candidates(code: str, entry: dict) -> list[str]:
     """Lines of an entry the unrendered-record pass should look for.
 
-    A fused multi-record entry (two or more record-shaped lines, or dated
-    clauses, `dated_clause_candidates`) for any code.
+    A fused multi-record entry (two or more record-shaped lines) for any
+    code, and the dated clauses of an entry (`dated_clause_candidates`)
+    beside them, or alone when it has fewer record-shaped lines. A lone
+    record-shaped line stays no candidate beside the clauses, as it is
+    without them: the clauses are cut from it, and read as lost it would
+    print whole, the record its row prints included (#1243 review).
     A T entry longer than `APPENDIX_MAX_CHARS` is the exception: every
     record-shaped or dated line of it is a candidate (`t_recovery_lines`), and
     a single-record entry qualifies (#1230). The Appendix renders a T body
@@ -1886,7 +1900,10 @@ def recovery_candidates(code: str, entry: dict) -> list[str]:
     # An entry stage 4 split into records renders them from their own children;
     # their tab parts are not lost, only reformatted (#1243).
     read_lines = _record_lines if LAST_STAGE4_RECORD in entry else tab_aware_record_lines
-    records = read_lines(text) + dated_clause_candidates(code, entry)
+    records = read_lines(text)
+    if len(records) < UNRENDERED_MIN_RECORD_LINES:
+        records = []
+    records += dated_clause_candidates(code, entry)
     return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
 
 
