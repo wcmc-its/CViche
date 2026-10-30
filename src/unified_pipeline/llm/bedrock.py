@@ -306,6 +306,19 @@ def _extract_tool_use_input(response):
     return None
 
 
+def _unoffered_tool_names(response: dict, tool_config: dict) -> list[str | None]:
+    """The name of every toolUse block in a Converse response that names no
+    tool in `tool_config` (None for a block with no name), in order.
+
+    A forced call answered through a tool it was never offered is a malformed
+    response (#640): that input was never held to the caller's schema.
+    """
+    offered = {tool["toolSpec"]["name"] for tool in tool_config["tools"]}
+    content = response.get("output", {}).get("message", {}).get("content", [])
+    return [block["toolUse"].get("name") for block in content
+            if "toolUse" in block and block["toolUse"].get("name") not in offered]
+
+
 def _extract_text_content(response: dict) -> str | None:
     """Return the first text block's text from a Converse response's message
     content list, or None when the list is empty or has no text block.
@@ -680,23 +693,27 @@ def _usage_cost(usage: dict, cache_read_tokens: int, cache_write_tokens: int,
     )
 
 
-def _finalize_schema_tool_response(response: dict, usage: dict, cache_read_tokens: int,
-                                   cache_write_tokens: int, model: str,
-                                   api_seconds: float) -> dict:
+def _finalize_schema_tool_response(response: dict, tool_config: dict, usage: dict,
+                                   cache_read_tokens: int, cache_write_tokens: int,
+                                   model: str, api_seconds: float) -> dict:
     """#46 json_schema path: the forced tool's structured `input` IS the
     answer. Re-serialize it so every caller's json.loads(content) keeps
     working, and skip the text-validation/fence-strip of the text path
     (structured tool output is guaranteed valid JSON). Returns before the
-    JSON-repair branch, so there is only the one dispatch to account for."""
+    JSON-repair branch, so there is only the one dispatch to account for.
+    `tool_config` is the toolConfig the request was sent with."""
     stop_reason = response.get("stopReason")
     tool_input = _extract_tool_use_input(response)
-    if stop_reason != "tool_use" or tool_input is None:
-        # Forced tool call that didn't fire => schema not enforced.
-        # Fail loud rather than silently parsing free text.
+    unoffered = _unoffered_tool_names(response, tool_config)
+    if stop_reason != "tool_use" or tool_input is None or unoffered:
+        # Forced tool call that didn't fire => schema not enforced. A call
+        # through a tool that was never offered is the same malformed
+        # response (#640). Fail loud rather than silently parsing free text.
+        unoffered_note = f", tools not offered={unoffered!r}" if unoffered else ""
         raise BedrockToolCallDidNotFireError(
             f"Bedrock forced json_schema tool call did not fire "
             f"(stopReason={stop_reason!r}, tool_input="
-            f"{'present' if tool_input is not None else 'missing'})",
+            f"{'present' if tool_input is not None else 'missing'}{unoffered_note})",
             stop_reason=stop_reason,
             cost=_usage_cost(usage, cache_read_tokens, cache_write_tokens, model),
         )
@@ -773,9 +790,11 @@ def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -
     usage = response["usage"]
     cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
 
-    if _model_schema_tool_config(model, response_format) is not None:
+    tool_config = _model_schema_tool_config(model, response_format)
+    if tool_config is not None:
         return _finalize_schema_tool_response(
-            response, usage, cache_read_tokens, cache_write_tokens, model, api_seconds
+            response, tool_config, usage, cache_read_tokens, cache_write_tokens, model,
+            api_seconds,
         ), response.get("stopReason")
 
     # Extract and normalize Bedrock response (text / json_object path). A

@@ -194,6 +194,83 @@ def test_call_llm_missing_provider_raises_keyerror():
 
 
 # ---------------------------------------------------------------------------
+# Message validation (#640)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("messages", "problem"), [
+    pytest.param("hello", r" must be a list", id="a-string-not-a-list"),
+    pytest.param({"role": "user", "content": "x"}, r" must be a list",
+                 id="one-message-not-a-list"),
+    pytest.param([], r" must not be empty", id="empty-list"),
+    pytest.param(["hello"], r"\[0\] must be a mapping", id="item-not-a-mapping"),
+    pytest.param([{"content": "x"}], r"\[0\] has role None", id="no-role"),
+    pytest.param([{"role": "tool", "content": "x"}], r"\[0\] has role 'tool'",
+                 id="unknown-role"),
+    pytest.param([{"role": ["user"], "content": "x"}], r"\[0\] has role \['user'\]",
+                 id="role-not-a-string"),
+    pytest.param([{"role": "user"}], r"\[0\] \(role 'user'\) has no content",
+                 id="no-content"),
+    pytest.param([{"role": "user", "content": None}], r"\[0\] \(role 'user'\) has no content",
+                 id="content-none"),
+    pytest.param([{"role": "system", "content": "s"}, {"role": "user"}],
+                 r"\[1\] \(role 'user'\) has no content", id="later-item-no-content"),
+])
+def test_call_llm_rejects_malformed_messages_before_any_provider_call(messages, problem):
+    """Decided on #640: an empty or malformed message list raises ValueError
+    locally, naming what is wrong. No prompt is logged and no provider client
+    is reached."""
+    from unified_pipeline.llm_client import call_llm
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client.log_prompt_before_call") as before, \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as get_client, \
+         pytest.raises(ValueError, match=rf"^call_llm messages{problem}"):
+        call_llm("stage_2", messages)
+
+    assert before.call_count == 0
+    assert get_client.call_count == 0
+
+
+@pytest.mark.parametrize("messages", [
+    pytest.param([{"role": "user", "content": "x"}], id="user-only"),
+    pytest.param([{"role": "system", "content": "s"}, {"role": "user", "content": "x"}],
+                 id="system-then-user"),
+    pytest.param([{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"},
+                  {"role": "user", "content": "z"}], id="multi-turn"),
+])
+def test_call_llm_sends_every_message_shape_a_caller_uses(messages):
+    """The shapes the call sites send (string content; system, user and
+    assistant roles) still reach the provider, once."""
+    from unified_pipeline.llm_client import call_llm
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client.log_prompt_before_call", return_value="0" * 12), \
+         patch("unified_pipeline.llm_client.log_prompt_response"), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as get_client:
+        get_client.return_value.converse.return_value = _make_bedrock_response()
+        result = call_llm("stage_2", messages)
+
+    assert result["content"] == "test response"
+    assert get_client.return_value.converse.call_count == 1
+
+
+def test_call_llm_leaves_list_content_to_the_provider_adapter():
+    """List (multimodal) content is not malformed: validation lets it through,
+    and the Bedrock adapter refuses it as it always has (#265)."""
+    from unified_pipeline.llm_client import call_llm
+
+    content = [{"type": "text", "text": "segment this"}]
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client.log_prompt_before_call", return_value="0" * 12), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client"), \
+         pytest.raises(NotImplementedError, match="multimodal"):
+        call_llm("stage_2", [{"role": "user", "content": content}])
+
+
+# ---------------------------------------------------------------------------
 # Bedrock provider (BED-01, TEST-01)
 # ---------------------------------------------------------------------------
 

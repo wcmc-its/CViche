@@ -749,10 +749,50 @@ def test_handle_bedrock_raises_when_forced_tool_did_not_fire(monkeypatch: pytest
         "type": "json_schema",
         "json_schema": {"name": "extract", "schema": {"type": "object"}},
     }
-    with pytest.raises(bedrock.BedrockToolCallDidNotFireError, match="did not fire"):
+    # The whole message, so a change to it on this pre-#640 path is seen.
+    with pytest.raises(bedrock.BedrockToolCallDidNotFireError,
+                       match=r"did not fire \(stopReason='end_turn', tool_input=missing\)$"):
         bedrock._handle_bedrock(
             [{"role": "user", "content": "hi"}], response_format=response_format, cfg=_bedrock_cfg()
         )
+
+
+@pytest.mark.parametrize(
+    ("tool_blocks", "named"),
+    [
+        pytest.param([{"toolUse": {"name": "other_tool", "input": {"foo": "bar"}}}],
+                     r"\['other_tool'\]", id="unoffered-tool"),
+        pytest.param([{"toolUse": {"name": "extract", "input": {"foo": "bar"}}},
+                      {"toolUse": {"name": "other_tool", "input": {"foo": "baz"}}}],
+                     r"\['other_tool'\]", id="offered-then-unoffered-tool"),
+        pytest.param([{"toolUse": {"input": {"foo": "bar"}}}], r"\[None\]",
+                     id="tool-with-no-name"),
+    ],
+)
+def test_handle_bedrock_raises_when_response_names_a_tool_not_offered(
+    monkeypatch: pytest.MonkeyPatch, tool_blocks: list[dict], named: str,
+) -> None:
+    # Decided on #640: a tool the request never offered is a malformed
+    # response. It takes the did-not-fire path -- no repair call, the billed
+    # cost carried on the error -- not a new error of its own.
+    canned = {
+        "output": {"message": {"content": tool_blocks}},
+        "stopReason": "tool_use",
+        "usage": {"inputTokens": 50, "outputTokens": 10},
+    }
+    fake = _FakeBedrockClient([canned])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockToolCallDidNotFireError,
+                       match=rf"did not fire .*, tools not offered={named}\)$") as excinfo:
+        bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}], response_format=_EXTRACT_SCHEMA_RF,
+            cfg=_bedrock_cfg(),
+        )
+
+    assert excinfo.value.stop_reason == "tool_use"
+    assert excinfo.value.cost > 0
+    assert len(fake.calls) == 1
 
 
 def test_handle_bedrock_empty_content_retries_and_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2066,7 +2106,8 @@ def test_content_filtered_schema_tool_path_falls_back(monkeypatch: pytest.Monkey
     }
     filtered = _empty_response("content_filtered")
     tool_ok = {
-        "output": {"message": {"content": [{"toolUse": {"input": {"foo": "bar"}}}]}},
+        "output": {"message": {"content": [
+            {"toolUse": {"name": "extract_v1", "input": {"foo": "bar"}}}]}},
         "stopReason": "tool_use",
         "usage": {"inputTokens": 10, "outputTokens": 5},
     }
