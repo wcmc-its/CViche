@@ -3,15 +3,18 @@ app/services/batch_service.py, through the real router.
 
 POST /batches (size cap, quota pre-check in check_rate_limit's 429 shape, no
 Teams card), the batch's one Teams card on its first run
-(announce_batch_once), GET /batches and GET /batches/{id} (visibility:
+(announce_batch_once, and #1202's probe through POST /upload), GET /batches
+and GET /batches/{id} (visibility:
 submitter, admins and read-only staff only, 404 for anyone else), and GET
 /queue (per-queue live workers, waiting runs and wait estimate). Names in
 fixtures are invented.
 """
 import logging
 import re
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import fakeredis
 import pymysql
@@ -70,6 +73,24 @@ def teams_posts(monkeypatch):
 
 def _card_titles(posted):
     return [p["attachments"][0]["content"]["body"][0]["text"] for p in posted]
+
+
+def _upload_into(client, tmp_path, batch_id, content):
+    """POST /upload one file into ``batch_id``. The content checks and the
+    storage are stubbed as test_upload_atomicity does, so dummy bytes reach
+    the Run row; distinct ``content`` keeps the duplicate check out of it."""
+    stubs = [
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=None),
+        patch("app.services.run_creation.detect_wcm_template", return_value=(False, None)),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
+    ]
+    with ExitStack() as stack:
+        for stub in stubs:
+            stack.enter_context(stub)
+        return client.post("/api/upload", files={"file": ("cv.docx", content, "application/octet-stream")},
+                           data={"submission_type": "own_cv", "batch_id": batch_id})
 
 
 # --- POST /batches ------------------------------------------------------------
@@ -168,6 +189,38 @@ def test_create_batch_posts_no_teams_card_accepted_or_refused(client, db, seed_s
     notifications.flush()
 
     assert teams_posts == []
+
+
+def test_twenty_batches_nobody_uploads_to_post_no_card_until_one_gets_its_first_run(
+    client, db, seed_simple_mode, teams_posts, tmp_path,
+):
+    """#1202's reviewer probe, at daily_limit=2. 20 POST /batches of 2 files
+    with no upload between them each still answer 200 and store a batch (no
+    rate limit, by decision), but none posts a card; they used to post 20.
+    The first upload into one of them posts that batch's one card, and a
+    second upload into the same batch posts no other."""
+    _auth(client, _make_user(db, daily_limit=2))
+
+    created = [client.post("/api/batches", json={"files_submitted": 2}) for _ in range(20)]
+    notifications.flush()
+
+    assert [r.status_code for r in created] == [200] * 20
+    assert db.query(RunBatch).count() == 20
+    assert teams_posts == []
+
+    batch_id = created[-1].json()["id"]
+    first = _upload_into(client, tmp_path, batch_id, b"PK\x03\x04probe-first")
+    notifications.flush()
+
+    assert first.status_code == 200, first.text
+    assert _card_titles(teams_posts) == [f"CViche batch {batch_id} submitted (2 files)"]
+
+    second = _upload_into(client, tmp_path, batch_id, b"PK\x03\x04probe-second")
+    notifications.flush()
+
+    assert second.status_code == 200, second.text
+    assert db.query(Run).filter(Run.batch_id == batch_id).count() == 2
+    assert len(teams_posts) == 1
 
 
 # --- announce_batch_once: the batch's one Teams card, on its first run --------

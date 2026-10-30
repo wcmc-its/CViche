@@ -1829,6 +1829,33 @@ def test_an_upload_refused_into_a_batch_posts_no_card_and_the_next_accepted_one_
         "CViche batch BATCHA submitted (2 files)"]
 
 
+def test_a_batch_upload_whose_run_commit_fails_posts_no_card(
+    client, db, seed_simple_mode, tmp_path, teams_posts, write_conflict_on_insert,
+):
+    """#1202: the card is claimed only after the run's commit. When that
+    commit fails (a 1020 on the runs INSERT, and again on its one retry) the
+    upload is the compensated 500 with no run, no card goes out, and the
+    batch stays unclaimed for its next upload. A claim made before that
+    commit would have committed the half-built run along with it."""
+    user = _make_user(db)
+    _add_batch(db, user)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
+    write_conflict_on_insert("runs", failures=2)
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": "BATCHA"}))
+    notifications.flush()
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"]["message"] == RUN_NOT_CREATED_NOTHING_SAVED
+    assert db.query(Run).count() == 0
+    assert teams_posts == []
+    db.expire_all()
+    assert db.get(RunBatch, "BATCHA").submitted_notified_at is None
+
+
 def _post_estimates(client, *names):
     return client.post(
         "/api/estimate",
