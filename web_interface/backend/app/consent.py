@@ -87,7 +87,8 @@ def require_current_consent(db: Session, user: User) -> None:
     """Raise 403 ``consent_required`` unless ``user`` has accepted the current
     consent version. The first check of every request that starts work on a
     CV: /upload, and POST /batches (#1114), which would otherwise create a
-    batch and post its Teams card for a user every upload then refuses."""
+    batch, and count its files against the quota (#1202), for a user every
+    upload then refuses."""
     if not has_current_consent(db, user):
         raise HTTPException(
             status_code=403,

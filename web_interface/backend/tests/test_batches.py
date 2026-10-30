@@ -1,11 +1,14 @@
 """Batch upload endpoints (#1114): app/api/batches.py over
 app/services/batch_service.py, through the real router.
 
-POST /batches (size cap, quota pre-check in check_rate_limit's 429 shape, the
-Teams card), GET /batches and GET /batches/{id} (visibility: submitter,
-admins and read-only staff only, 404 for anyone else), and GET /queue (per-queue live workers,
-waiting runs and wait estimate). Names in fixtures are invented.
+POST /batches (size cap, quota pre-check in check_rate_limit's 429 shape with
+earlier batches' unfilled files counted, no Teams card), the batch's one Teams
+card on its first run (announce_batch_once), GET /batches and GET
+/batches/{id} (visibility: submitter, admins and read-only staff only, 404 for
+anyone else), and GET /queue (per-queue live workers, waiting runs and wait
+estimate). Names in fixtures are invented.
 """
+import logging
 import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -14,13 +17,15 @@ import fakeredis
 import pymysql
 import pytest
 import redis
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import object_session
 
 from app.auth import COOKIE_NAME, create_session_cookie
 from app.models import Run, RunBatch, RunState, User
 from app.pipeline import run_queue
 from app.services import batch_service, notifications
+from app.timeutil import utc_now
+from tests.conftest import TestingSessionLocal
 
 T0 = datetime(2026, 10, 1, 9, 0, 0)
 
@@ -52,6 +57,20 @@ def _run(db, run_id, user, *, batch_id=None, status="complete", queued_at=None, 
     db.add(run)
     db.commit()
     return run
+
+
+@pytest.fixture
+def teams_posts(monkeypatch):
+    """Every Teams webhook POST, recorded, with a webhook configured."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    posted = []
+    monkeypatch.setattr(notifications._SESSION, "post",
+                        lambda url, json=None, timeout=None: posted.append(json) or SimpleNamespace(status_code=200))
+    return posted
+
+
+def _card_titles(posted):
+    return [p["attachments"][0]["content"]["body"][0]["text"] for p in posted]
 
 
 # --- POST /batches ------------------------------------------------------------
@@ -140,22 +159,151 @@ def test_create_batch_over_a_lowered_limit_never_reports_a_negative_remainder(cl
     assert (detail["details"]["limit"], detail["details"]["used"]) == (2, 3)
 
 
-def test_create_batch_posts_one_teams_card_and_none_on_a_refusal(client, db, seed_simple_mode, monkeypatch):
-    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
-    posted = []
-    monkeypatch.setattr(notifications._SESSION, "post",
-                        lambda url, json=None, timeout=None: posted.append(json) or SimpleNamespace(status_code=200))
-    _auth(client, _make_user(db, email="pat.example@example.com", daily_limit=5))
+def test_create_batch_posts_no_teams_card_accepted_or_refused(client, db, seed_simple_mode, teams_posts):
+    """#1202: the "batch submitted" card goes out with the batch's first run
+    (announce_batch_once), so a batch nobody uploads to posts none."""
+    _auth(client, _make_user(db, daily_limit=5))
 
     assert client.post("/api/batches", json={"files_submitted": 6}).status_code == 429
-    batch_id = client.post("/api/batches", json={"files_submitted": 4}).json()["id"]
+    assert client.post("/api/batches", json={"files_submitted": 4}).status_code == 200
     notifications.flush()
 
-    assert len(posted) == 1
-    card = posted[0]["attachments"][0]["content"]
-    assert card["body"][0]["text"] == f"CViche batch {batch_id} submitted (4 files)"
-    facts = {f["title"]: f["value"] for f in card["body"][1]["facts"]}
-    assert facts["Submitted by"] == "Pat.Example"
+    assert teams_posts == []
+
+
+@pytest.mark.parametrize("daily_limit", [1, 2])
+def test_twenty_batches_nobody_uploads_to_get_one_200_then_429s(client, db, seed_simple_mode, teams_posts,
+                                                                daily_limit):
+    """#1202's reviewer probe: a user with no runs creates batches of their
+    whole daily limit 20 times and uploads nothing. Every call used to answer
+    200, store a batch and post a card (a bulk batch's; a one-file batch posts
+    none, #1340). The first batch's unfilled files now use up the quota."""
+    _auth(client, _make_user(db, daily_limit=daily_limit))
+
+    codes = [client.post("/api/batches", json={"files_submitted": daily_limit}).status_code for _ in range(20)]
+    notifications.flush()
+
+    assert codes == [200] + [429] * 19
+    assert db.query(RunBatch).count() == 1
+    assert teams_posts == []
+
+
+def test_create_batch_counts_an_earlier_batchs_unfilled_files_as_used(client, db, seed_simple_mode):
+    """A batch of 4 with 1 run uploaded still holds its other 3 files: with a
+    daily limit of 5, 1 run and 3 unfilled files leave 1, in the same 429 body."""
+    user = _make_user(db, daily_limit=5)
+    now = utc_now()
+    _batch(db, user, "EARLYB", files_submitted=4, created_at=now)
+    _run(db, "EARLY1", user, batch_id="EARLYB", created_at=now)
+    _auth(client, user)
+
+    over = client.post("/api/batches", json={"files_submitted": 2})
+
+    assert over.status_code == 429
+    detail = over.json()["detail"]
+    assert detail["message"] == "This batch needs 2 runs, but only 1 of your daily limit of 5 remain."
+    assert (detail["details"]["limit_type"], detail["details"]["used"]) == ("daily", 4)
+    assert client.post("/api/batches", json={"files_submitted": 1}).status_code == 200
+
+
+def test_create_batch_counts_unfilled_files_against_the_monthly_limit_too(client, db, seed_simple_mode):
+    """3 unfilled files and a batch of 2 fit the daily limit of 10 but not the
+    monthly limit of 4."""
+    user = _make_user(db, daily_limit=10, monthly_limit=4)
+    _batch(db, user, "EARLYB", files_submitted=3, created_at=utc_now())
+    _auth(client, user)
+
+    resp = client.post("/api/batches", json={"files_submitted": 2})
+
+    assert resp.status_code == 429
+    assert (resp.json()["detail"]["details"]["limit_type"], resp.json()["detail"]["details"]["used"]) == ("monthly", 3)
+
+
+def test_a_batch_holding_more_runs_than_files_offsets_no_other_batch(client, db, seed_simple_mode):
+    """A one-file batch that got 2 runs has nothing left to upload: it counts
+    0, not -1, so another batch's 3 unfilled files still all count."""
+    user = _make_user(db, daily_limit=6)
+    now = utc_now()
+    _batch(db, user, "OVERFL", files_submitted=1, created_at=now)
+    _run(db, "OVER01", user, batch_id="OVERFL", created_at=now)
+    _run(db, "OVER02", user, batch_id="OVERFL", created_at=now)
+    _batch(db, user, "UNFILL", files_submitted=3, created_at=now)
+    _auth(client, user)
+
+    resp = client.post("/api/batches", json={"files_submitted": 2})
+
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["details"]["used"] == 5  # 2 runs + 0 + 3 unfilled
+
+
+def test_another_users_unfilled_batch_does_not_count_against_yours(client, db, seed_simple_mode):
+    pat = _make_user(db, daily_limit=3)
+    sam = _make_user(db, email="sam@example.com")
+    _batch(db, sam, "SAMBAT", files_submitted=3, created_at=utc_now())
+    _auth(client, pat)
+
+    assert client.post("/api/batches", json={"files_submitted": 3}).status_code == 200
+
+
+# --- announce_batch_once: the batch's one Teams card, on its first run --------
+
+def test_announce_batch_once_posts_the_card_for_the_first_call_only(db, teams_posts):
+    owner = _make_user(db)
+    _batch(db, owner, files_submitted=3)
+
+    results = [batch_service.announce_batch_once(db, "BATCHA", submitter="Pat Example") for _ in range(2)]
+    notifications.flush()
+
+    assert results == [True, False]
+    assert _card_titles(teams_posts) == ["CViche batch BATCHA submitted (3 files)"]
+    facts = {f["title"]: f["value"] for f in teams_posts[0]["attachments"][0]["content"]["body"][1]["facts"]}
+    assert facts["Submitted by"] == "Pat Example"
+    assert db.get(RunBatch, "BATCHA").submitted_notified_at is not None
+
+
+def test_two_uploads_racing_on_two_pods_post_one_card(db, teams_posts):
+    """Both pods read the batch, unclaimed, before either claims it: the claim
+    is decided by the UPDATE's WHERE in SQL, not by the row each pod read, so
+    the second pod loses. The first pod's request ends (rolling back whatever
+    it left uncommitted) before the second claims, so the claim must already
+    be committed."""
+    owner = _make_user(db)
+    _batch(db, owner, files_submitted=2)
+    other_pod = TestingSessionLocal()
+    try:
+        assert other_pod.get(RunBatch, "BATCHA").submitted_notified_at is None
+        assert batch_service.announce_batch_once(db, "BATCHA", submitter="Pat Example") is True
+        db.rollback()
+        assert batch_service.announce_batch_once(other_pod, "BATCHA", submitter="Pat Example") is False
+    finally:
+        other_pod.close()
+    notifications.flush()
+
+    assert len(teams_posts) == 1
+
+
+def test_a_failed_claim_is_logged_not_raised_and_the_next_upload_posts_the_card(db, teams_posts, monkeypatch, caplog):
+    """Best-effort: the run is already committed, so a database error while
+    claiming is logged, never raised, and no card goes out. The failed claim
+    is rolled back, so the batch's next upload still posts it."""
+    owner = _make_user(db)
+    _batch(db, owner, files_submitted=2)
+    real_batch_size = batch_service.batch_size
+
+    def failing_batch_size(db_, batch_id):
+        raise OperationalError("SELECT run_batches.files_submitted ...", {}, Exception("connection lost"))
+    monkeypatch.setattr(batch_service, "batch_size", failing_batch_size)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.batch_service"):
+        assert batch_service.announce_batch_once(db, "BATCHA", submitter="Pat Example") is False
+    notifications.flush()
+    assert teams_posts == []
+    assert "claiming its Teams card failed" in caplog.text
+
+    monkeypatch.setattr(batch_service, "batch_size", real_batch_size)
+    assert batch_service.announce_batch_once(db, "BATCHA", submitter="Pat Example") is True
+    notifications.flush()
+    assert _card_titles(teams_posts) == ["CViche batch BATCHA submitted (2 files)"]
 
 
 def test_create_batch_of_one_file_posts_no_batch_card(client, db, seed_simple_mode, monkeypatch):

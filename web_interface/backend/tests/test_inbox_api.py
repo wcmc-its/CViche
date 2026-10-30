@@ -8,6 +8,7 @@ import functools
 import hashlib
 import io
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 from docx import Document
@@ -23,7 +24,7 @@ from app.models import (
     RunBatch,
     User,
 )
-from app.services import inbound_service
+from app.services import inbound_service, notifications
 from app.storage.local_storage import LocalRunStorage
 
 ATTEST = {"submission_type": "own_cv"}
@@ -203,6 +204,27 @@ def test_submit_carries_options_and_batch_like_upload(client, db, storage, pat):
     run = db.get(Run, resp.json()["results"][0]["run_id"])
     assert (run.batch_id, run.submission_type) == ("BATCHA", "authorized_admin")
     assert (run.show_track_changes, run.show_pipeline_comments, run.strip_template_instructions) == (0, 1, 0)
+
+
+def test_submitting_into_a_batch_posts_its_teams_card_once(client, db, storage, pat, monkeypatch):
+    """#1202: the shared upload core posts the batch's card with its first
+    run, so a batch the inbox fills gets it too, once."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    posted = []
+    monkeypatch.setattr(notifications._SESSION, "post",
+                        lambda url, json=None, timeout=None: posted.append(json) or SimpleNamespace(status_code=200))
+    first, second = _hold(db, storage, pat, "a.docx"), _hold(db, storage, pat, "b.docx")
+    db.add(RunBatch(id="BATCHA", user_id=pat.id, files_submitted=2))
+    db.commit()
+    _auth(client, pat)
+
+    results = client.post("/api/inbox/submit", json={
+        "item_ids": [first.id, second.id], "batch_id": "BATCHA", **ATTEST}).json()["results"]
+    notifications.flush()
+
+    assert [r["status"] for r in results] == ["submitted", "submitted"]
+    assert [p["attachments"][0]["content"]["body"][0]["text"] for p in posted] == [
+        "CViche batch BATCHA submitted (2 files)"]
 
 
 def test_submit_with_someone_elses_batch_is_a_404_and_creates_nothing(client, db, storage, pat):

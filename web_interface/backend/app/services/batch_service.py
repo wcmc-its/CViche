@@ -3,8 +3,9 @@ per-queue wait estimate behind GET /api/queue.
 
 A batch is a header row (``RunBatch``) that its runs point at through
 ``runs.batch_id``. Each file is still uploaded and started on its own by the
-client; this module only creates the header, answers who may see it, and
-reads the batch and the two queues back.
+client; this module only creates the header, answers who may see it, posts
+its Teams card once its first run exists, and reads the batch and the two
+queues back.
 
 Visibility (Counsel-approved policy, spec "Access policy"): a batch is visible
 to the user who submitted it and to admins, and to nobody else -- another user
@@ -21,8 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import redis
-from sqlalchemy import ColumnElement, func
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import ColumnElement, func, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Query, Session
 
 from app.database import commit_inserts_retrying_conflict
@@ -45,8 +46,9 @@ from app.schemas import (
     QueueLane,
     QueueOverview,
 )
-from app.services import mailer
+from app.services import mailer, notifications
 from app.services.runs_admin_query import run_by_summary
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +214,44 @@ def batch_size(db: Session, batch_id: str | None) -> int | None:
     if batch_id is None:
         return None
     return db.query(RunBatch.files_submitted).filter(RunBatch.id == batch_id).scalar()
+
+
+def _claim_submitted_card(db: Session, batch_id: str) -> int | None:
+    """Atomically take the right to post the batch's Teams card: its
+    ``files_submitted`` for the one call whose conditional UPDATE sets
+    ``submitted_notified_at``, None for every call after it."""
+    claimed = db.execute(
+        update(RunBatch)
+        .where(RunBatch.id == batch_id, RunBatch.submitted_notified_at.is_(None))
+        .values(submitted_notified_at=utc_now())
+    ).rowcount == 1
+    files_submitted = batch_size(db, batch_id) if claimed else None
+    db.commit()
+    return files_submitted
+
+
+def announce_batch_once(db: Session, batch_id: str, submitter: str) -> bool:
+    """Queue the batch's Teams "batch submitted" card unless an earlier call
+    already has (#1202). Called after each of the batch's runs is committed,
+    so the card goes out with the first run, and a batch nobody uploads to
+    posts none. The claim is decided in SQL (``_claim_submitted_card``), not
+    from a row read earlier, so two uploads racing on two pods post one card.
+
+    Best-effort: the run already exists, so a database error is logged and
+    the card skipped, never raised. True only for the call that won the claim
+    (``notify_batch_submitted`` still posts nothing for a one-file batch)."""
+    try:
+        files_submitted = _claim_submitted_card(db, batch_id)
+    except SQLAlchemyError:
+        logger.warning("batch %s: claiming its Teams card failed; no card posted", batch_id, exc_info=True)
+        db.rollback()
+        return False
+    if files_submitted is None:
+        return False
+    notifications.notify_batch_submitted(
+        notifications.BatchFacts(id=batch_id, files_submitted=files_submitted), submitter=submitter,
+    )
+    return True
 
 
 def _on_batch_queue() -> ColumnElement[bool]:

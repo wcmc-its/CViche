@@ -20,6 +20,7 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,7 +34,7 @@ from app.api.runs import _run_duration_seconds
 from app.api.upload import _extract_text, _validate_docx_magic
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.services import upload_validation
+from app.services import notifications, upload_validation
 from app.services.config_service import get_estimated_run_cost
 from app.services.run_creation import RUN_NOT_CREATED_NOTHING_SAVED
 from app.storage.local_storage import LocalRunStorage
@@ -1752,6 +1753,48 @@ def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
     assert resp.json()["detail"] == {"error": "not_found", "message": "Batch not found"}
     storage.put_file_exclusive.assert_not_called()
     assert db.query(Run).count() == 0
+
+
+def test_the_first_upload_into_a_batch_posts_its_one_teams_card(client, db, seed_simple_mode, tmp_path, monkeypatch):
+    """#1202: the batch's "batch submitted" card goes out with its first run,
+    not at POST /batches, and a second upload into the batch posts no second one."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    posted = []
+    monkeypatch.setattr(notifications._SESSION, "post",
+                        lambda url, json=None, timeout=None: posted.append(json) or SimpleNamespace(status_code=200))
+    user = _make_user(db)
+    _add_batch(db, user)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
+
+    def upload_both():
+        return [_post_upload(client, f"cv{n}.docx", b"PK\x03\x04dummy-" + bytes([n]), DOCX_MIME,
+                             data={"batch_id": "BATCHA"}) for n in range(2)]
+    responses = _run_patches(patches, upload_both)
+    notifications.flush()
+
+    assert [r.status_code for r in responses] == [200, 200]
+    cards = [p["attachments"][0]["content"] for p in posted]
+    assert [card["body"][0]["text"] for card in cards] == ["CViche batch BATCHA submitted (2 files)"]
+    assert {f["title"]: f["value"] for f in cards[0]["body"][1]["facts"]}["Submitted by"] == "Test User"
+
+
+def test_an_upload_fills_its_own_batch_without_counting_the_file_twice(client, db, seed_simple_mode, tmp_path):
+    """/upload's quota check counts runs only (#1202): the one-file batch a
+    daily limit of 1 just allowed holds that last run, and the upload into it
+    is that run, not a second one."""
+    user = _make_user(db, daily_limit=1)
+    _auth(client, user)
+    batch_id = client.post("/api/batches", json={"files_submitted": 1}).json()["id"]
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": batch_id}))
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).batch_id == batch_id
 
 
 def _post_estimates(client, *names):

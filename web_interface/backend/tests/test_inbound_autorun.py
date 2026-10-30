@@ -27,6 +27,7 @@ from app.services import (
     inbound_autorun,
     inbound_service,
     mailer,
+    notifications,
 )
 from app.services.pdf_sandbox import PdfText
 from app.storage.local_storage import LocalRunStorage
@@ -69,8 +70,7 @@ def queue(monkeypatch):
     monkeypatch.setattr(inbound_autorun.concurrency, "dispatch_mode", lambda: "queue")
     monkeypatch.setattr(inbound_autorun.run_queue, "is_configured", lambda: True)
     monkeypatch.setattr(inbound_autorun.run_queue, "enqueue", lambda run_id, q: enqueued.append((run_id, q)))
-    monkeypatch.setattr(inbound_autorun.notifications, "notify_batch_submitted",
-                        lambda batch, submitter=None: cards.append(batch))
+    monkeypatch.setattr(notifications, "notify_batch_submitted", lambda batch, submitter=None: cards.append(batch))
     return SimpleQueue(enqueued, cards)
 
 
@@ -354,6 +354,17 @@ def test_a_refused_file_shrinks_the_batch_so_the_rest_can_complete(db, storage, 
     assert batch.files_submitted == 1
     _finish(db, RunState.COMPLETE)
     assert batch_completion.send_if_batch_complete(db, batch.id) is True
+
+
+def test_a_batch_whose_every_file_is_refused_posts_no_card(db, storage, sent, queue, monkeypatch, seed_simple_mode):
+    """#1202: the Teams batch card goes out with the batch's first run, so an
+    email batch the upload core created no run in posts none."""
+    _user(db)
+    monkeypatch.setattr(inbound_autorun, "_run_item", lambda db_, st, u, item, req: False)
+    _send(db, storage, ["one", "two"])
+
+    assert db.query(RunBatch).count() == 1 and db.query(Run).count() == 0
+    assert queue.cards == []
 
 
 def test_the_mail_flag_off_means_logged_not_sent(db, storage, queue, monkeypatch, caplog, seed_simple_mode):

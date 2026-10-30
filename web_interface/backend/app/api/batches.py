@@ -21,7 +21,7 @@ from app.schemas import (
     BatchListResponse,
     QueueOverview,
 )
-from app.services import batch_service, notifications
+from app.services import batch_service
 
 router = APIRouter()
 
@@ -36,15 +36,19 @@ def create_batch(
 
     Rejects more than MAX_BATCH_FILES files (400), and a batch larger than
     the user's remaining daily or monthly run quota with the same 429 body
-    /upload answers, so the user learns it before uploading anything. Each
-    /upload still checks the quota itself. Posts the one Teams "batch
-    submitted" card. Refused first, like /upload, for a user who has not
-    accepted the current consent terms.
+    /upload answers, so the user learns it before uploading anything. The
+    files the user's earlier batches have not uploaded yet count as used
+    (#1202), so creating batches nobody uploads to runs out the quota. Each
+    /upload still checks the quota itself, counting runs only. Posts no Teams
+    card: the batch's first run does (batch_service.announce_batch_once).
+    Refused first, like /upload, for a user who has not accepted the current
+    consent terms.
     """
     require_current_consent(db, current_user)
     if body.files_submitted > batch_service.MAX_BATCH_FILES:
         raise bad_request(f"A batch can hold at most {batch_service.MAX_BATCH_FILES} files.")
-    rate_limit_error = check_rate_limit(current_user, db, requested=body.files_submitted)
+    rate_limit_error = check_rate_limit(
+        current_user, db, requested=body.files_submitted, include_unfilled_batches=True)
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
     try:
@@ -52,10 +56,6 @@ def create_batch(
             db, current_user, body.files_submitted, notify_on_complete=body.notify_on_complete)
     except batch_service.BatchIdAttemptsExhausted as e:
         raise internal_error("We couldn't create the batch. Please try again in a moment.") from e
-    notifications.notify_batch_submitted(
-        notifications.BatchFacts(id=batch.id, files_submitted=batch.files_submitted),
-        submitter=current_user.display_name or current_user.email,
-    )
     return BatchCreateResponse(id=batch.id)
 
 

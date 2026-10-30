@@ -5,10 +5,11 @@ confirm in the UI: files already processed (#1286), files beyond the remaining
 quota, everything when their consent is out of date, and everything when the
 deployment cannot queue runs for the worker.
 
-Reuses the web paths: batch_service.create_batch and the Teams batch card as
-POST /batches does, run_creation.create_run_from_bytes as /upload does, and the
-same flip-and-enqueue as POST /run/{id}/start in queue mode. Never logs a
-filename, subject or address (CODING_STANDARDS 4.7).
+Reuses the web paths: batch_service.create_batch as POST /batches does,
+run_creation.create_run_from_bytes as /upload does (which also posts the Teams
+batch card with the batch's first run, #1202), and the same flip-and-enqueue
+as POST /run/{id}/start in queue mode. Never logs a filename, subject or
+address (CODING_STANDARDS 4.7).
 """
 import asyncio
 import logging
@@ -29,7 +30,7 @@ from app.models import (
 )
 from app.pipeline import concurrency, run_queue
 from app.rate_limiter import check_rate_limit
-from app.services import batch_completion, batch_service, notifications
+from app.services import batch_completion, batch_service
 from app.services.run_creation import RunRequest, create_run_from_bytes, duplicate_info
 from app.services.run_service import flip_to_queued, revert_queued
 from app.storage.base import RunStorage
@@ -124,10 +125,6 @@ def auto_run(db: Session, storage: RunStorage, user: User, items: list[InboundFi
     if budget == 0:
         return AutoRunResult(0, len(items))
     batch = batch_service.create_batch(db, user, budget, source=BatchSource.EMAIL)
-    notifications.notify_batch_submitted(
-        notifications.BatchFacts(id=batch.id, files_submitted=batch.files_submitted),
-        submitter=user.display_name or user.email,
-    )
     request = RunRequest(submission_type=submission_type_for(user), batch_id=batch.id)
     started = 0
     for item in items:
