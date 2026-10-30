@@ -1,5 +1,7 @@
 """core.text_norm: the public helpers."""
 
+import pytest
+
 from unified_pipeline.core import text_norm
 
 
@@ -180,7 +182,7 @@ _ONE_YEAR_POSTS = ("Quokka College of Pharmacy, 1979-present\tFounding Member, 1
 
 def test_tab_record_segments_reads_parts_dated_by_one_year_beside_two_ranges():
     assert text_norm.tab_record_segments(_ONE_YEAR_POSTS) == [
-        "Quokka College of Pharmacy, 1979-present", "Founding Member, 1979",
+        "Quokka College of Pharmacy, 1979-present", "Founding Member, 1979", "Fellow, 1985",
         "Research Affairs Committee, 1985", "Chairperson, Awards Committee, 1987-1988"]
     # A year at the start dates a part too; a year in the middle does not.
     assert text_norm.tab_record_segments(
@@ -204,7 +206,54 @@ def test_tab_record_segments_does_not_date_details_after_a_label_by_their_years(
 
 
 def test_tab_record_segments_needs_parts_long_enough_to_carry_words():
-    assert text_norm.tab_record_segments("Chair 2010-2012\tMember 2013-2015") == []
+    # #1243: a part of 12 characters is a record, one of 11 is not.
+    assert text_norm.tab_record_segments("Dean 2001-02\tChairman 2003-04") == ["Dean 2001-02", "Chairman 2003-04"]
+    assert text_norm.tab_record_segments("Rep 2001-02\tChair 2003-04") == []
+
+
+def test_tab_record_segments_reads_a_short_part_as_a_record_only_when_it_names_an_office():
+    # #1243 review: a part under 20 characters that names no office is a term
+    # of the role beside it (BNYLDF 209), a heading or a detail over the posts,
+    # or an item of a list wrapped across parts (EHZFOH 247), not a record.
+    assert text_norm.tab_record_segments(
+        "2004-2010 Wombat Assembly\tStanding Alternate\tNorvale 2004-2007\tAshby 2007-2010") == []
+    assert text_norm.tab_record_segments(
+        "2004-2010 Wombat Assembly\tStanding Alternate\tChair 2004-2007\tSecretary 2007-2010"
+    ) == ["2004-2010 Wombat Assembly", "Chair 2004-2007", "Secretary 2007-2010"]
+    posts = "Secretary, Wombat Guild, 2011-2013\tTreasurer, Wombat Guild, 2014-2016"
+    assert text_norm.tab_record_segments(f"Committees 2010-15\t{posts}") == posts.split("\t")
+    assert text_norm.tab_record_segments(f"{posts}\tTerm ended 2015-16") == posts.split("\t")
+    # A one-year list item no longer pushes the wrapped list over the share.
+    wrapped = ("• Consulting\tAcme Labs & Sons (2006-2007, 2010, 2013), Bolt Works\t"
+               "(2006), Corla (2007), Danto (2010-2011), Esko (2010-2011),\t"
+               "Fenn (2013-2014), Gale Holdings (2014-present), Hux (2014-\t"
+               "2015), Ivo (2015), Jax Advisory Board (2014-present),\tKopogranite (2015)")
+    assert text_norm.tab_record_segments(wrapped) == []
+    assert len(text_norm.tab_record_segments(wrapped.replace("Kopogranite (2015)", "Kopo Fellow (2015)"))) == 3
+    # From 20 characters a part needs no office.
+    assert text_norm.tab_record_segments("Quokka Society, 2001-2004\tNorvale Ward 2004-07") == [
+        "Quokka Society, 2001-2004", "Norvale Ward 2004-07"]
+    assert text_norm.tab_record_segments("Quokka Society, 2001-2004\tNorvale Wds 2004-07") == []
+
+
+@pytest.mark.parametrize("office", ["Member", "Fellow", "Chairperson", "President", "Secretary", "Treasurer",
+                                    "Director", "Officer", "Delegate", "Trustee", "Councilor", "Councillor",
+                                    "Governor", "Editor", "Founder", "Coordinator", "Liaison", "Representative",
+                                    "Dean"])
+def test_tab_record_segments_reads_each_office_in_a_short_part(office):
+    assert text_norm.tab_record_segments(f"Quokka Society, 2001-2004\t{office} 2004-07") == [
+        "Quokka Society, 2001-2004", f"{office} 2004-07"]
+
+
+def test_tab_record_segments_reads_a_short_officer_post_beside_its_society_as_a_record():
+    # #1243 (HZGJFM 65, IZJADE 511, VQFSDI 37): posts of 12 to 19 characters
+    # were read as details of the society's line, so the render lost them.
+    assert text_norm.tab_record_segments(
+        "Quokka Society of Norvale, 1998-present\tMember 1975-1978\tPresident 2011-2013"
+    ) == ["Quokka Society of Norvale, 1998-present", "Member 1975-1978", "President 2011-2013"]
+    assert text_norm.tab_record_segments(
+        "1991-2002 Member, Board of Trustees, Wombat Clinic\t1995-97 President\tPast-President"
+    ) == ["1991-2002 Member, Board of Trustees, Wombat Clinic", "1995-97 President"]
 
 
 def test_fold_quotes_maps_typographic_apostrophes_and_quotes_to_ascii():

@@ -2051,3 +2051,72 @@ class TestStage5dCitationOnASplitEntry:
         assert 'Lanterns in the Orchard Model' in body
         assert 'Copper weathering of the north arch' in body
         assert body.count('Lanterns in the') == 1
+
+
+# --- #1243 (HNQBOI 19): one title stage 4 split into a record per year ---
+# Beside a record of another title; stage 5d cited the split title once, with
+# the year of one of its records. Invented titles.
+_ARCH = 'Copper Weathering of the North Arch'
+_ORCHARD = 'Lanterns in the Orchard Model'
+
+
+def _yearly_entry(citation, years=('2009', '2008'), second_title=_ARCH, title_key='title', code='S8'):
+    # A DOI's digits are no date: only the date fields' years name a record.
+    records = [{'authors': None, 'year': years[0], title_key: _ARCH, 'doi': '10.1000/zq.2015.1'},
+               {'authors': None, 'year': years[1], title_key: second_title, 'doi': '10.1000/zq.2016.2'},
+               {'authors': None, 'year': '2007', title_key: _ORCHARD, 'doi': None}]
+    text = '\t'.join(f'{record[title_key]}, {record["year"]}.' for record in records)
+    entry = _stage4_entry(records, code=code, text=text)
+    entry['extracted_fields'].update({'formatted_citation': citation, 'formatting_source': 'stage_5d_llm'})
+    return entry
+
+
+class TestStage5dCitationOfOneTitleSplitByYear:
+    @pytest.mark.parametrize('year, cited', [('2009', 0), ('2008', 1)])
+    @pytest.mark.parametrize('title_key, code', [('title', 'S8'), ('chapter_title', 'S4')])
+    def test_the_citation_goes_to_the_record_of_its_year(self, year, cited, title_key, code):
+        citation = f'{_ARCH}; {year}.'
+        children = _fan4(_yearly_entry(citation, title_key=title_key, code=code))
+        assert [child['extracted_fields']['year'] for child in children] == ['2009', '2008', '2007']
+        assert [child['extracted_fields'].get('formatted_citation') for child in children] == [
+            citation if i == cited else None for i in range(3)]
+        # A citation of the one other title goes to its record, year or no year.
+        orchard = _fan4(_yearly_entry(f'{_ORCHARD}. Ashby Meeting.'))
+        assert [child['extracted_fields'].get('formatted_citation') for child in orchard] == [
+            None, None, f'{_ORCHARD}. Ashby Meeting.']
+
+    @pytest.mark.parametrize('years, second_title, citation', [
+        (('2009', '2009'), _ARCH, f'{_ARCH}; 2009.'),
+        (('2009', '2008'), 'Copper Weathering of the South Arch',
+         f'{_ARCH}; Copper Weathering of the South Arch; 2009.'),
+        (('2009', '2008'), _ARCH, f'{_ARCH}; 2009, 2008.'),
+        (('2009', None), _ARCH, f'{_ARCH}; 2009.'),
+        (('2008', None), _ARCH, f'{_ARCH}; 2009.'),
+        (('2009', None), _ARCH, f'{_ARCH}. Ashby Journal.'),
+    ], ids=['same_year', 'different_titles', 'every_year', 'undated_twin',
+            'undated_twin_dated_twin_misses', 'undated_twin_citation_writes_no_year'])
+    def test_a_citation_its_years_do_not_tie_to_one_record_declines_the_split(
+            self, years, second_title, citation):
+        # BCTOGR 2166: one article split twice in one year; a citation of two
+        # titles is of the whole list; EYTHNB 89: a citation writing every
+        # record's year renders them all; an undated twin's year is unknown, so
+        # the citation names neither twin even when the dated one misses.
+        entry = _yearly_entry(citation, years, second_title)
+        assert _fan4(entry) == [entry]
+        # The same entry with its two years apart, cited with one, fans out.
+        assert len(_fan4(_yearly_entry(f'{_ARCH}; 2009.'))) == 3
+
+    @pytest.mark.parametrize('citation', [f'{_ARCH}. Ashby Journal. doi:10.1000/zq.2009.1',
+                                          f'{_ARCH}. https://ashby.example.org/2008/arch',
+                                          f'{_ARCH}. www.ashby.example.org/2009/arch'])
+    def test_the_digits_of_a_doi_or_a_link_name_no_record(self, citation):
+        # #1243 review: a citation with no year names neither record, whatever
+        # its DOI or link writes.
+        entry = _yearly_entry(citation)
+        assert _fan4(entry) == [entry]
+
+    def test_a_year_with_a_letter_names_its_record(self):
+        # "2009a", an author-year list's second paper of the year, is 2009.
+        citation = f'{_ARCH}; 2009a.'
+        assert [child['extracted_fields'].get('formatted_citation') for child in _fan4(_yearly_entry(citation))] == [
+            citation, None, None]

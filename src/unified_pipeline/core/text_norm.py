@@ -128,14 +128,39 @@ _DATE_RANGE_RE = re.compile(
     r"|(?:[A-Za-z]{3,9}\.? )?(?:(?:19|20)\d{2}|\d{1,2}))\b"
     r"|(?i:present|current|ongoing|now|to date)\b)")
 
-# A tab part must be at least this long to be a dated record (the same floor as
-# `RECORD_DATE_LINE_MIN_CHARS` for a date-led line) and at most the second
-# length: a longer part is prose about a record, not one. Its date range sits
-# within `DATED_SEGMENT_EDGE_CHARS` of either end: a range in the middle of the
-# text belongs to a sentence or to a record wrapped across two parts.
-DATED_SEGMENT_MIN_CHARS = 20
+# A tab part must be at least this long to be a dated record and at most the
+# second length: a longer part is prose about a record, not one. Its date range
+# sits within `DATED_SEGMENT_EDGE_CHARS` of either end: a range in the middle of
+# the text belongs to a sentence or to a record wrapped across two parts.
+# ponytail: 12, not the 20 of `RECORD_DATE_LINE_MIN_CHARS` for a date-led line,
+# keeps an officer post beside its society's line ("President 2011-2013", 19
+# chars; "Member 1975-1978", 16) a record of its own (#1243). A shorter part
+# ("Rep 2001-02") stays a detail, and so does a part shorter than
+# `DATED_SEGMENT_OFFICE_FREE_MIN_CHARS` that names no office (`_OFFICE_WORD_RE`).
+# Without the office, on the #1243 census (460 stored runs, 2026-10-29) the 12
+# floor wrote 4 bullets that were no record: the two per-state terms of a
+# delegate row that renders with its whole span ("<State> 2005-2008", BNYLDF
+# 209), and, once an 18-character one-year list item ("<Company> (2015)")
+# pushed its line over the half-dated share, two fragments of a comma list
+# wrapped across tab parts (EHZFOH 247). A heading or a detail of that length
+# beside dated records ("Committees 2010-15", "Term ended 2015-16") was written
+# the same way. With it, 12 changes the parts of 42 entries and the render of 5,
+# each a post the render had lost. A short part still needs words beside its
+# range, and its line two distinct ranges and half its parts dated. Revisit if
+# an office the list lacks turns up lost in a short part, or a short part that
+# is no record (a room or course number with a year) splits a line.
+DATED_SEGMENT_MIN_CHARS = 12
+DATED_SEGMENT_OFFICE_FREE_MIN_CHARS = 20
 DATED_SEGMENT_MAX_CHARS = 200
 DATED_SEGMENT_EDGE_CHARS = 12
+# An office or a seat a short dated part names: what makes "Co-chair 2012-2014"
+# a post of its own where "<State> 2005-2008" is a term of the role beside it.
+# A body ("Committees", "Board") is not one: a short part naming only a body is
+# a heading over the posts.
+_OFFICE_WORD_RE = re.compile(
+    r"\b(?:member|fellow|chair\w*|president|secretary|treasurer|director|officer"
+    r"|delegate|trustee|councill?or|governor|editor|founder|coordinator|liaison|representative"
+    r"|dean)\b", re.IGNORECASE)
 # A line is a run of records only when its dated parts give at least this many
 # different date ranges and make up at least this share of all its parts.
 DATED_SEGMENT_MIN_DISTINCT_RANGES = 2
@@ -190,10 +215,13 @@ def _edge_lone_year(part: str) -> str | None:
 
 def _is_dated_record_part(part: str) -> bool:
     """Whether `part` is long enough to be a record, not prose, and has words
-    besides its dates (`_WORDS_BESIDE_RANGE_RE`)."""
+    besides its dates (`_WORDS_BESIDE_RANGE_RE`), an office among them when it
+    is short (`DATED_SEGMENT_OFFICE_FREE_MIN_CHARS`)."""
     undated = _LONE_YEAR_RE.sub(" ", _DATE_RANGE_RE.sub(" ", part))
     return (DATED_SEGMENT_MIN_CHARS <= len(part) <= DATED_SEGMENT_MAX_CHARS
-            and _WORDS_BESIDE_RANGE_RE.search(undated) is not None)
+            and _WORDS_BESIDE_RANGE_RE.search(undated) is not None
+            and (len(part) >= DATED_SEGMENT_OFFICE_FREE_MIN_CHARS
+                 or _OFFICE_WORD_RE.search(undated) is not None))
 
 
 def tab_record_segments(line: str) -> list[str]:

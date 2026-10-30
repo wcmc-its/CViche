@@ -1792,6 +1792,20 @@ def test_unrendered_records_still_fires_on_a_tab_part_only_a_list_field_holds():
                                        "Secretary of the Wombat Panel 2012-2014"]
 
 
+def test_unrendered_records_fires_on_a_tab_part_the_fields_hold_with_other_years():
+    # #1243 (FLYBMX 219's shape): a board seat held twice. Both terms have
+    # the words the fields hold, and only the term inside their years is the
+    # record stage 4 extracted; the earlier one is a record the page lacks.
+    fused = ("Board Member, Wombat Guild, Norvale, 2005-2006\t"
+             "Board Member, Wombat Guild, Norvale, 2002-2004")
+    fields = {"role": "Board Member", "organization": "Wombat Guild", "city": "Norvale",
+              "start_date": "2005", "end_date": "2006"}
+    stage4 = {"entries": [_entry(fused, start=219, taxonomy_code="P", extracted_fields=fields)]}
+    blocks = [("p", "INSTITUTIONAL ADMINISTRATIVE"), ("p", "Board Member | Wombat Guild | Norvale | 2005-2006")]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert [f["evidence"] for f in findings] == [["Board Member, Wombat Guild, Norvale, 2002-2004"]]
+
+
 def test_unrendered_records_leaves_a_tab_part_that_names_an_extracted_title_alone():
     # #1243: a grant header row renders as table cells; the part names the
     # extracted title, with the investigator beside it that no field repeats.
