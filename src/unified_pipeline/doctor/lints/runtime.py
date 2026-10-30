@@ -160,8 +160,8 @@ def lint_stage3b_fallback_ratio(stage_3b: dict) -> list[dict]:
 # --------------------------------------------------------------------------
 # Stage 3b's two second-pass LLM stages that degrade silently (#818).
 # `quality_score.STAGE3B_SECOND_PASS_KEYS` names them: both catch their own
-# exception, return the entries untouched and record `error` -- the run
-# continues, so the failure is a WARN, not a gate (#745).
+# exception, keep the first pass's classifications and record `error` -- the
+# run continues, so the failure is a WARN, not a gate (#745).
 
 
 def lint_stage3b_second_pass_errors(stage_3b: dict) -> list[dict]:

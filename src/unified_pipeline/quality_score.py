@@ -345,8 +345,10 @@ def iter_error_fields(obj: object, path: str = "") -> list[tuple[str, str]]:
 
 
 #: `meta.stats` keys of stage 3b's two second passes, in pipeline order. Each
-#: pass catches its own exception, returns the first pass's entries untouched
-#: and records the message at ``meta.stats.<key>.error`` (#818).
+#: pass catches its own exception, keeps the first pass's classifications and
+#: records the message at ``meta.stats.<key>.error`` (#818). t_validation
+#: returns the entries untouched; fragment_reconnection keeps any reconnection
+#: it applied before the error.
 STAGE3B_SECOND_PASS_KEYS = ("t_validation", "fragment_reconnection")
 
 #: Where iter_error_fields puts a second pass's caught error: the artifact's
@@ -361,8 +363,8 @@ def is_fatal_error_field(label: str, path: str, value: str) -> bool:
 
     A stage-3b second pass's own caught error (``meta.stats.<pass>.error`` at
     the artifact's root) is never fatal, whatever its text (#745, option A,
-    decided 2026-10-30): the pass left the first pass's entries as they were, so
-    the run is degraded, not broken. The doctor reports it as the
+    decided 2026-10-30): the first pass's classifications stand, so the run is
+    degraded, not broken. The doctor reports it as the
     stage3b_second_pass_error WARN. Any other field is fatal when its text
     matches FATAL_ERROR_PATTERN."""
     if path in {_SECOND_PASS_ERROR_PATH.format(label=label, key=key)
