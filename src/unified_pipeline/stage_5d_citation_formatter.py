@@ -189,11 +189,17 @@ def build_raw_content(entries: list[dict]) -> tuple[str, dict[str, dict]]:
 
 def _reply_object(llm_output: str) -> dict | None:
     """The JSON object in a 5d reply: the whole reply, else its first
-    brace-delimited span. None when neither parses."""
+    brace-delimited span. None when neither parses, or when the whole reply
+    is JSON but not an object (#2029)."""
     try:
-        return json.loads(llm_output)
+        whole = json.loads(llm_output)
     except json.JSONDecodeError:
         pass
+    else:
+        if isinstance(whole, dict):
+            return whole
+        logger.warning("5d reply is a JSON %s, not an object; formatted nothing from it", type(whole).__name__)
+        return None
     json_match = re.search(r'\{[\s\S]*\}', llm_output)
     if not json_match:
         return None
@@ -269,12 +275,25 @@ def _keep_own_citations(id_to_formatted: dict[str, dict], id_to_entry: dict[str,
     (#1632). A dropped entry keeps its stage-4 render."""
     entry_words = {entry_id: _citation_words(entry.get('text') or '') for entry_id, entry in id_to_entry.items()}
     kept = {entry_id: fields for entry_id, fields in id_to_formatted.items()
-            if isinstance(fields, dict)
-            and _matches_own_entry(fields.get('formatted_citation'), entry_id, entry_words)}
+            if _matches_own_entry(fields.get('formatted_citation'), entry_id, entry_words)}
     dropped = sorted(set(id_to_formatted) - set(kept))
     logger.warning("5d reply carried ids the batch never sent (%s); dropped %d citation(s) that do not "
                    "match their own entry: %s", ', '.join(unsent_ids), len(dropped), ', '.join(dropped))
     return kept
+
+
+def _object_items(parsed: dict) -> dict[str, dict]:
+    """The items of a parsed reply whose value is an object; each other
+    item is logged and skipped, so its entry keeps its stage-4 render.
+    #2029 (KH2YMW): one entry holding two citations came back as a list
+    of two objects, and apply_formatted_fields' dict() of it raised."""
+    objects = {}
+    for entry_id, fields in parsed.items():
+        if isinstance(fields, dict):
+            objects[entry_id] = fields
+        else:
+            logger.warning("5d reply item %s is a %s, not an object; skipped it", entry_id, type(fields).__name__)
+    return objects
 
 
 def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str, dict]:
@@ -291,7 +310,8 @@ def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str,
     parsed = _reply_object(llm_output)
     if parsed is None:
         return {}
-    id_to_formatted = {entry_id: fields for entry_id, fields in parsed.items() if entry_id in id_to_entry}
+    id_to_formatted = {entry_id: fields for entry_id, fields in _object_items(parsed).items()
+                       if entry_id in id_to_entry}
     unsent_ids = [entry_id for entry_id in parsed if entry_id not in id_to_entry]
     if unsent_ids:
         return _keep_own_citations(id_to_formatted, id_to_entry, unsent_ids)
