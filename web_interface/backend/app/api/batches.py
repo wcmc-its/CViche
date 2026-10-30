@@ -36,19 +36,15 @@ def create_batch(
 
     Rejects more than MAX_BATCH_FILES files (400), and a batch larger than
     the user's remaining daily or monthly run quota with the same 429 body
-    /upload answers, so the user learns it before uploading anything. The
-    files the user's earlier batches have not uploaded yet count as used
-    (#1202), so creating batches nobody uploads to runs out the quota. Each
-    /upload still checks the quota itself, counting runs only. Posts no Teams
-    card: the batch's first run does (batch_service.announce_batch_once).
-    Refused first, like /upload, for a user who has not accepted the current
-    consent terms.
+    /upload answers, so the user learns it before uploading anything. Each
+    /upload still checks the quota itself. Posts no Teams card: the batch's
+    first run does (batch_service.announce_batch_once, #1202). Refused first,
+    like /upload, for a user who has not accepted the current consent terms.
     """
     require_current_consent(db, current_user)
     if body.files_submitted > batch_service.MAX_BATCH_FILES:
         raise bad_request(f"A batch can hold at most {batch_service.MAX_BATCH_FILES} files.")
-    rate_limit_error = check_rate_limit(
-        current_user, db, requested=body.files_submitted, include_unfilled_batches=True)
+    rate_limit_error = check_rate_limit(current_user, db, requested=body.files_submitted)
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
     try:

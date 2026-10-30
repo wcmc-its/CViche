@@ -379,9 +379,8 @@ class RunBatch(Base):
     """One batch upload (#1114): a set of runs a user submitted together.
 
     A table rather than only ``runs.batch_id``: the batch view reports files
-    that never became runs (``files_submitted`` minus the run count), POST
-    /batches counts those files against the quota (#1202), and the Runs page's
-    Batch filter lists batches with their submitter and time.
+    that never became runs (``files_submitted`` minus the run count), and the
+    Runs page's Batch filter lists batches with their submitter and time.
     """
     __tablename__ = "run_batches"
 

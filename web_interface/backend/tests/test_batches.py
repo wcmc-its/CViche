@@ -1,12 +1,12 @@
 """Batch upload endpoints (#1114): app/api/batches.py over
 app/services/batch_service.py, through the real router.
 
-POST /batches (size cap, quota pre-check in check_rate_limit's 429 shape with
-earlier batches' unfilled files counted, no Teams card), the batch's one Teams
-card on its first run (announce_batch_once), GET /batches and GET
-/batches/{id} (visibility: submitter, admins and read-only staff only, 404 for
-anyone else), and GET /queue (per-queue live workers, waiting runs and wait
-estimate). Names in fixtures are invented.
+POST /batches (size cap, quota pre-check in check_rate_limit's 429 shape, no
+Teams card), the batch's one Teams card on its first run
+(announce_batch_once), GET /batches and GET /batches/{id} (visibility:
+submitter, admins and read-only staff only, 404 for anyone else), and GET
+/queue (per-queue live workers, waiting runs and wait estimate). Names in
+fixtures are invented.
 """
 import logging
 import re
@@ -24,7 +24,6 @@ from app.auth import COOKIE_NAME, create_session_cookie
 from app.models import Run, RunBatch, RunState, User
 from app.pipeline import run_queue
 from app.services import batch_service, notifications
-from app.timeutil import utc_now
 from tests.conftest import TestingSessionLocal
 
 T0 = datetime(2026, 10, 1, 9, 0, 0)
@@ -169,80 +168,6 @@ def test_create_batch_posts_no_teams_card_accepted_or_refused(client, db, seed_s
     notifications.flush()
 
     assert teams_posts == []
-
-
-@pytest.mark.parametrize("daily_limit", [1, 2])
-def test_twenty_batches_nobody_uploads_to_get_one_200_then_429s(client, db, seed_simple_mode, teams_posts,
-                                                                daily_limit):
-    """#1202's reviewer probe: a user with no runs creates batches of their
-    whole daily limit 20 times and uploads nothing. Every call used to answer
-    200, store a batch and post a card (a bulk batch's; a one-file batch posts
-    none, #1340). The first batch's unfilled files now use up the quota."""
-    _auth(client, _make_user(db, daily_limit=daily_limit))
-
-    codes = [client.post("/api/batches", json={"files_submitted": daily_limit}).status_code for _ in range(20)]
-    notifications.flush()
-
-    assert codes == [200] + [429] * 19
-    assert db.query(RunBatch).count() == 1
-    assert teams_posts == []
-
-
-def test_create_batch_counts_an_earlier_batchs_unfilled_files_as_used(client, db, seed_simple_mode):
-    """A batch of 4 with 1 run uploaded still holds its other 3 files: with a
-    daily limit of 5, 1 run and 3 unfilled files leave 1, in the same 429 body."""
-    user = _make_user(db, daily_limit=5)
-    now = utc_now()
-    _batch(db, user, "EARLYB", files_submitted=4, created_at=now)
-    _run(db, "EARLY1", user, batch_id="EARLYB", created_at=now)
-    _auth(client, user)
-
-    over = client.post("/api/batches", json={"files_submitted": 2})
-
-    assert over.status_code == 429
-    detail = over.json()["detail"]
-    assert detail["message"] == "This batch needs 2 runs, but only 1 of your daily limit of 5 remain."
-    assert (detail["details"]["limit_type"], detail["details"]["used"]) == ("daily", 4)
-    assert client.post("/api/batches", json={"files_submitted": 1}).status_code == 200
-
-
-def test_create_batch_counts_unfilled_files_against_the_monthly_limit_too(client, db, seed_simple_mode):
-    """3 unfilled files and a batch of 2 fit the daily limit of 10 but not the
-    monthly limit of 4."""
-    user = _make_user(db, daily_limit=10, monthly_limit=4)
-    _batch(db, user, "EARLYB", files_submitted=3, created_at=utc_now())
-    _auth(client, user)
-
-    resp = client.post("/api/batches", json={"files_submitted": 2})
-
-    assert resp.status_code == 429
-    assert (resp.json()["detail"]["details"]["limit_type"], resp.json()["detail"]["details"]["used"]) == ("monthly", 3)
-
-
-def test_a_batch_holding_more_runs_than_files_offsets_no_other_batch(client, db, seed_simple_mode):
-    """A one-file batch that got 2 runs has nothing left to upload: it counts
-    0, not -1, so another batch's 3 unfilled files still all count."""
-    user = _make_user(db, daily_limit=6)
-    now = utc_now()
-    _batch(db, user, "OVERFL", files_submitted=1, created_at=now)
-    _run(db, "OVER01", user, batch_id="OVERFL", created_at=now)
-    _run(db, "OVER02", user, batch_id="OVERFL", created_at=now)
-    _batch(db, user, "UNFILL", files_submitted=3, created_at=now)
-    _auth(client, user)
-
-    resp = client.post("/api/batches", json={"files_submitted": 2})
-
-    assert resp.status_code == 429
-    assert resp.json()["detail"]["details"]["used"] == 5  # 2 runs + 0 + 3 unfilled
-
-
-def test_another_users_unfilled_batch_does_not_count_against_yours(client, db, seed_simple_mode):
-    pat = _make_user(db, daily_limit=3)
-    sam = _make_user(db, email="sam@example.com")
-    _batch(db, sam, "SAMBAT", files_submitted=3, created_at=utc_now())
-    _auth(client, pat)
-
-    assert client.post("/api/batches", json={"files_submitted": 3}).status_code == 200
 
 
 # --- announce_batch_once: the batch's one Teams card, on its first run --------

@@ -65,11 +65,6 @@ export function useSingleRun({
   // The upload was refused as a duplicate of an earlier run, so NO run exists.
   // The next click re-uploads with confirm_duplicate set. null = no duplicate pending.
   const [pendingDuplicate, setPendingDuplicate] = useState<string | null>(null)
-  // The one-file batch made for an upload the server refused as a duplicate: it
-  // holds no run, so the next attempt (the confirming click) reuses it. Another
-  // batch would count against the quota as well (#1202), so at the last run left
-  // the confirm would be refused. null = no such batch.
-  const [emptyBatchId, setEmptyBatchId] = useState<string | null>(null)
 
   // Kick off the (paid) pipeline run for an already-uploaded run, then hand off.
   const beginRun = async (runId: string) => {
@@ -109,39 +104,17 @@ export function useSingleRun({
     return true
   }
 
-  /** No batch, unless "Email me when job completes" is ticked: then a one-file batch that asks for the
-   *  email (#1335): the one a duplicate refusal left empty, if there is one. A refused batch
-   *  (consent, quota) throws like a refused upload. */
-  const batchForRun = async (): Promise<string | undefined> => {
-    if (!notifyOnComplete) return undefined
-    return emptyBatchId ?? (await createBatch(1, { notifyOnComplete: true })).id
-  }
-
-  /** Create the run, remembering its batch when the server refuses the file as a duplicate: that
-   *  refusal comes before any run exists, so the batch is still empty. */
+  /** Create the run: upload the file, or submit the emailed CV held on the server (#1298). No batch,
+   *  unless "Email me when job completes" is ticked: then a one-file batch that asks for the email (#1335).
+   *  A refused batch (consent, quota) throws like a refused upload. */
   const createRun = async (file: File, held: HeldFile | null, confirmDuplicate: boolean): Promise<UploadResult> => {
-    const batchId = await batchForRun()
-    try {
-      const result = await sendFile(file, held, confirmDuplicate, batchId)
-      setEmptyBatchId(null)
-      return result
-    } catch (err) {
-      // Any other failure forgets the batch: a gateway's 5xx can arrive after the run was created.
-      setEmptyBatchId(isDuplicateError(err) ? batchId ?? null : null)
-      throw err
-    }
-  }
-
-  /** Upload the file, or submit the emailed CV held on the server (#1298). */
-  const sendFile = async (
-    file: File, held: HeldFile | null, confirmDuplicate: boolean, batchId: string | undefined,
-  ): Promise<UploadResult> => {
+    const batchId = notifyOnComplete ? (await createBatch(1, { notifyOnComplete: true })).id : undefined
     if (!held) return uploadFile(file, { stripWcmInstructions, submissionType, confirmDuplicate: confirmDuplicate || undefined, batchId })
     const result = await submitInboxItem(held.id, { stripWcmInstructions, submissionType, confirmDuplicate, batchId })
     if (result.status === 'submitted' && result.run_id) {
       return { run_id: result.run_id, wcm_template_warning: false, wcm_template_match_ratio: null }
     }
-    // Same shape /upload's refusal has, so the catches in createRun and start treat a duplicate the same way.
+    // Same shape /upload's refusal has, so the catch below treats a duplicate the same way.
     throw { status: result.error === 'duplicate_file' ? 409 : 400, code: result.error ?? undefined, message: result.message ?? INBOX_REFUSED }
   }
 

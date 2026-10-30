@@ -1829,23 +1829,6 @@ def test_an_upload_refused_into_a_batch_posts_no_card_and_the_next_accepted_one_
         "CViche batch BATCHA submitted (2 files)"]
 
 
-def test_an_upload_fills_its_own_batch_without_counting_the_file_twice(client, db, seed_simple_mode, tmp_path):
-    """/upload's quota check counts runs only (#1202): the one-file batch a
-    daily limit of 1 just allowed holds that last run, and the upload into it
-    is that run, not a second one."""
-    user = _make_user(db, daily_limit=1)
-    _auth(client, user)
-    batch_id = client.post("/api/batches", json={"files_submitted": 1}).json()["id"]
-    patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
-
-    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
-                                                      data={"batch_id": batch_id}))
-
-    assert resp.status_code == 200, resp.text
-    assert db.get(Run, resp.json()["run_id"]).batch_id == batch_id
-
-
 def _post_estimates(client, *names):
     return client.post(
         "/api/estimate",
