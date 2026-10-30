@@ -299,12 +299,13 @@ def missing_evidence(outputs_dir: Path) -> list[str]:
 #: war on terror" or a lowercase "keyerror" no longer matches it, and added
 #: an explicit, still case-insensitive, API-envelope branch so the
 #: genuine L7IAKW failure (an OpenAI 400) stays fatal by name rather than by
-#: accident of the broad heuristic. Residual gap the pattern still cannot
-#: see: a stage failure recorded as a raw Python exception message with no
-#: type name in it, e.g. `'int' object is not iterable` (1 of the 66 scored
-#: farm uids, ODAWYA, carries exactly this in
-#: meta.stats.t_validation.error and stays non-fatal) -- driving this from
-#: structured stage error metadata instead of exception text is #745.
+#: accident of the broad heuristic. A stage failure whose message names no
+#: exception type (`'int' object is not iterable`) is still invisible to the
+#: pattern; a driver-recorded stage failure carries its own fatal flag
+#: instead (`_structured_stage_errors`, #745). The pattern does not judge a
+#: stage-3b second pass's own caught error at all (`is_fatal_error_field`,
+#: #745), so L7IAKW's API 400, which sits at meta.stats.t_validation.error, is
+#: no longer fatal; the envelope branch still makes that text fatal elsewhere.
 FATAL_ERROR_PATTERN = re.compile(
     r"name '\w+' is not defined"
     r"|Traceback \(most recent call last\)"
@@ -341,6 +342,33 @@ def iter_error_fields(obj: object, path: str = "") -> list[tuple[str, str]]:
         for i, item in enumerate(obj):
             results.extend(iter_error_fields(item, f"{path}[{i}]"))
     return results
+
+
+#: `meta.stats` keys of stage 3b's two second passes, in pipeline order. Each
+#: pass catches its own exception, returns the first pass's entries untouched
+#: and records the message at ``meta.stats.<key>.error`` (#818).
+STAGE3B_SECOND_PASS_KEYS = ("t_validation", "fragment_reconnection")
+
+#: Where iter_error_fields puts a second pass's caught error: the artifact's
+#: own ``meta.stats.<key>.error``, under the label the walk started from.
+_SECOND_PASS_ERROR_PATH = "{label}.meta.stats.{key}.error"
+
+
+def is_fatal_error_field(label: str, path: str, value: str) -> bool:
+    """Whether one ``error`` field, as ``iter_error_fields(artifact, label)``
+    yields it, is the cap-40 hard fail. score_pipeline_errors and the doctor's
+    pipeline_errors_present both call this, so they cannot disagree.
+
+    A stage-3b second pass's own caught error (``meta.stats.<pass>.error`` at
+    the artifact's root) is never fatal, whatever its text (#745, option A,
+    decided 2026-10-30): the pass left the first pass's entries as they were, so
+    the run is degraded, not broken. The doctor reports it as the
+    stage3b_second_pass_error WARN. Any other field is fatal when its text
+    matches FATAL_ERROR_PATTERN."""
+    if path in {_SECOND_PASS_ERROR_PATH.format(label=label, key=key)
+                for key in STAGE3B_SECOND_PASS_KEYS}:
+        return False
+    return bool(FATAL_ERROR_PATTERN.search(value))
 
 
 def _invalid_metadata_result(
@@ -713,7 +741,9 @@ def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
 
     A stage the driver recorded as failed (``*_stage_errors.json``, #745) is
     fatal by its record's ``fatal`` flag, not by pattern; see
-    _structured_stage_errors.
+    _structured_stage_errors. An error a stage-3b second pass caught and
+    recorded itself counts as an error field and is never fatal; see
+    is_fatal_error_field.
     """
     nonnull_errors = 0
     fatal_locations = []
@@ -736,7 +766,7 @@ def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
             continue
         for path, val in iter_error_fields(data, json_file.name):
             nonnull_errors += 1
-            if FATAL_ERROR_PATTERN.search(val):
+            if is_fatal_error_field(json_file.name, path, val):
                 fatal_locations.append(f"{path}: {val!r}")
 
     recorded, recorded_fatal, invalid_records = _structured_stage_errors(outputs_dir)

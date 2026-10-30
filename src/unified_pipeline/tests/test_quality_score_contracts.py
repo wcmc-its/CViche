@@ -233,27 +233,70 @@ def test_fatal_error_pattern_does_not_match_benign_text():
     assert not FATAL_ERROR_PATTERN.search("optional field unavailable")
 
 
-def test_score_pipeline_errors_validation_exception_is_fatal(tmp_path):
-    _write_json(tmp_path, "ABC_classified.json",
-               {"meta": {"stats": {"t_validation": {
-                   "error": "ValidationException: entries malformed"}}}})
+#: Error texts that match FATAL_ERROR_PATTERN, one per branch: the shapes the
+#: farm's stage-3b second passes recorded (an API 400 envelope, a NameError)
+#: and the #724 review's ValidationException. Invented text.
+_FATAL_LOOKING_ERRORS = [
+    "ValidationException: entries malformed",
+    "{'error': {'type': 'invalid_request_error'}}",
+    "Error code: 400 - the invented request body could not be parsed",
+    "name 'response' is not defined",
+    "Traceback (most recent call last): an invented frame",
+]
+
+
+@pytest.mark.parametrize("text", _FATAL_LOOKING_ERRORS)
+def test_score_pipeline_errors_a_fatal_text_on_an_entry_is_fatal(tmp_path, text):
+    """FATAL_ERROR_PATTERN still decides every error field that is not a
+    stage-3b second pass's own: the same texts on an entry cap the run at 40."""
+    assert FATAL_ERROR_PATTERN.search(text), "fixture must match the pattern"
+    _write_json(tmp_path, "ABC_classified.json", {"entries": [{"error": text}]})
     fraction, detail, cap = score_pipeline_errors(tmp_path)
-    assert fraction == 1.0
-    assert cap == 40
+    assert (fraction, cap) == (1.0, 40)
     assert "fatal_pattern=YES" in detail
 
 
-def test_score_pipeline_errors_api_envelope_error_is_fatal(tmp_path):
-    """D5': the farm's actual L7IAKW shape -- an OpenAI 400 recorded as
-    meta.stats.t_validation.error -- stays fatal via the explicit
-    API-envelope branch, not the case-sensitive exception-name branch."""
-    _write_json(tmp_path, "ABC_classified.json",
-               {"meta": {"stats": {"t_validation": {
-                   "error": "{'error': {'type': 'invalid_request_error'}}"}}}})
+@pytest.mark.parametrize("pass_key", ["t_validation", "fragment_reconnection"])
+@pytest.mark.parametrize("text", _FATAL_LOOKING_ERRORS)
+def test_score_pipeline_errors_never_caps_a_caught_second_pass_error(tmp_path, pass_key, text):
+    """#745, option A (decided 2026-10-30): a stage-3b second pass that caught
+    its own exception and recorded ``meta.stats.<pass>.error`` returned the
+    first pass's entries untouched, so the run is degraded, not broken. It
+    counts as an error field and is never the cap, whatever its text. These
+    texts at this path were pinned fatal until then (farm uid L7IAKW's API 400)."""
+    _write_json(tmp_path, "ABC_classified.json", _classified(stats={pass_key: {"error": text}}))
     fraction, detail, cap = score_pipeline_errors(tmp_path)
-    assert fraction == 1.0
+    assert cap is None
+    assert "fatal_pattern=NO" in detail
+    assert "nonnull_error_fields=1" in detail
+    assert fraction == pytest.approx(1 / 3)
+
+
+@pytest.mark.parametrize("artifact", [
+    {"meta": {"stats": {"batches": {"error": "NameError: an invented name"}}}},
+    {"meta": {"t_validation": {"error": "NameError: an invented name"}}},
+    {"entries": [{"meta": {"stats": {"t_validation": {"error": "NameError: an invented name"}}}}]},
+], ids=["another stats key", "not under stats", "under an entry"])
+def test_score_pipeline_errors_exempts_only_the_second_pass_paths(tmp_path, artifact):
+    """The exemption is the two passes' own ``meta.stats.<pass>.error`` at the
+    artifact's root, nothing that merely resembles it."""
+    _write_json(tmp_path, "ABC_classified.json", artifact)
+    _fraction, _detail, cap = score_pipeline_errors(tmp_path)
     assert cap == 40
-    assert "fatal_pattern=YES" in detail
+
+
+def test_a_caught_second_pass_error_leaves_the_run_deliverable_and_uncapped(tmp_path):
+    """#745 through score_run and #823's deliverable: the complete fixture run
+    with an API 400 on its t_validation pass scores exactly as without it."""
+    clean = score_run(_complete_run_dir(tmp_path))
+    _write_json(tmp_path, "X_classified.json", _classified(
+        total_entries=4, duplicate_entries=0, code_distribution={"A": 3, "T": 1},
+        stats={"t_validation": {"error": "Error code: 400 - invented"}}))
+    caught = score_run(tmp_path)
+    assert clean["totalScore"] == 100
+    for key in ("totalScore", "band", "raw_score_before_caps", "hard_fail_caps_applied", "flags"):
+        assert caught[key] == clean[key], key
+    assert (caught["deliverable"], caught["blockers"]) == (True, [])
 
 
 # --------------------------------------------------------------------- #745
@@ -310,7 +353,7 @@ def test_a_stage_error_file_that_is_not_json_is_counted_once(tmp_path):
 def test_run_without_stage_error_record_falls_back_to_the_pattern(tmp_path):
     """A run that predates the record is scored exactly as before."""
     _write_json(tmp_path, "ABC_classified.json",
-               {"meta": {"stats": {"t_validation": {"error": "'int' object is not iterable"}}}})
+               {"entries": [{"error": "'int' object is not iterable"}]})
     fraction, detail, cap = score_pipeline_errors(tmp_path)
     assert cap is None
     assert "fatal_pattern=NO" in detail

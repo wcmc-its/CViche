@@ -43,6 +43,7 @@ from unified_pipeline.doctor.shared import (  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
     _TEMPLATE_DOCX_PATH,
     score_cv_owner,
+    score_pipeline_errors,
 )
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
@@ -5810,6 +5811,45 @@ def test_pipeline_errors_quiet_on_benign_and_absent_error_fields():
     assert lint_pipeline_errors({}) == []
 
 
+@pytest.mark.parametrize("pass_key", ["t_validation", "fragment_reconnection"])
+@pytest.mark.parametrize("text", [
+    "NameError: name 'response' is not defined",
+    "Error code: 400 - the invented request body could not be parsed",
+])
+def test_pipeline_errors_quiet_on_a_caught_second_pass_error(pass_key, text):
+    """#745, option A (decided 2026-10-30): a stage-3b second pass's own caught
+    error is the stage3b_second_pass_error WARN, never this ERROR, whatever
+    its text. The same text on an entry of the same artifact is still the
+    hard fail."""
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {pass_key: {"error": text}}}}
+    assert lint_pipeline_errors({"stage_3b": stage3b}) == []
+    assert [f["severity"] for f in lint_stage3b_second_pass_errors(stage3b)] == ["WARN"]
+
+    stage3b["entries"] = [{"error": text}]
+    [finding] = lint_pipeline_errors({"stage_3b": stage3b})
+    assert finding["severity"] == "ERROR"
+    assert finding["evidence"] == [f"stage_3b.entries[0].error: {text}"]
+
+
+@pytest.mark.parametrize("artifact, fatal", [
+    ({"meta": {"stats": {"t_validation": {"error": "NameError: name 'x' is not defined"}}}}, False),
+    ({"meta": {"stats": {"fragment_reconnection": {"error": "Error code: 400"}}}}, False),
+    ({"meta": {"stats": {"batches": {"error": "Error code: 400"}}}}, True),
+    ({"entries": [{"meta": {"stats": {"t_validation": {"error": "Error code: 400"}}}}]}, True),
+    ({"entries": [{"error": "NameError: name 'x' is not defined"}]}, True),
+], ids=["t_validation", "fragment_reconnection", "another stats key", "under an entry", "entry"])
+def test_pipeline_errors_lint_and_scorer_agree_on_a_stage3b_artifact(tmp_path, artifact, fatal):
+    """The doctor labels the artifact `stage_3b` and the scorer labels it by
+    its file name, so the shared predicate (quality_score.is_fatal_error_field)
+    must exempt the second-pass paths under both labels (#745)."""
+    (tmp_path / "run_classified.json").write_text(json.dumps(artifact))
+    _fraction, _detail, cap = score_pipeline_errors(tmp_path)
+    fired = bool(lint_pipeline_errors({"stage_3b": artifact}))
+    assert (fired, cap == 40) == (fatal, fatal)
+
+
 # ------------------------------ #810: stage3b_fallback_ratio (hard fail) ----
 #
 # Synthesized from the outage's own log line (~/worktrees/batch-slices/s4/
@@ -6323,16 +6363,21 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
         "appendix_entries": 0, "appendix_share": 0.0, "source_coverage_pct": 100.0}
 
 
-def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path):
+@pytest.mark.parametrize("error", [
+    "'int' object is not iterable",
+    "name 'response' is not defined",  # matches FATAL_ERROR_PATTERN (#745)
+])
+def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path, error):
     """End to end (#818): a stage_3b whose t_validation errored surfaces as
     the WARN finding through run_doctor(), and total_post_corrections reaches
-    the metrics block -- the wire, not just the helpers."""
+    the metrics block -- the wire, not just the helpers. The error is never
+    also the pipeline_errors_present hard fail, whatever its text (#745)."""
     root = _build_clean_run(tmp_path)
     path = next((root / "stage_3b_classified_entries").glob("*_classified.json"))
     data = json.loads(path.read_text())
     data["meta"] = {"stats": {
         "t_validation": {"t_entries_reviewed": 4, "t_entries_reclassified": 0,
-                         "error": "'int' object is not iterable"},
+                         "error": error},
         "total_post_corrections": 7}}
     path.write_text(json.dumps(data))
 
@@ -6341,6 +6386,7 @@ def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path):
     hits = [f for f in payload["findings"]
             if f["lint"] == "stage3b_second_pass_error"]
     assert len(hits) == 1 and hits[0]["severity"] == "WARN"
+    assert not [f for f in payload["findings"] if f["lint"] == "pipeline_errors_present"]
     assert payload["metrics"]["total_post_corrections"] == 7
 
 
