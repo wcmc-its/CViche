@@ -493,24 +493,123 @@ def test_a_one_record_entry_s_tab_part_needs_only_its_words_held():
     assert not segment_held_by_fields("Treasurer of the Quokka Society 2005-2007", fields, one_record=True)
 
 
+def test_the_fields_years_are_their_date_fields_years():
+    # #1243 review: a year in a name or a note is no date of the record, so it
+    # does not widen the span; an int `year` dates it (S, B1, F2 codes).
+    fields = {**_SECRETARY_2004_2010, "start_date": "2005", "end_date": "2007", "note": "Bylaws of 2001"}
+    assert short_tab_part_rendered("Secretary, 2001-2003", fields, []) is False
+    assert short_tab_part_rendered("Secretary, 2005-2007", fields, []) is True
+    assert segment_held_by_fields("Fellow of the Quokka Society 2010-2012",
+                                  {"membership_type": "Fellow", "organization": "Quokka Society", "year": 2010})
+    # A `{start_date, end_date}` object dates the record too.
+    assert not segment_held_by_fields("Fellow of the Quokka Society 1995-1997", {
+        "degree": "Fellow", "institution": "Quokka Society",
+        "dates_attended": {"start_date": "1998", "end_date": "2001"}})
+    assert segment_held_by_fields("Fellow of the Quokka Society 1999-2000", {
+        "degree": "Fellow", "institution": "Quokka Society",
+        "dates_attended": {"start_date": "1998", "end_date": "2001"}})
+    # A two-digit end year is a year of the part, in the next century past 99.
+    assert short_tab_part_rendered("Secretary, 2009-12", _SECRETARY_2004_2010, []) is False
+    assert short_tab_part_rendered("Secretary, 2005-07", _SECRETARY_2004_2010, []) is True
+    assert short_tab_part_rendered("Secretary, 1999-01", {**_SECRETARY_2004_2010, "start_date": "1998",
+                                                          "end_date": "2002"}, []) is True
+    # A month before the end year is part of the range, not its end.
+    assert short_tab_part_rendered("Secretary, 07/2005-02/12", _SECRETARY_2004_2010, []) is False
+    assert short_tab_part_rendered("Secretary, 5/2005-11/2008", _SECRETARY_2004_2010, []) is True
+
+
+def _recovered_rounds(date, part):
+    """The bullets the pass writes for an R entry whose one `date` field
+    holds `date`, beside the record's own `part` and a sibling talk."""
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "R",
+        "text": f"{part}\tAshby Rounds, Wombat Hospital, 2011-2012",
+        "extracted_fields": {"title": "Quokka Rounds", "host_organization": "Wombat Hospital", "date": date},
+    }
+    gen.doc.add_paragraph(f"Quokka Rounds | {date}")
+    before = _bulleted_texts(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"R": [entry]})
+
+    return [t for t in _bulleted_texts(gen.doc.paragraphs) if t not in before]
+
+
+def test_a_record_dated_by_one_date_field_is_not_written_twice():
+    # #1243 review: H, K4, K5, N4 and R keep a record's dates in one `date`
+    # field. An open end there leaves the span open, and a date of one year
+    # dates where the record starts or ends, so a part that writes it is the
+    # record its row renders, not a sibling to write again.
+    sibling = ["Ashby Rounds, Wombat Hospital, 2011-2012"]
+    assert _recovered_rounds("2015-Present", "Quokka Rounds, Wombat Hospital, 2015-present") == sibling
+    assert _recovered_rounds("2010", "Quokka Rounds, Wombat Hospital, 2010-2011") == sibling
+    # Its sibling term with the record's words is still checked.
+    fields = {"title": "Quokka Rounds", "host_organization": "Wombat Hospital", "date": "2010"}
+    assert not segment_held_by_fields("Quokka Rounds, Wombat Hospital, 2007-2008", fields)
+    assert not segment_held_by_fields("Quokka Rounds, Wombat Hospital, 2016-present", {**fields, "date": "2018"})
+    # A `date` written as a range with a two-digit end spans both years.
+    assert segment_held_by_fields("Quokka Rounds, Wombat Hospital, 2010-2012", {**fields, "date": "2009-12"})
+
+
+def test_the_organization_s_own_line_over_the_record_s_years_is_not_recovered():
+    # #1243 review (BNYLDF 82): the line naming only the organization, over a
+    # span that holds the officer term the fields keep, heads the posts below
+    # it; the row names the organization, so the pass wrote it as a bullet.
+    gen = _generator()
+    fields = {"role": "Treasurer", "organization": "Quokka Guild, Board of Trustees",
+              "start_date": "2000", "end_date": "2004"}
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("1998-2004 Quokka Guild\tBoard of Trustees\tTreasurer 2000-2004\t"
+                 "Secretary 1999-2000\tChair, Bylaws Review Committee\tNorvale"),
+        "extracted_fields": fields,
+    }
+    gen.doc.add_paragraph("Quokka Guild, Board of Trustees | Treasurer | 2000-2004")
+    before = _bulleted_texts(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    assert [t for t in _bulleted_texts(gen.doc.paragraphs) if t not in before] == ["Secretary 1999-2000"]
+    # A stint at the organization whose span does not hold the record's is still checked.
+    assert not segment_held_by_fields("Quokka Guild 1995-1999", fields)
+    assert not segment_held_by_fields("Quokka Guild 2002-2006", fields)
+    assert not segment_held_by_fields("Quokka Guild 1998-2004", {"organization": "Quokka Guild"})
+    # An institution names the organization too; a seat or a role is no organization.
+    assert segment_held_by_fields("Wombat University 1998-2004", {
+        "title": "Lecturer", "institution": "Wombat University", "start_date": "2000", "end_date": "2002"})
+    assert not segment_held_by_fields("Wombat Senate 1998-2004", {
+        "committee_name": "Wombat Senate", "start_date": "2000", "end_date": "2002"})
+
+
+def test_a_sibling_term_naming_a_long_identifying_field_is_vouched_for_whatever_its_years():
+    # Known gap #1243 leaves open: `segment_already_rendered` vouches for a
+    # part that repeats an identifying field of 15 or more characters without
+    # reading its years, so an earlier term at the same organization stays lost.
+    fields = {"role": "Secretary", "organization": "Wombat Guild of Norvale",
+              "start_date": "2013", "end_date": "2015"}
+    part = "Secretary, Wombat Guild of Norvale 2009-2011"
+    assert not segment_held_by_fields(part, fields)
+    assert segment_already_rendered(part, fields)
+
+
 def test_a_tab_part_with_the_fields_words_and_other_years_is_recovered():
-    # #1243 (FLYBMX 219, VQFSDI 234, web056 367, BNYLDF 82): the field words
+    # #1243 (FLYBMX 219, VQFSDI 234, web056 367): the field words
     # vouched for the sibling term, so the render lost it. VQFSDI 234's shape:
     # the fields keep the presidency; the board seat has their words.
     gen = _generator()
     entry = {
         "taxonomy_code": "Q2",
-        "text": "Quokka Guild of Norvale:\tBoard of Directors 2002-2008\tBoard President 2005-2006",
-        "extracted_fields": {"committee_name": "Board of Directors", "role": "Board President",
+        "text": "Quokka Guild of Norvale:\tBoard of Trustees 2001-2009\tBoard President 2004-2005",
+        "extracted_fields": {"committee_name": "Board of Trustees", "role": "Board President",
                              "organization": "Quokka Guild of Norvale",
-                             "start_date": "2005", "end_date": "2006"},
+                             "start_date": "2004", "end_date": "2005"},
     }
-    gen.doc.add_paragraph("Board President, Board of Directors, Quokka Guild of Norvale 2005-2006")
+    gen.doc.add_paragraph("Board President, Board of Trustees, Quokka Guild of Norvale 2004-2005")
 
     gen._recover_unrendered_records({"Q2": [entry]})
 
     bullets = _bulleted_texts(gen.doc.paragraphs)
-    assert any("Board of Directors 2002-2008" in t for t in bullets)
+    assert any("Board of Trustees 2001-2009" in t for t in bullets)
     assert not any("Board President" in t for t in bullets)
     assert gen.stats["unrendered_records_recovered"] == 1
 
@@ -521,16 +620,16 @@ def test_a_short_term_before_the_extracted_term_is_recovered():
     gen = _generator()
     entry = {
         "taxonomy_code": "Q1",
-        "text": "Wombat Coverage Initiative:\tCo-Chair 2006-2009\tFinance committee chair 2007-2009",
-        "extracted_fields": {"role": "Finance committee chair", "organization": "Wombat Coverage Initiative",
-                             "start_date": "2007", "end_date": "2009"},
+        "text": "Wombat Coverage Initiative:\tCo-Chair 2005-2008\tBudget committee chair 2006-2008",
+        "extracted_fields": {"role": "Budget committee chair", "organization": "Wombat Coverage Initiative",
+                             "start_date": "2006", "end_date": "2008"},
     }
-    gen.doc.add_paragraph("Finance committee chair, Wombat Coverage Initiative 2007-2009")
+    gen.doc.add_paragraph("Budget committee chair, Wombat Coverage Initiative 2006-2008")
 
     gen._recover_unrendered_records({"Q1": [entry]})
 
     bullets = _bulleted_texts(gen.doc.paragraphs)
-    assert any("Co-Chair 2006-2009" in t for t in bullets)
+    assert any("Co-Chair 2005-2008" in t for t in bullets)
     assert gen.stats["unrendered_records_recovered"] == 1
 
 
@@ -539,11 +638,11 @@ def _recovered_mentor_parts(code):
     gen = _generator()
     entry = {
         "taxonomy_code": code,
-        "text": "Quimby Farrow  Wombat work study program mentor  2017-2018\tProgram mentor 2017-2019",
-        "extracted_fields": {"mentee_name": "Quimby Farrow", "site_position": "Wombat work study program mentor",
-                             "mentee_level": "Undergraduate", "start_date": "2017", "end_date": "2018"},
+        "text": "Quimby Farrow  Wombat summer program mentor  2016-2017\tProgram mentor 2016-2018",
+        "extracted_fields": {"mentee_name": "Quimby Farrow", "site_position": "Wombat summer program mentor",
+                             "mentee_level": "Undergraduate", "start_date": "2016", "end_date": "2017"},
     }
-    gen.doc.add_paragraph("Quimby Farrow | Undergraduate | Wombat work study program mentor")
+    gen.doc.add_paragraph("Quimby Farrow | Undergraduate | Wombat summer program mentor")
     before = _bulleted_texts(gen.doc.paragraphs)
 
     gen._recover_unrendered_records({code: [entry]})
@@ -556,7 +655,7 @@ def test_a_mentee_s_tab_parts_the_fields_hold_are_details_whatever_their_years()
     # years, are details of the one mentee the row renders. The same line
     # coded as a membership is a record per part.
     assert _recovered_mentor_parts("N3B") == []
-    assert _recovered_mentor_parts("Q1") == ["Program mentor 2017-2019"]
+    assert _recovered_mentor_parts("Q1") == ["Program mentor 2016-2018"]
 
 
 def test_tab_parts_dated_by_one_year_the_render_dropped_are_recovered():

@@ -2101,3 +2101,18 @@ class TestStage5dCitationOfOneTitleSplitByYear:
         assert _fan4(entry) == [entry]
         # The same entry with its two years apart, cited with one, fans out.
         assert len(_fan4(_yearly_entry(f'{_ARCH}; 2009.'))) == 3
+
+    @pytest.mark.parametrize('citation', [f'{_ARCH}. Ashby Journal. doi:10.1000/zq.2009.1',
+                                          f'{_ARCH}. https://ashby.example.org/2008/arch',
+                                          f'{_ARCH}. www.ashby.example.org/2009/arch'])
+    def test_the_digits_of_a_doi_or_a_link_name_no_record(self, citation):
+        # #1243 review: a citation with no year names neither record, whatever
+        # its DOI or link writes.
+        entry = _yearly_entry(citation)
+        assert _fan4(entry) == [entry]
+
+    def test_a_year_with_a_letter_names_its_record(self):
+        # "2009a", an author-year list's second paper of the year, is 2009.
+        citation = f'{_ARCH}; 2009a.'
+        assert [child['extracted_fields'].get('formatted_citation') for child in _fan4(_yearly_entry(citation))] == [
+            citation, None, None]

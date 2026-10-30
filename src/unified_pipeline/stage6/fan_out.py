@@ -1295,8 +1295,13 @@ def _record_title(record: Mapping[str, Any]) -> str:
     return _title_words(next((record[key] for key in _TITLE_KEYS if record.get(key)), ''))
 
 
-# A year a citation or a record's date field writes, matched by `_hit_cited_by_year`.
-_CITATION_YEAR_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+# A year a citation or a record's date field writes, matched by
+# `_hit_cited_by_year`; a letter may follow it ("2019a", a second paper of a
+# year in an author-year list).
+_CITATION_YEAR_RE = re.compile(r'\b((?:19|20)\d{2})[a-z]?\b')
+# A DOI or a link inside a citation: its digits ("10.1000/zq.2009.1") are no
+# year of the record.
+_CITATION_LINK_RE = re.compile(r'\b10\.\d{4,9}/\S+|https?://\S+|\bwww\.\S+', re.IGNORECASE)
 
 
 def _record_years(record: Mapping[str, Any]) -> frozenset[str]:
@@ -1322,7 +1327,8 @@ def _hit_cited_by_year(fields: Mapping[str, Any], records: Sequence[Mapping[str,
     in every citation."""
     if len({_record_title(records[i]) for i in hits}) != 1:
         return None
-    cited_years = frozenset(_CITATION_YEAR_RE.findall(str(fields.get(_FORMATTED_CITATION_KEY) or '')))
+    citation = _CITATION_LINK_RE.sub(' ', str(fields.get(_FORMATTED_CITATION_KEY) or ''))
+    cited_years = frozenset(_CITATION_YEAR_RE.findall(citation))
     named = [i for i in hits if _record_years(records[i]) <= cited_years]
     return named[0] if len(named) == 1 else None
 
