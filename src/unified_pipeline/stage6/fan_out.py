@@ -1323,13 +1323,16 @@ def _hit_cited_by_year(fields: Mapping[str, Any], records: Sequence[Mapping[str,
     Hits with different titles are a citation of the whole list. A citation
     that writes the year of every hit (one article split twice in one year,
     BCTOGR 2166; a talk cited with all its venues and years, EYTHNB 89) names
-    no single one, and neither does one beside an undated hit: no years are
-    in every citation."""
+    no single one, and neither does one beside an undated hit, whose year
+    the citation cannot rule in or out."""
     if len({_record_title(records[i]) for i in hits}) != 1:
+        return None
+    hit_years = [_record_years(records[i]) for i in hits]
+    if not all(hit_years):
         return None
     citation = _CITATION_LINK_RE.sub(' ', str(fields.get(_FORMATTED_CITATION_KEY) or ''))
     cited_years = frozenset(_CITATION_YEAR_RE.findall(citation))
-    named = [i for i in hits if _record_years(records[i]) <= cited_years]
+    named = [i for i, years in zip(hits, hit_years) if years <= cited_years]
     return named[0] if len(named) == 1 else None
 
 

@@ -2091,12 +2091,16 @@ class TestStage5dCitationOfOneTitleSplitByYear:
          f'{_ARCH}; Copper Weathering of the South Arch; 2009.'),
         (('2009', '2008'), _ARCH, f'{_ARCH}; 2009, 2008.'),
         (('2009', None), _ARCH, f'{_ARCH}; 2009.'),
-    ], ids=['same_year', 'different_titles', 'every_year', 'undated_twin'])
+        (('2008', None), _ARCH, f'{_ARCH}; 2009.'),
+        (('2009', None), _ARCH, f'{_ARCH}. Ashby Journal.'),
+    ], ids=['same_year', 'different_titles', 'every_year', 'undated_twin',
+            'undated_twin_dated_twin_misses', 'undated_twin_citation_writes_no_year'])
     def test_a_citation_its_years_do_not_tie_to_one_record_declines_the_split(
             self, years, second_title, citation):
         # BCTOGR 2166: one article split twice in one year; a citation of two
         # titles is of the whole list; EYTHNB 89: a citation writing every
-        # record's year renders them all; an undated twin fits any citation.
+        # record's year renders them all; an undated twin's year is unknown, so
+        # the citation names neither twin even when the dated one misses.
         entry = _yearly_entry(citation, years, second_title)
         assert _fan4(entry) == [entry]
         # The same entry with its two years apart, cited with one, fans out.
