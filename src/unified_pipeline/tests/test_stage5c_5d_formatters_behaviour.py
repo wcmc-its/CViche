@@ -1312,6 +1312,51 @@ def test_5d_parse_llm_output_empty_string_returns_empty_dict():
     assert parsed == {}
 
 
+# #2029 (KH2YMW): the reply answered one entry holding two citations with a
+# list of two objects; dict() of that list raised and took down the stage.
+_NON_OBJECT_ITEMS = [
+    [{"formatted_citation": "Quill A. Moth lore. 2019."}, {"formatted_citation": "Quill A. Wing dust. 2020."}],
+    "Quill A. Moth lore. 2019.",
+    None,
+]
+
+
+@pytest.mark.parametrize("item", _NON_OBJECT_ITEMS, ids=["list", "string", "null"])
+def test_5d_parse_llm_output_skips_and_logs_an_item_that_is_not_an_object(item, caplog):
+    id_map = {"CIT-0001": {}, "CIT-0002": {}}
+    reply = json.dumps({"CIT-0001": item, "CIT-0002": {"formatted_citation": "Brandt B. Fern reed. 2021."}})
+    with caplog.at_level(logging.WARNING, logger=s5d.logger.name):
+        parsed = s5d.parse_llm_output(reply, id_map)
+    assert parsed == {"CIT-0002": {"formatted_citation": "Brandt B. Fern reed. 2021."}}
+    assert [r.getMessage() for r in caplog.records] == [
+        f"5d reply item CIT-0001 is a {type(item).__name__}, not an object; skipped it"]
+
+
+def test_5d_parse_llm_output_a_whole_reply_that_is_not_an_object_parses_to_nothing(caplog):
+    with caplog.at_level(logging.WARNING, logger=s5d.logger.name):
+        parsed = s5d.parse_llm_output(json.dumps([{"CIT-0001": {"formatted_citation": "x"}}]), {"CIT-0001": {}})
+    assert parsed == {}
+    assert len(caplog.records) == 1
+
+
+def test_run_stage_5d_formats_the_other_entries_when_one_item_is_not_an_object(tmp_path, monkeypatch):
+    texts = ["Quill A. Moth lore. 2019. Quill A. Wing dust. 2020.", "Brandt B. Fern reed. 2021."]
+    entries = [{"taxonomy_code": "S1", "text": text, "enrichment_status": "no_identifier", "extracted_fields": {}}
+               for text in texts]
+    input_path = _write_json(tmp_path / "in.json", {"document_uid": "PLACEHOLD", "entries": entries})
+    output_path = str(tmp_path / "out.json")
+    reply = json.dumps({"CIT-0001": _NON_OBJECT_ITEMS[0],
+                        "CIT-0002": {"formatted_citation": "Brandt B. Fern reed. 2021.", "year": "2021"}})
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result(reply))
+    s5d.run_stage_5d(input_path, output_path=output_path, verbose=False)
+    with open(output_path, encoding="utf-8") as f:
+        out = json.load(f)
+    assert out["entries"][0]["extracted_fields"] == {}
+    assert out["entries"][1]["extracted_fields"]["formatted_citation"] == "Brandt B. Fern reed. 2021."
+    assert out["entries"][1]["extracted_fields"]["year"] == "2021"
+    assert out["stage_5d"]["formatted_count"] == 1
+
+
 # ---------------------------------------------------------------------------
 # stage_5d: call_llm_formatter
 # ---------------------------------------------------------------------------
