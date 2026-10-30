@@ -424,6 +424,7 @@ def test_the_committed_held_out_table_folds_as_the_owner_decided():
     assert shown_in_place("enrichment_failures", "1 failed")
     assert not shown_in_place("enrichment_failures", "1 failed", in_sample)
     assert gate[("source_line_coverage", None)] == in_sample[("source_line_coverage", None)]
+    assert ("missed_headers", None) in HELD_OUT_CHANGED, "#1232 changed its candidates"
     assert {lint for lint, _shape in HELD_OUT_CHANGED} <= set(KNOWN_LINTS)
 
 
