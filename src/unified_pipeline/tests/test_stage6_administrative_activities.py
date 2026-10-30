@@ -917,3 +917,201 @@ class TestNonSeatRowShowsTheRoleItsLineWrites:
                             {"committee_name": "A. Example, PhD", "role": "Committee Member", "start_date": "2031"},
                             {"committee_name": "B. Example, PhD", "role": "Examiner", "start_date": "2032"}])
         assert [role for _activity, role, _dates in _rows(entry)] == ["", "Examiner"]
+
+
+def _stacked_parent():
+    """A stacked table row: three names, then their dates, one more date line
+    than names (a month and a second year the records do not hold), as
+    stage 4 splits it into records (#2040). Synthetic names only."""
+    records = [
+        {"committee_name": "Zqalpha Board", "role": "Chair", "start_date": "2001", "end_date": "2003"},
+        {"committee_name": "Zqbeta Panel", "role": None, "start_date": "2004", "end_date": "2006"},
+        {"committee_name": None, "role": None, "start_date": "2009", "end_date": "2011"},
+        {"committee_name": "Zqgamma Council", "role": "Member", "start_date": "2007", "end_date": None},
+    ]
+    text = ("Zqalpha Board (Chair)\nZqbeta Panel\nZqgamma Council member\n"
+            "2001-2003\n2004-2006\nMay 2007, 2008\n2009-2011")
+    parent = {"taxonomy_code": "P", "element_idx_start": "9.1", "text": text,
+              "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+    return fan_out_multi_record_entries([parent], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+
+
+def _all_rows(entries):
+    return [row for _entry, row in _generator()._parse_administrative_activity_rows(entries)]
+
+
+class TestSplitRecordsRenderOnceFromTheirFields:
+    """#2040: the last of stage 4's records keeps the parent's whole text, so
+    re-parsing it rendered every sibling a second time, its names and dates
+    paired by position ("May" as a committee, rows of only a date)."""
+
+    def test_each_record_is_one_row_and_the_text_is_not_reparsed(self):
+        rows = _all_rows(_stacked_parent())
+        assert sorted(rows) == sorted([
+            ("Zqalpha Board", "Chair", "2001-2003"),
+            ("Zqbeta Panel", "", "2004-2006"),
+            ("Zqgamma Council", "Member", "2007"),
+        ])
+
+    def test_a_record_of_only_dates_writes_no_row(self):
+        children = _stacked_parent()
+        dates_only = [child for child in children if not child["extracted_fields"].get("committee_name")]
+        assert len(dates_only) == 1
+        assert _all_rows(dates_only) == []
+
+    def test_an_unsplit_entry_of_only_dates_is_untouched(self):
+        """Blast radius: the skip is a split record's only."""
+        entry = {"text": "2009-2011", "taxonomy_code": "P",
+                 "extracted_fields": {"start_date": "2009", "end_date": "2011"}}
+        assert _rows(entry) == [("", "", "2009-2011")]
+
+    def test_the_last_record_without_a_line_of_its_own_reads_its_fields(self):
+        """Its fields leave words unheld (`OWN_TEXT_KEY` None), so it reads
+        the line built from its fields, not the parent's whole text."""
+        last = _stacked_parent()[-1]
+        assert last[LAST_STAGE4_RECORD][OWN_TEXT_KEY] is None
+        assert _rows(last) == [("Zqgamma Council", "Member", "2007")]
+
+
+    def test_an_undated_last_record_takes_no_siblings_dates_or_columns(self):
+        """Its own line is the one built from its fields ("Zqbeta Panel |
+        Member"): neither the parenthetical fallback nor the pipe re-parse
+        reads the parent's text, where a sibling's "(Chair 2011-2013)" is."""
+        records = [{"committee_name": "Zqalpha Board", "role": "Chair",
+                    "start_date": "2011", "end_date": "2013"},
+                   {"committee_name": "Zqbeta Panel", "role": "Member"}]
+        parent = {"taxonomy_code": "P", "element_idx_start": "9.2",
+                  "text": "Zqalpha Board (Chair 2011-2013)\nZqbeta Panel member, Zqword",
+                  "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+        last = fan_out_multi_record_entries([parent], FIELD_SCHEMAS,
+                                            records_key=STAGE4_RECORDS_KEY)[-1]
+        assert last[LAST_STAGE4_RECORD][OWN_TEXT_KEY] is None
+        assert _rows(last) == [("Zqbeta Panel", "Member", "")]
+
+
+class TestSourceHeaderRowIsNoCommittee:
+    """#2040: a source table's own column-header row, with nothing extracted,
+    rendered as a committee named after the header."""
+
+    def test_a_header_row_with_nothing_extracted_writes_no_row(self):
+        entry = {"text": "Administrative duties (including committees) | Dates",
+                 "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": None, "role": None,
+                                      "start_date": None, "end_date": None}}
+        assert _rows(entry) == []
+
+    def test_header_words_with_an_extracted_committee_still_render(self):
+        entry = {"text": "Activities Committee | Dates", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Activities Committee"}}
+        [(activity, _role, _dates)] = _rows(entry)
+        assert activity.startswith("Activities Committee")
+
+    def test_a_named_row_with_nothing_extracted_still_renders(self):
+        entry = {"text": "Zqdelta Working Group | Dates", "taxonomy_code": "P",
+                 "extracted_fields": {}}
+        assert _rows(entry) != []
+
+
+class TestUnrenderedSourceLines:
+    """#2040: what no row prints is kept, so no source word leaves the
+    document: the lines of a split parent's text holding a word or number no
+    P row prints, and a source header row whole."""
+
+    def test_the_lines_no_row_prints_are_offered_under_the_last_record(self):
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _unrendered_source_lines,
+        )
+        children = _stacked_parent()
+        rows = _generator()._parse_administrative_activity_rows(children)
+        [(entry, lines)] = _unrendered_source_lines(children, rows)
+        assert entry is children[-1]
+        assert lines == ("May 2007, 2008", "2009-2011")
+
+    def test_a_parent_text_the_writer_never_reparsed_offers_nothing(self):
+        """One tab-joined line of records was never re-parsed, so its unheld
+        words are the sub-point pass's to place or not, as before."""
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _unrendered_source_lines,
+        )
+        records = [{"committee_name": "Zqalpha Board", "role": "Chair",
+                    "start_date": "2001", "end_date": "2003"},
+                   {"committee_name": "Zqbeta Panel", "role": "Member",
+                    "start_date": "2004", "end_date": "2006"}]
+        parent = {"taxonomy_code": "P", "element_idx_start": "9.3",
+                  "text": "Zqalpha Board, Chair, 2001-2003\tZqword prose\tZqbeta Panel, Member, 2004-2006",
+                  "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+        children = fan_out_multi_record_entries([parent], FIELD_SCHEMAS,
+                                                records_key=STAGE4_RECORDS_KEY)
+        rows = _generator()._parse_administrative_activity_rows(children)
+        assert _unrendered_source_lines(children, rows) == []
+
+    def test_a_header_row_is_offered_whole(self):
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _unrendered_source_lines,
+        )
+        header = {"text": "Administrative duties (including committees) | Dates",
+                  "taxonomy_code": "P", "extracted_fields": {}}
+        assert _unrendered_source_lines([header], []) == [
+            (header, ("Administrative duties (including committees) | Dates",))]
+
+    def test_an_unsplit_entry_offers_nothing(self):
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _unrendered_source_lines,
+        )
+        entry = {"text": "Zqalpha Board\nMay 2007", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Zqalpha Board"}}
+        assert _unrendered_source_lines([entry], []) == []
+
+
+def _table_lines(gen):
+    """Each P table row's text, w:t and w:delText both, a deleted row marked."""
+    from docx.oxml.ns import qn
+    table = gen._find_table_after_paragraph(gen._find_header_paragraph("INSTITUTIONAL ADMINISTRATIVE"))
+    out = []
+    for row in table.rows:
+        cells = (''.join(node.text or '' for node in p.iter(qn('w:t'), qn('w:delText')))
+                 for p in row._tr.iter(qn('w:p')))
+        text = ' '.join(' '.join(cells).split())
+        deleted = row._tr.find(qn('w:trPr') + '/' + qn('w:del')) is not None
+        out.append(('del ' if deleted else '') + text)
+    return out
+
+
+class TestUnrenderedLinesAreWrittenUnderTheirFamily:
+    """#2040: the writer puts those lines under the last row the record's
+    family wrote: a tracked-deleted row with sub-points on, plain rows off."""
+
+    def test_with_subpoints_on_they_are_one_deleted_row_after_the_familys_last_row(self):
+        gen = _template_generator()
+        gen.supplementary_subpoints = True
+        children = _stacked_parent()
+        gen._fill_administrative_activities(children)
+        lines = _table_lines(gen)
+        assert lines[1:] == [
+            "Zqgamma Council Member 2007",
+            "Zqbeta Panel 2004-2006",
+            "Zqalpha Board Chair 2001-2003",
+            "del May 2007, 2008 2009-2011",
+        ]
+        assert gen._subpoint_lines and gen._subpoint_placements
+        # The overflow pass skips it, and the next tracked change takes a new id.
+        assert id(children[-1]) in gen._subpoint_entry_ids
+        assert gen._revision_id > 0
+
+    def test_with_subpoints_off_they_are_plain_rows(self):
+        gen = _template_generator()
+        gen._fill_administrative_activities(_stacked_parent())
+        assert _table_lines(gen)[-2:] == ["May 2007, 2008", "2009-2011"]
+        assert gen._subpoint_lines == []
+
+    def test_a_header_row_goes_under_the_template_header(self):
+        gen = _template_generator()
+        gen.supplementary_subpoints = True
+        header = {"text": "Administrative duties (including committees) | Dates",
+                  "taxonomy_code": "P", "extracted_fields": {}}
+        named = {"text": "Zqalpha Board, 2004", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Zqalpha Board", "start_date": "2004"}}
+        gen._fill_administrative_activities([named, header])
+        lines = _table_lines(gen)
+        assert lines[1:] == ["del Administrative duties (including committees) | Dates",
+                             "Zqalpha Board 2004"]

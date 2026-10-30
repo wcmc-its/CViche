@@ -131,6 +131,8 @@ from .formatting import (
     PRESENTATION_DATE_FIELDS,
     PRESENTATION_END_DATE_FIELD,
     clear_entry_end,
+    deepen_entry_bullet,
+    is_entry_bullet,
     is_entry_end,
     plain_entry_left_twips,
     plain_entry_level,
@@ -2534,6 +2536,14 @@ def _deepen_plain_entry(ppr: BaseOxmlElement) -> None:
         ind.set(qn('w:left'), str(plain_entry_left_twips(level + 1)))
 
 
+def _numbering(anchor: Paragraph) -> BaseOxmlElement | None:
+    """The `w:numbering` of `anchor`'s document, or None when it has none."""
+    try:
+        return anchor.part.numbering_part.element
+    except NotImplementedError:  # python-docx: a document with no numbering part
+        return None
+
+
 def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
                             revision: Revision) -> None:
     """Deleted paragraphs after `anchor`, with its paragraph properties; a
@@ -2547,7 +2557,11 @@ def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
     ppr = copy.deepcopy(anchor._p.pPr) if anchor._p.pPr is not None else None
     if ppr is not None:
         level = ppr.find(f"{qn('w:numPr')}/{qn('w:ilvl')}")
-        if level is not None:
+        if is_entry_bullet(ppr, _numbering(anchor)):
+            # A K or L entry's bullet (#2019): its sub-points are sub-bullets
+            # of it, as a sub-list its source wrote is.
+            deepen_entry_bullet(ppr)
+        elif level is not None:
             level.set(qn('w:val'), str(int(level.get(qn('w:val'), '0')) + 1))
         else:
             _deepen_plain_entry(ppr)

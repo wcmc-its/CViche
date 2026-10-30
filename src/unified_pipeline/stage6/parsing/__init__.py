@@ -8,6 +8,8 @@ from any section writer and testable with a string literal.
     text.py     raw text in -- which year, is this a header, is this a label
     records.py  a stage 4 record in -- what kind of thing is this
     dates.py    both, for the one value they have to agree about
+    entry_card.py  both, for one K/L entry: its head, organization, date and
+                details as spans of its own text (#2019)
 
 The split between the first two is by input, not by topic: `text.py` parses
 strings, `records.py` classifies dicts. `dates.py` is the exception and is a

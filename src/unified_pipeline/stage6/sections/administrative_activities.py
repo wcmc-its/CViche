@@ -45,18 +45,37 @@ content untouched instead of half-rewritten.
 Every row written is recorded in the row-receipt ledger against the entry it
 renders (#534), so the #1205 sub-point pass anchors a committee's prose only
 under that entry's own row.
+
+A record fanned out of stage 4's records list (`is_split_record`) is one row
+from its own fields and is never re-parsed (#2040): the last of the records
+keeps the parent's whole text, and re-parsing it printed every sibling a
+second time, names and dates paired by position. A record of nothing but
+dates writes no row, nor does a source table's own header row. No source word
+leaves the document for it: the lines of the parent's text that no row
+prints, and a skipped header row, are written under the family's last row
+(`_unrendered_source_lines`), as a tracked-deleted sub-point when sub-points
+are on.
 """
 import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TypedDict
 
+from docx.oxml.xmlchemy import BaseOxmlElement
 from docx.table import Table
 
 from unified_pipeline.core.render_check import entry_lines
 
-from ..fan_out import fallback_text, has_built_text
+from ..dedup import _is_sibling_of
+from ..fan_out import (
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+    fallback_text,
+    is_split_record,
+    record_text,
+)
 from ..formatting import (
     _set_font,
     format_date_range,
@@ -68,9 +87,18 @@ from ..normalization import (
     names_non_seat_activity,
     own_activity_role,
 )
-from ..parsing import _looks_like_multiple_records, _parse_flattened_committee_lines
+from ..parsing import (
+    _is_table_header_entry,
+    _looks_like_multiple_records,
+    _parse_flattened_committee_lines,
+)
 from ..sorting import sort_entries_reverse_chronological
-from ..supplementary import ADMINISTRATIVE_ACTIVITY_FIELDS
+from ..supplementary import (
+    ADMINISTRATIVE_ACTIVITY_FIELDS,
+    Revision,
+    SubpointPlacement,
+    write_row_subpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +256,50 @@ def _name_with_institution(activity: str, institution: str) -> str:
     return f"{activity.strip()}, {institution}"
 
 
+# The column-label words of a source CV's own committee table header row
+# ("Administrative duties (including committees) | Dates"), scored by
+# `_is_table_header_entry` on top of its shared filler words.
+_HEADER_KEYWORDS = ['administrative', 'activity', 'activities', 'committee',
+                    'duties', 'responsibilities', 'including', 'role', 'date']
+
+
+def _is_source_header_row(fields: Mapping, text: str) -> bool:
+    """Is this entry the source table's column-header row, not a committee?
+
+    Only on positive evidence from both sides: stage 4 found no committee,
+    role or date in it, and every cell of its text is column-label vocabulary
+    (`_is_table_header_entry`). A header row has nothing for stage 4 to
+    extract, so an entry with any extracted value is a committee whatever its
+    words (#2040: it rendered as a committee named after the header)."""
+    if any(fields.get(key) for key in (*_COMMITTEE_ALIAS_KEYS, 'role', 'start_date', 'end_date')):
+        return False
+    return _is_table_header_entry(text, _HEADER_KEYWORDS)
+
+
+# The fields a P row's Dates cell writes.
+_DATE_FIELDS = ('start_date', 'end_date')
+
+
+def _names_nothing(fields: Mapping) -> bool:
+    """Whether `fields` hold no value but dates: no committee, role or any
+    other value a row could name. Stage 4 returns such records when a stacked
+    table cell lists more dates than names (#2040, #2041)."""
+    return not any(_committee_cell_text(value) for key, value in fields.items()
+                   if key not in _DATE_FIELDS)
+
+
+def _own_record_text(entry: _AdminActivityEntry) -> str:
+    """The line of the one record a fanned-out `entry` stands for: its own
+    text (`fallback_text`), except for the last of stage 4's records when it
+    has no line of its own (`OWN_TEXT_KEY` None): then the line built from
+    its fields (`record_text`), never the parent's whole text, which is every
+    sibling's line too."""
+    marker = entry.get(LAST_STAGE4_RECORD)
+    if isinstance(marker, Mapping) and marker.get(OWN_TEXT_KEY) is None:
+        return record_text(entry)
+    return fallback_text(entry)
+
+
 def _row_role(entry: _AdminActivityEntry, role: str) -> str:
     """The Role cell of a P row: stage 4's `role`, except on a row that is
     not a seat on a committee (`names_non_seat_activity`, #1580), which shows
@@ -240,6 +312,106 @@ def _row_role(entry: _AdminActivityEntry, role: str) -> str:
     if not names_non_seat_activity(text, [str(heading) for heading in headings]):
         return role
     return own_activity_role(role, text, str(headings[-1]) if headings else '')
+
+
+def _record_dates(record: _CommitteeRecord, fields: Mapping, code: str, text: str) -> str:
+    """The Dates cell of a row written from `fields`: its range, then any
+    further span (`with_extra_date_spans`)."""
+    return with_extra_date_spans(
+        format_date_range(record.start_date, record.end_date, code, text) or '', fields, code)
+
+
+def _routes_to_line_parser(text: str, activity: str, dates: str) -> bool:
+    """Whether `text` goes through the shared #572 line parser
+    (`_multiline_committee_rows` -> `_parse_flattened_committee_lines`), given
+    the `activity` and `dates` extraction produced for it. It does when:
+
+    - the text holds 3+ lines and no complete structured record covers it (a
+      merged multi-record block -- field extraction only captured one item
+      out of many), or
+    - it is 2 lines with no activity extracted, or
+    - #627: it still carries an unresolved pipe-separated date column (e.g.
+      "Committee (Chair 2002-present) | 1996-Present") -- the parenthetical
+      fallback has no pipe branch, so it strips only the paren and leaves
+      "| 1996-Present" stuck in the activity while taking the (wrong) paren
+      date. (A record fanned out of a multi-record entry is never re-parsed:
+      its line, when built from its fields, has no such column.)
+
+    #660: a complete activity+dates record is trusted however the text wraps
+    across display lines (a description under an otherwise clean single
+    committee entry, say), and a fully-resolved record is never rerouted
+    just because its text holds a `|`. Whether the text holds ONE record is
+    read off the text itself, per dated line (`_looks_like_multiple_records`),
+    not off its length. PR #714 capped trust at 3 lines because a genuine
+    multi-committee mega-block, where extraction captured only the first of
+    25+ merged committees, also yields a non-empty activity+dates pair, and
+    trusting it dropped the other 24. A line count both over-trusted (3 dated
+    lines) and under-trusted (a 5-line wrapped description with one date); a
+    block with two or more dated lines is a burst at any length and still
+    reparses.
+    """
+    lines = entry_lines(text)
+    structured_complete = bool(activity) and bool(dates) and not _looks_like_multiple_records(lines)
+    return ((not structured_complete and len(lines) >= 3)
+            or (len(lines) > 1 and not activity)
+            or (not structured_complete and '|' in text))
+
+
+_TOKEN_RE = re.compile(r'[^\W_]+')
+
+
+def _tokens(text: str) -> set[str]:
+    """`text`'s letter and digit runs, case-folded."""
+    return set(_TOKEN_RE.findall(text.casefold()))
+
+
+def _is_family(entry: Mapping, other: Mapping) -> bool:
+    """Whether `other` is `entry` or, for the last of stage 4's records, one
+    of its earlier records (`_is_sibling_of`)."""
+    return other is entry or (LAST_STAGE4_RECORD in entry and _is_sibling_of(other, entry))
+
+
+def _parent_text_was_reparsed(entry: Mapping, fields: Mapping, text: str) -> bool:
+    """Whether the writer, before #2040, re-parsed the last of stage 4's
+    records' whole `text` line by line (`_routes_to_line_parser`): only then
+    did the section print the lines its records do not hold."""
+    record = _CommitteeRecord.from_raw(fields)
+    dates = _record_dates(record, fields, str(entry.get('taxonomy_code', 'P')), text)
+    return _routes_to_line_parser(text, record.activity, dates)
+
+
+def _unrendered_source_lines(
+        entries: list[_AdminActivityEntry],
+        rows: list[tuple[_AdminActivityEntry, tuple[str, str, str]]],
+) -> list[tuple[_AdminActivityEntry, tuple[str, ...]]]:
+    """The source lines no P row prints, per entry they are offered under
+    (#2040). Two kinds, each the CV's own text that its writer no longer
+    shows:
+
+    - a source table's column-header row (`_is_source_header_row`), whole;
+    - for the last of stage 4's records whose parent text the writer used to
+      re-parse (`_parent_text_was_reparsed`), the lines of that text that
+      hold a word or a number no row of the section prints. Its records now
+      render a row each and the text is never re-parsed, so a line the
+      records left out (a month, a second year, a line stage 1 moved in from
+      a neighbouring row) is kept here instead. Any other text is left to
+      the sub-point pass's own rules, as before.
+    """
+    printed = set().union(*(_tokens(' '.join(cells)) for _entry, cells in rows))
+    unrendered = []
+    for entry in entries:
+        raw_fields = entry.get('extracted_fields')
+        fields = raw_fields if isinstance(raw_fields, Mapping) else {}
+        text = str(entry.get('text') or '')
+        if not is_split_record(entry) and _is_source_header_row(fields, text):
+            lines = [text.strip()]
+        elif LAST_STAGE4_RECORD in entry and _parent_text_was_reparsed(entry, fields, text):
+            lines = [line for line in entry_lines(text) if _tokens(line) - printed]
+        else:
+            continue
+        if lines:
+            unrendered.append((entry, tuple(lines)))
+    return unrendered
 
 
 class AdministrativeActivitiesSection:
@@ -274,13 +446,42 @@ class AdministrativeActivitiesSection:
         # the real rows written in its place.
         sorted_entries = sort_entries_reverse_chronological(entries)
         rows = self._parse_administrative_activity_rows(sorted_entries)
+        unrendered = _unrendered_source_lines(sorted_entries, rows)
 
         self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
+        written = []
         for entry, (activity, role, dates) in rows:
             self._row_receipts.begin_entry(entry)  # the row below is its receipt (#534, #1205)
-            self._add_committee_row(table, activity, role, dates)
+            written.append((entry, self._add_committee_row(table, activity, role, dates)))
         self._row_receipts.end_entry()  # a later row is not the last entry's (#534)
+        for entry, lines in unrendered:
+            # Under the last row its family wrote; under the table's header
+            # row when it wrote none (a source header row).
+            anchor = next((tr for other, tr in reversed(written) if _is_family(entry, other)),
+                          table.rows[0]._tr)
+            self._add_unrendered_lines(table, anchor, entry, lines)
+
+    def _add_unrendered_lines(self, table: Table, anchor: BaseOxmlElement,
+                              entry: _AdminActivityEntry, lines: tuple[str, ...]) -> None:
+        """Source lines no P row prints (`_unrendered_source_lines`), under
+        `anchor`. With sub-points on (`supplementary_subpoints` and track
+        changes) they are the entry's tracked-deleted sub-point, recorded as
+        the positions writer records its duties (`_add_title_duties`), so the
+        sub-point pass, the overflow routing and the #221 recovery read them
+        as already offered. Otherwise they are plain rows, a line each."""
+        if not (self.supplementary_subpoints and self.emit_track_changes):
+            for line in reversed(lines):
+                anchor.addnext(self._add_committee_row(table, line, '', ''))
+            return
+        revision = Revision(self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
+        texts = tuple(self._sanitize_run_text(line) for line in lines)
+        self._subpoint_lines.append(write_row_subpoint(anchor, texts, revision))
+        self._subpoint_entry_ids.add(id(entry))
+        self._subpoint_placements.append(SubpointPlacement(
+            entry.get('element_idx_start'), entry.get('taxonomy_code'), texts))
+        self._revision_id = revision.next_id
+        self.stats['track_changes_added'] += 1
 
     def _parse_administrative_activity_rows(
         self, sorted_entries: list[_AdminActivityEntry]
@@ -302,7 +503,18 @@ class AdministrativeActivitiesSection:
             raw_fields = entry.get('extracted_fields')
             fields = raw_fields if isinstance(raw_fields, Mapping) else {}
             taxonomy_code = entry.get('taxonomy_code', 'P')
-            original_text = entry.get('text', '')
+            # A record fanned out of a multi-record entry is ONE record, read
+            # from its own line (`_own_record_text`) and never re-parsed: the
+            # last of stage 4's records keeps the parent's whole text, every
+            # sibling's line, and reading that rendered each sibling a second
+            # time, its names and dates paired by position (#2040). A record
+            # of nothing but dates has no committee to list them under, and a
+            # source header row is no committee; the lines either leaves
+            # unprinted are kept by `_unrendered_source_lines`.
+            split = is_split_record(entry)
+            original_text = _own_record_text(entry) if split else entry.get('text', '')
+            if (split and _names_nothing(fields)) or _is_source_header_row(fields, original_text):
+                continue
 
             # Stage 4 packs a multi-committee entry as a LIST of record dicts
             # under committee_name/committee/activity (#208/#248 fusion).
@@ -332,32 +544,12 @@ class AdministrativeActivitiesSection:
             # look at what extraction produced, not at the fallback's
             # rewrite.
             extracted_activity = activity
-            dates = with_extra_date_spans(
-                format_date_range(record.start_date, record.end_date, taxonomy_code,
-                                  original_text) or '',
-                fields, taxonomy_code)
+            dates = _record_dates(record, fields, taxonomy_code, original_text)
 
-            # #660: extraction alone already produced a complete
-            # activity+dates record for this entry. Capture that BEFORE any
-            # raw-text fallback below touches `activity`/`dates`, so the
-            # rerouting further down can never discard a fully-populated
-            # structured record just because its source text wraps across
-            # display lines (a description under an otherwise clean single
-            # committee entry, say).
-            #
-            # Whether the text holds ONE record is read off the text itself,
-            # per dated line (`_looks_like_multiple_records`), not off its
-            # length. PR #714 capped trust at 3 lines because a genuine
-            # multi-committee mega-block, where extraction captured only the
-            # first of 25+ merged committees, also yields a non-empty
-            # activity+dates pair, and trusting it dropped the other 24. A
-            # line count both over-trusted (3 dated lines) and under-trusted
-            # (a 5-line wrapped description with one date); a block with two
-            # or more dated lines is a burst at any length and still reparses.
+            # Routing is decided off what extraction produced, BEFORE any
+            # raw-text fallback below touches `activity`/`dates` (#660).
             lines = entry_lines(original_text)
-            structured_complete = (
-                bool(activity) and bool(dates)
-                and not _looks_like_multiple_records(lines))
+            reparse = _routes_to_line_parser(original_text, extracted_activity, dates)
 
             # If dates not extracted, try to parse from parenthetical patterns in original text
             # Common patterns: "(Chair 2011-2013)", "(2010-present)", "(Member 1999-2012)"
@@ -401,29 +593,7 @@ class AdministrativeActivitiesSection:
                         activity = _PARENTHETICAL_WITH_YEAR_RE.sub(
                             '', activity or original_text).strip()
 
-            # `lines` (entry_lines(original_text)) was already computed above
-            # for `structured_complete`; reused here for the line-count-based
-            # rerouting below.
-
-            # Route through the shared #572 line parser (`_multiline_committee_rows`
-            # -> `_parse_flattened_committee_lines`) when:
-            #   - the text contains 3+ lines and no complete structured record
-            #     covers it (a merged multi-record block -- field extraction
-            #     only captured one item out of many), or
-            #   - it's 2 lines with nothing extracted, or
-            #   - #627: it's a 1- or 2-line entry whose raw text still carries
-            #     an unresolved pipe-separated date column (e.g. "Committee
-            #     (Chair 2002-present) | 1996-Present") -- the parenthetical
-            #     fallback above has no pipe branch, so it strips only the
-            #     paren and leaves "| 1996-Present" stuck in `activity` while
-            #     taking the (wrong) paren date. `structured_complete` guards
-            #     this last case: a fully-resolved record from extraction
-            #     never gets rerouted just because its raw text happens to
-            #     contain a `|`.
-            has_unresolved_pipe = (not structured_complete and '|' in original_text
-                                   and not has_built_text(entry))
-            multiline_burst = not structured_complete and len(lines) >= 3
-            if multiline_burst or (len(lines) > 1 and not extracted_activity) or has_unresolved_pipe:
+            if reparse and not split:
                 parsed_rows = self._multiline_committee_rows(lines)
             else:
                 parsed_rows = []
@@ -436,14 +606,15 @@ class AdministrativeActivitiesSection:
                     # the line; the whole line printed them twice (#1346,
                     # KJJVVO 240 "<society> Advisor — 2018–Present").
                     activity = _line_without_shown_role_and_dates(
-                        fallback_text(entry), role, record.start_date, record.end_date)
+                        original_text, role, record.start_date, record.end_date)
                 rows.append((entry, (
                     _name_with_institution(activity, record.institution),
                     role, dates)))
 
         return rows
 
-    def _add_committee_row(self, table: Table, activity: str, role: str, dates: str) -> None:
+    def _add_committee_row(self, table: Table, activity: str, role: str,
+                           dates: str) -> BaseOxmlElement:
         """Add a single committee row with proper column handling, recorded
         against the entry `_fill_administrative_activities` is on
         (`begin_entry`): the row-receipt ledger, by which the #1205 sub-point
@@ -477,6 +648,7 @@ class AdministrativeActivitiesSection:
                     _set_font(run)
         self.stats['entries_inserted'] += 1
         self._row_receipts.wrote(row._tr)
+        return row._tr
 
     def _multiline_committee_rows(self, lines: list[str]) -> list[tuple[str, str, str]]:
         """Parse multiline content into (activity, role, dates) rows.

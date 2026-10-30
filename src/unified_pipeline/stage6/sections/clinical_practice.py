@@ -24,17 +24,20 @@ the right place, so the permissive accept only ever clobbered another
 section's table. 21 of 105 corpus CVs lost a mentee's rendered table this
 way; see #841.)
 
-Bullet levels (#984): a multi-part entry ("title<TAB>hours<TAB>dates", or the
-same on separate lines) renders its first part as a level-0 bullet and every
-later part as a level-1 sub-bullet under it; a single-part entry is level 0.
-Since #1943 none of them carries a bullet glyph: a level is an indent step
-(`_apply_plain_list_indent`), as WCM reviewers asked.
+Layout (#2019): a multi-part entry ("title<TAB>hours<TAB>dates", or the
+same on separate lines) is one entry bullet, its marker at the subsection
+heading's edge, holding every part inline in source order (`join_inline`).
+Only a sub-list the source wrote keeps a sub-level: the parts after a part
+ending in a colon ("Selected Initiatives:") are sub-bullets under the entry
+(`entry_card.entry_layout`). Until #2019 every later part was a level-1 line
+under the first (#984), and since #1943 no line carries the template's
+bullet.
 
 `_insert_multiline_as_bullets` is the bullet fallback used by all three
 subsections (L2 joined L1 and L3 in #572; it used the single-bullet inserter,
 which collapsed a multi-line entry into one list paragraph with soft line
 breaks). It segments through `_bullet_parts` and attaches the entry's Word
-comments to the first bullet only.
+comments to the first paragraph only.
 
 `_bullet_parts` deliberately diverges from
 `unified_pipeline.core.render_check.entry_lines`, and exactly one input class
@@ -78,9 +81,9 @@ recovering the same text twice, which a loss-only corpus census cannot see:
 - Splitting an entry into N bullets also changed how much text the FIRST
   bullet holds, and stage 6's low-coverage overflow router judged an entry by
   that one paragraph -- so a fully rendered entry looked 1/N covered and was
-  re-emitted whole. `_insert_multiline_as_bullets` therefore hands the
-  sibling bullets it inserted to `_insert_bulleted_entry`, and the check in
-  `_add_entry_comments` weighs the entry's whole rendered text.
+  re-emitted whole. `_insert_entry` therefore hands every paragraph of the
+  entry to `_add_entry_comments`, whose check weighs the entry's whole
+  rendered text.
 """
 import logging
 import re
@@ -97,10 +100,10 @@ from ..formatting import (
     _set_font,
     format_date_for_section,
     format_date_range,
-    mark_entry_end,
 )
 from ..normalization import _committee_cell_text
 from ..parsing import _is_structural_label, _refold_shattered
+from ..parsing.entry_card import words as card_words
 from ..sorting import sort_entries_reverse_chronological
 from ..supplementary import clinical_leadership_cell_values
 
@@ -116,13 +119,6 @@ _LEADING_LIST_NUMBER_RE = re.compile(r'^[ \t]*(?:\(\d{1,3}\)|\d{1,3}[.)])[ \t]+'
 def _without_list_numbers(text: str) -> str:
     """`text` with the list number removed from the start of every line."""
     return _LEADING_LIST_NUMBER_RE.sub('', text)
-
-
-# List levels for a multi-part entry (#984): the first part is the entry's
-# title bullet, every later part (hours, dates, volume) is a sub-bullet under
-# it. Same scheme as `_insert_overflow_bullet`'s title / context split.
-_TITLE_BULLET_LEVEL = 0
-_DETAIL_BULLET_LEVEL = 1
 
 
 def _bullet_parts(text: str) -> list[str]:
@@ -219,6 +215,23 @@ def _with_unit_program(institution: str, unit_program: str, role: str) -> str:
     if not institution:
         return unit_program
     return f"{unit_program}, {institution}"
+
+
+# Where an L3 source line's first cell ends: a tab, or the " | " stage 2
+# joins a table row's cells with.
+_FIRST_CELL_END_RE = re.compile(r'\t| \| ')
+
+
+def _l3_card_source(text: str, composed: str) -> str:
+    """The source text an L3 role is tried as a card from (#2019): its first
+    cell (`_FIRST_CELL_END_RE`), without the CV's list number, or '' when that cell does not
+    hold every word of the `composed` "role, institution, dates" line, so a
+    card never prints less than the line it replaces. What follows the first
+    tab is the role's prose, which the composed line never printed either:
+    the sub-point pass (#1205) offers it under the line, card or not."""
+    cell = _without_list_numbers(_FIRST_CELL_END_RE.split(text, maxsplit=1)[0])
+    return cell if not (card_words(composed) - card_words(cell)) else ''
+
 
 # Section L taxonomy codes (docs/CODING_STANDARDS.md §8.2): L1 Clinical
 # Practice, L2 Clinical Innovations, L3 Clinical Leadership.
@@ -462,8 +475,8 @@ class ClinicalPracticeSection:
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
-                        inserted = self._insert_multiline_as_bullets(
-                            section_idx + 1 + bullet_count, bullet_text, entry,
+                        inserted = self._insert_card_or_bullets(
+                            section_idx + 1 + bullet_count, entry, bullet_text, bullet_text,
                             add_blank_before=(bullet_count == 0)
                         )
                         bullet_count += inserted
@@ -546,8 +559,8 @@ class ClinicalPracticeSection:
                     if bullet_text:
                         # Use multiline helper so a multi-line entry becomes
                         # one bullet per line, matching L1 and L3 (#572)
-                        inserted = self._insert_multiline_as_bullets(
-                            section_idx + 1 + bullet_count, bullet_text, entry,
+                        inserted = self._insert_card_or_bullets(
+                            section_idx + 1 + bullet_count, entry, bullet_text, bullet_text,
                             add_blank_before=(bullet_count == 0)
                         )
                         bullet_count += inserted
@@ -694,31 +707,45 @@ class ClinicalPracticeSection:
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
-                        inserted = self._insert_multiline_as_bullets(
-                            section_idx + 1 + bullet_count, bullet_text, entry,
-                            add_blank_before=(bullet_count == 0)
+                        inserted = self._insert_card_or_bullets(
+                            section_idx + 1 + bullet_count, entry,
+                            _l3_card_source(original_text, bullet_text), bullet_text,
+                            add_blank_before=(bullet_count == 0), one_line=True
                         )
                         bullet_count += inserted
 
+    def _insert_card_or_bullets(self, insert_idx: int, entry: dict, card_text: str,
+                                bullet_text: str, add_blank_before: bool = False,
+                                one_line: bool = False) -> int:
+        """Insert `entry` as a card read from its source text `card_text`
+        (#2019, `_insert_entry_card`; `one_line` takes only a card with no
+        detail lines), or, when that text is not one, as the bullets of
+        `bullet_text`. Returns the paragraphs inserted, which every caller
+        advances its insertion index by."""
+        inserted = self._insert_entry_card(insert_idx, card_text, entry,
+                                           add_blank_before=add_blank_before,
+                                           one_line=one_line)
+        return inserted or self._insert_multiline_as_bullets(
+            insert_idx, bullet_text, entry, add_blank_before=add_blank_before)
+
     def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: dict | None = None,
                                        add_blank_before: bool = False) -> int:
-        """Insert multi-part text as separate bullets, one per part. The first part
-        is a level-0 bullet and parts 2..N are level-1 sub-bullets under it
-        (#984), so hours/dates stay attached to their title.
+        """Insert multi-part text as one entry bullet holding every part inline
+        (#2019; until then parts 2..N were level-1 lines under the first,
+        #984), so hours/dates stay attached to their title. A colon-led
+        label's items stay a sub-level under it: a sub-list the source wrote.
 
-        This is the STANDARD method for inserting bulleted content. It respects
-        the original document's structure - if the source had multiple lines or
-        tab-separated parts, each becomes its own bullet. `_bullet_parts` above
-        defines what counts as a part.
+        This is the STANDARD method for inserting bulleted content.
+        `_bullet_parts` above defines what counts as a part.
 
         Args:
             insert_idx: Index of paragraph to insert before
             text: The text content (may contain newlines and tabs)
-            entry: Optional entry dict for adding comments (attached to first bullet only)
+            entry: Optional entry dict for adding comments (attached to the first paragraph only)
             add_blank_before: If True, add a blank line before the first entry
 
         Returns:
-            Number of PARAGRAPHS inserted -- one per bullet, plus the blank
+            Number of PARAGRAPHS inserted -- usually one, plus the blank
             spacer when `add_blank_before` is set. All three callers use the
             return value to advance their own insertion index, so it has to
             count every paragraph this method added, not only the bullets.
@@ -728,35 +755,7 @@ class ClinicalPracticeSection:
             (#476 review; found by the end-to-end tests through the real
             template, not by a helper unit test).
         """
-        lines = _bullet_parts(text)
-        if not lines:
-            return 0
-
-        # Insert in reverse order since we're inserting before insert_idx
-        inserted_paras = []
-        for j, line_text in enumerate(reversed(lines)):
-            is_last = (j == len(lines) - 1)  # Last in reversed = first in original
-            para = self._insert_bulleted_entry(
-                insert_idx, line_text,
-                entry if is_last else None,  # Attach entry/comments to first bullet
-                add_blank_before=add_blank_before and is_last,
-                list_level=_TITLE_BULLET_LEVEL if is_last else _DETAIL_BULLET_LEVEL,
-                bulleted=False,  # #1943: reviewers read unbulleted entries more easily
-                # Because insertion runs backwards, every later bullet of this
-                # entry already exists by the time the first one -- the one the
-                # entry rides -- is written. Hand them over with it: the
-                # low-coverage overflow check behind `_add_entry_comments`
-                # weighs the entry's rendered text against its source text, and
-                # measuring only the first bullet scored a fully-rendered
-                # N-part entry as 1/N covered, so `_route_overflow_entries`
-                # re-emitted the entire entry below bullets that already
-                # carried it (#476 review; +36 duplicated word tokens on one
-                # corpus CV, invisible to a loss-only census).
-                entry_sibling_paras=inserted_paras if is_last else None,
-            )
-            if para is not None:
-                inserted_paras.append(para)
-                if j == 0:  # the entry's last part: the gap to the next entry
-                    mark_entry_end(para)
-
-        return len(lines) + (1 if add_blank_before else 0)
+        # One entry bullet holding the parts inline, a colon-led label's
+        # items a sub-level under it (#2019, `_insert_entry_lines`).
+        return self._insert_entry_lines(insert_idx, _bullet_parts(text), entry,
+                                        add_blank_before=add_blank_before)

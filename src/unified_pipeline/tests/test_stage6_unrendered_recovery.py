@@ -42,7 +42,11 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
 )
-from unified_pipeline.stage6.formatting import plain_entry_left_twips  # noqa: E402
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    ENTRY_BULLET_HANG_TWIPS,
+    is_entry_bullet,
+    plain_entry_left_twips,
+)
 from unified_pipeline.stage6.normalization import (  # noqa: E402
     _clean_inline_tabs,
     _squash,
@@ -1299,9 +1303,18 @@ def test_reconsidered_k_segment_lands_under_its_own_template_subsection(code):
     assert _heading_above(gen, segment).startswith(_K_SUBSECTION_HEADINGS[code])
 
 
-def _plain_left(para):
-    """The left indent, in twips, of a paragraph with no list markup."""
-    assert _num_level(para) is None, "expected no bullet (#1943)"
+def _is_entry_bullet(para):
+    """Whether `para` carries a K or L entry's one bullet (#2019)."""
+    return is_entry_bullet(para._p.pPr, para.part.numbering_part.element)
+
+
+def _plain_left(para, first_line=False):
+    """The left indent, in twips, of a K or L entry line: the entry bullet
+    on its first line (#2019), no list markup on any other (#1943)."""
+    if first_line:
+        assert _is_entry_bullet(para), "expected the entry bullet (#2019)"
+    else:
+        assert _num_level(para) is None, "expected no bullet (#1943)"
     return para.paragraph_format.left_indent.twips
 
 
@@ -1318,7 +1331,7 @@ def test_a_reconsidered_k_or_l_segment_carries_no_bullet(code, bulleted):
     if bulleted:
         assert _num_level(para) == "0"
     else:
-        assert _plain_left(para) == plain_entry_left_twips(0)
+        assert _plain_left(para, first_line=True) == plain_entry_left_twips(0)
 
 
 def test_every_section_header_map_code_anchors_in_the_blank_template():
@@ -1354,8 +1367,9 @@ def test_table_cell_overflow_for_k3_k4_k5_stays_in_the_teaching_section(code):
     start = next(i for i, t in enumerate(texts) if t.strip() == "EDUCATIONAL CONTRIBUTIONS")
     end = next(i for i, t in enumerate(texts) if t.startswith("CLINICAL PRACTICE, INNOVATION"))
     assert start < texts.index(text) < end
-    # #1943: the section's entries carry no bullet, and neither does its overflow.
-    assert _plain_left(gen.doc.paragraphs[texts.index(text)]) == plain_entry_left_twips(0)
+    # #1943: no template bullet; #2019: the entry bullet, as the section's entries.
+    assert (_plain_left(gen.doc.paragraphs[texts.index(text)], first_line=True)
+            == plain_entry_left_twips(0))
 
 
 @pytest.mark.parametrize(("code", "bulleted"), [("K1", False), ("L1", False), ("D1", True)])
@@ -1378,24 +1392,42 @@ def test_body_paragraph_overflow_is_unbulleted_for_k_and_l(code, bulleted):
     if bulleted:
         assert _num_level(para) == "0"
     else:
-        assert _plain_left(para) == plain_entry_left_twips(0)
+        assert _plain_left(para, first_line=True) == plain_entry_left_twips(0)
 
 
-@pytest.mark.parametrize("bulleted", [True, False])
-def test_overflow_levels_survive_with_or_without_bullets(bulleted):
-    """A title, a context segment and a label's content: levels 0, 1, 2, as
-    ilvl when bulleted and as indent steps when not (#1943)."""
+def test_overflow_levels_survive_with_bullets():
+    """A title, a context segment and a label's content: levels 0, 1, 2."""
     gen = _generator()
     idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
-    gen._insert_overflow_bullet(idx + 1, "Synthetic title\tScope:\tSynthetic scope prose",
-                                bulleted=bulleted)
+    gen._insert_overflow_bullet(idx + 1, "Synthetic title\tScope:\tSynthetic scope prose")
     paras = {p.text: p for p in gen.doc.paragraphs}
     expected = {"Synthetic title": 0, "Scope:": 1, "Synthetic scope prose": 2}
     for text, level in expected.items():
-        if bulleted:
-            assert _num_level(paras[text]) == str(level)
-        else:
-            assert _plain_left(paras[text]) == plain_entry_left_twips(level)
+        assert _num_level(paras[text]) == str(level)
+
+
+def test_k_and_l_overflow_is_one_entry_bullet_with_a_labels_sub_list():
+    """K and L (#2019): the segments inline in one entry bullet, as the
+    sections' own entries; a colon-led label's list a sub-level under it."""
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+    first = gen._insert_overflow_bullet(
+        idx + 1, "Synthetic title\tExample University\tScope:\tSynthetic scope prose\t"
+                  "Synthetic second item", bulleted=False)
+    assert first.text == "Synthetic title, Example University, Scope:"
+    assert _is_entry_bullet(first) and _num_level(first) == "0"
+    prose = next(p for p in gen.doc.paragraphs if p.text == "Synthetic scope prose")
+    assert _is_entry_bullet(prose) and _num_level(prose) == "1"
+    assert prose.paragraph_format.left_indent.twips == 2 * ENTRY_BULLET_HANG_TWIPS
+
+
+def test_k_and_l_overflow_prints_a_segments_own_line_break_inline():
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+    first = gen._insert_overflow_bullet(idx + 1, "Synthetic title\tSynthetic line one\n"
+                                                 "Synthetic line two", bulleted=False)
+    assert first.text == "Synthetic title, Synthetic line one, Synthetic line two"
+    assert first._p.find(f".//{qn('w:br')}") is None
 
 
 def test_reconsider_prompt_names_k3_k4_k5_by_their_taxonomy_labels(monkeypatch):
@@ -7332,8 +7364,10 @@ def _clinical_role_table_row():
     return entry
 
 
+# The role's line is an entry card (#2019): the source's own words, the
+# years inline where the source has them.
 _CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2010-2015"
-_LATER_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2016-Present"
+_LATER_CLINICAL_LINE = f"{_CLINICAL_ROLE}, {_CLINICAL_SITE}, 2016-present"
 
 
 def _subpoint_paragraphs(gen):
@@ -7369,10 +7403,11 @@ def test_clinical_leadership_prose_is_a_deleted_paragraph_under_the_role_line(en
     assert "".join(t.text for t in para.iter(qn("w:delText"))) == _CLINICAL_PROSE
     assert list(para.iter(qn("w:t"))) == []
     assert para.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
-    # Unbulleted, one indent step under the role's line (#1943).
-    assert para.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
-    assert _left_indent(above) == str(plain_entry_left_twips(0))
-    assert _left_indent(para) == str(plain_entry_left_twips(1))
+    # A sub-bullet of the role's entry bullet, its marker under the role's
+    # text (#2019; unbulleted since #1943, until the entry bullet).
+    assert para.find(f"{qn('w:pPr')}/{qn('w:numPr')}/{qn('w:ilvl')}").get(qn("w:val")) == "1"
+    assert _left_indent(above) == str(ENTRY_BULLET_HANG_TWIPS)
+    assert _left_indent(para) == str(2 * ENTRY_BULLET_HANG_TWIPS)
     span = gen._subpoint_section_spans()["L3"]
     assert span.start < list(gen.doc.element.body).index(para) < span.end
     assert gen.stats["supplementary_subpoints"] == 1
@@ -7407,13 +7442,13 @@ def test_clinical_leadership_prose_goes_under_its_own_line_among_roles_of_one_ho
 
     (para,) = _subpoint_paragraphs(gen)
     assert _paragraph_text(para.getprevious()) == _CLINICAL_LINE
-    assert _paragraph_text(para.getprevious().getprevious()) == f"{later}, {_CLINICAL_SITE}, 2016-Present"
+    assert _paragraph_text(para.getprevious().getprevious()) == f"{later}, {_CLINICAL_SITE}, 2016-present"
     # Words alone would have taken the later role's line.
     lines = list(supplementary.anchor_candidates(_render_clinical_roles(
         [_later_clinical_role(later), _clinical_role()], supplementary_subpoints=False).doc))
-    roles = [line for line in lines if line.text.endswith(("2015", "Present"))]
+    roles = [line for line in lines if line.text.endswith(("2015", "present"))]
     assert supplementary.best_anchor(supplementary._value_tokens(_clinical_role(), "L3"), roles) is roles[0]
-    assert roles[0].text.startswith(later) and roles[0].text.endswith("Present")
+    assert roles[0].text.startswith(later) and roles[0].text.endswith("present")
 
 
 def test_roles_at_one_hospital_each_take_their_own_prose():
@@ -7992,8 +8027,9 @@ def test_a_low_coverage_role_with_a_part_no_sub_point_holds_keeps_its_overflow(p
 
     assert _subpoint_paragraphs(on) == [] and on._subpoint_placements == []
     assert on.stats["overflow_bullets_added"] == 1
-    texts = _texts_of(on.doc.element.body)
-    assert all(part in texts for part in (*prose, *parts))
+    # One entry bullet holds the overflow's parts inline (#2019).
+    text = " ".join(_texts_of(on.doc.element.body))
+    assert all(part in text for part in (*prose, *parts))
     assert etree.tostring(on.doc.element.body, method="c14n") \
         == etree.tostring(off.doc.element.body, method="c14n")
 

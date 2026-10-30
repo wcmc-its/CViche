@@ -54,6 +54,11 @@ _CALL_SITES = {
     ("stage_6_word_template.py", "_insert_bulleted_entry"):
         "shared bullet helper -- its own callers are pinned by "
         "_BULLET_FALLBACKS below",
+    ("stage_6_word_template.py", "_insert_entry_lines"):
+        "a K or L entry's lines or cells, each cleaned on its own before "
+        "they join inline (#2019): teaching bullets every entry, and the "
+        "clinical subsections reach it only on their bullet fallback, "
+        "pinned by _ENTRY_LINE_WRITERS below",
     ("stage_6_word_template.py", "_insert_reconsidered_segment"):
         "a re-routed appendix segment, and _recover_unrendered_records, "
         "which passes a dateless multi-cell row here on purpose rather "
@@ -78,14 +83,22 @@ _CALL_SITES = {
         "S0 identifier lines; the template has no heading or table for them",
 }
 
-# Every function that calls `_insert_bulleted_entry`, asserted below. Two are
-# fallbacks taken when a table-backed section cannot use its table; teaching is
-# not a fallback -- it bullets every entry, the template having no teaching
-# table at all.
+# Every function that calls `_insert_bulleted_entry`, asserted below: the
+# hospital-affiliation fallback, taken when its table-backed section cannot
+# use its table. Since #2019 the K and L writers write through
+# `_insert_entry_lines` instead (`_ENTRY_LINE_WRITERS`).
 _BULLET_FALLBACKS = {
-    ("stage6/sections/clinical_practice.py", "_insert_multiline_as_bullets"),
     ("stage6/sections/passthrough.py", "_fill_hospital_affiliation"),
+}
+# Every function that calls `_insert_entry_lines`: the clinical bullet
+# fallback, taken when L cannot use a table, and teaching, which is not a
+# fallback -- it writes every entry, the template having no teaching table
+# at all (one call for an entry, one for each record of a multi-record one
+# or each item of a stacked row).
+_ENTRY_LINE_WRITERS = {
+    ("stage6/sections/clinical_practice.py", "_insert_multiline_as_bullets"),
     ("stage6/sections/teaching.py", "_insert_teaching_entry"),
+    ("stage6/sections/teaching.py", "_insert_entry_bullets"),
 }
 
 
@@ -129,11 +142,12 @@ def test_the_call_sites_are_exactly_the_six_this_file_documents():
     assert _callers_of("_clean_inline_tabs") == set(_CALL_SITES)
 
 
-def test_the_bullet_helper_has_exactly_these_three_calling_functions():
-    """`_insert_bulleted_entry` is shared, so its own contract is empty and
-    its callers' is what matters. Two are table-backed fallbacks, pinned
-    below; the third bullets unconditionally."""
+def test_the_bullet_helper_and_the_entry_writer_have_exactly_these_callers():
+    """`_insert_bulleted_entry` and `_insert_entry_lines` are shared, so
+    their own contract is empty and their callers' is what matters. Two are
+    table-backed fallbacks, pinned below; teaching writes unconditionally."""
     assert _callers_of("_insert_bulleted_entry") == _BULLET_FALLBACKS
+    assert _callers_of("_insert_entry_lines") == _ENTRY_LINE_WRITERS
 
 
 class _Cell:
@@ -168,8 +182,12 @@ class _ClinicalProbe(ClinicalPracticeSection):
     def _find_table_after_paragraph(self, idx):
         return self._table
 
-    def _insert_bulleted_entry(self, insert_idx, text, entry=None, **kwargs):
-        self.bullets.append(text)
+    def _insert_entry_lines(self, insert_idx, lines, entry=None, **kwargs):
+        self.bullets.extend(lines)
+        return len(lines)
+
+    def _insert_entry_card(self, insert_idx, text, entry, **kwargs):
+        return 0  # not a card (#2019): the bullet path below is under test
 
 
 class _PassthroughProbe(PassthroughSection):
