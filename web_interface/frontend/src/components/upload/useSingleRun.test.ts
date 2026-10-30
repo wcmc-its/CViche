@@ -97,6 +97,30 @@ describe('useSingleRun', () => {
     expect(onUploadSuccess).toHaveBeenCalledWith('RM1')
   })
 
+  it('confirms a duplicate in the batch its refusal left empty, then makes a new one (#1202)', async () => {
+    vi.mocked(createBatch).mockResolvedValueOnce({ id: 'BQXZKD' }).mockResolvedValueOnce({ id: 'BNEXTB' })
+    vi.mocked(uploadFile).mockRejectedValueOnce({ status: 409, code: 'duplicate_file', message: 'Already run' })
+    const { result } = renderRun(true)
+    await act(() => result.current.start(FILE))
+    expect(result.current.pendingDuplicate).toBe('Already run')
+
+    await act(() => result.current.start(FILE))
+    await act(() => result.current.start(FILE))
+    expect(createBatch).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(uploadFile).mock.calls.map(([, o]) => [o.batchId, o.confirmDuplicate])).toEqual([
+      ['BQXZKD', undefined], ['BQXZKD', true], ['BNEXTB', undefined],
+    ])
+  })
+
+  it('makes a new batch after any other refused upload, which may have created its run', async () => {
+    vi.mocked(createBatch).mockResolvedValueOnce({ id: 'BQXZKD' }).mockResolvedValueOnce({ id: 'BNEXTB' })
+    vi.mocked(uploadFile).mockRejectedValueOnce({ status: 504, message: 'Gateway timeout' })
+    const { result } = renderRun(true)
+    await act(() => result.current.start(FILE))
+    await act(() => result.current.start(FILE))
+    expect(vi.mocked(uploadFile).mock.calls.map(([, o]) => o.batchId)).toEqual(['BQXZKD', 'BNEXTB'])
+  })
+
   it("shows a refused batch's quota message and uploads nothing", async () => {
     vi.mocked(createBatch).mockRejectedValue({ status: 429, message: 'Daily limit reached' })
     const { result } = renderRun(true)

@@ -32,7 +32,7 @@ from sqlalchemy.orm import object_session
 from app.api import upload as upload_module
 from app.api.runs import _run_duration_seconds
 from app.api.upload import _extract_text, _validate_docx_magic
-from app.models import Run, Step, User
+from app.models import Run, RunBatch, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services import notifications, upload_validation
 from app.services.config_service import get_estimated_run_cost
@@ -1755,13 +1755,19 @@ def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
     assert db.query(Run).count() == 0
 
 
-def test_the_first_upload_into_a_batch_posts_its_one_teams_card(client, db, seed_simple_mode, tmp_path, monkeypatch):
-    """#1202: the batch's "batch submitted" card goes out with its first run,
-    not at POST /batches, and a second upload into the batch posts no second one."""
+@pytest.fixture
+def teams_posts(monkeypatch):
+    """Every Teams webhook POST, recorded, with a webhook configured."""
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
     posted = []
     monkeypatch.setattr(notifications._SESSION, "post",
                         lambda url, json=None, timeout=None: posted.append(json) or SimpleNamespace(status_code=200))
+    return posted
+
+
+def test_the_first_upload_into_a_batch_posts_its_one_teams_card(client, db, seed_simple_mode, tmp_path, teams_posts):
+    """#1202: the batch's "batch submitted" card goes out with its first run,
+    not at POST /batches, and a second upload into the batch posts no second one."""
     user = _make_user(db)
     _add_batch(db, user)
     _auth(client, user)
@@ -1775,9 +1781,52 @@ def test_the_first_upload_into_a_batch_posts_its_one_teams_card(client, db, seed
     notifications.flush()
 
     assert [r.status_code for r in responses] == [200, 200]
-    cards = [p["attachments"][0]["content"] for p in posted]
+    cards = [p["attachments"][0]["content"] for p in teams_posts]
     assert [card["body"][0]["text"] for card in cards] == ["CViche batch BATCHA submitted (2 files)"]
     assert {f["title"]: f["value"] for f in cards[0]["body"][1]["facts"]}["Submitted by"] == "Test User"
+
+
+def _refuse_as_a_duplicate(client, tmp_path):
+    """Refused before anything is written: another user already ran these bytes (409)."""
+    return _dup_upload(client, tmp_path, {"batch_id": "BATCHA"})[0]
+
+
+def _refuse_at_the_archive(client, tmp_path):
+    """Refused after the bytes are read: the durable archive write fails (502)."""
+    storage = MagicMock()
+    storage.put_file_exclusive.side_effect = Exception("S3 unavailable")
+    patches = [*_bypass_file_validation(tmp_path), patch("app.services.run_creation.get_storage", return_value=storage)]
+    return _run_patches(patches, lambda: _post_upload(client, "cv.docx", _DUP_BYTES, DOCX_MIME,
+                                                      data={"batch_id": "BATCHA", "confirm_duplicate": "true"}))
+
+
+@pytest.mark.parametrize("refuse, status", [(_refuse_as_a_duplicate, 409), (_refuse_at_the_archive, 502)],
+                         ids=["duplicate", "archive_failed"])
+def test_an_upload_refused_into_a_batch_posts_no_card_and_the_next_accepted_one_does(
+    client, db, seed_simple_mode, tmp_path, teams_posts, refuse, status,
+):
+    """#1202: the card waits for the batch's first run. An upload the core
+    refuses creates no run, so it neither posts the card nor claims it, and
+    the next upload, the one that does create the run, posts it."""
+    _seed_prior_run(db, _make_user(db, email="other@example.com"))
+    user = _make_user(db)
+    _add_batch(db, user)
+    _auth(client, user)
+
+    refused = refuse(client, tmp_path)
+    notifications.flush()
+
+    assert refused.status_code == status, refused.text
+    assert teams_posts == []
+    db.expire_all()
+    assert db.get(RunBatch, "BATCHA").submitted_notified_at is None
+
+    accepted, _ = _dup_upload(client, tmp_path, {"batch_id": "BATCHA", "confirm_duplicate": "true"})
+    notifications.flush()
+
+    assert accepted.status_code == 200, accepted.text
+    assert [p["attachments"][0]["content"]["body"][0]["text"] for p in teams_posts] == [
+        "CViche batch BATCHA submitted (2 files)"]
 
 
 def test_an_upload_fills_its_own_batch_without_counting_the_file_twice(client, db, seed_simple_mode, tmp_path):

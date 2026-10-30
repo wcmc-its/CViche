@@ -248,8 +248,11 @@ def test_another_users_unfilled_batch_does_not_count_against_yours(client, db, s
 # --- announce_batch_once: the batch's one Teams card, on its first run --------
 
 def test_announce_batch_once_posts_the_card_for_the_first_call_only(db, teams_posts):
+    """The claim stamps only the batch it names: another batch, not yet
+    uploaded to, keeps its card for its own first run."""
     owner = _make_user(db)
     _batch(db, owner, files_submitted=3)
+    _batch(db, owner, batch_id="BATCHB", files_submitted=2)
 
     results = [batch_service.announce_batch_once(db, "BATCHA", submitter="Pat Example") for _ in range(2)]
     notifications.flush()
@@ -258,7 +261,9 @@ def test_announce_batch_once_posts_the_card_for_the_first_call_only(db, teams_po
     assert _card_titles(teams_posts) == ["CViche batch BATCHA submitted (3 files)"]
     facts = {f["title"]: f["value"] for f in teams_posts[0]["attachments"][0]["content"]["body"][1]["facts"]}
     assert facts["Submitted by"] == "Pat Example"
+    db.expire_all()
     assert db.get(RunBatch, "BATCHA").submitted_notified_at is not None
+    assert db.get(RunBatch, "BATCHB").submitted_notified_at is None
 
 
 def test_two_uploads_racing_on_two_pods_post_one_card(db, teams_posts):
