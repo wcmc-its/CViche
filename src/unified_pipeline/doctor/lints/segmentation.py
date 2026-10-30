@@ -31,6 +31,7 @@ name it exported before.
 """
 
 import re
+from bisect import bisect_right
 from collections import Counter
 from difflib import SequenceMatcher
 from typing import NamedTuple
@@ -107,6 +108,24 @@ def lint_table_lost(source_block_lines: list[tuple[int, str]],
 # quartile; the corpus median is 2, and a flat WARN on any single demoted
 # header is what made the verdict carry no information (#438).
 MISSED_HEADERS_WARN_COUNT = 6
+
+#: Severity of a finding whose only claim to being a header is its Heading
+#: style, i.e. a line that is not ALL-CAPS (#1232 G2). Many CVs style record
+#: titles, journal names and contact-block lines Heading 1-8; other CVs style
+#: their real sub-section labels the same way and stage 1a misses some. A
+#: style 1a promoted elsewhere in the run is evidence, not proof: the line is
+#: reported, never counted toward the run's WARN threshold.
+WEAK_CANDIDATE_SEVERITY = "INFO"
+
+
+class HeadingLine(NamedTuple):
+    """A source paragraph with a Word Heading style, as the doctor's header
+    reader (`run_doctor.read_header_lines`) reads it (#1232)."""
+    text: str
+    style: str
+    #: Passes every candidate rule but ALL-CAPS: the Heading style is its only
+    #: qualification.
+    style_only: bool
 
 
 def _hierarchy_titles(stage1a: dict) -> list[str]:
@@ -283,13 +302,46 @@ def _contact_block_keys(stage4: dict | None) -> set[str]:
             for part in re.split(r"[\n\t]", str(entry.get("text") or ""))}
 
 
-def lint_missed_headers(candidates: list[str], stage1a: dict,
-                        stage2: dict, stage4: dict | None = None) -> list[dict]:
+def _promoted_styles(heading_lines: list[HeadingLine], known: set[str]) -> set[str]:
+    """The Heading styles the CV demonstrably uses for real headings: each is
+    carried by a source line stage 1a promoted, i.e. one whose key is a 1a
+    title the way `lint_missed_headers` matches one (#1232 G2)."""
+    return {line.style for line in heading_lines
+            if (key := _header_key(line.text)) in known or _key_matches_title(key, known)}
+
+
+def _contact_label_keys(stage2: dict, stage4: dict | None) -> set[str]:
+    """`_header_key`s of the stage-2 entries that head the contact block: the
+    first stage-4 entry starting after the entry is coded Personal Data
+    ('Contact Information' over the address lines, 'Optional Information'
+    over the birth date). Empty without stage 4 (#1232 G2)."""
+    starts = sorted(((e["element_idx_start"], e.get("taxonomy_code"))
+                     for e in (stage4 or {}).get("entries", [])
+                     if type(e.get("element_idx_start")) is int), key=lambda pair: pair[0])
+    positions = [start for start, _ in starts]
+    keys = set()
+    for entry in stage2.get("entries", []):
+        end = entry.get("element_idx_end")
+        if type(end) is not int:
+            continue
+        nxt = bisect_right(positions, end)
+        if nxt < len(starts) and starts[nxt][1] == PERSONAL_DATA_CODE:
+            keys.add(_header_key(str(entry.get("text") or "")))
+    return keys
+
+
+def lint_missed_headers(candidates: list[str], stage1a: dict, stage2: dict,
+                        stage4: dict | None = None,
+                        heading_lines: list[HeadingLine] | None = None) -> list[dict]:
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
     everything filed under it. With the optional stage 4, the CV owner's own
     name (``cv_owner``, #539) and any other line of the Personal Data block
-    (`_contact_block_keys`) are document furniture, not headers."""
+    (`_contact_block_keys`) are document furniture, not headers. A
+    `HeadingLine` that qualifies by its style alone is checked after the
+    candidates, only when a line 1a promoted carries its style and it does not
+    head the contact block (`_contact_label_keys`), at
+    `WEAK_CANDIDATE_SEVERITY` (#1232 G2)."""
     allowed, required = _owner_name_words(stage4)
     contact_block = _contact_block_keys(stage4)
     known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
@@ -340,6 +392,22 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
     severity = _magnitude_severity(len(findings), MISSED_HEADERS_WARN_COUNT)
     for f in findings:
         f["severity"] = severity
+
+    styles = _promoted_styles(heading_lines or [], known)
+    contact_labels = _contact_label_keys(stage2, stage4)
+    for line in heading_lines or []:
+        normed = _header_key(line.text)
+        if not (line.style_only and line.style in styles) or not normed or normed in seen:
+            continue
+        seen.add(normed)
+        if (normed in titles or _key_matches_title(normed, known)
+                or _is_owner_name(line.text, allowed, required)
+                or normed in contact_block or normed in contact_labels):
+            continue
+        findings.append(_finding(
+            "missed_headers", WEAK_CANDIDATE_SEVERITY,
+            f"header-like source line missing from segmentation: '{line.text}'",
+            [line.text]))
     return findings
 
 
