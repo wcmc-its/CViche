@@ -1159,10 +1159,13 @@ def test_read_header_lines_records_every_heading_styled_line(tmp_path):
     with its style. `style_only` marks a mixed-case line that passes every
     other candidate rule; a digit or a tab keeps a line from qualifying, and
     an ALL-CAPS line is a candidate, not style-only."""
+    long_title = "An Example Record Title That Runs Well Past Sixty Characters Long"
     doc = Document()
     doc.add_paragraph("Example Appointments", style="Heading 2")
     doc.add_paragraph("Example Degrees 2001", style="Heading 2")
     doc.add_paragraph("Example\tValue", style="Heading 2")
+    doc.add_paragraph("Ex", style="Heading 2")
+    doc.add_paragraph(long_title, style="Heading 2")
     doc.add_paragraph("EXAMPLE SERVICE", style="Heading 1")
     doc.add_paragraph("", style="Heading 3")
     doc.add_paragraph("Bold Example Line").runs[0].bold = True
@@ -1175,6 +1178,8 @@ def test_read_header_lines_records_every_heading_styled_line(tmp_path):
         HeadingLine("Example Appointments", "Heading 2", True),
         HeadingLine("Example Degrees 2001", "Heading 2", False),
         HeadingLine("Example\tValue", "Heading 2", False),
+        HeadingLine("Ex", "Heading 2", False),
+        HeadingLine(long_title, "Heading 2", False),
         HeadingLine("EXAMPLE SERVICE", "Heading 1", False)]
 
 
@@ -1316,6 +1321,11 @@ def test_missed_headers_reports_a_style_only_line_only_when_1a_promoted_its_styl
         "INFO", "header-like source line missing from segmentation: 'Example Appointments'",
         ["Example Appointments"])]
     assert lint_missed_headers([], {"hierarchy": []}, {"entries": []}, None, lines) == []
+
+    # A line that names an entry's hierarchy path is a known header too.
+    stage2 = {"entries": [_entry("A mentee record line long enough", hierarchy=["MENTORING"])]}
+    mentoring = [lines[0], HeadingLine("Mentoring", "Heading 1", True)]
+    assert lint_missed_headers([], _G2_STAGE1A, stage2, None, mentoring) == []
 
     # A header 1a joined from two source lines promotes the first line's style.
     wrapped = {"hierarchy": [{"text": "EXAMPLE GRANTS AND CONTRACTS", "level": "H1", "children": []}]}
