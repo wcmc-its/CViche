@@ -29,6 +29,7 @@ from unified_pipeline.core.template_boilerplate import (
 )
 from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
+    is_prose,
     looks_like_record,
     norm,
     tab_record_segments,
@@ -92,7 +93,7 @@ from ..shared import (
     normalise_hyphens,
     offered_as_subpoint,
 )
-from .extraction import _is_prose, _leaf_strings
+from .extraction import _leaf_strings
 
 # Lint 7: a source section with at least this many substantive lines whose
 # output section is empty did not just "have nothing to say".
@@ -4750,7 +4751,7 @@ def _date_problems(text: str, records: list[Mapping],
     """(what, evidence) per shared range; with the docx read, only when two
     or more of its records render it (#1449 drops WYMVGU 865's copied date
     on origin/dev 8b287ec2, so that render is right)."""
-    if _is_prose(text):
+    if is_prose(text):
         return []
     problems = []
     for span, carriers in _shared_ranges(text, records):

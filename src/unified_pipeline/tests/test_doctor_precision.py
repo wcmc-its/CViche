@@ -375,6 +375,8 @@ def test_held_out_verdicts_fold_into_an_unchanged_lints_row():
 
 def test_a_changed_lint_keeps_its_in_sample_row_only():
     assert ("dedup_drops", None) in HELD_OUT_CHANGED
+    # #1243: the dated-clause slice changed how the lint reads an aside.
+    assert ("multi_record_coverage", None) in HELD_OUT_CHANGED
     rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
     assert rows[("dedup_drops", None)] == LintPrecision("dedup_drops", 2, 8, "M1-dup")
     assert not shown_in_place("dedup_drops", "x", rows)

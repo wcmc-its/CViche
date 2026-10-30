@@ -25,7 +25,7 @@ import re
 import sys
 import traceback
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -282,6 +282,7 @@ from unified_pipeline.stage6.sections.appendix import (
     UnmappedEntry,
     _owner_signature_tokens,
     build_appendix_diversion_warnings,
+    dated_clause_candidates,
     is_page_furniture,
     is_t_validation_recoded_m1,
     labelled_email,
@@ -857,13 +858,19 @@ def _recovery_view(out_lines: list[str], entries_by_code: dict[str, list[dict]])
 class EntryRecords(NamedTuple):
     """The record lines the #221 recovery looks for in one entry
     (`recovery_candidates`), with what it reads them by: the entry's
-    fields, the tab parts it splits a line into (`tab_record_segments`),
-    and each line's sibling rows and twins (#1230, #1956)."""
+    fields, the tab parts it splits a line into (`tab_record_segments`)
+    and the dated clauses it splits a line or part into
+    (`dated_clause_candidates`, read as tab parts are), each line's sibling
+    rows and twins (#1230, #1956), the dated clauses on their own, and the
+    clause the entry's extracted record stands for
+    (`render_check.extracted_clause`, #1243)."""
     lines: list[str]
     fields: dict
     tab_parts: set[str]
     siblings: dict[str, list[set[str]]]
     twins: dict[str, list[str]]
+    clauses: frozenset[str]
+    extracted_clause: str | None
 
 
 def _entry_records(code: str, entry: dict) -> EntryRecords | None:
@@ -874,8 +881,12 @@ def _entry_records(code: str, entry: dict) -> EntryRecords | None:
         return None
     tab_parts = {part for text_line in recovery_text(entry).split('\n')
                  for part in tab_record_segments(text_line)}
-    return EntryRecords(records, entry.get('extracted_fields') or {}, tab_parts,
-                        render_check.record_siblings(records), render_check.record_twins(records))
+    clauses = dated_clause_candidates(code, entry)
+    tab_parts.update(clauses)
+    fields = entry.get('extracted_fields') or {}
+    return EntryRecords(records, fields, tab_parts,
+                        render_check.record_siblings(records), render_check.record_twins(records),
+                        frozenset(clauses), render_check.extracted_clause(clauses, fields))
 
 
 def _record_line_lost(line: str, code: str, entry: dict, records: EntryRecords,
@@ -889,6 +900,8 @@ def _record_line_lost(line: str, code: str, entry: dict, records: EntryRecords,
     (`supplementary.held_by_subpoint`)."""
     if code == 'T' and t_line_is_scaffolding(line, entry):
         return False
+    if line == records.extracted_clause:
+        return False  # the clause the record stage 4 extracted renders as its row (#1243)
     if code == 'T':
         rendered = _whole_record_rendered(
             line, view.haystack, view.t_line_token_sets, view.t_cut_token_sets)
@@ -909,6 +922,8 @@ def _record_line_lost(line: str, code: str, entry: dict, records: EntryRecords,
     if line in records.tab_parts and segment_held_by_fields(line, records.fields,
                                                             one_record=one_record):
         return False  # a tab part of the record stage 4 extracted (#1243)
+    if line in records.clauses and render_check.noted_clause_rendered(line, view.haystack):
+        return False  # a clause whose record renders beside its note (#1243)
     if segment_already_rendered(line, records.fields):
         # The record that DID render from extracted fields: a grant table
         # splits its tokens across label/value rows, so the token check
@@ -933,13 +948,34 @@ def _record_line_verdicts(view: RecoveryView, code: str,
     line the #221 recovery looks for in `entry`, with whether it reads the
     line as lost from the document `view` reads, before any sub-point is
     written, and whether the line is a record of its own beside the
-    entry's (`supplementary.is_sub_record`)."""
+    entry's (`supplementary.is_sub_record`).
+
+    The dated clauses are left out (#1243): a sub-point offers a fragment
+    whole, and one that holds a clause the recovery re-emits would be held
+    back with the rest of its text, which then prints nowhere. The planner
+    offers such a fragment as before, and the recovery re-emits no clause
+    a written sub-point holds (`_recovers_beside_subpoints`)."""
     records = _entry_records(code, entry)
     if records is None:
         return []
+    lines = [line for line in records.lines if line not in records.clauses]
+    if len(lines) < UNRENDERED_MIN_RECORD_LINES:
+        return []
     return [supplementary.RecordLine(line, _record_line_lost(line, code, entry, records, view),
                                      supplementary.is_sub_record(line, records.tab_parts, entry))
-            for line in records.lines]
+            for line in lines]
+
+
+def _recovers_beside_subpoints(line: str, entry: dict, records: EntryRecords,
+                               subpoint_prose: Collection[str]) -> bool:
+    """Whether the #221 recovery re-emits `line`, a record line of `entry` it
+    reads as lost, beside the sub-points written (#1205): a record of its
+    own (`supplementary.is_sub_record`), whose fragment the planner held
+    back for it, or a line no written sub-point's prose holds
+    (`supplementary.held_by_subpoint`). A dated clause is never held back
+    (`_record_line_verdicts`), so only the second applies to it (#1243)."""
+    sub_record = line not in records.clauses and supplementary.is_sub_record(line, records.tab_parts, entry)
+    return sub_record or not supplementary.held_by_subpoint(line, subpoint_prose)
 
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
@@ -4667,8 +4703,7 @@ Now analyze the text above:"""
                         # part of any written sub-point's prose (duties, now
                         # under their row) is not re-emitted, and vouches below
                         # as its re-emitted copy does with sub-points off.
-                        if (supplementary.is_sub_record(line, records.tab_parts, entry)
-                                or not supplementary.held_by_subpoint(line, self._subpoint_prose)):
+                        if _recovers_beside_subpoints(line, entry, records, self._subpoint_prose):
                             inserted = self._insert_reconsidered_segment(
                                 line, code,
                                 comment=(

@@ -49,7 +49,16 @@ from unified_pipeline.core.template_boilerplate import (
     is_unanswered_prompt,
 )
 from unified_pipeline.core.text_norm import (
+    DATE_WORD_RE,
+    MONTH_PATTERN,
+    PROSE_WORD_RE,
     SUBSTANTIVE_LINE_CHARS,
+    TITLE_WORD_RE,
+    Clause,
+    DateAnchor,
+    date_clauses,
+    is_prose,
+    join_date_anchors,
     looks_like_record,
     norm,
     squash,
@@ -2124,10 +2133,6 @@ def _year_written(year: int, text: str) -> bool:
             or year in _range_shorthand_ends(text))
 
 
-#: A month or term word, as dates write it.
-_MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
-                  r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
-                  r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
 #: Two-digit year shapes only `_year_in_source` reads (#1585, batch YUYVIG:
 #: 40 of its 44 false positives). Looser than `_two_digit_years`, whose
 #: tokens also vouch for a century in implausible_year; here a wrongly read
@@ -2143,7 +2148,7 @@ _YEAR_LIST_TAILS_RE = re.compile(
 #: a day: one a comma, a four-digit year or a word follows ("May 13,",
 #: "June 05 2010", "May 13 at").
 _MONTH_TWO_DIGIT_YEAR_RE = re.compile(
-    rf"(?<![a-z]){_MONTH_PATTERN}\s*(\d{{2}})(?!\d|\s*,|\s*\d{{4}})(?=\s*(?:$|[^\w\s]))",
+    rf"(?<![a-z]){MONTH_PATTERN}\s*(\d{{2}})(?!\d|\s*,|\s*\d{{4}})(?=\s*(?:$|[^\w\s]))",
     re.IGNORECASE)
 #: A two-digit year opening a range left open: "16- present", "16-", not a
 #: number before a dash that opens a title ("Volume 20 - Title").
@@ -2399,13 +2404,6 @@ def lint_year_not_in_source(stage4: dict, stage5d: dict | None = None) -> list[d
 MULTI_RECORD_MIN_NEW = 2
 MULTI_RECORD_NEW_SHARE = 0.4
 
-#: A clause with at least this many lowercase words, and more lowercase words
-#: than capitalised ones, is a sentence about the record ("in recognition of
-#: ...", "who then went on to ..."), not a record. Titles, roles and
-#: institutions are capitalised; a short role phrase in sentence case
-#: ("Clinical skills tutor") stays below the floor.
-MULTI_RECORD_PROSE_MIN_LOWERCASE = 4
-
 #: How a left-out clause was found; the message names every shape but the
 #: first. CLAUSE_NEW_WORDS: it carries words or years the record lacks.
 #: CLAUSE_SPAN_OUTSIDE: the record holds each of its words, but it writes a
@@ -2441,34 +2439,13 @@ _DATE_YEAR_RE = re.compile(
     r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)"
     r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?P<slash_yy>\d{2})(?![\d/])"
     r"|(?<!\w)['\u2018\u2019](?P<apostrophe_yy>\d{2})(?!\d)")
-#: A word that belongs to a date, not to what the record is.
-_DATE_WORD_RE = re.compile(rf"^(?:{_MONTH_PATTERN}|present|current|ongoing|date|now)$",
-                           re.IGNORECASE)
-#: What may sit between two years of ONE date: "1990-1992", "March 2001 -
-#: June 2004", "1987, 1988", "2003 and 2005".
-_DATE_GAP_RE = re.compile(
-    rf"^(?:[\s,\-–—/.:()&]|\d|(?:to|through|thru|and|present|current|ongoing"
-    rf"|{_MONTH_PATTERN})\b)*$", re.IGNORECASE)
-#: A word for `_has_payload`: three or more letters.
-_PAYLOAD_WORD_RE = re.compile(r"[^\W\d_]{3,}")
-_PAYLOAD_FILLER = frozenset({"and", "the"})
 #: Where a source table cell, line or pipe-joined cell ends: one part of an
 #: entry holds one record or a run of them, never half of one.
 _STRONG_SEPARATOR_RE = re.compile(r"\t|\n|\s\|\s")
 #: The same, plus ';', for undated parts named by a title and an institution.
 _SOFT_SEPARATOR_RE = re.compile(r"\t|\n|;|\s\|\s")
-#: An aside that opens a clause: "(Chair). ...", " - (see ...".
-_PAREN_OPENING_RE = re.compile(r"^[\s\-–—,.:;]*\(")
-_PAREN_LEAD_CHARS = frozenset(",.;:-–—")
-#: An undated part names a record when it carries a role or rank and an
-#: institution: "Assistant Professor, <university> College of Medicine" beside
-#: the hospital post the record kept (TAUBPU-01). A PI named in a project's
-#: credit line is not the owner's role, so "investigator" is not a title.
-_TITLE_WORD_RE = re.compile(
-    r"\b(?:professor|instructor|lecturer|fellow|director|chief|chair(?:man|person)?"
-    r"|attending|surgeon|physician|resident|member|president|dean|head|scientist"
-    r"|consultant|officer|editor|coordinator|manager|advisor|associate|assistant)\b",
-    re.IGNORECASE)
+#: An undated part names a record when it carries a role or rank
+#: (`TITLE_WORD_RE`) and an institution.
 _INSTITUTION_WORD_RE = re.compile(
     r"\b(?:university|college|hospital|institute|school|cent(?:er|re)|society"
     r"|association|academy|foundation|council|committee|board|department|clinic"
@@ -2490,7 +2467,6 @@ _CLAUSE_CONNECTIVES = frozenset({
     "through", "about", "after", "before", "under", "while", "within", "which",
     "their", "there", "these", "those", "where", "other", "since", "until",
     "among", "between", "including", "during"})
-_PROSE_WORD_RE = re.compile(r"[^\W\d_]{4,}")
 
 #: The field a mentee code's record names its mentee in, and a person's name
 #: there: two or more capitalised words ("Jane Q. Doe", "Ana Ruiz-Lee").
@@ -2503,19 +2479,6 @@ DEGREE_YEAR_FIELD = "year"
 #: and such a number: five or more digits in a row.
 _IDENTIFIER_FIELDS = MappingProxyType({"F1": "license_number", "M2D": "patent_number"})
 _IDENTIFIER_NUMBER_RE = re.compile(r"\d{5,}")
-
-
-class Clause(NamedTuple):
-    """One record-shaped stretch of an entry's text and the years it writes."""
-    text: str
-    years: frozenset[str]
-
-
-class DateAnchor(NamedTuple):
-    """One written date: its span in the text and the years it holds."""
-    start: int
-    end: int
-    years: frozenset[str]
 
 
 class YearSpan(NamedTuple):
@@ -2558,12 +2521,6 @@ class MultiRecordVerdict(NamedTuple):
     evidence: list[str]
 
 
-def _has_payload(text: str) -> bool:
-    """Whether a stretch of entry text names anything besides a date."""
-    return any(not _DATE_WORD_RE.match(word) and word.lower() not in _PAYLOAD_FILLER
-               for word in _PAYLOAD_WORD_RE.findall(text))
-
-
 def _anchor_year(match: re.Match[str]) -> str:
     """The four-digit year a `_DATE_YEAR_RE` match writes; a two-digit year
     takes the shared century pivot, as stage 4 reads it."""
@@ -2575,75 +2532,17 @@ def _anchor_year(match: re.Match[str]) -> str:
 
 def _date_anchors(text: str, two_digit_years: bool) -> list[DateAnchor]:
     """Each written date of the text: a run of years joined by date-only
-    gaps, reading two-digit years only when `two_digit_years`. A month or
-    day written before a year stays in the text around it; `_has_payload`
-    and `_clause_words` read past date words."""
-    anchors: list[DateAnchor] = []
-    for match in _DATE_YEAR_RE.finditer(text):
-        if not (match.group("year") or two_digit_years):
-            continue
-        year = _anchor_year(match)
-        if anchors and _DATE_GAP_RE.match(text[anchors[-1].end:match.start()]):
-            last = anchors[-1]
-            anchors[-1] = DateAnchor(last.start, match.end(), last.years | {year})
-        else:
-            anchors.append(DateAnchor(match.start(), match.end(), frozenset({year})))
-    return anchors
-
-
-def _is_parenthetical(text: str) -> bool:
-    """An aside of the clause before it: the clause opens a parenthesis that
-    never closes, or that closes with nothing after it."""
-    opening = _PAREN_OPENING_RE.match(text)
-    if not opening:
-        return False
-    close = text.find(")", opening.end())
-    return close < 0 or not _has_payload(text[close + 1:])
-
-
-def _opens_inside_parens(part: str, position: int) -> bool:
-    """Whether the words after `position` sit inside a parenthesis an earlier
-    clause opened -- "(won an award <year>, <meeting>, <city>)" is that
-    clause's aside, not a record. Punctuation, digits and closing parentheses after
-    `position` are stepped over first."""
-    depth = part.count("(", 0, position) - part.count(")", 0, position)
-    for char in part[position:]:
-        if char == ")":
-            depth -= 1
-        elif not (char.isspace() or char.isdigit() or char in _PAREN_LEAD_CHARS):
-            break
-    return depth > 0
-
-
-def _part_clauses(part: str, two_digit_years: bool) -> list[Clause]:
-    """One part's dated clauses. A part whose dates are not separated by any
-    words is one clause (a record with a list of dates); otherwise each date
-    takes the words after it when the part opens with a date ("<year> <talk>
-    <year> <talk>"), else the words before it ("<role>, <years> <role>,
-    <years>")."""
-    anchors = _date_anchors(part, two_digit_years)
-    if not anchors:
-        return []
-    between = [part[a.end:b.start] for a, b in zip(anchors, anchors[1:])]
-    if not any(_has_payload(gap) for gap in between):
-        return [Clause(part, frozenset().union(*(a.years for a in anchors)))]
-    leading = not _has_payload(part[:anchors[0].start])
-    clauses = []
-    for i, anchor in enumerate(anchors):
-        if leading:
-            end = anchors[i + 1].start if i + 1 < len(anchors) else len(part)
-            text = part[anchor.start:end]
-        else:
-            text = part[anchors[i - 1].end if i else 0:anchor.end]
-        if i and (_is_parenthetical(text)
-                  or (leading and _opens_inside_parens(part, anchor.end))):
-            continue
-        clauses.append(Clause(text, anchor.years))
-    return clauses
+    gaps (`join_date_anchors`), reading two-digit years only when
+    `two_digit_years`. A month or day written before a year stays in the
+    text around it; `has_payload` and `_clause_words` read past date words."""
+    return join_date_anchors(text, (
+        DateAnchor(match.start(), match.end(), frozenset({_anchor_year(match)}))
+        for match in _DATE_YEAR_RE.finditer(text)
+        if match.group("year") or two_digit_years))
 
 
 def _names_title_and_institution(part: str) -> bool:
-    return bool(_TITLE_WORD_RE.search(part) and _INSTITUTION_WORD_RE.search(part))
+    return bool(TITLE_WORD_RE.search(part) and _INSTITUTION_WORD_RE.search(part))
 
 
 def _is_dated_event(part: str, record_words: frozenset[str] | None) -> bool:
@@ -2668,7 +2567,7 @@ def _record_clauses(text: str, record_words: frozenset[str] | None) -> list[Clau
     reads as one record."""
     two_digit_years = not _CLAUSE_YEAR_RE.search(text)
     dated = [clause for part in _STRONG_SEPARATOR_RE.split(text)
-             for clause in _part_clauses(part, two_digit_years)]
+             for clause in date_clauses(part, _date_anchors(part, two_digit_years))]
     if len(dated) >= 2:
         return dated
     return [Clause(part, frozenset(_CLAUSE_YEAR_RE.findall(part)))
@@ -2684,16 +2583,7 @@ def _clause_words(text: str) -> set[str]:
               for token in _long_word_tokens(match.group(1))}
     return {token for token in _long_word_tokens(text)
             if token not in labels and token not in _CLAUSE_CONNECTIVES
-            and not _DATE_WORD_RE.match(token)}
-
-
-def _is_prose(text: str) -> bool:
-    """A sentence about a record rather than a record; see
-    MULTI_RECORD_PROSE_MIN_LOWERCASE."""
-    words = [word for word in _PROSE_WORD_RE.findall(text) if not _DATE_WORD_RE.match(word)]
-    lowercase = sum(1 for word in words if word[0].islower())
-    return (lowercase >= MULTI_RECORD_PROSE_MIN_LOWERCASE
-            and lowercase > len(words) - lowercase)
+            and not DATE_WORD_RE.match(token)}
 
 
 def _years_of(value: object) -> frozenset[str]:
@@ -2749,8 +2639,8 @@ def _span_outside(clause: Clause, clause_words: set[str], own_words: set[str] | 
     one-record entry (`own_words` given) the clause the record's dates stand
     for names a role this one lacks."""
     return (bool(clause_words) and _outside_every_span(clause.years, record.spans)
-            and not _is_prose(clause.text)
-            and (own_words is None or any(_TITLE_WORD_RE.fullmatch(word)
+            and not is_prose(clause.text)
+            and (own_words is None or any(TITLE_WORD_RE.fullmatch(word)
                                           for word in own_words - clause_words)))
 
 
@@ -2778,7 +2668,7 @@ def _uncovered_clauses(clauses: list[Clause], record: RecordWords,
         new = len(new_words) + len(clause.years - record.years)
         if (new < MULTI_RECORD_MIN_NEW
                 or new < MULTI_RECORD_NEW_SHARE * (len(words[i]) + len(clause.years))
-                or _is_prose(clause.text)):
+                or is_prose(clause.text)):
             continue
         checked = new_words if len(new_words) >= MULTI_RECORD_MIN_NEW else words[i]
         uncovered.append(UncoveredClause(clause.text, clause.years, frozenset(checked)))
@@ -3372,7 +3262,7 @@ _TRAILING_CLOSERS_RE = re.compile(r"[\s\"'\u201d\u2019)\]]+$")
 #: (`ListEntry.head_label`), or none of them.
 _DATE_OPENING_RE = re.compile(
     rf"^\(?(?:(?:19|20)\d{{2}}\b|\d{{1,2}}[/.\-]\d{{1,4}}"
-    rf"|{_MONTH_PATTERN}\s*,?\s*(?:\d{{1,2}},?\s*)?(?:19|20)?\d{{2}})",
+    rf"|{MONTH_PATTERN}\s*,?\s*(?:\d{{1,2}},?\s*)?(?:19|20)?\d{{2}})",
     re.IGNORECASE)
 _NUMBERED_OPENING_RE = re.compile(r"^(?:\d{1,3}\.|\(\d{1,3}\))\s")
 OPENING_DATE = "date"
@@ -3517,7 +3407,7 @@ def _reads_as_sentence(text: str) -> bool:
         return False
     if words[0].lower() in _SENTENCE_OPENERS:
         return True
-    long_words = _PROSE_WORD_RE.findall(text)
+    long_words = PROSE_WORD_RE.findall(text)
     lowercase = sum(word[0].islower() for word in long_words)
     return (_TRAILING_CLOSERS_RE.sub("", text).endswith(_SENTENCE_ENDS) and bool(long_words)
             and lowercase >= RECORD_CUT_TAIL_LOWERCASE_SHARE * len(long_words))
@@ -3714,7 +3604,7 @@ _WRITTEN_SPAN_RE = re.compile(
 #: lists use. A comma straight after the word goes with it: "June, 2018" is
 #: no list (#1585, batch YUYVIG: 14 of its 22 false positives).
 _SPAN_MONTH_RE = re.compile(
-    rf"(?:{_MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])"
+    rf"(?:{MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])"
     r"(?:,|\s*(?:\d{1,2}(?:st|nd|rd|th)?\b,?)?)",
     re.IGNORECASE)
 #: Words that join the two ends of one span: "1980 to 1987", "between 1978

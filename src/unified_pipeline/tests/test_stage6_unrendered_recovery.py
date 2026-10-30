@@ -62,6 +62,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _record_rendered,
     _record_tokens,
     _whole_record_rendered,
+    dated_clause_lines,
+    extracted_clause,
     record_chunks,
     record_pieces,
     record_siblings,
@@ -76,7 +78,9 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import recovery_candidates  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
+    _record_line_verdicts,
     _record_lines,
+    _recovery_view,
     run_stage6,
     segment_already_rendered,
 )
@@ -9862,3 +9866,185 @@ def test_run_stage6_writes_a_restated_degree_line_as_its_honors(tmp_path, monkey
                and d.get(qn("w:author")) == "CViche: source text with no template field"]:
         tr.getparent().remove(tr)
     assert _without_revision_dates(on_doc.element.body) == _without_revision_dates(off_doc.element.body)
+
+
+# --- #1243 S3: dated clauses, several records on one line with no tab ---
+
+_QUOKKA_POSTS = "Member, Quokka Society Board, 1995-96. Treasurer, Wombat Council, 1997-99"
+
+
+def _clause_entry(code="Q1", text=_QUOKKA_POSTS, **fields):
+    return {"taxonomy_code": code, "element_idx_start": 41, "text": text,
+            "extracted_fields": fields or {"organization": "Quokka Society Board", "role": "Member",
+                                           "start_date": "1995", "end_date": "1996"}}
+
+
+def _rendered_on_line(line, rendered_line):
+    """`_record_rendered` of `line` against one rendered line."""
+    return _record_rendered(line, _squash(rendered_line), [set(_RENDER_TOKEN_RE.findall(_norm(rendered_line)))])
+
+
+def _clause_bullets(entries_by_code, rendered=(), subpoint_prose=()):
+    """The bullets the recovery writes for `entries_by_code` beside the
+    `rendered` lines."""
+    gen = _generator()
+    for line in rendered:
+        gen.doc.add_paragraph(line)
+    gen._subpoint_prose = list(subpoint_prose)
+    before = _bulleted_texts(gen.doc.paragraphs)
+    gen._recover_unrendered_records(entries_by_code)
+    return [t for t in _bulleted_texts(gen.doc.paragraphs) if t not in before]
+
+
+def test_a_one_line_entry_s_dated_clause_the_render_dropped_is_recovered():
+    entry = _clause_entry()
+    assert recovery_candidates("Q1", entry) == _QUOKKA_POSTS.split(". ")
+    assert _clause_bullets({"Q1": [entry]}, ["Quokka Society Board | Member | 1995-1996"]) == [
+        "Treasurer, Wombat Council, 1997-99"]
+
+
+def test_dated_clauses_are_read_only_by_the_recovery_pass():
+    # Dedup weighs the entry by its record lines, as before (`_record_lines`).
+    assert tab_aware_record_lines(_QUOKKA_POSTS) == _record_lines(_QUOKKA_POSTS) == []
+    assert len(recovery_candidates("Q1", _clause_entry())) == 2
+
+
+@pytest.mark.parametrize("code, splits", [
+    ("C1", True), ("D3", True), ("I", True), ("O", True), ("P", True), ("Q4D", True), ("R", True),
+    ("B1", False), ("H", False), ("K1", False), ("M2A", False), ("N3A", False), ("S1", False),
+])
+def test_only_the_dated_clause_sections_split_a_line_into_clauses(code, splits):
+    assert bool(recovery_candidates(code, _clause_entry(code))) is splits
+
+
+@pytest.mark.parametrize("marker", [FANNED_OUT_FROM, LAST_STAGE4_RECORD])
+def test_an_entry_split_into_stage_4_records_is_not_cut_into_clauses(marker):
+    entry = {**_clause_entry(), marker: {"key": STAGE4_RECORDS_KEY, "index": 0, "count": 2}}
+    assert recovery_candidates("Q1", entry) == []
+
+
+def test_the_clause_the_extracted_record_stands_for_is_not_written_again():
+    # #1243 census (6 entries): the row prints the record cell by cell and
+    # drops the clause's "Reviewer:" and "since", so the per-line check read
+    # the clause as lost and wrote it beside its own row.
+    text = "Reviewer: Journal of Quokka Science since 2009. Board of Quokka Science reviewers - 2016-2019."
+    entry = _clause_entry("Q4D", text, journal_name="Journal of Quokka Science",
+                          start_date="2009", end_date="present")
+    assert _clause_bullets({"Q4D": [entry]}, ["Journal of Quokka Science | 2009-Present"]) == [
+        "Board of Quokka Science reviewers - 2016-2019"]
+
+
+def test_the_extracted_clause_is_the_one_its_date_fields_hold():
+    clauses = ["Postdoctoral Fellow, Wombat Department of Physiology; Mentor: Quokka Lab (2009-2012",
+               "Wombat Department of Physiology; Mentor: Wombat Lab (2012-2015"]
+    fields = {"training_type": "Postdoctoral Fellowship", "institution": "Wombat Department of Physiology",
+              "start_date": "2012", "end_date": "2015"}
+    assert extracted_clause(clauses, fields) == clauses[1]
+    one_day = {"role": "Founder Ambassador", "organization": "Quokka Ventures",
+               "start_date": "2024-09-24", "end_date": "2024-09-24"}
+    events = ["Quokka Ventures Founder Ambassador, Wombat Innovation Conference, Norvale, ZQ, Sept 24, 2024",
+              "Quokka Ventures Founder Ambassador, Global Marsupial Congress, Norvale, ZQ, June 3, 2025"]
+    assert extracted_clause(events, one_day) == events[0]
+    # Fields that share no word with any clause, or date none, stand for none.
+    assert extracted_clause(events, {"start_date": "2024"}) is None
+    assert extracted_clause(events, {"role": "Founder Ambassador"}) is None
+
+
+def test_a_clause_whose_record_renders_beside_its_note_is_not_written_again():
+    # #1243 census: committees named in one fused row; the source writes
+    # each with an "(elected; <years>)" note, so no output line holds the
+    # clause's words whole.
+    text = ("Quokka Dept: Associate Chair for Undergraduate Studies (2014-2017); Personnel "
+            "Committee (elected; 2006-08); Budgetary Subcommittee (elected; 2007-2008).")
+    entry = _clause_entry("P", text, committee_name="Quokka Dept: Associate Chair for Undergraduate Studies",
+                          start_date="2014", end_date="2017")
+    fused = ("Quokka Dept: Associate Chair for Undergraduate Studies; Personnel Committee; "
+             "Budgetary Subcommittee | | 2014-2017")
+    assert _clause_bullets({"P": [entry]}, [fused]) == []
+    # The same committees with no row naming them are recovered.
+    assert _clause_bullets({"P": [entry]}, ["Quokka Dept: Associate Chair for Undergraduate Studies | | 2014-2017"]) == [
+        "Budgetary Subcommittee (elected; 2007-2008", "Personnel Committee (elected; 2006-08"]
+    # The note keeps the per-line check from vouching for the clause.
+    assert _rendered_on_line("Personnel Committee (elected; 2006-08", fused) is False
+
+
+def test_an_office_held_within_a_rendered_record_is_recovered():
+    text = "Advisory Board, Quokka Research Programs, 1992-1998 (Chairman, 1996-1998)"
+    entry = _clause_entry("Q1", text, role="Member", organization="Quokka Research Programs, Advisory Board",
+                          start_date="1992", end_date="1998")
+    assert _clause_bullets({"Q1": [entry]}, ["Quokka Research Programs, Advisory Board | Member | 1992-1998"]) == [
+        "Chairman, 1996-1998"]
+
+
+@pytest.mark.parametrize("text", [
+    # a parenthetical case note with a year
+    "Wombat Academic Appeals Board – 1995 – (Appeal of a denied promotion of a Quokka Faculty Member, May 1996).",
+    # a 'see previous section' pointer
+    "2019: Quokka Society Master Series, Wombat Lecture Course Director 2013-19 see previous section",
+    # narrative with years
+    "After my fellowship at the Quokka Clinic in 1985 I joined a small group practice, and in 1990 I "
+    "founded the Wombat Surgical Society, which I led until 2012.",
+])
+def test_a_dated_note_pointer_or_narrative_is_not_written_as_a_record(text):
+    entry = _clause_entry("P", text, committee_name="Wombat Academic Appeals Board", start_date="1995")
+    assert recovery_candidates("P", entry) == []
+    assert _clause_bullets({"P": [entry]}) == []
+
+
+def test_a_year_inside_a_talk_title_is_not_a_record_date():
+    text = ("Quokka Grand Rounds, Wombat Department of Surgery, May 16th, 2017, Visiting Professor: "
+            "Quokka Protection Act 2010; Wombat Access Reauthorization Act 2015; How to Survive in Surgery!")
+    title = "Quokka Protection Act 2010; Wombat Access Reauthorization Act 2015; How to Survive in Surgery!"
+    entry = _clause_entry("R", text, title=title, event_name="Quokka Grand Rounds", date="2017-05-16")
+    assert recovery_candidates("R", entry) == []
+    assert len(recovery_candidates("R", {**entry, "extracted_fields": {"date": "2017-05-16"}})) == 2
+
+
+def test_offices_on_a_line_of_their_own_in_parentheses_are_not_written_again():
+    # The office cell of the committee's row prints both offices.
+    text = "Quokka Education Committee, Norvale Campus\n       (Vice Chair 2006-2008) (Chair 2008-2010)"
+    entry = _clause_entry("O", text, start_date="1999", end_date="2012")
+    assert recovery_candidates("O", entry) == []
+
+
+def test_a_dated_clause_a_written_sub_point_holds_is_not_written_again():
+    # A sub-point offers the fragment whole; held back for the clause, the
+    # rest of the fragment would print nowhere (#1205).
+    entry = _clause_entry()
+    rendered = ["Quokka Society Board | Member | 1995-1996"]
+    prose = ["Treasurer, Wombat Council, 1997-99. Wombat Council annual report editor"]
+    assert _clause_bullets({"Q1": [entry]}, rendered, prose) == []
+    assert _clause_bullets({"Q1": [entry]}, rendered) == ["Treasurer, Wombat Council, 1997-99"]
+
+
+def test_the_sub_point_planner_reads_no_dated_clause_as_an_entry_record():
+    gen = _generator()
+    gen.doc.add_paragraph("Quokka Society Board | Member | 1995-1996")
+    view = _recovery_view(gen._rendered_output_lines(), {"Q1": [_clause_entry()]})
+    assert _record_line_verdicts(view, "Q1", _clause_entry()) == []
+    # One record line besides the clauses is no entry the planner reads, as before.
+    one_line = _clause_entry(text=f"{_QUOKKA_POSTS}\n1998-2001 Secretary, Norvale Quokka Guild Board")
+    assert len(recovery_candidates("Q1", one_line)) == 3
+    assert _record_line_verdicts(view, "Q1", one_line) == []
+    guild = ["1998-2001 Secretary, Norvale Quokka Guild Board", "2002-2004 President, Norvale Quokka Guild Board"]
+    three_lines = _clause_entry(text="\n".join([_QUOKKA_POSTS, *guild]))
+    assert len(recovery_candidates("Q1", three_lines)) == 4
+    assert [record.text for record in _record_line_verdicts(view, "Q1", three_lines)] == guild
+
+
+def test_a_line_its_tab_parts_split_is_not_also_cut_into_clauses():
+    line = f"{_QUOKKA_POSTS}\tChair, Norvale Board, 2001-2003"
+    assert dated_clause_lines(line, {}) == []
+    assert recovery_candidates("Q1", _clause_entry(text=line)) == line.split("\t")
+    # Each tab part the tab split leaves whole is cut on its own.
+    places = "Wombat Hall, 1990. Ashby Lane, 1991. Norvale Park, 1992"
+    assert dated_clause_lines(f"{places}\t{_QUOKKA_POSTS}", {}) == _QUOKKA_POSTS.split(". ")
+
+
+def test_a_date_field_names_no_year_of_a_dated_clause():
+    # Only titles and names hold a year as part of a name; a date field's
+    # year is the record's date.
+    text = "Member, Quokka Society Board, Term 2010. Chair, Wombat Council, 2012"
+    entry = _clause_entry("Q1", text, organization="Quokka Society Board", start_date="Term 2010")
+    assert dated_clause_lines(text, entry["extracted_fields"]) == text.split(". ")
+    assert dated_clause_lines(text, {"title": "Quokka Society Board Term 2010"}) == []
