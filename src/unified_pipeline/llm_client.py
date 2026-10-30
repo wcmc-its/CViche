@@ -239,8 +239,9 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         botocore.exceptions.ClientError: On non-retryable Bedrock errors or
             exhausted retries
     """
-    # First: a message list no provider accepts never reaches the prompt log
-    # or an API (#640).
+    # First: a structurally broken message list (see _validate_messages)
+    # never reaches the prompt log or an API (#640). Content type is left to
+    # the adapter.
     _validate_messages(messages)
     cfg = _resolve_call_config(stage, kwargs)
 
