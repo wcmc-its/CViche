@@ -78,6 +78,25 @@ def test_an_election_that_is_not_the_lines_fellowship_is_not(text):
     assert not is_honorific_fellowship(text, ("Professional Societies",))
 
 
+@pytest.mark.parametrize("text", [
+    # a membership period to the present, and the election's own year
+    "Invented Association (IA), 2001 - Present.\tElected as Fellow, 2009.",
+    "1996-Present Fellow in the Invented Heart Association, Elected as fellow, 2002",
+    "2001 \u2013 current Invented Society (elected Fellow 2009)",
+])
+def test_a_membership_period_beside_a_separately_dated_election_is_the_membership(text):
+    assert not is_honorific_fellowship(text, ("Professional Societies",))
+
+
+@pytest.mark.parametrize("text", [
+    # the period is the fellowship's own, or the election carries no other year
+    "2005-present Invented Epidemiological Society (elected Fellow)",
+    "Invented College of Nutrition, Elected as Fellow, 2006-2010.",
+])
+def test_a_period_with_no_other_year_keeps_the_election(text):
+    assert is_honorific_fellowship(text, ("Professional Societies",))
+
+
 @pytest.mark.parametrize("role", [
     "Member", "Membership Liaison", "Committee", "Chairman", "Board", "Council", "President",
     "Officer", "Secretary", "Treasurer",

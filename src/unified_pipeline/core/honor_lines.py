@@ -61,6 +61,14 @@ _ELECTED_FELLOW_CLAUSE_RE = re.compile(
 _OTHER_ROLE_RE = re.compile(
     r"\b(?:members?|membership|committees?|chair\w*|boards?|council|president|officer"
     r"|secretary|treasurer)\b", re.IGNORECASE)
+#: So is a membership period that runs to the present beside a separately
+#: dated election: "<Association>, 1989 - Present. Elected as Fellow, 2009."
+#: (web204 3166), "1996-Present Fellow in the <Association>, Elected as
+#: fellow, 2002" (ULHCAP 154, whose fellowship the CV lists again, with its
+#: year, under Certification). Recoding such a line to H would drop the
+#: membership, or the election's own year.
+_OPEN_SPAN_RE = re.compile(r"\b(?:19|20)\d{2}\s*[-–—]\s*(?:present|current)\b", re.IGNORECASE)
+_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 
 #: The words that name a society-like body.
 _BODY = r"(?:association|society|college|academy|institute)"
@@ -93,18 +101,27 @@ def heading_names_honors(heading: str) -> bool:
     return bool(_HONORS_HEADING_RE.search(heading)) and not _FUNDING_HEADING_RE.search(heading)
 
 
+def _is_membership_row(text: str) -> bool:
+    """A line that names another membership role, or a membership period to
+    the present and a year outside it."""
+    if _OTHER_ROLE_RE.search(text):
+        return True
+    span = _OPEN_SPAN_RE.search(text)
+    return bool(span) and bool(_YEAR_RE.search(text[:span.start()] + " " + text[span.end():]))
+
+
 def is_honorific_fellowship(text: str, heading_path: Sequence[str]) -> bool:
     """A fellowship the 2026-10-30 decision on #1577 makes an honor.
 
     True when the line opens with an election to a fellowship; or states the
-    election later and names no other membership role; or names a
+    election later and is no membership row (`_is_membership_row`); or names a
     fellowship as its title on a heading path that names honors, whose leaf
     names no membership or credential. The code the line was given is the
     caller's to check.
     """
     if _ELECTED_FELLOW_LEAD_RE.search(text):
         return True
-    if _ELECTED_FELLOW_CLAUSE_RE.search(text) and not _OTHER_ROLE_RE.search(text):
+    if _ELECTED_FELLOW_CLAUSE_RE.search(text) and not _is_membership_row(text):
         return True
     leaf = heading_path[-1] if heading_path else ""
     return (any(_HONORS_HEADING_RE.search(level) for level in heading_path)
