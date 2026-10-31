@@ -16,6 +16,7 @@ from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
 from app.services import review_comments as rc  # noqa: E402
+from app.services import template_rules as tr  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
 from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
@@ -26,6 +27,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
 )
 from unified_pipeline.doctor.lints.render import lint_renderer_row_receipts  # noqa: E402
 from unified_pipeline.doctor.precision import LintPrecision  # noqa: E402
+from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     read_docx_blocks,
     read_docx_table_rows,
@@ -873,3 +875,23 @@ def test_a_comment_map_that_cannot_be_written_leaves_no_review_copy(tmp_path):
     with pytest.raises(rc.REVIEW_DOCX_ERRORS):
         rc.write_review_docx(clean, _report())
     assert not rc.review_docx_path(clean).exists()
+
+
+def test_a_template_rule_is_an_uncapped_comment_on_its_slot_listed_in_the_map(tmp_path, monkeypatch):
+    """#1999: an Abstracts slot past the template's 20 gets the rule's comment on
+    its heading, by COMMENT_AUTHOR, though no lint may place a flag at all."""
+    monkeypatch.setattr(rc, "MAX_FLAGS_PER_LINT", 0)
+    abstracts = tr.TemplateRule("Abstracts", "max_entries", "Please list only 20 entries in this section.", 20)
+    monkeypatch.setattr(tr, "load_rules", lambda: (abstracts,))
+    doc = Document(str(_TEMPLATE_DOCX_PATH))
+    heading = next(p for p in doc.paragraphs if p.text.startswith("Abstracts"))
+    for i in range(21, 0, -1):
+        heading._p.addnext(copy.deepcopy(doc.add_paragraph(f"{i}. {CITATION}")._p))
+    clean = tmp_path / "DOC_wcm.docx"
+    doc.save(str(clean))
+    out, n = rc.write_review_docx(clean, _report(_finding("output_hygiene", "leak", [CITATION])))
+    assert _comments(out) == [(abstracts.comment, heading.text)]
+    assert n == 1
+    assert json.loads(rc.comment_map_path(out).read_text(encoding="utf-8")) == [{
+        "comment_id": 0, "lint": tr.TEMPLATE_RULE_LINT, "shape": "max_entries:Abstracts",
+        "severity": None, "entry_index": None}]

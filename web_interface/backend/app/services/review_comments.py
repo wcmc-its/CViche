@@ -42,6 +42,13 @@ delivered text (#1591). Which findings qualify is the "Repair tiers" table in
 doctor/PRECISION.md; today one does, owner_pi_role_empty ("PI" in an empty
 "Your role:" cell beside a PI cell naming the CV owner).
 
+Template rules (#1999, `template_rules`): the template's own asks, such as
+"list 10-20 best" over 21 abstracts or an Office address left blank, are
+comments on that slot's heading or label, by COMMENT_AUTHOR like a finding's.
+They are not findings: no precision gate, and no MAX_FLAGS_PER_LINT cap,
+since each rule fires at most once per copy. The comment map lists each under
+TEMPLATE_RULE_LINT, its rule as the shape.
+
 Beside the copy, `<uid>_wcm_review_comments.json` names the finding each
 comment marks (lint, shape, severity, entry index; `CommentFinding`), so the
 fate of each comment in a reviewer's corrected copy is a verdict on that
@@ -76,6 +83,7 @@ from app.services.run_quality_report import (
     _instance,
     _usable_findings,
 )
+from app.services.template_rules import TEMPLATE_RULE_LINT, template_rule_comments
 from unified_pipeline.core.text_norm import squash  # noqa: E402
 from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
 from unified_pipeline.doctor.lints.completeness import (  # noqa: E402
@@ -699,7 +707,8 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
                       rows: dict[ShapeKey, LintPrecision] | None = None) -> tuple[Path, int] | None:
     """Write the flagged copy of ``clean_docx``, and beside it the finding
     each comment marks (`comment_map_path`); return the copy's path and how
-    many flags (comments, review notes and tracked fixes) it carries, which
+    many flags (comments, template-rule comments, review notes and tracked
+    fixes) it carries, which
     may be none. None when ``doctor_payload`` is not a doctor report or the document
     is empty. ``stage4`` is the run's stage-4 artifact, which the
     owner_pi_role_empty fix needs to know the owner; without it that finding
@@ -740,6 +749,12 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
         comment = doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
                                   author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
         marked.append(asdict(_comment_finding(comment.comment_id, f, rows)))
+    ruled = template_rule_comments(doc)
+    for para, rule in ruled:  # uncapped: each rule fires at most once
+        comment = doc.add_comment(_runs(para, None), text=rule.comment,
+                                  author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
+        marked.append(asdict(CommentFinding(comment.comment_id, TEMPLATE_RULE_LINT, rule.shape,
+                                            None, None)))
     # Last, so the findings' comments keep the ids the map names.
     _add_review_notes(doc, paragraphs[0][0], notes)
     out = review_docx_path(clean_docx)
@@ -747,4 +762,4 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     # saved, so no copy is left on disk that the caller reports as failed.
     comment_map_path(out).write_text(json.dumps(marked, indent=1), encoding="utf-8")
     doc.save(str(out))
-    return out, len(flags) + len(notes) + fixed
+    return out, len(flags) + len(ruled) + len(notes) + fixed
