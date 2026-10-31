@@ -726,7 +726,8 @@ def test_one_recurring_error_among_passing_ones_advises_no_rerun_for_the_row():
 def test_pipeline_errors_advice_follows_the_real_lints_evidence(error, temporary):
     from unified_pipeline.doctor.lints.runtime import lint_pipeline_errors
 
-    findings = lint_pipeline_errors({"T1_classified.json": {"meta": {"stats": {"t_validation": {"error": error}}}}})
+    # On an entry: a second pass's own meta.stats error is never this lint's (#745).
+    findings = lint_pipeline_errors({"T1_classified.json": {"entries": [{"error": error}]}})
     assert [f["lint"] for f in findings] == ["pipeline_errors_present"]
 
     expected = (rqr.TEMPORARY_FAILURE_WHAT_TO_DO if temporary else
