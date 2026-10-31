@@ -3,7 +3,7 @@
 Posts a Microsoft Teams message when a run starts processing, again when it
 reaches a terminal status (complete, failed, or cancelled), and again when a
 user submits feedback on a run. A batch upload (#1114) posts one "batch
-submitted" card when the batch is created, and its runs then skip the
+submitted" card when the batch's first run is created (#1202), and its runs then skip the
 "started" card (each still gets its terminal card). Fully decoupled from run execution and from
 the feedback API: a missing webhook URL is a silent no-op, payload building
 and delivery never raise back into the caller, and delivery itself happens on

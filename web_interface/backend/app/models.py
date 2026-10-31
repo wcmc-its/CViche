@@ -398,6 +398,10 @@ class RunBatch(Base):
     notify_on_complete = Column(Boolean, nullable=False, default=False, server_default=false())
     # Set once, by a conditional UPDATE, by whichever pod sends the completion email.
     completion_notified_at = Column(UTCDateTime, nullable=True)
+    # Set once, by a conditional UPDATE, by the upload that creates the batch's
+    # first run; only that call queues the Teams "batch submitted" card (#1202),
+    # so a batch nobody uploads to posts none.
+    submitted_notified_at = Column(UTCDateTime, nullable=True)
 
     user = relationship("User", lazy="raise_on_sql")
 
