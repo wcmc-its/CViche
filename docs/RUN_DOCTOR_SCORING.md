@@ -201,10 +201,14 @@ owner and fatal-error rows used to carry weight too).
 - **cap 25** — `cv_owner_name_missing()`: no usable `full_name`, and not both
   `first_name` and `last_name`. The document cannot be delivered under anyone's
   name. Also trips when `*_fields.json` is absent entirely.
-- **cap 40** — `FATAL_ERROR_PATTERN` matches any non-null `error` field anywhere
-  in the scanned JSON: `name 'x' is not defined`, `Traceback (most recent call
+- **cap 40** — `FATAL_ERROR_PATTERN` matches a non-null `error` field in the
+  scanned JSON: `name 'x' is not defined`, `Traceback (most recent call
   last)`, `NameError:`, `UnboundLocalError:`, `KeyError:`. Means a stage broke,
-  not that a lookup came back empty.
+  not that a lookup came back empty. One exemption (#745): an error a stage-3b
+  second pass caught and recorded itself, `meta.stats.t_validation.error` or
+  `meta.stats.fragment_reconnection.error`, never caps the score, whatever its
+  text. The doctor reports it as the `stage3b_second_pass_error` WARN. Both
+  callers use the same predicate, `quality_score.is_fatal_error_field`.
 - **cap 25** — `score_protected_data()`: protected personal data (date of
   birth, SSN and the other #820 label/value shapes) reached the rendered docx.
   Cap-only gate in `CAP_ONLY_GATES`, not in `DIMENSIONS`. It runs the same scan

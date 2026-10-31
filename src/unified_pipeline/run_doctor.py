@@ -112,7 +112,8 @@ Lints, ranked by the severity of the failure class they catch:
 14e. stage3b_second_pass_error a stage-3b second pass (t_validation,
                           fragment_reconnection) recorded `error` in
                           meta.stats: it failed and left its entries
-                          unchanged; WARN, the run completes (#818)
+                          unchanged; WARN, the run completes (#818), and
+                          never also pipeline_errors_present (#745)
 
 14f. offschema_fields     a stage-4 value under a key that is in neither
                           field schema, not rendered for its code, not
@@ -603,7 +604,9 @@ independent confirmation that the gate itself is calibrated:
                           artifact, because the gate trips on that too.
 15. pipeline_errors_present a fatal error (NameError, traceback) recorded in an
                           'error' field of stage_2/stage_3b/stage_4 — the JSON
-                          the deployed scorer globs — capped at 40
+                          the deployed scorer globs — capped at 40; a stage-3b
+                          second pass's own caught error is 14e's, not this
+                          (#745)
 16. no_output             a run that reached stage 4 but produced NEITHER a
                           stage-6 docx nor its render-warnings report at all
                           — nothing to deliver — capped at 20 (#745: web204
