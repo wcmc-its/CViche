@@ -36,6 +36,7 @@ this path -- see that file before renaming or dropping any of them.
 import threading
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from unified_pipeline.config import get_stage_config
@@ -131,6 +132,37 @@ def _resolve_call_config(stage: str, kwargs: dict) -> dict:
     }
 
 
+# The roles a message may carry. The Bedrock adapter lifts "system" into the
+# Converse system block and sends the rest as turns (_translate_messages);
+# Converse accepts no turn role but "user" and "assistant".
+_MESSAGE_ROLES = frozenset({"system", "user", "assistant"})
+
+
+def _validate_messages(messages: object) -> None:
+    """Raise ValueError for a message list the provider cannot accept (#640).
+
+    Only what is broken for every caller: not a list, an empty list, an item
+    that is not a mapping, a role outside _MESSAGE_ROLES, or no content. The
+    content's type is left to the adapter: list (multimodal) content is a
+    shape, which _translate_messages refuses on its own terms (#265).
+    """
+    if not isinstance(messages, list):
+        raise ValueError(f"call_llm messages must be a list, got {type(messages).__name__}")
+    if not messages:
+        raise ValueError("call_llm messages must not be empty")
+    for index, message in enumerate(messages):
+        if not isinstance(message, Mapping):
+            raise ValueError(
+                f"call_llm messages[{index}] must be a mapping, got {type(message).__name__}")
+        role = message.get("role")
+        if not isinstance(role, str) or role not in _MESSAGE_ROLES:
+            raise ValueError(
+                f"call_llm messages[{index}] has role {role!r}; "
+                f"expected one of {sorted(_MESSAGE_ROLES)}")
+        if message.get("content") is None:
+            raise ValueError(f"call_llm messages[{index}] (role {role!r}) has no content")
+
+
 _PROVIDER_HANDLERS = {
     "bedrock": _handle_bedrock,
 }
@@ -202,10 +234,15 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
           Bedrock JSON-repair path it is the sum of both live calls.
 
     Raises:
-        ValueError: If provider is not supported
+        ValueError: If messages is empty or malformed (_validate_messages),
+            or provider is not supported
         botocore.exceptions.ClientError: On non-retryable Bedrock errors or
             exhausted retries
     """
+    # First: a structurally broken message list (see _validate_messages)
+    # never reaches the prompt log or an API (#640). Content type is left to
+    # the adapter.
+    _validate_messages(messages)
     cfg = _resolve_call_config(stage, kwargs)
 
     handler = _PROVIDER_HANDLERS.get(cfg["provider"])
