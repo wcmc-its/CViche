@@ -108,16 +108,6 @@ def lint_table_lost(source_block_lines: list[tuple[int, str]],
 # header is what made the verdict carry no information (#438).
 MISSED_HEADERS_WARN_COUNT = 6
 
-#: Severity of a finding whose only claim to being a header is its Heading
-#: style, i.e. a line that is not ALL-CAPS (#1232). Many CVs style record
-#: titles, journal names and contact-block lines Heading 1-6: on one batch
-#: 42 of 75 findings (30 of them one CV's record titles) were such lines and
-#: none was a real miss. Other CVs style their real sub-section labels the
-#: same way and stage 1a misses some of them, so dropping the class would
-#: lose real findings. Too ambiguous to drop, too weak to count toward the
-#: run's WARN threshold: it is reported, never escalated.
-WEAK_CANDIDATE_SEVERITY = "INFO"
-
 
 def _hierarchy_titles(stage1a: dict) -> list[str]:
     titles: list[str] = []
@@ -299,9 +289,7 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
     every entry hierarchy path: a header demoted to content misroutes
     everything filed under it. With the optional stage 4, the CV owner's own
     name (``cv_owner``, #539) and any other line of the Personal Data block
-    (`_contact_block_keys`) are document furniture, not headers. A candidate
-    that is not ALL-CAPS reached the list through its Heading style alone and
-    never sets the run's severity (`WEAK_CANDIDATE_SEVERITY`, #1232)."""
+    (`_contact_block_keys`) are document furniture, not headers."""
     allowed, required = _owner_name_words(stage4)
     contact_block = _contact_block_keys(stage4)
     known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
@@ -309,7 +297,7 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
              for h in (e.get("hierarchy") or [])}
     titles = known | paths
 
-    findings, strong, seen = [], [], set()
+    findings, seen = [], set()
     n = len(candidates)
     skip_next = False
     for i, cand in enumerate(candidates):
@@ -341,23 +329,16 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
             continue
         if _is_owner_name(cand, allowed, required) or normed in contact_block:
             continue
-        finding = _finding(
+        findings.append(_finding(
             "missed_headers", "WARN",
             f"header-like source line missing from segmentation: '{cand}'",
-            [cand])
-        findings.append(finding)
-        if cand == cand.upper():
-            strong.append(finding)
+            [cand]))
     # Severity is a property of the RUN, not of each header: one stray
     # header-like line is normal, a dozen means segmentation lost the document's
     # shape. This lint emits one finding per header, so without this the finding
     # count doubled as the severity and a long CV always looked worse (#438).
-    # Only ALL-CAPS candidates are counted and take that severity; a Heading-
-    # styled line that is not ALL-CAPS stays at WEAK_CANDIDATE_SEVERITY (#1232).
-    severity = _magnitude_severity(len(strong), MISSED_HEADERS_WARN_COUNT)
+    severity = _magnitude_severity(len(findings), MISSED_HEADERS_WARN_COUNT)
     for f in findings:
-        f["severity"] = WEAK_CANDIDATE_SEVERITY
-    for f in strong:
         f["severity"] = severity
     return findings
 

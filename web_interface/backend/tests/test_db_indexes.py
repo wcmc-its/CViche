@@ -10,7 +10,7 @@ Two angles:
 """
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 ALEMBIC_DIR = Path(__file__).resolve().parent.parent / "alembic"
 
@@ -76,6 +76,35 @@ def test_index_migration_roundtrips_on_sqlite(tmp_path, monkeypatch):
     command.downgrade(cfg, "f1a2b3c4d5e6")
     leftover = EXPECTED_INDEXES & _index_names(eng)
     assert not leftover, f"indexes not dropped on downgrade: {leftover}"
+
+
+def test_submitted_notified_at_marks_every_existing_batch_as_announced(tmp_path, monkeypatch):
+    """#1202 (31d01b4bd243): every batch stored before the migration already
+    posted its Teams card at POST /batches, so the upgrade backfills its
+    created_at and an upload into it posts no second card. The downgrade
+    drops the column."""
+    from alembic.config import Config
+
+    from alembic import command
+
+    sqlite_url = f"sqlite:///{tmp_path / 'mig.db'}"
+    eng = create_engine(sqlite_url)
+    monkeypatch.setattr("app.database_factory.create_cviche_engine", lambda **kwargs: eng)
+    cfg = Config()
+    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    cfg.set_main_option("sqlalchemy.url", sqlite_url)
+
+    command.upgrade(cfg, "302005a597a4")
+    with eng.begin() as conn:
+        conn.execute(text("INSERT INTO run_batches (id, user_id, created_at, files_submitted) "
+                          "VALUES ('OLDBAT', 1, '2026-10-29 14:00:00.000000', 3)"))
+    command.upgrade(cfg, "31d01b4bd243")
+    with eng.connect() as conn:
+        stamped = conn.execute(text("SELECT submitted_notified_at FROM run_batches WHERE id = 'OLDBAT'")).scalar()
+    assert stamped == "2026-10-29 14:00:00.000000"
+
+    command.downgrade(cfg, "302005a597a4")
+    assert "submitted_notified_at" not in {c["name"] for c in inspect(eng).get_columns("run_batches")}
 
 
 def test_run_batches_downgrade_never_drops_an_index_a_foreign_key_needs(monkeypatch):

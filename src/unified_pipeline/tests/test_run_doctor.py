@@ -43,6 +43,7 @@ from unified_pipeline.doctor.shared import (  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
     _TEMPLATE_DOCX_PATH,
     score_cv_owner,
+    score_pipeline_errors,
 )
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
@@ -849,33 +850,22 @@ def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
     assert missed == [["MENTORING"]]
 
 
-def test_missed_headers_heading_styled_lines_never_escalate_the_run():
-    """#1232: a line that is not ALL-CAPS reached the candidate list through
-    its Heading style alone (record titles, journal names, contact lines). A
-    CV that styles its records Heading 1 must not read as a WARN storm, and
-    the lines stay reported."""
-    weak = [f"Example Record {name}" for name in
-            ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta")]
-    assert len(weak) > MISSED_HEADERS_WARN_COUNT
-    findings = lint_missed_headers(weak, _STAGE1A, {"entries": []})
-    assert [f["evidence"][0] for f in findings] == weak
-    assert {f["severity"] for f in findings} == {"INFO"}
+def test_run_doctor_missed_headers_skips_mixed_case_heading_lines(tmp_path):
+    """#1232, the wire: a CV that styles its record titles Heading 1 gets no
+    finding for them, so they cannot make a WARN storm; a bold ALL-CAPS
+    header 1a missed is still reported, at the severity of its own count."""
+    root = _build_clean_run(tmp_path)
+    source_path = root / "uploads" / f"{_UID}_cv.docx"
+    source = Document(str(source_path))
+    names = ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta")
+    assert len(names) > MISSED_HEADERS_WARN_COUNT, "enough to WARN if they counted"
+    for name in names:
+        source.add_paragraph(f"Example Record {name} on Widgets", style="Heading 1")
+    source.add_paragraph("MENTORING").runs[0].bold = True
+    source.save(str(source_path))
 
-
-def test_missed_headers_only_all_caps_candidates_set_the_run_severity():
-    """Weak candidates are not counted toward the WARN threshold, and an
-    ALL-CAPS candidate still takes the run severity from ITS OWN count."""
-    weak = [f"Example Record {name}" for name in ("Alpha", "Beta", "Gamma")]
-    few = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT - 1)]
-    found = lint_missed_headers(few + weak, _STAGE1A, {"entries": []})
-    assert {f["severity"] for f in found} == {"INFO"}, \
-        "five strong lines plus weak ones stay under the threshold"
-
-    many = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT)]
-    found = lint_missed_headers(many + weak, _STAGE1A, {"entries": []})
-    by_line = {f["evidence"][0]: f["severity"] for f in found}
-    assert {by_line[line] for line in many} == {"WARN"}
-    assert {by_line[line] for line in weak} == {"INFO"}
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "missed_headers"]
+    assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", ["MENTORING"])]
 
 
 def test_run_doctor_reports_a_lost_source_table(tmp_path):
@@ -1102,8 +1092,9 @@ def test_is_single_column_is_the_logical_cell_count_not_the_grid():
 
 def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
     """#539: 'PI. <Name>' / 'Dr. <Name>' is the owner's name line (marker in
-    FRONT, which the suffix-only credential filter misses); a header that
-    merely starts with a marker, or an ALL-CAPS line, is still a candidate."""
+    FRONT, which the suffix-only credential filter misses). It is mixed-case,
+    so the ALL-CAPS rule keeps it out (#1232), with every other mixed-case
+    line after a marker; an ALL-CAPS line after a marker is still a candidate."""
     doc = Document()
     doc.add_paragraph("PI. Jane Q. Sample", style="Heading 1")
     doc.add_paragraph("Dr. Alex Example", style="Heading 1")
@@ -1117,9 +1108,27 @@ def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
     path = tmp_path / "cv.docx"
     doc.save(path)
 
-    assert iter_header_candidates(str(path)) == [
-        "PI. RESPONSIBILITIES", "Dr. PUBLICATIONS", "Pi. Notes",
-        "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
+    assert iter_header_candidates(str(path)) == ["PI. RESPONSIBILITIES"]
+
+
+def test_iter_header_candidates_admits_a_heading_styled_line_only_when_all_caps(tmp_path):
+    """#1232: a Heading style no longer admits a line that is not ALL-CAPS
+    (record titles, journal names, contact-block lines), bold or not. An
+    ALL-CAPS Heading-styled line still needs no bold, and the other rules
+    still apply to it."""
+    doc = Document()
+    doc.add_paragraph("Example Record Title About Widgets", style="Heading 1")
+    doc.add_paragraph("Journal of Example Studies", style="Heading 6")
+    doc.add_paragraph("Department of Example Medicine", style="Heading 3")
+    doc.add_paragraph("Bold Example Record Title", style="Heading 1").runs[0].bold = True
+    doc.add_paragraph("SELECTED EXAMPLE LECTURES", style="Heading 2")   # not bold: kept
+    doc.add_paragraph("JANE Q. EXAMPLE, M.D.", style="Heading 1")       # name line
+    doc.add_paragraph("EXAMPLE SERVICE").runs[0].bold = True
+    doc.add_paragraph("EXAMPLE PLAIN CAPS LINE")                         # not bold, Normal
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == ["SELECTED EXAMPLE LECTURES", "EXAMPLE SERVICE"]
 
 
 def test_iter_header_candidates_flattens_the_tab_after_an_enumeration_token(tmp_path):
@@ -5810,6 +5819,45 @@ def test_pipeline_errors_quiet_on_benign_and_absent_error_fields():
     assert lint_pipeline_errors({}) == []
 
 
+@pytest.mark.parametrize("pass_key", ["t_validation", "fragment_reconnection"])
+@pytest.mark.parametrize("text", [
+    "NameError: name 'response' is not defined",
+    "Error code: 400 - the invented request body could not be parsed",
+])
+def test_pipeline_errors_quiet_on_a_caught_second_pass_error(pass_key, text):
+    """#745, option A (decided 2026-10-30): a stage-3b second pass's own caught
+    error is the stage3b_second_pass_error WARN, never this ERROR, whatever
+    its text. The same text on an entry of the same artifact is still the
+    hard fail."""
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {pass_key: {"error": text}}}}
+    assert lint_pipeline_errors({"stage_3b": stage3b}) == []
+    assert [f["severity"] for f in lint_stage3b_second_pass_errors(stage3b)] == ["WARN"]
+
+    stage3b["entries"] = [{"error": text}]
+    [finding] = lint_pipeline_errors({"stage_3b": stage3b})
+    assert finding["severity"] == "ERROR"
+    assert finding["evidence"] == [f"stage_3b.entries[0].error: {text}"]
+
+
+@pytest.mark.parametrize("artifact, fatal", [
+    ({"meta": {"stats": {"t_validation": {"error": "NameError: name 'x' is not defined"}}}}, False),
+    ({"meta": {"stats": {"fragment_reconnection": {"error": "Error code: 400"}}}}, False),
+    ({"meta": {"stats": {"batches": {"error": "Error code: 400"}}}}, True),
+    ({"entries": [{"meta": {"stats": {"t_validation": {"error": "Error code: 400"}}}}]}, True),
+    ({"entries": [{"error": "NameError: name 'x' is not defined"}]}, True),
+], ids=["t_validation", "fragment_reconnection", "another stats key", "under an entry", "entry"])
+def test_pipeline_errors_lint_and_scorer_agree_on_a_stage3b_artifact(tmp_path, artifact, fatal):
+    """The doctor labels the artifact `stage_3b` and the scorer labels it by
+    its file name, so the shared predicate (quality_score.is_fatal_error_field)
+    must exempt the second-pass paths under both labels (#745)."""
+    (tmp_path / "run_classified.json").write_text(json.dumps(artifact))
+    _fraction, _detail, cap = score_pipeline_errors(tmp_path)
+    fired = bool(lint_pipeline_errors({"stage_3b": artifact}))
+    assert (fired, cap == 40) == (fatal, fatal)
+
+
 # ------------------------------ #810: stage3b_fallback_ratio (hard fail) ----
 #
 # Synthesized from the outage's own log line (~/worktrees/batch-slices/s4/
@@ -6323,16 +6371,21 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
         "appendix_entries": 0, "appendix_share": 0.0, "source_coverage_pct": 100.0}
 
 
-def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path):
+@pytest.mark.parametrize("error", [
+    "'int' object is not iterable",
+    "name 'response' is not defined",  # matches FATAL_ERROR_PATTERN (#745)
+])
+def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path, error):
     """End to end (#818): a stage_3b whose t_validation errored surfaces as
     the WARN finding through run_doctor(), and total_post_corrections reaches
-    the metrics block -- the wire, not just the helpers."""
+    the metrics block -- the wire, not just the helpers. The error is never
+    also the pipeline_errors_present hard fail, whatever its text (#745)."""
     root = _build_clean_run(tmp_path)
     path = next((root / "stage_3b_classified_entries").glob("*_classified.json"))
     data = json.loads(path.read_text())
     data["meta"] = {"stats": {
         "t_validation": {"t_entries_reviewed": 4, "t_entries_reclassified": 0,
-                         "error": "'int' object is not iterable"},
+                         "error": error},
         "total_post_corrections": 7}}
     path.write_text(json.dumps(data))
 
@@ -6341,6 +6394,7 @@ def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path):
     hits = [f for f in payload["findings"]
             if f["lint"] == "stage3b_second_pass_error"]
     assert len(hits) == 1 and hits[0]["severity"] == "WARN"
+    assert not [f for f in payload["findings"] if f["lint"] == "pipeline_errors_present"]
     assert payload["metrics"]["total_post_corrections"] == 7
 
 

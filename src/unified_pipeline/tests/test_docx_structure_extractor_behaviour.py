@@ -30,6 +30,7 @@ exercised indirectly through extract_docx_structure/create_simplified_layout_jso
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     _fold_orphan_date_tail,
     _is_date_column,
     _is_date_only_text,
+    _pad_lines_to_slots,
     create_simplified_layout_json,
     extract_docx_structure,
     extract_paragraph_metadata,
@@ -67,6 +69,8 @@ from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     split_merged_cells_in_row,
     unwrap_body_content_controls,
 )
+
+_EXTRACTOR_LOGGER = "unified_pipeline.core.docx_structure_extractor"
 
 # --------------------------------------------------------------------------
 # get_paragraph_text / get_cell_text
@@ -704,37 +708,132 @@ def test_split_merged_cells_lone_blank_line_split_kept_without_aligned_match_612
 
 
 def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
-    # The \n\n pass splits cell 0 into 2 segments and no two cells share a
-    # 3+ line count, so the 4-line date cell is distributed over 2 sub-rows by
-    # the date-column fallback, which used to drop the last 2 dates.
+    # The \n\n pass splits cell 0 into 2 one-line segments and no two cells
+    # share a 3+ line count. The 4-line date cell can't be paired with 2
+    # sub-rows (the segments hold 2 lines, not 4), so the row is kept whole:
+    # no date dropped (#612) and none folded onto the last sub-row (#2041).
     row = [
         {"text": "Alpha unit one\n\nAlpha unit two", "row": 0, "col": 0},
         {"text": "Rank A\nRank B", "row": 0, "col": 1},
         {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
     ]
 
-    out = split_merged_cells_in_row(row)
-
-    assert _all_lines(out) == _all_lines([row])
-    assert [r[2]["text"] for r in out] == [
-        "2011 - Present",
-        "2009 - 2011\n2007 - 2009\n2000 - Present",
-    ]
+    assert split_merged_cells_in_row(row) == [row]
 
 
-def test_split_merged_cells_aligned_date_column_longer_than_target_keeps_surplus_612():
+def test_split_merged_cells_aligned_date_column_longer_than_target_keeps_row_whole_612():
     # Aligned-line pass (two 3-line cells => target 3) beside a 4-line date
-    # column: the old `padded_lines[:target_count]` truncation dropped line 4.
+    # column: truncation dropped line 4 (#612); folding it onto sub-row 3
+    # paired "2003" and "2004" with "c" and "f" (#2041). Kept whole instead.
     row = [
         {"text": "a\nb\nc", "row": 0, "col": 0},
         {"text": "d\ne\nf", "row": 0, "col": 1},
         {"text": "2001\n2002\n2003\n2004", "row": 0, "col": 2},
     ]
 
+    assert split_merged_cells_in_row(row) == [row]
+
+
+def test_split_merged_cells_unreconciled_date_column_keeps_row_whole_2041(caplog):
+    # #2041 shape (invented text): a 2-segment entry cell holds 5 lines, the
+    # date cell 4. Positionally the counts don't reconcile, so the old fold put
+    # 1 date beside segment 1 and 3 beside segment 2 -- one of segment 1's
+    # dates moved into segment 2's sub-row. The row stays whole, and says so.
+    row = [
+        {"text": "Committee one\nCommittee two\n(Chair 2011)\n\nCommittee three\nCommittee four",
+         "row": 0, "col": 0},
+        {"text": "2003\n2004-2006\n2008\n2010-present", "row": 0, "col": 1},
+    ]
+
+    with caplog.at_level(logging.INFO, logger=_EXTRACTOR_LOGGER):
+        out = split_merged_cells_in_row(row)
+
+    assert out == [row]
+    assert "4 date lines for 2 sub-rows; keeping the row whole" in caplog.text
+    assert "folding" not in caplog.text
+
+
+def test_split_merged_cells_date_lines_follow_each_segments_own_lines_2041():
+    # The entry cells' 2 segments hold 3 + 1 = 4 lines, one per date line: each
+    # segment takes its own dates. The old fold gave segment 1 one date and
+    # moved its other two beside segment 2.
+    row = [
+        {"text": "Panelist", "row": 0, "col": 0},
+        {"text": "Clinic A\nClinic B\nClinic C\n\nSchool D", "row": 0, "col": 1},
+        {"text": "Role A\nRole B\nRole C\n\nRole D", "row": 0, "col": 2},
+        {"text": "October 2023\n2021-present\n2020-present\n2023", "row": 0, "col": 3},
+    ]
+
     out = split_merged_cells_in_row(row)
 
     assert _all_lines(out) == _all_lines([row])
-    assert [r[2]["text"] for r in out] == ["2001", "2002", "2003\n2004"]
+    assert [r[3]["text"] for r in out] == ["October 2023\n2021-present\n2020-present", "2023"]
+    assert [r[1]["text"] for r in out] == ["Clinic A\nClinic B\nClinic C", "School D"]
+
+
+def test_split_merged_cells_two_disagreeing_segment_partitions_keep_row_whole_2041():
+    # Two split cells both total 4 lines but group them 1+3 and 3+1: which
+    # partition the dates follow is a guess, so the row stays whole.
+    row = [
+        {"text": "A\n\nB\nC\nD", "row": 0, "col": 0},
+        {"text": "E\nF\nG\n\nH", "row": 0, "col": 1},
+        {"text": "2001\n2002\n2003\n2004", "row": 0, "col": 2},
+    ]
+
+    assert split_merged_cells_in_row(row) == [row]
+
+
+def test_split_merged_cells_short_split_cell_does_not_set_the_date_partition_2041():
+    # Cells 0 and 1 set 3 sub-rows; cell 2 split into only 2 segments, padded.
+    # Its 2 + 2 lines match the 4 dates, but 2 groups can't fill 3 sub-rows,
+    # and the full splits' 1 + 1 + 1 doesn't total 4: the row is kept whole.
+    row = [
+        {"text": "Alpha\n\nBeta\n\nGamma", "row": 0, "col": 0},
+        {"text": "Role a\n\nRole b\n\nRole c", "row": 0, "col": 1},
+        {"text": "One\nTwo\n\nThree\nFour", "row": 0, "col": 2},
+        {"text": "2001\n2002\n2003\n2004", "row": 0, "col": 3},
+    ]
+
+    assert split_merged_cells_in_row(row) == [row]
+
+
+def test_split_merged_cells_date_column_already_split_is_not_reconciled_2041():
+    # The date cell is itself one of the parallel blank-line splits; it keeps
+    # its own segments even though the two cells group their lines
+    # differently (3 + 1 beside 2 + 2), which would refuse a reconcile.
+    row = [
+        {"text": "A\nB\nC\n\nD", "row": 0, "col": 0},
+        {"text": "2001\n2002\n\n2003\n2004", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["A\nB\nC", "2001\n2002"], ["D", "2003\n2004"]]
+
+
+def test_pad_lines_to_slots_refuses_more_lines_than_slots_2041():
+    # Padding never folds: a longer date column must be reconciled first.
+    assert _pad_lines_to_slots(["2001"], 3) == ["2001", "", ""]
+    with pytest.raises(ValueError, match="3 lines for 2 slots"):
+        _pad_lines_to_slots(["2001", "2002", "2003"], 2)
+
+
+def test_extract_unified_elements_unreconciled_date_column_row_stays_one_row_2041(tmp_path):
+    # The wire: a no-header table row whose date cell can't pair with the
+    # entry cell's segments reaches the element as ONE row, both cells whole.
+    doc = Document()
+    t = doc.add_table(rows=1, cols=2)
+    t.cell(0, 0).text = "Board one\nBoard two\n\nBoard three"
+    t.cell(0, 1).text = "2001\n2002\n2003\n2004\n2005"
+    docx_path = tmp_path / "unreconciled_dates.docx"
+    doc.save(str(docx_path))
+
+    element = extract_unified_elements(str(docx_path))["elements"][0]
+
+    assert element["rows"] == 1
+    assert [c["text"] for c in element["data"][0]] == [
+        "Board one\nBoard two\n\nBoard three", "2001\n2002\n2003\n2004\n2005"]
 
 
 # --------------------------------------------------------------------------

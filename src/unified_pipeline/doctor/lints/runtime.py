@@ -10,9 +10,11 @@ care what the document says.
 pattern (NameError, traceback) recorded in an `error` field of the JSON the
 deployed scorer globs means a stage died mid-run, so whatever that stage owned
 is missing from the output and no finding about the output can be trusted. It
-walks the artifacts with the scorer's own pattern and iterator
-(`quality_score.FATAL_ERROR_PATTERN` / `iter_error_fields`) so the doctor and
-the score cannot disagree about whether the gate fired.
+walks the artifacts with the scorer's own iterator and predicate
+(`quality_score.iter_error_fields` / `is_fatal_error_field`) so the doctor and
+the score cannot disagree about whether the gate fired. The predicate exempts
+a stage-3b second pass's own caught error, whatever its text (#745): that is
+`lint_stage3b_second_pass_errors`'s WARN, never this gate.
 
 The finding it emits is keyed `pipeline_errors_present`, not the function
 name -- the `lint_` prefix is not a rule marker, which is why `KNOWN_LINTS` is
@@ -76,11 +78,12 @@ from unified_pipeline.llm_provenance import (
     STAGE4_5_CALL_SUMMARY,
 )
 from unified_pipeline.quality_score import (
-    FATAL_ERROR_PATTERN,
     NO_OUTPUT_CAP,
     STAGE3B_FALLBACK_HARD_FAIL_CAP,
+    STAGE3B_SECOND_PASS_KEYS,
     STAGE4_GROUP_FAILURE_CAP,
     FallbackServedCall,
+    is_fatal_error_field,
     iter_error_fields,
     llm_fallback_served,
     no_output_produced,
@@ -107,8 +110,9 @@ def lint_pipeline_errors(artifacts: dict[str, dict]) -> list[dict]:
     """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
     in the run's artifacts carries a fatal pattern (NameError, traceback), so a
     stage died mid-run and whatever it owned is missing from the output. The
-    pattern and the walk are the scorer's own
-    (quality_score.FATAL_ERROR_PATTERN / iter_error_fields).
+    predicate and the walk are the scorer's own
+    (quality_score.is_fatal_error_field / iter_error_fields), which never
+    count a stage-3b second pass's own caught error (#745).
 
     ``artifacts`` is keyed by stage label and the caller narrows it to exactly
     the JSON the deployed scorer reads, so the cap this finding names is the
@@ -116,7 +120,7 @@ def lint_pipeline_errors(artifacts: dict[str, dict]) -> list[dict]:
     fatal: list[str] = []
     for label in sorted(artifacts):
         for path, value in iter_error_fields(artifacts[label], label):
-            if FATAL_ERROR_PATTERN.search(value):
+            if is_fatal_error_field(label, path, value):
                 fatal.append(f"{path}: {value[:120]}")
     if not fatal:
         return []
@@ -155,24 +159,20 @@ def lint_stage3b_fallback_ratio(stage_3b: dict) -> list[dict]:
 
 # --------------------------------------------------------------------------
 # Stage 3b's two second-pass LLM stages that degrade silently (#818).
-
-#: `meta.stats` keys of the two stage-3b second passes, in pipeline order.
-#: Both stages catch their own exception, return the entries untouched and
-#: record `error` -- the run continues, so the failure is a WARN, not a gate.
-STAGE3B_SECOND_PASS_KEYS = ("t_validation", "fragment_reconnection")
+# `quality_score.STAGE3B_SECOND_PASS_KEYS` names them: both catch their own
+# exception, keep the first pass's classifications and record `error` -- the
+# run continues, so the failure is a WARN, not a gate (#745).
 
 
 def lint_stage3b_second_pass_errors(stage_3b: dict) -> list[dict]:
     """A stage-3b second pass (`t_validation`, `fragment_reconnection`)
     recorded a non-null `error` in `meta.stats`: it failed and left every
     entry as the first pass classified it, so the T entries it should have
-    reclassified or reconnected are still T. `lint_pipeline_errors` only sees
-    such an error when its text matches FATAL_ERROR_PATTERN (a raw
-    `'int' object is not iterable` does not -- #745), and even then only as a
-    score cap, never naming the pass. WARN: the run completes and the first
-    pass's output is intact (the error blocks nothing the scorer already
-    penalises through t_ratio). Error text is truncated like
-    `lint_pipeline_errors`'s evidence."""
+    reclassified or reconnected are still T. This is the only finding such an
+    error gets: `lint_pipeline_errors` and the score's cap never count it,
+    whatever its text (#745, option A, decided 2026-10-30). WARN: the run
+    completes and the first pass's output is intact. Error text is truncated
+    like `lint_pipeline_errors`'s evidence."""
     meta = stage_3b.get("meta") if isinstance(stage_3b, dict) else None
     stats = meta.get("stats") if isinstance(meta, dict) else None
     if not isinstance(stats, dict):

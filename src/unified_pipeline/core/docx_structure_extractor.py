@@ -420,19 +420,16 @@ def _is_date_column(lines: list[str]) -> bool:
     return date_lines >= len(lines) * 0.5 and date_lines >= 1
 
 
-def _fit_lines_to_slots(lines: list[str], slots: int) -> list[str]:
-    """Return exactly `slots` strings holding every line of `lines`.
+def _pad_lines_to_slots(lines: list[str], slots: int) -> list[str]:
+    """Return `lines` padded with "" at the end to exactly `slots` strings.
 
-    Fewer lines than slots: pad with "" at the end. More lines than slots: the
-    surplus is joined onto the last slot, never dropped (#612: a 4-line date
-    column beside a cell that split into 2 segments lost its last 2 dates).
+    A date column with MORE lines than slots is never fitted here: it is
+    split along the entry cells' own segments or the row is kept whole
+    (`_reconcile_long_date_columns`, #2041). Folding the surplus onto the
+    last slot (#612) moved dates beside entries they don't belong to.
     """
     if len(lines) > slots:
-        logger.info(
-            "split_merged_cells_in_row: %d lines for %d sub-rows; folding %d surplus into the last",
-            len(lines), slots, len(lines) - slots,
-        )
-        return lines[:slots - 1] + ["\n".join(lines[slots - 1:])]
+        raise ValueError(f"{len(lines)} lines for {slots} slots; reconcile before padding")
     return lines + [""] * (slots - len(lines))
 
 
@@ -512,8 +509,8 @@ def _aligned_line_splits(row: list[dict[str, Any]]) -> tuple[CellSplits, int]:
         for lines in cell_lines:
             if len(lines) == target_count:
                 cell_splits.append(lines)
-            elif _is_date_column(lines):
-                cell_splits.append(_fit_lines_to_slots(lines, target_count))
+            elif _is_date_column(lines) and len(lines) < target_count:
+                cell_splits.append(_pad_lines_to_slots(lines, target_count))
             else:
                 cell_splits.append(None)  # don't split non-matching cells
         return cell_splits, target_count
@@ -561,6 +558,52 @@ def _choose_cell_splits(
     return blank_splits, blank_max
 
 
+def _segment_line_partition(cell_splits: CellSplits, max_splits: int, n_lines: int) -> tuple[int, ...] | None:
+    """How many lines each of the `max_splits` segments holds, when the split
+    cells agree on one such grouping and it totals `n_lines`; else None."""
+    partitions = {
+        tuple(len(_nonblank_lines(segment)) for segment in splits)
+        for splits in cell_splits
+        if splits is not None and len(splits) == max_splits
+    }
+    matching = [partition for partition in partitions if sum(partition) == n_lines]
+    return matching[0] if len(matching) == 1 else None
+
+
+def _slice_lines(lines: list[str], partition: tuple[int, ...]) -> list[str]:
+    """Cut `lines` into consecutive groups of the `partition` sizes, one string each."""
+    groups, start = [], 0
+    for size in partition:
+        groups.append("\n".join(lines[start:start + size]))
+        start += size
+    return groups
+
+
+def _reconcile_long_date_columns(row: list[dict[str, Any]], cell_splits: CellSplits, max_splits: int) -> bool:
+    """Split each unsplit date column that has more lines than `max_splits`
+    along the entry cells' own segments, line for line (updates `cell_splits`).
+
+    False when one can't be: the segments' line counts don't add up to the
+    date lines, or two split cells group their lines differently. The caller
+    then keeps the row whole -- pairing dates by position there moved them
+    beside other entries (#2041, KH2YMW: 60 dates beside 4 segments of 74
+    lines, 57 of them folded onto the last sub-row).
+    """
+    for idx, cell in enumerate(row):
+        lines = _nonblank_lines(_cell_text(cell))
+        if cell_splits[idx] is not None or len(lines) <= max_splits or not _is_date_column(lines):
+            continue
+        partition = _segment_line_partition(cell_splits, max_splits, len(lines))
+        if partition is None:
+            logger.info(
+                "split_merged_cells_in_row: %d date lines for %d sub-rows; keeping the row whole",
+                len(lines), max_splits,
+            )
+            return False
+        cell_splits[idx] = _slice_lines(lines, partition)
+    return True
+
+
 def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
@@ -577,6 +620,8 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
     - If multiple cells have the same number of splits, splits them in parallel
     - If only one cell has splits, other cells are duplicated across split rows
     - If cells have different numbers of splits, uses the max and pads shorter ones
+    - A date column with more lines than sub-rows follows the entry cells' own
+      segments line for line, or the row is kept whole (#2041)
 
     Args:
         row: List of cell dictionaries with at least "text" key
@@ -593,6 +638,8 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
 
     # If no splits needed, return original row
     if max_splits == 1:
+        return [row]
+    if not _reconcile_long_date_columns(row, cell_splits, max_splits):
         return [row]
 
     # Create split rows
@@ -620,7 +667,7 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
                 cell_lines_local = [line.strip() for line in cell_text.strip().split('\n') if line.strip()]
                 if _is_date_column(cell_lines_local) and len(cell_lines_local) > 1:
                     # It's a date column - distribute dates across split rows
-                    slots = _fit_lines_to_slots(cell_lines_local, max_splits)
+                    slots = _pad_lines_to_slots(cell_lines_local, max_splits)
                     new_row.append({"text": slots[split_idx]})
                 elif split_idx == 0:
                     new_row.append(cell)

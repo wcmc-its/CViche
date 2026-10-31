@@ -25,6 +25,7 @@ from app.errors import bad_request, duplicate_file, internal_error
 from app.models import Run, RunState, Step, User, can_view_all_runs
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.schemas import UploadResponse
+from app.services import batch_service
 from app.services.config_service import BASE_OVERHEAD_SECONDS, TIME_PER_1K_TOKENS
 from app.services.input_format import detect_input_format_or_none
 from app.services.pdf_sandbox import (
@@ -528,9 +529,10 @@ async def create_run_from_bytes(
     content_type: str | None, request: RunRequest,
 ) -> UploadResponse:
     """The upload core (#1298): validate the bytes -> duplicate check -> extract
-    text -> archive -> Run row. The caller has already checked consent, the
-    batch, the filename and the rate limit, and read ``content`` within the
-    size cap. Raises the same HTTPErrors /upload always did."""
+    text -> archive -> Run row -> the batch's Teams card, if this is its first
+    run (#1202). The caller has already checked consent, the batch, the
+    filename and the rate limit, and read ``content`` within the size cap.
+    Raises the same HTTPErrors /upload always did."""
     file_ext = Path(filename).suffix.lower()
     submission_type = request.submission_type
     include_track_changes = request.include_track_changes
@@ -666,6 +668,9 @@ async def create_run_from_bytes(
         )
         db.add(run)
         _add_pending_steps(db, run_id)
+
+    if batch_id is not None:
+        batch_service.announce_batch_once(db, batch_id, submitter=current_user.display_name or current_user.email)
 
     return UploadResponse(
         run_id=run_id,
