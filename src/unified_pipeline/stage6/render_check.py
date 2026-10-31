@@ -32,7 +32,12 @@ from typing import NamedTuple
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
 from unified_pipeline.core.template_boilerplate import is_template_label_line
-from unified_pipeline.core.text_norm import edge_date_range, tab_record_segments
+from unified_pipeline.core.text_norm import (
+    dated_record_clauses,
+    edge_date_range,
+    noted_clause_head,
+    tab_record_segments,
+)
 
 from .fan_out import _is_date_key
 from .normalization import _squash
@@ -318,6 +323,42 @@ def tab_aware_record_lines(text: object) -> list[str]:
     return lines
 
 
+def dated_clause_lines(text: object, extracted_fields: dict,
+                       record_word: re.Pattern[str] | None = None) -> list[str]:
+    """The dated clauses (`dated_record_clauses`) of each line of `text` that
+    `tab_record_segments` leaves whole, read tab part by tab part: records
+    that share a line with no tab between them (#1243). A year the entry's
+    own titles and names write (`_name_field_values`) is no record's date,
+    and a clause without the `record_word` its section's records name is no
+    record. Only the recovery pass reads them, as it reads
+    `tab_aware_record_lines`."""
+    names = _name_field_values(extracted_fields)
+    return [clause for line in str(text or "").split("\n") if not tab_record_segments(line)
+            for part in line.split("\t") for clause in dated_record_clauses(part, names, record_word)]
+
+
+def noted_clause_rendered(clause: str, haystack: str) -> bool:
+    """Whether the head of a dated clause with a parenthetical note
+    (`noted_clause_head`), `RENDER_PIECE_MIN_CHARS` or longer, sits verbatim
+    in the squashed `haystack`: the record renders, and the note is its
+    detail. The note's words keep the per-line check from vouching for it
+    (#1243 census: a committee named in a fused row, its "(elected; <years>)"
+    note beside it in the source)."""
+    head = noted_clause_head(clause)
+    piece = _squash(head) if head else ""
+    return len(piece) >= RENDER_PIECE_MIN_CHARS and piece in haystack
+
+
+def _name_field_values(extracted_fields: object) -> list[str]:
+    """The strings of an entry's scalar fields other than its date fields
+    (`_is_date_key`), objects flattened as in `_field_strings`: its titles,
+    names and places."""
+    if not isinstance(extracted_fields, dict):
+        return []
+    return [string for key, value in extracted_fields.items() if not _is_date_key(key)
+            for string in _field_strings(value)]
+
+
 def _field_strings(value: object) -> list[str]:
     """Every string inside a field value, objects flattened. A list is left out:
     the list fields of an entry (`additional_roles`) are the ones a section may
@@ -343,6 +384,26 @@ def segment_held_by_fields(segment: str, extracted_fields: dict, *, one_record: 
     part dated outside the fields' years (a sibling term of the record)."""
     words = set(_RENDER_TOKEN_RE.findall(_norm(segment)))
     return bool(words) and _fields_hold(words, segment, extracted_fields, one_record)
+
+
+def extracted_clause(clauses: list[str], extracted_fields: dict) -> str | None:
+    """The one of an entry's dated clauses (`dated_record_clauses`) that its
+    extracted record stands for, or None: of the clauses whose years fall
+    within the fields' date span (`_years_within_field_span`), the first to
+    share the most distinctive words with the scalar fields, at least one.
+
+    Stage 4 kept one record of a line that holds several, and its row prints
+    that clause cell by cell (the role, the organization, the dates) without
+    the clause's other words (an event's name, a mentor, a "since"), so the
+    per-line check reads the clause as lost. Written again, it stood beside
+    its own row (#1243 census: 6 entries). The doctor's `multi_record_coverage`
+    reads the clause its record stands for the same way, and looks only for
+    the others."""
+    field_words = _scalar_field_words(extracted_fields)
+    shared = {clause: len(set(_RENDER_TOKEN_RE.findall(_norm(clause))) & field_words)
+              for clause in clauses if _years_within_field_span(clause, extracted_fields)}
+    best = max(shared.values(), default=0)
+    return next((clause for clause, count in shared.items() if count == best), None) if best else None
 
 
 def _fields_hold(words: set[str], segment: str, extracted_fields: dict, one_record: bool) -> bool:

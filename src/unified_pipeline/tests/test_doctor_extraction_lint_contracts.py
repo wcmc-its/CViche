@@ -38,6 +38,7 @@ from unified_pipeline.core.template_boilerplate import (  # noqa: E402
     is_near_template_instruction,
     is_template_instruction,
 )
+from unified_pipeline.core.text_norm import PROSE_MIN_LOWERCASE_WORDS  # noqa: E402
 from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _FUNDING_SECTIONS,
@@ -63,7 +64,6 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     INVENTED_RECORD_MIN_VALUES,
     MULTI_RECORD_MIN_NEW,
     MULTI_RECORD_NEW_SHARE,
-    MULTI_RECORD_PROSE_MIN_LOWERCASE,
     OPENING_DATE,
     OPENING_NUMBERED,
     OPENING_OTHER,
@@ -2869,7 +2869,7 @@ def test_multi_record_the_record_s_own_clause_is_never_reported():
 ])
 def test_multi_record_a_short_lowercase_clause_is_not_prose(talk):
     """Three lowercase 4+-letter words, and short words like 'on', are below
-    MULTI_RECORD_PROSE_MIN_LOWERCASE: a talk title in sentence case is a
+    PROSE_MIN_LOWERCASE_WORDS: a talk title in sentence case is a
     record."""
     text = f"2013 Example Workshop, Lakeport\t{talk}"
     findings = _multi_record(text, {
@@ -3121,6 +3121,11 @@ def test_multi_record_silent_when_the_other_clause_is_no_new_record(text, fields
     # an aside that never closes inside its clause
     ("Residency in Family Medicine, Northfield University 2004-2007 "
      "(on the combined track, ended 2008)",
+     {"training_type": "Residency", "specialty": "Family Medicine",
+      "institution": "Northfield University", "start_date": "2004", "end_date": "2007"}, "C"),
+    # an aside holding a parenthesis of its own, which closes first (#1243)
+    ("Residency in Family Medicine, Northfield University 2004-2007 "
+     "(on the combined track (CT), ended 2008)",
      {"training_type": "Residency", "specialty": "Family Medicine",
       "institution": "Northfield University", "start_date": "2004", "end_date": "2007"}, "C"),
     # an aside an earlier clause opened, after a year-led clause
@@ -3485,7 +3490,7 @@ def test_multi_record_licence_numbers_silent_when_not_several_records(text, fiel
 
 def test_multi_record_constants_are_pinned():
     assert (MULTI_RECORD_MIN_NEW, MULTI_RECORD_NEW_SHARE,
-            MULTI_RECORD_PROSE_MIN_LOWERCASE) == (2, 0.4, 4)
+            PROSE_MIN_LOWERCASE_WORDS) == (2, 0.4, 4)
     # the shape name is a message literal the precision ledger counts by
     assert CLAUSE_SPAN_OUTSIDE == "span_outside_record"
 

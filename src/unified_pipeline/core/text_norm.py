@@ -13,6 +13,8 @@ False an upstream stage wrote stays visible instead of vanishing.
 
 import re
 import unicodedata
+from collections.abc import Callable, Collection, Iterable
+from typing import NamedTuple
 
 # Substantive-line threshold: shorter lines ("2016", "PhD", bare bullets)
 # match by accident and only add noise to the coverage metric.
@@ -257,6 +259,526 @@ def tab_record_segments(line: str) -> list[str]:
              if (date_range or (years_date_parts and _edge_lone_year(part)))
              and _is_dated_record_part(part)]
     return dated if len(dated) / len(parts) >= DATED_SEGMENT_MIN_SHARE else []
+
+
+# --- Dated clauses -----------------------------------------------------------
+#
+# A line can hold several records with no tab between them, joined by "; ",
+# ", ", ". " or just the next date ("Member, <society>, 1995-96. Treasurer,
+# <society>, 1997-99"). The run doctor's `multi_record_coverage` cuts such a
+# line at its dates to find the records stage 4 left out; stage 6's recovery
+# pass cuts it the same way to re-emit them (`dated_record_clauses`, #1243).
+# Both read the helpers below, so a date, a payload and an aside mean one thing.
+
+#: A month or term word, as dates write it.
+MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
+                 r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
+                 r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
+#: A word that belongs to a date, not to what the record is.
+DATE_WORD_RE = re.compile(rf"^(?:{MONTH_PATTERN}|present|current|ongoing|date|now)$",
+                          re.IGNORECASE)
+#: What may sit between two years of ONE date: "1990-1992", "March 2001 -
+#: June 2004", "1987, 1988", "2003 and 2005".
+DATE_GAP_RE = re.compile(
+    rf"^(?:[\s,\-–—/.:()&]|\d|(?:to|through|thru|and|present|current|ongoing"
+    rf"|{MONTH_PATTERN})\b)*$", re.IGNORECASE)
+#: A word for `has_payload`: three or more letters.
+_PAYLOAD_WORD_RE = re.compile(r"[^\W\d_]{3,}")
+_PAYLOAD_FILLER = frozenset({"and", "the"})
+#: An aside that opens a clause: "(Chair). ...", " - (see ...".
+_PAREN_OPENING_RE = re.compile(r"^[\s\-–—,.:;]*\(")
+_PAREN_LEAD_CHARS = frozenset(",.;:-–—")
+#: An undated part names a record when it carries a role or rank and an
+#: institution: "Assistant Professor, <university> College of Medicine" beside
+#: the hospital post the record kept (TAUBPU-01). A PI named in a project's
+#: credit line is not the owner's role, so "investigator" is not a title.
+TITLE_WORD_RE = re.compile(
+    r"\b(?:professor|instructor|lecturer|fellow|director|chief|chair(?:man|person)?"
+    r"|attending|surgeon|physician|resident|member|president|dean|head|scientist"
+    r"|consultant|officer|editor|coordinator|manager|advisor|associate|assistant)\b",
+    re.IGNORECASE)
+#: A clause with at least this many lowercase words, and more lowercase words
+#: than capitalised ones, is a sentence about the record ("in recognition of
+#: ...", "who then went on to ..."), not a record. Titles, roles and
+#: institutions are capitalised; a short role phrase in sentence case
+#: ("Clinical skills tutor") stays below the floor.
+PROSE_MIN_LOWERCASE_WORDS = 4
+#: A word `is_prose` counts: four or more letters.
+PROSE_WORD_RE = re.compile(r"[^\W\d_]{4,}")
+
+
+class Clause(NamedTuple):
+    """One record-shaped stretch of an entry's text and the years it writes."""
+    text: str
+    years: frozenset[str]
+
+
+class DateAnchor(NamedTuple):
+    """One written date: its span in the text and the years it holds."""
+    start: int
+    end: int
+    years: frozenset[str]
+
+
+def has_payload(text: str) -> bool:
+    """Whether a stretch of entry text names anything besides a date."""
+    return any(not DATE_WORD_RE.match(word) and word.lower() not in _PAYLOAD_FILLER
+               for word in _PAYLOAD_WORD_RE.findall(text))
+
+
+def is_prose(text: str) -> bool:
+    """A sentence about a record rather than a record; see
+    PROSE_MIN_LOWERCASE_WORDS."""
+    words = [word for word in PROSE_WORD_RE.findall(text) if not DATE_WORD_RE.match(word)]
+    lowercase = sum(1 for word in words if word[0].islower())
+    return (lowercase >= PROSE_MIN_LOWERCASE_WORDS
+            and lowercase > len(words) - lowercase)
+
+
+def join_date_anchors(text: str, dates: Iterable[DateAnchor],
+                      counts: Callable[[DateAnchor, bool], bool] | None = None,
+                      ) -> list[DateAnchor]:
+    """`dates`, the dates `text` writes in reading order, as its anchors: a
+    date joins the anchor before it when only a date gap (`DATE_GAP_RE`)
+    separates them, so "1990-1992" or "March 2001 - June 2004" is one. A
+    `counts` that returns False for a date (and whether it would join the
+    anchor before it) leaves that date out."""
+    anchors: list[DateAnchor] = []
+    for date in dates:
+        joined = bool(anchors) and DATE_GAP_RE.match(text[anchors[-1].end:date.start]) is not None
+        if counts is not None and not counts(date, joined):
+            continue
+        if joined:
+            last = anchors[-1]
+            anchors[-1] = DateAnchor(last.start, date.end, last.years | date.years)
+        else:
+            anchors.append(date)
+    return anchors
+
+
+def _is_parenthetical(text: str) -> bool:
+    """An aside of the clause before it: the clause opens a parenthesis that
+    never closes, or that closes with nothing after it. A parenthesis inside
+    it ("(<board> (<acronym>) approved, <year>") closes before it does."""
+    opening = _PAREN_OPENING_RE.match(text)
+    if not opening:
+        return False
+    depth = 1
+    for position in range(opening.end(), len(text)):
+        if text[position] == "(":
+            depth += 1
+        elif text[position] == ")":
+            depth -= 1
+            if not depth:
+                return not has_payload(text[position + 1:])
+    return True
+
+
+def _opens_inside_parens(part: str, position: int) -> bool:
+    """Whether the words after `position` sit inside a parenthesis an earlier
+    clause opened -- "(won an award <year>, <meeting>, <city>)" is that
+    clause's aside, not a record. Punctuation, digits and closing parentheses after
+    `position` are stepped over first."""
+    depth = part.count("(", 0, position) - part.count(")", 0, position)
+    for char in part[position:]:
+        if char == ")":
+            depth -= 1
+        elif not (char.isspace() or char.isdigit() or char in _PAREN_LEAD_CHARS):
+            break
+    return depth > 0
+
+
+class ClauseCut(NamedTuple):
+    """A clause `_clause_cuts` cuts, and whether it is an aside of the clause
+    before it (`_is_parenthetical`, `_opens_inside_parens`)."""
+    clause: Clause
+    aside: bool
+
+
+#: An undated parenthesis right after a date ("<years> (Chair)"): the office
+#: or note of the clause that date ends, not the opening of the next one.
+_ASIDE_AFTER_DATE_RE = re.compile(r"\s*\([^()]*\)")
+#: What follows a date that ends its clause: a closing parenthesis, a full stop
+#: or semicolon, or the end of the part ("... <institute> (2003-2008). <next>").
+_CLAUSE_CLOSING_AFTER_DATE_RE = re.compile(r"\s*\)?\s*(?:[.;]|$)")
+#: A date in a parenthesis that opens after a word ("<title> (<years>)"): the
+#: note of the words before it, not the date that opens the next clause.
+_WORD_BEFORE_PAREN_RE = re.compile(r"[^\W_][^\S\n]*\($")
+_CLOSING_PAREN_AFTER_DATE_RE = re.compile(r"\s*\)")
+#: A dash right before a date: it ends a range the text before it opens
+#: ("<department> (l<year>-<year>)", a start year with a letter for a digit).
+_DASH_BEFORE_DATE_RE = re.compile(r"[-\u2013\u2014]\s*$")
+#: What joins the cells of one record on a pipe row.
+_PIPE_CELL_SEPARATOR = " | "
+
+
+def _clause_bounds(part: str, anchors: list[DateAnchor], attach: bool) -> list[int]:
+    """Where each date-trailing clause of `part` ends: at its date, or with
+    `attach` past an undated parenthesis right after it
+    (`_ASIDE_AFTER_DATE_RE`) that closes before the next date."""
+    bounds = []
+    for i, anchor in enumerate(anchors):
+        aside = _ASIDE_AFTER_DATE_RE.match(part, anchor.end) if attach else None
+        fits = aside is not None and (i + 1 == len(anchors) or aside.end() <= anchors[i + 1].start)
+        bounds.append(aside.end() if fits else anchor.end)
+    return bounds
+
+
+def _date_ends_its_clause(part: str, anchor: DateAnchor) -> bool:
+    """Whether the date `anchor` of `part` ends the clause it sits in rather
+    than opening the next: a full stop, semicolon, closing parenthesis or the
+    end follows it (`_CLAUSE_CLOSING_AFTER_DATE_RE`), it is the note in
+    parentheses of the words before it (`_WORD_BEFORE_PAREN_RE`), or it ends
+    a range after a dash (`_DASH_BEFORE_DATE_RE`)."""
+    return bool(_CLAUSE_CLOSING_AFTER_DATE_RE.match(part, anchor.end)
+                or (_WORD_BEFORE_PAREN_RE.search(part, 0, anchor.start)
+                    and _CLOSING_PAREN_AFTER_DATE_RE.match(part, anchor.end))
+                or _DASH_BEFORE_DATE_RE.search(part, 0, anchor.start))
+
+
+def _clause_cuts(part: str, anchors: list[DateAnchor], *,
+                 attach_asides: bool = False) -> list[ClauseCut]:
+    """One part cut at its date `anchors`. A part whose dates are not
+    separated by any words is one clause (a record with a list of dates);
+    otherwise each date takes the words after it when the part opens with a
+    date ("<year> <talk> <year> <talk>"), else the words before it ("<role>,
+    <years> <role>, <years>").
+
+    With `attach_asides` (the recovery's cut, `dated_record_clauses`), in a
+    date-trailing part an undated parenthesis right after a date stays with
+    the clause that date ends ("<committee>; <years> (Chair). <committee>;
+    <year>"), and a clause that opens inside a parenthesis an earlier clause
+    opened ("<society> (Fellow <year>; <committee>, <years>)"), or that has
+    no words before its date ("<symposia>, <year> (<university>), <year>
+    (<university>)"), is an aside of the clause before. A date-led part
+    whose later date ends its clause ("<years> <title>, <university>.
+    <title> (<years>). ...") mixes both ways and is no cut at all: []."""
+    if not anchors:
+        return []
+    between = [part[a.end:b.start] for a, b in zip(anchors, anchors[1:], strict=False)]
+    if not any(has_payload(gap) for gap in between):
+        return [ClauseCut(Clause(part, frozenset().union(*(a.years for a in anchors))), False)]
+    leading = not has_payload(part[:anchors[0].start])
+    if attach_asides and leading and any(_date_ends_its_clause(part, anchor) for anchor in anchors[1:]):
+        return []
+    attached = attach_asides and not leading
+    bounds = _clause_bounds(part, anchors, attached)
+    cuts = []
+    for i, anchor in enumerate(anchors):
+        start = bounds[i - 1] if i else 0
+        if leading:
+            end = anchors[i + 1].start if i + 1 < len(anchors) else len(part)
+            text = part[anchor.start:end]
+        else:
+            text = part[start:bounds[i]]
+        aside = bool(i) and (_is_parenthetical(text)
+                             or (leading and _opens_inside_parens(part, anchor.end))
+                             or (attached and (_opens_inside_parens(part, start)
+                                               or not has_payload(part[start:anchor.start]))))
+        cuts.append(ClauseCut(Clause(text, anchor.years), aside))
+    return cuts
+
+
+def date_clauses(part: str, anchors: list[DateAnchor]) -> list[Clause]:
+    """One part's dated clauses, cut at its date `anchors` (`_clause_cuts`).
+    An aside of the clause before is no clause."""
+    return [cut.clause for cut in _clause_cuts(part, anchors) if not cut.aside]
+
+
+_YEAR = r"(?:19\d{2}|20[0-3]\d)"
+#: A date a record clause ends or opens on: a date range (`_DATE_RANGE_RE`),
+#: one open to the present in words ("<year> to present") or open with a
+#: bare dash ("<year>-"), or a year standing alone with any "MM/" or "MM/DD/"
+#: before it ("3/2008") or its month glued to it ("May<year>", which joins the
+#: year before it as "<year>-May<year>"). Cut inside such a date, a clause
+#: would keep the year and leave its month or its end to the next clause
+#: (#1243 review).
+_RECORD_DATE_RE = re.compile(
+    rf"{_DATE_RANGE_RE.pattern}"
+    rf"|\b{_YEAR}\s+(?i:to|through|until)\s+(?i:present|current|date|now)\b"
+    rf"|\b{_YEAR}\s*[-\u2013\u2014](?!\s*\w)"
+    rf"|\b(?:\d{{1,2}}/){{1,2}}{_YEAR}\b"
+    rf"|\b(?i:{MONTH_PATTERN}){_YEAR}\b"
+    rf"|{_LONE_YEAR_RE.pattern}")
+#: The four-digit years a date writes, glued to a month or not.
+_DATE_YEAR_DIGITS_RE = re.compile(rf"(?<!\d){_YEAR}(?!\d)")
+#: The "MM/", "MM/DD/" or glued month before a year written alone.
+_YEAR_PREFIX_RE = re.compile(rf"^(?:(?:\d{{1,2}}/){{1,2}}|(?i:{MONTH_PATTERN}))(?={_YEAR}$)")
+# A lone year is part of a name, not the date of a record, when it follows an
+# event word ("<society> Annual Meeting 2020", "Class of 2010"), starts an
+# event name away from a clause boundary ("Committee, 2009 Western Regional
+# Meeting"), or sits between an all-caps acronym and a capitalised word ("AACR
+# 2011 Scientific Program Committee"). It is a date after a month or term
+# ("May 2012", "Fall 2010"), after "MM/" ("5/2012"), after a two-letter state
+# code ("<city>, MD 1999") and when it joins the date before it ("1980 to
+# 1982"). Any other name holds a year the same way (#1243 review): after a
+# capitalised word and "of" ("<title> Act of 2010"), and between two
+# capitalised words with no punctuation, the first naming no title or body
+# and the second no title ("<plan> Vision 2020 Steering Committee"), where
+# "<committee> 2007 <board>" and "<role> 2005 <role>" keep their dates.
+_EVENT_WORDS = r"meeting|conference|symposium|congress|convention|assembly|summit|workshop|course"
+_EVENT_BEFORE_YEAR_RE = re.compile(rf"\b(?:{_EVENT_WORDS}|class of)$", re.IGNORECASE)
+_NAME_OF_BEFORE_YEAR_RE = re.compile(r"\b[A-Z][\w'’-]*\s+of$")
+_CAPITALISED_BEFORE_YEAR_RE = re.compile(r"\b([A-Z][a-z][\w'’-]*) $")
+_CAPITALISED_AFTER_YEAR_RE = re.compile(r" ([A-Z][a-z][\w'’-]*)")
+_EVENT_AFTER_YEAR_RE = re.compile(
+    rf"^(?:[A-Z0-9][\w&/.'’-]*\s+){{0,6}}?(?:annual|{_EVENT_WORDS})\b", re.IGNORECASE)
+_MONTH_BEFORE_YEAR_RE = re.compile(rf"(?:\b{MONTH_PATTERN},?|\b\d{{1,2}}/)$", re.IGNORECASE)
+_STATE_BEFORE_YEAR_RE = re.compile(r"\b[A-Z]{2}\.?,?$")
+_ACRONYM_BEFORE_YEAR_RE = re.compile(r"\b[A-Z]{3,}$")
+_CLAUSE_BOUNDARY_CHARS = frozenset(".;|:(•*")
+# A word: what a year's neighbour is read as, and what a name is compared by.
+_NAME_WORD_RE = re.compile(r"[^\W_]+")
+# A line that opens with a dated parenthesis ("(Vice Chair <years>) (Chair
+# <years>)") holds the offices of the record on the line before it, not
+# records of its own. A list number ("(14) <committee> ...") is no aside.
+_ASIDE_LINE_RE = re.compile(rf"^\s*\([^()]*{_LONE_YEAR_RE.pattern}")
+# A clause the recovery may re-emit is at least the first length and at most
+# the second: a shorter one is a fragment of a record ("Chair 2010"), a longer
+# one a paragraph about one.
+# ponytail: these rules were tuned on the #1243 census farm (460 stored runs,
+# 2026-10-30), and the review round narrowed them by class there: an office
+# alone, an aside inside an earlier parenthesis, a note after a date, a
+# date-led line whose later dates end clauses, a pipe row, a clause without
+# its section's record word. Two kinds of wrong clause stay, which no word
+# test tells apart: a membership another entry writes in other words (an
+# acronym), and a sub-body's office ("<task force> Chairman, <year>") within
+# the committee the line names first. The held-out replay of the first round
+# is spent: these rules need a fresh one. Revisit if a recovered clause turns
+# up printed twice, or a run of records the census did not see is lost.
+DATED_CLAUSE_MIN_CHARS = 15
+DATED_CLAUSE_MAX_CHARS = 250
+# A unit is a run of records only when at least this many of its clauses are
+# records (`_is_record_clause`) and they make up at least this share of all.
+DATED_CLAUSE_MIN_RECORDS = 2
+DATED_CLAUSE_MIN_SHARE = 0.5
+# The punctuation a clause loses at either end: what joined it to the next.
+_CLAUSE_EDGE_CHARS = " \t,;.:()-–—•*"
+_CLAUSE_EDGE_CHARS_BUT_DASHES = " \t,;.:()•*"
+# A date open at the end of a clause: its dash is the date's ("<year>-").
+_OPEN_DATE_END_RE = re.compile(rf"\b{_YEAR}\s*[-\u2013\u2014]$")
+# A clause opens with a capital or a digit, past any punctuation: one that
+# opens in lower case continues the sentence before it.
+_CLAUSE_OPENING_RE = re.compile(r"^[\W\d_]*[A-Z0-9]")
+# A clause that names an office and nothing else besides its date ("Vice
+# Chair <years>", "Chairman, <years>", "Consulting Editor <years>") is
+# an office held within the record before it, which names the body: written
+# alone, it is no record (#1243 review: such bullets printed an office of a
+# board, society or journal whose row renders, without the body). Its words
+# are office words (`TITLE_WORD_RE`, `_OFFICE_WORD_RE`) or these qualifiers.
+_OFFICE_QUALIFIER_RE = re.compile(
+    r"^(?:vice|deputy|senior|junior|interim|acting|consulting|contributing|founding|elect|elected|past"
+    r"|honorary|executive|general|from|since|until|then|also|and|the)$", re.IGNORECASE)
+# A pointer to a record written elsewhere ("<years> see previous section",
+# "(see <section>)", "refer to <appendix>", "described in <section>"): the
+# record it names is not on this line. A "see" before a capitalised word
+# counts only in lower case ("Holy See" names a body).
+_CROSS_REFERENCE_RE = re.compile(
+    r"\b(?:see|cf\.?)\s+(?:also\s+)?(?:the\s+)?(?:previous|prior|above|below|next|following"
+    r"|earlier|later|other|section|sections|page|pages|list|table|appendix|attached)\b"
+    r"|\b(?:as|listed|noted|described)\s+(?:above|below|elsewhere)\b"
+    r"|\bsee\s+also\b|\(\s*see\b|(?-i:\bsee:?\s+[A-Z])|\brefer(?:red)?\s+to\b"
+    r"|\b(?:described|listed|noted|detailed|included|shown)\s+(?:in|under)\s+(?:the\s+)?"
+    r"(?:section|appendix|table|part|list|page)s?\b", re.IGNORECASE)
+# A line in the first person is narrative, however short its sentences ("In
+# <year> I became <title> of <center>. In <year> I was named ..."): "I" before
+# a lower-case word, after the start, a full stop, a year or a lower-case word
+# (not "Phase I trial"), or "my" / "our" in lower case ("Our Lady of <city>
+# Hospital" names one).
+_FIRST_PERSON_RE = re.compile(
+    rf"(?:^|[.;:,]\s*|\b{_YEAR},?\s+|\b[a-z]+\s+)I\s+[a-z]|\b(?:my|our)\b")
+# A body a record belongs to. With `TITLE_WORD_RE`'s titles, what makes a
+# clause name a record rather than a detail of one. Wider than the doctor's
+# `_INSTITUTION_WORD_RE`, which judges undated parts: a dated clause may name
+# a meeting, a journal or a working group.
+_BODY_WORD_RE = re.compile(
+    r"\b(?:society|association|academy|college|federation|council|committee|board"
+    r"|foundation|forum|network|consortium|alliance|league|union|club|task force"
+    r"|working group|work group|workgroup|panel|commission|subcommittee|section"
+    r"|chapter|caucus|institute|organization|cent(?:er|re)|program|journal"
+    r"|initiative|conference|meeting|symposium|congress|course"
+    r"|school|university|hospital|department|division)\b", re.IGNORECASE)
+# What a clause must name to be a record of a section whose records all name
+# one (`dated_record_clauses`' `record_word`). A position names its title: an
+# institution and its years alone are the post of the line before it, or a
+# training post whose title stage 2 left in the entry before (#1243 review).
+POSITION_TITLE_RE = re.compile(
+    rf"{TITLE_WORD_RE.pattern}|{_OFFICE_WORD_RE.pattern}"
+    r"|\b(?:prof|teacher|tutor|investigator|researcher|intern|specialist|staff|nurse"
+    r"|pharmacist|psychologist|therapist|counsel+or|analyst|engineer|librarian|curator)\b",
+    re.IGNORECASE)
+# A membership names its organization: a committee, panel or task force alone
+# is a seat within the society the line names first (#1243 review).
+ORGANIZATION_WORD_RE = re.compile(
+    r"\b(?:society|association|academy|college|federation|council|board|foundation"
+    r"|network|consortium|alliance|league|union|club|commission|chapter|institute"
+    r"|organi[sz]ation|cent(?:er|re)|school|university|hospital|fraternity|sorority"
+    r"|guild|coalition|trust|corporation|company|collegium|congress)\b", re.IGNORECASE)
+
+
+def _named_year(unit: str, date: DateAnchor, names: Collection[str]) -> bool:
+    """Whether one of `names` writes the lone year `date` of `unit` with the
+    word beside it ("<title> Act 2010"): the record's own title or name holds
+    the year, so it is part of that name. Compared word by word, case folded."""
+    year = unit[date.start:date.end]
+    before = _NAME_WORD_RE.findall(unit[:date.start])[-1:]
+    after = _NAME_WORD_RE.findall(unit[date.end:])[:1]
+    phrases = [f" {before[0].lower()} {year} "] if before else []
+    phrases += [f" {year} {after[0].lower()} "] if after else []
+    spaced = [f" {' '.join(_NAME_WORD_RE.findall(name.lower()))} " for name in names]
+    return any(phrase in name for phrase in phrases for name in spaced)
+
+
+def _year_in_name(unit: str, date: DateAnchor, names: Collection[str] = ()) -> bool:
+    """Whether `date`, a date of `unit`, is a year inside a name rather than
+    a record's date (see `_EVENT_WORDS`), or one of the record's `names`
+    writes it (`_named_year`). A range never is."""
+    if not _LONE_YEAR_RE.fullmatch(unit[date.start:date.end]):
+        return False
+    before, after = unit[:date.start].rstrip(), unit[date.end:].lstrip()
+    if not before or _MONTH_BEFORE_YEAR_RE.search(before) or _STATE_BEFORE_YEAR_RE.search(before):
+        return False
+    return bool(_EVENT_BEFORE_YEAR_RE.search(before)
+                or _NAME_OF_BEFORE_YEAR_RE.search(before)
+                or (before[-1] not in _CLAUSE_BOUNDARY_CHARS and _EVENT_AFTER_YEAR_RE.match(after))
+                or (_ACRONYM_BEFORE_YEAR_RE.search(before) and after[:1].isupper())
+                or _year_between_name_words(unit, date)
+                or _named_year(unit, date, names))
+
+
+def _year_between_name_words(unit: str, date: DateAnchor) -> bool:
+    """Whether the lone year `date` of `unit` sits between two capitalised
+    words with only a space on either side, the word before naming no title
+    or body (`TITLE_WORD_RE`, `_BODY_WORD_RE`, `_OFFICE_WORD_RE`) and the
+    word after no title: inside a name ("<plan> Vision 2020 Steering
+    Committee"), not ending a record before the next ("<committee> 2007
+    <board>", "<role> 2005 <role>")."""
+    before = _CAPITALISED_BEFORE_YEAR_RE.search(unit, 0, date.start)
+    after = _CAPITALISED_AFTER_YEAR_RE.match(unit, date.end)
+    if before is None or after is None:
+        return False
+    word_before, word_after = before.group(1), after.group(1)
+    return not (TITLE_WORD_RE.fullmatch(word_before) or _BODY_WORD_RE.fullmatch(word_before)
+                or _OFFICE_WORD_RE.fullmatch(word_before)
+                or TITLE_WORD_RE.fullmatch(word_after) or _OFFICE_WORD_RE.fullmatch(word_after))
+
+
+def record_date_anchors(unit: str, names: Collection[str] = ()) -> list[DateAnchor]:
+    """The record dates of `unit` (`_RECORD_DATE_RE`), its ranges and lone
+    years joined into one anchor where only a date gap separates them
+    (`join_date_anchors`), less the years inside a name (`_year_in_name`;
+    `names` are the record's own titles and names). A year that joins the
+    date before it always counts."""
+    dates = (DateAnchor(match.start(), match.end(), frozenset(_DATE_YEAR_DIGITS_RE.findall(match.group())))
+             for match in _RECORD_DATE_RE.finditer(unit))
+    return join_date_anchors(unit, dates,
+                             lambda date, joined: joined or not _year_in_name(unit, date, names))
+
+
+def _is_record_clause(clause: str) -> bool:
+    """Whether `clause` reads as a record: `DATED_CLAUSE_MIN_CHARS` to
+    `DATED_CLAUSE_MAX_CHARS` long, naming something besides its date
+    (`has_payload`), not a sentence (`is_prose`) nor a pointer to a record
+    written elsewhere (`_CROSS_REFERENCE_RE`), opening with a capital or a
+    digit, and naming a title (`TITLE_WORD_RE`) or a body (`_BODY_WORD_RE`),
+    and something besides an office (`_names_only_an_office`)."""
+    return (DATED_CLAUSE_MIN_CHARS <= len(clause) <= DATED_CLAUSE_MAX_CHARS
+            and has_payload(clause) and not is_prose(clause)
+            and _CROSS_REFERENCE_RE.search(clause) is None
+            and _CLAUSE_OPENING_RE.match(clause) is not None
+            and (TITLE_WORD_RE.search(clause) or _BODY_WORD_RE.search(clause)) is not None
+            and not _names_only_an_office(clause))
+
+
+def _names_only_an_office(clause: str) -> bool:
+    """Whether every word of `clause` besides its dates is an office word or
+    a qualifier of one (`_OFFICE_QUALIFIER_RE`): the office of the record
+    before it, whose body it leaves out."""
+    return all(TITLE_WORD_RE.fullmatch(word) or _OFFICE_WORD_RE.fullmatch(word) or _OFFICE_QUALIFIER_RE.match(word)
+               for word in _undated_words(clause))
+
+
+def noted_clause_head(clause: str) -> str | None:
+    """The text of a dated clause before its parenthetical note, or None
+    when it has none: a parenthesis that holds a word besides its dates and
+    names no office ("<committee> (elected; <years>)"). The note says how
+    the record was held, not which record it is, so the head names the
+    record. An office in the parenthesis ("(founder; Chair <years>)") is a
+    record of its own within it, and keeps the whole clause."""
+    head, opened, note = clause.partition("(")
+    if not opened or not _undated_words(note) or _OFFICE_WORD_RE.search(note):
+        return None
+    return head.strip(_CLAUSE_EDGE_CHARS)
+
+
+def _written_dates(unit: str, anchor: DateAnchor) -> frozenset[str]:
+    """The dates `anchor` joins, as `unit` writes them, a year alone read
+    past the month written before it (`_YEAR_PREFIX_RE`): two anchors with
+    the same are one record's date written twice ("<year>: <talk>, <day>
+    <month> <year>"; "01/<year> <talk>, Spring <year> <series>")."""
+    return frozenset(_YEAR_PREFIX_RE.sub("", match.group())
+                     for match in _RECORD_DATE_RE.finditer(unit, anchor.start, anchor.end))
+
+
+def _undated_words(text: str) -> list[str]:
+    """The words of `text` (`_PAYLOAD_WORD_RE`) that are not date words."""
+    return [word for word in _PAYLOAD_WORD_RE.findall(text) if not DATE_WORD_RE.match(word)]
+
+
+def _clause_text(text: str) -> str:
+    """A cut clause as the recovery writes it: less the punctuation at its
+    ends (`_CLAUSE_EDGE_CHARS`) but the dash of a date open at its end
+    ("<council>, <year>-"), and with each parenthesis balanced: one it opens
+    is closed ("<program> (since <year>)", whose ")" the edge took), and one
+    it closes first is opened ("(14) <council>", "(<year>) <lecture>")."""
+    text = text.lstrip(_CLAUSE_EDGE_CHARS)
+    open_end = text.rstrip(_CLAUSE_EDGE_CHARS_BUT_DASHES)
+    text = open_end if _OPEN_DATE_END_RE.search(open_end) else text.rstrip(_CLAUSE_EDGE_CHARS)
+    first_open = text.find("(")
+    if text.count(")") > text.count("(") and (first_open < 0 or text.index(")") < first_open):
+        text = f"({text}"
+    return text + ")" * max(0, text.count("(") - text.count(")"))
+
+
+def dated_record_clauses(unit: str, names: Collection[str] = (),
+                         record_word: re.Pattern[str] | None = None) -> list[str]:
+    """The records of `unit`, one line or tab part, when it holds several of
+    them cut by their dates, or [] when it reads as one record.
+
+    Stage 2 can leave several records on one line with no tab between them
+    ("Member, <society>, 1995-96. Treasurer, <society>, 1997-99"; "2006
+    <talk>. 2008 <talk>."), and `tab_record_segments` splits only on tabs
+    (#1243). The unit is cut at its record dates (`record_date_anchors`)
+    into clauses (`_clause_cuts` with its asides attached), date-led or
+    date-trailing; it needs two different dates with words between them.
+    Each clause loses the punctuation at its ends (`_clause_text`). An aside
+    of the clause before (`ClauseCut.aside`) is that record's office or note,
+    no record. The unit is a run of records only when
+    `DATED_CLAUSE_MIN_RECORDS` clauses or more are records
+    (`_is_record_clause`) and they are `DATED_CLAUSE_MIN_SHARE` of its
+    clauses or more; those are returned, in order. `names`, the record's own
+    titles and names, tell a year inside a title from a record's date
+    (`_named_year`). A `record_word` is what each record of the unit's
+    section names (`POSITION_TITLE_RE`, `ORGANIZATION_WORD_RE`): a clause
+    without one is no record.
+
+    Not a run of records: narrative (`is_prose`, `_FIRST_PERSON_RE`), a
+    line that opens with a dated parenthesis, the offices of the record
+    before it (`_ASIDE_LINE_RE`), and a pipe row, the cells of one record.
+    """
+    if (is_prose(unit) or _FIRST_PERSON_RE.search(unit) or _ASIDE_LINE_RE.match(unit)
+            or _PIPE_CELL_SEPARATOR in unit):
+        return []
+    anchors = record_date_anchors(unit, names)
+    if len({_written_dates(unit, anchor) for anchor in anchors}) < 2:
+        return []
+    clauses = [_clause_text(cut.clause.text) for cut in _clause_cuts(unit, anchors, attach_asides=True)
+               if not cut.aside]
+    records = [clause for clause in clauses if _is_record_clause(clause)
+               and (record_word is None or record_word.search(clause) is not None)]
+    if len(records) < DATED_CLAUSE_MIN_RECORDS or len(records) < DATED_CLAUSE_MIN_SHARE * len(clauses):
+        return []
+    return records
 
 
 #: A whole value in square brackets: "[Title not provided]".

@@ -217,6 +217,7 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from ...core.template_boilerplate import (
@@ -227,8 +228,9 @@ from ...core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
+from ...core.text_norm import ORGANIZATION_WORD_RE, POSITION_TITLE_RE
 from ..empty_slots import APPENDIX_HEADING
-from ..fan_out import LAST_STAGE4_RECORD
+from ..fan_out import LAST_STAGE4_RECORD, is_split_record
 from ..formatting import (
     _set_font,
     add_cviche_box,
@@ -244,6 +246,7 @@ from ..render_check import (
     _is_column_header_row,
     _record_lines,
     _record_tokens,
+    dated_clause_lines,
     t_recovery_lines,
     tab_aware_record_lines,
 )
@@ -1845,10 +1848,43 @@ def recovery_text(entry: Mapping[str, object]) -> str:
     return str(entry.get(DATE_LED_SOURCE_TEXT) or entry.get('text') or '')
 
 
+#: The sections whose entries the unrendered-record pass also reads clause by
+#: clause (`dated_clause_candidates`): postdoctoral training (C), positions
+#: (D), memberships (I), leadership (O), administrative (P), extramural (Q)
+#: and talks (R), the sections whose one-line entries the #1243 census found
+#: holding several dated records. Elsewhere a line's dates are its record's
+#: own (a degree and its honours, a grant and its periods, a citation).
+DATED_CLAUSE_SECTIONS = ('C', 'D', 'I', 'O', 'P', 'Q', 'R')
+#: What each dated clause of a section names when it is a record of its own
+#: (`dated_record_clauses`' `record_word`): a position its title, a
+#: membership its organization (#1243 review).
+DATED_CLAUSE_RECORD_WORDS = MappingProxyType({
+    'D': POSITION_TITLE_RE,
+    'I': ORGANIZATION_WORD_RE,
+})
+
+
+def dated_clause_candidates(code: str, entry: Mapping[str, object]) -> list[str]:
+    """The dated clauses (`dated_clause_lines`) of an entry of a
+    `DATED_CLAUSE_SECTIONS` code that stage 4 did not split into records:
+    the records stage 2 left on one line with no tab between them (#1243).
+    An entry fanned out of stage 4's records renders each from its own row
+    (`is_split_record`)."""
+    if not code.startswith(DATED_CLAUSE_SECTIONS) or is_split_record(entry):
+        return []
+    return dated_clause_lines(recovery_text(entry), entry.get('extracted_fields') or {},
+                              DATED_CLAUSE_RECORD_WORDS.get(code[:1]))
+
+
 def recovery_candidates(code: str, entry: dict) -> list[str]:
     """Lines of an entry the unrendered-record pass should look for.
 
-    A fused multi-record entry (two or more record-shaped lines) for any code.
+    A fused multi-record entry (two or more record-shaped lines) for any
+    code, and the dated clauses of an entry (`dated_clause_candidates`)
+    beside them, or alone when it has fewer record-shaped lines. A lone
+    record-shaped line stays no candidate beside the clauses, as it is
+    without them: the clauses are cut from it, and read as lost it would
+    print whole, the record its row prints included (#1243 review).
     A T entry longer than `APPENDIX_MAX_CHARS` is the exception: every
     record-shaped or dated line of it is a candidate (`t_recovery_lines`), and
     a single-record entry qualifies (#1230). The Appendix renders a T body
@@ -1865,6 +1901,9 @@ def recovery_candidates(code: str, entry: dict) -> list[str]:
     # their tab parts are not lost, only reformatted (#1243).
     read_lines = _record_lines if LAST_STAGE4_RECORD in entry else tab_aware_record_lines
     records = read_lines(text)
+    if len(records) < UNRENDERED_MIN_RECORD_LINES:
+        records = []
+    records += dated_clause_candidates(code, entry)
     return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
 
 

@@ -91,7 +91,9 @@ STAGE6_IMPORT_SURFACE = (
     "_parse_date_components",
     "_phone_cell_text",
     "_pii_fragments",
+    "_record_line_verdicts",
     "_record_lines",
+    "_recovery_view",
     "_squash",
     "_strip_taxonomy_code",
     "deduplicate_entries",
@@ -229,7 +231,7 @@ HOME_ONLY_IMPORTS = {
                                              "record_siblings", "record_twins",
                                              "short_tab_part_words",
                                              "sibling_record_rendered", "_OPEN_TERM_WORDS",
-                                             "_field_strings"),
+                                             "_field_strings", "dated_clause_lines", "extracted_clause"),
 }
 
 _RELOCATED_CASES = [
@@ -336,7 +338,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 50, (
+    assert len(STAGE6_IMPORT_SURFACE) == 52, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
@@ -351,8 +353,8 @@ def test_private_names_are_a_deliberate_part_of_the_contract():
     but should be its own PR) or widening it (worth noticing).
     """
     private = [n for n in STAGE6_IMPORT_SURFACE if n.startswith("_")]
-    assert len(private) == 17, (
-        f"expected 17 private names in the stage 6 import surface, found "
+    assert len(private) == 19, (
+        f"expected 19 private names in the stage 6 import surface, found "
         f"{len(private)}: {sorted(private)}"
     )
 

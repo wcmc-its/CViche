@@ -454,7 +454,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 8.3 typing syntax (UP*, RUF013) | falling | 0 | ratchet |
 | 8.3 missing annotations (ANN*, RUF012) | falling | 443 | ratchet |
 | 8.4 pyflakes findings (F) | falling | 154 | ratchet |
-| 8.4 bugbear findings (B) | falling | 135 | ratchet |
+| 8.4 bugbear findings (B) | falling | 134 | ratchet |
 
 <!-- check_standards:auto:end -->
 

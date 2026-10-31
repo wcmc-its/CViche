@@ -9,6 +9,6 @@
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
   "8.3 missing annotations (ANN*, RUF012)": 443,
   "8.3 typing syntax (UP*, RUF013)": 0,
-  "8.4 bugbear findings (B)": 135,
+  "8.4 bugbear findings (B)": 134,
   "8.4 pyflakes findings (F)": 154
 }
