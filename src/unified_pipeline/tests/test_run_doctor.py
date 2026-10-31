@@ -850,33 +850,22 @@ def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
     assert missed == [["MENTORING"]]
 
 
-def test_missed_headers_heading_styled_lines_never_escalate_the_run():
-    """#1232: a line that is not ALL-CAPS reached the candidate list through
-    its Heading style alone (record titles, journal names, contact lines). A
-    CV that styles its records Heading 1 must not read as a WARN storm, and
-    the lines stay reported."""
-    weak = [f"Example Record {name}" for name in
-            ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta")]
-    assert len(weak) > MISSED_HEADERS_WARN_COUNT
-    findings = lint_missed_headers(weak, _STAGE1A, {"entries": []})
-    assert [f["evidence"][0] for f in findings] == weak
-    assert {f["severity"] for f in findings} == {"INFO"}
+def test_run_doctor_missed_headers_skips_mixed_case_heading_lines(tmp_path):
+    """#1232, the wire: a CV that styles its record titles Heading 1 gets no
+    finding for them, so they cannot make a WARN storm; a bold ALL-CAPS
+    header 1a missed is still reported, at the severity of its own count."""
+    root = _build_clean_run(tmp_path)
+    source_path = root / "uploads" / f"{_UID}_cv.docx"
+    source = Document(str(source_path))
+    names = ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta")
+    assert len(names) > MISSED_HEADERS_WARN_COUNT, "enough to WARN if they counted"
+    for name in names:
+        source.add_paragraph(f"Example Record {name} on Widgets", style="Heading 1")
+    source.add_paragraph("MENTORING").runs[0].bold = True
+    source.save(str(source_path))
 
-
-def test_missed_headers_only_all_caps_candidates_set_the_run_severity():
-    """Weak candidates are not counted toward the WARN threshold, and an
-    ALL-CAPS candidate still takes the run severity from ITS OWN count."""
-    weak = [f"Example Record {name}" for name in ("Alpha", "Beta", "Gamma")]
-    few = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT - 1)]
-    found = lint_missed_headers(few + weak, _STAGE1A, {"entries": []})
-    assert {f["severity"] for f in found} == {"INFO"}, \
-        "five strong lines plus weak ones stay under the threshold"
-
-    many = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT)]
-    found = lint_missed_headers(many + weak, _STAGE1A, {"entries": []})
-    by_line = {f["evidence"][0]: f["severity"] for f in found}
-    assert {by_line[line] for line in many} == {"WARN"}
-    assert {by_line[line] for line in weak} == {"INFO"}
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "missed_headers"]
+    assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", ["MENTORING"])]
 
 
 def test_run_doctor_reports_a_lost_source_table(tmp_path):
@@ -1103,8 +1092,9 @@ def test_is_single_column_is_the_logical_cell_count_not_the_grid():
 
 def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
     """#539: 'PI. <Name>' / 'Dr. <Name>' is the owner's name line (marker in
-    FRONT, which the suffix-only credential filter misses); a header that
-    merely starts with a marker, or an ALL-CAPS line, is still a candidate."""
+    FRONT, which the suffix-only credential filter misses). It is mixed-case,
+    so the ALL-CAPS rule keeps it out (#1232), with every other mixed-case
+    line after a marker; an ALL-CAPS line after a marker is still a candidate."""
     doc = Document()
     doc.add_paragraph("PI. Jane Q. Sample", style="Heading 1")
     doc.add_paragraph("Dr. Alex Example", style="Heading 1")
@@ -1118,9 +1108,27 @@ def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
     path = tmp_path / "cv.docx"
     doc.save(path)
 
-    assert iter_header_candidates(str(path)) == [
-        "PI. RESPONSIBILITIES", "Dr. PUBLICATIONS", "Pi. Notes",
-        "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
+    assert iter_header_candidates(str(path)) == ["PI. RESPONSIBILITIES"]
+
+
+def test_iter_header_candidates_admits_a_heading_styled_line_only_when_all_caps(tmp_path):
+    """#1232: a Heading style no longer admits a line that is not ALL-CAPS
+    (record titles, journal names, contact-block lines), bold or not. An
+    ALL-CAPS Heading-styled line still needs no bold, and the other rules
+    still apply to it."""
+    doc = Document()
+    doc.add_paragraph("Example Record Title About Widgets", style="Heading 1")
+    doc.add_paragraph("Journal of Example Studies", style="Heading 6")
+    doc.add_paragraph("Department of Example Medicine", style="Heading 3")
+    doc.add_paragraph("Bold Example Record Title", style="Heading 1").runs[0].bold = True
+    doc.add_paragraph("SELECTED EXAMPLE LECTURES", style="Heading 2")   # not bold: kept
+    doc.add_paragraph("JANE Q. EXAMPLE, M.D.", style="Heading 1")       # name line
+    doc.add_paragraph("EXAMPLE SERVICE").runs[0].bold = True
+    doc.add_paragraph("EXAMPLE PLAIN CAPS LINE")                         # not bold, Normal
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == ["SELECTED EXAMPLE LECTURES", "EXAMPLE SERVICE"]
 
 
 def test_iter_header_candidates_flattens_the_tab_after_an_enumeration_token(tmp_path):

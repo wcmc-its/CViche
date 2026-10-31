@@ -15,11 +15,11 @@ Lints, ranked by the severity of the failure class they catch:
                           source table (web207's lost personal-data table)
                           and each body content control (RSFOYB's lost
                           889-paragraph control, #1656)
-2. missed_headers         ALL-CAPS bold header-like source lines absent from
-                          the 1a hierarchy AND every entry hierarchy path
-                          ('PROFESSIONAL EXPERIENCE' demoted to content); a
-                          Heading-styled line that is not ALL-CAPS is
-                          reported at INFO and never escalates the run; a
+2. missed_headers         ALL-CAPS header-like source lines (bold, or styled
+                          as a Heading) absent from the 1a hierarchy AND
+                          every entry hierarchy path ('PROFESSIONAL
+                          EXPERIENCE' demoted to content); a Heading-styled
+                          line that is not ALL-CAPS is not a candidate; a
                           line of the Personal Data block (CV title,
                           employer) is not a header
 3. bucket_status          grant status vs the funding subsection the grant
@@ -1375,18 +1375,6 @@ _NAME_CREDENTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: A person line with the role marker in FRONT ('PI. Jane Q. Sample', 'Dr.
-#: John Example'; #539). Both halves must hold, so a header that merely
-#: starts with a marker ('PI. RESPONSIBILITIES') is not swallowed: an exact
-#: marker token, then a run of Title-case name words / initials that ends on a
-#: real (multi-letter, lower-case-bearing) name word. ALL-CAPS text is never
-#: matched -- a caps line after a marker reads as a header, not a name.
-_LEADING_ROLE_NAME_RE = re.compile(
-    r"^(?:PI|Dr|Prof|Mr|Mrs|Ms)\.\s+(?:[A-Z]\.?\s+){0,2}"
-    r"[A-Z][a-z][\w'’-]*(?:\s+(?:[A-Z]\.?|[A-Z][a-z][\w'’-]*)){0,3}$"
-)
-
-
 def _logical_cells(row) -> list:
     """The row's distinct cells. python-docx's ``row.cells`` repeats one
     gridSpan-merged cell once per layout-grid column it spans, so a merged
@@ -1424,8 +1412,8 @@ _ENUM_TAB_RE = re.compile(r"^(\s*(?:[IVXLCivxlc]+|[A-Za-z])\.)\s*\t\s*")
 
 
 def iter_header_candidates(docx_path: str) -> list[str]:
-    """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
-    styled as a Heading), from top-level paragraphs and single-column table
+    """Header-looking source lines: short, letters-only, ALL-CAPS, and bold or
+    styled as a Heading, from top-level paragraphs and single-column table
     cells (the 1x1 layout tables CVs use as section containers; see
     `_is_single_column` for what single-column means). Multi-column tables
     are data tables — their bold cells are column headers — and document
@@ -1454,13 +1442,20 @@ def iter_header_candidates(docx_path: str) -> list[str]:
         # CPE', 'CURRICULUM VITAE - JEFFREY R OLSEN, MD'. Anchored on the
         # comma-suffix position so real headers that merely contain a comma
         # ('ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:') survive.
-        if _NAME_CREDENTIAL_RE.search(text) or _LEADING_ROLE_NAME_RE.match(text):
+        if _NAME_CREDENTIAL_RE.search(text):
+            return
+        # Only an ALL-CAPS line is a candidate, whatever its style (#1232,
+        # decided 2026-10-30). A Heading style alone admitted the record
+        # titles, journal names and contact-block lines CVs style Heading 1-6:
+        # on one batch 42 of 75 findings were such lines and none was a real
+        # miss. The cost is a mixed-case Heading-styled section label that
+        # stage 1a truly missed, which is no longer reported. A role-marker
+        # name line ('PI. Jane Q. Sample', #539) is mixed-case, so it stays out.
+        if text != text.upper():
             return
         style = getattr(para.style, "name", "") or ""
         if style.startswith("Heading"):
             candidates.append(text)
-            return
-        if text != text.upper():
             return
         runs = [r for r in para.runs if r.text.strip()]
         if runs and all(r.bold for r in runs):
