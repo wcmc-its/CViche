@@ -602,6 +602,28 @@ def test_fellowship_shapes_that_are_quiet_1577(text, code, headings):
     assert _run(_entry(text, code, *headings)) == []
 
 
+@pytest.mark.parametrize("text, headings, honor", [
+    ("2017: Elected Fellow of the Invented Society for Cell Examples", ("Professional Memberships",), True),
+    ("2031-present Invented Epidemiological Society (elected Fellow)", ("Professional Memberships",), True),
+    ("2031 Fellowship, Invented College of Physicians", ("Honors and Awards",), True),
+    ("Invented College of Physicians, Fellow | 2031", ("Professional Honors and Awards", "Service"), True),
+    ("2031 Fellow, Invented College of Examples", ("Professional Honors & Recognition", "National"), True),
+    ("2031 Fellow, Invented College of Examples", ("Awards, Honors, and Membership in Honorary Societies",),
+     False),
+    ("2031 Invented Head and Neck Society, Fellow", ("CERTIFICATION",), False),
+    ("Invented Academy (Active Member; elected fellow 2031)", ("Professional Societies",), False),
+    ("Fellow - Invented Leadership Programme, 2031", ("Honors and Awards",), False),
+])
+def test_the_lint_reports_exactly_what_the_stage3b_fellowship_pin_recodes_1577(text, headings, honor):
+    """One test, two readers (CODING_STANDARDS.md §1.5): the lint reports an I
+    line as fellowship_as_membership exactly when stage 3b's fellowship pin
+    recodes it to H, so a fresh run leaves the lint nothing the pin read."""
+    from unified_pipeline.stage3b.header_pin import fellowship_pin_code
+    entry = _entry(text, "I", *headings)
+    assert (fellowship_pin_code(entry) is not None) is honor
+    assert (_shapes(_run(entry)) == ["fellowship_as_membership"]) is honor
+
+
 # --- pinned_heading_empty (#1949) ------------------------------------------
 
 def _node(title, code, confidence, *children, alternative=None):

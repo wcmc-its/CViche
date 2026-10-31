@@ -41,6 +41,10 @@ import re
 from collections import Counter, defaultdict
 from typing import NamedTuple
 
+from unified_pipeline.core.honor_lines import (
+    heading_names_honors,
+    is_honorific_fellowship,
+)
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_context
 from unified_pipeline.stage3b.header_pin import (
@@ -66,8 +70,11 @@ SECTION_CONSISTENCY_SEVERITY = "WARN"
 
 #: A shape whose severity differs from SECTION_CONSISTENCY_SEVERITY. An
 #: honorific fellowship coded I follows the stage-3b prompt's own rules 16 and
-#: 27 ("Fellow, [Society]" is I), so whether it is wrong waits on the taxonomy
-#: decision #1577 names; until then it is reported, not weighed.
+#: 27 ("Fellow, [Society]" is I). The owner decided on 2026-10-30 (#1577) that
+#: an elected fellowship, or one listed under honors, is an honor, and stage
+#: 3b's fellowship pin now applies that with this lint's own test. The shape
+#: stays INFO until its precision against that decision is measured on a
+#: fresh batch.
 FELLOWSHIP_AS_MEMBERSHIP_SHAPE = "fellowship_as_membership"
 SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO"}
 
@@ -143,41 +150,6 @@ _ATTENDANCE_HEADING_RE = re.compile(
 SUBHEADING_MAX_WORDS = 6
 _SUBHEADING_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _WORD_RE = re.compile(r"[^\W\d_]+")
-
-#: A heading that names honors or awards, and one that names funding. "Grants
-#: and Contract Awards", "Current Awards" and "Research Awards" head grants
-#: lists, so an honors heading must not name funding too (YUYVIG, #1577).
-_HONORS_HEADING_RE = re.compile(r"honou?r|\bawards?\b|\bprizes?\b|recogni[tz]|distinction",
-                                re.IGNORECASE)
-_FUNDING_HEADING_RE = re.compile(
-    r"grant|fund|support|contract|research|investigat|current|\bpast\b|pending|completed"
-    r"|ongoing|active", re.IGNORECASE)
-#: A leaf heading that names memberships or credentials: a fellowship under it
-#: is where the author put it ("Awards, Honors, and Membership in Honorary
-#: Societies", UVZNIC; "Professional Certifications", HBALTD).
-_MEMBERSHIP_HEADING_RE = re.compile(r"member|societ|organi[sz]ation|affiliation|certific|licens",
-                                    re.IGNORECASE)
-#: A line that opens, after an optional date or bullet, with an election to a
-#: fellowship: "2017: Elected Fellow of ...", "Elected to Fellowship, ...",
-#: "Named Fellow of ...", "Inducted as a Fellow in ...".
-_ELECTED_FELLOW_RE = re.compile(
-    r"^[\W\d]*(?:[A-Za-z]{3,9}\.?\s+)?(?:(?:19|20)\d{2}\W*)?(?:elected|named|inducted)\s+"
-    r"(?:(?:as|to|an?)\s+)*(?:associate\s+|distinguished\s+|honorary\s+)?fellow(?:ship)?\b",
-    re.IGNORECASE)
-#: A fellowship as a title: a line that opens with "Fellow, <body>", "Fellow
-#: of/in <body>" or "Distinguished Fellow ...", or that names a body and then
-#: "Fellow" ("<Society> Fellow"). "Fellow" must be followed by a comma, of/in,
-#: a bracket or a digit, so "Fellow Travel Award" and "Fellow - <programme>"
-#: stay quiet. A fellowship programme ("Fellowship") is training or an award,
-#: not this shape. "<ACRONYM> Fellow" is not matched: "NIH Fellow 1998" and
-#: "AHA Fellow" name a training or funding fellowship as often as an honorific
-#: one (SQMWHM 1536 "NATA Fellow" is the one corpus hit it cost).
-_FELLOW_TITLE_RE = re.compile(
-    r"^[\W\d]*(?:(?i:present)\W*)?"
-    r"(?:(?i:distinguished|founding|honorary|associate)\s+)?(?i:fellow)\b"
-    r"(?:\s*,|\s+(?i:of|in)\b|\s*\(|\s+\d)"
-    r"|\b(?i:association|society|college|academy|institute)\s+(?i:fellow)\b")
-
 
 class HeadingCodeRule(NamedTuple):
     """One shape of a code that contradicts its heading or its own text.
@@ -362,37 +334,30 @@ def _is_attended_as_teacher(entry: _ClassifiedEntry, in_attendance_context: bool
     return in_attendance_context and not names_teaching_or_authorship_role(entry.text)
 
 
-def _is_honors_heading(heading: str) -> bool:
-    return bool(_HONORS_HEADING_RE.search(heading)) and not _FUNDING_HEADING_RE.search(heading)
-
-
 def _is_honor_as_funding(entry: _ClassifiedEntry) -> bool:
     """A grant code (M2, M2A/B/C) under a leaf heading that names honors and
-    not funding, on a line with no grant marker and no PI role at its head:
-    stage 6 renders it as a one-year funding table with no title and no PI
-    (UVZNIC 117-126, ZDOAZO 333, IXJMKS 112). The marker and role tests are
-    stage 3b's H pin's own (#1618); this reports what that pin leaves, a
+    not funding (`heading_names_honors`, stage 6's research-support guard's
+    heading test too), on a line with no grant marker and no PI role at its
+    head: stage 6 renders it as a one-year funding table with no title and
+    no PI (UVZNIC 117-126, ZDOAZO 333, IXJMKS 112). The marker and role tests
+    are stage 3b's H pin's own (#1618); this reports what that pin leaves, a
     confident grant answer or a heading stage 3a did not pin to H."""
     leaf = entry.heading_path[-1] if entry.heading_path else ""
-    return (entry.code in _GRANT_CODES and _is_honors_heading(leaf)
+    return (entry.code in _GRANT_CODES and heading_names_honors(leaf)
             and not _GRANT_MARKER.search(entry.text)
             and not _PI_ROLE_LEAD.match(entry.text))
 
 
 def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
-    """An I entry that opens with an election to a fellowship, or that names
-    a fellowship as a title under a heading path naming honors whose leaf
-    names no membership (MVUREJ 44, IZIXVF 55, XNWSZN 53; NECRGC ZASOTV,
-    LWMSPJ, UAURFU). It renders as "Fellow, <body> yyyy-Present" in
-    Memberships and is missing from Honors."""
-    if entry.code != MEMBERSHIP_CODE:
-        return False
-    if _ELECTED_FELLOW_RE.search(entry.text):
-        return True
-    leaf = entry.heading_path[-1] if entry.heading_path else ""
-    return (any(_HONORS_HEADING_RE.search(h) for h in entry.heading_path)
-            and not _MEMBERSHIP_HEADING_RE.search(leaf)
-            and bool(_FELLOW_TITLE_RE.search(entry.text)))
+    """An I entry for a fellowship that the 2026-10-30 decision on #1577
+    makes an honor (`is_honorific_fellowship`, stage 3b's fellowship pin's
+    own test): an elected one, or a fellowship title under an honors heading
+    whose leaf names no membership (MVUREJ 44, IZIXVF 55, XNWSZN 53; NECRGC
+    ZASOTV, LWMSPJ, UAURFU). It renders as "Fellow, <body> yyyy-Present" in
+    Memberships and is missing from Honors. On a fresh run the pin has
+    already recoded the model's answers of this shape, so this reports what
+    the pin does not reach: a stored run, or an I a later stage-3b step gave."""
+    return entry.code == MEMBERSHIP_CODE and is_honorific_fellowship(entry.text, entry.heading_path)
 
 
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],

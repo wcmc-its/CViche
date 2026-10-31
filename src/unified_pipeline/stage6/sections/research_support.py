@@ -53,6 +53,7 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from unified_pipeline.core.honor_lines import heading_names_honors
 from unified_pipeline.core.text_norm import fold_quotes
 
 from ..formatting import (
@@ -1521,6 +1522,75 @@ def unfunded_grant_warning(diverted: DivertedGrant) -> dict[str, Any]:
         'evidence': [f"element_idx_start={element_idx}"],
         'severity': 'WARN',
     }
+
+
+# #1577 (YUYVIG UVZNIC-02; NECRGC): an award under an honors heading that stage
+# 3b coded as a grant, and stage 4 extracted as one, rendered as a funding
+# table with a one-year "duration" and no project title, PI, role or amount.
+# Stage 3b's H pin catches the unsure answers; a confident one, or a heading
+# stage 3a did not pin to H, reaches stage 6. A record coded M2A/M2B/M2C whose
+# leaf heading names honors and no funding (`heading_names_honors`, the
+# doctor's honor_as_funding heading test), that has no title, no PI, none of
+# `FUNDING_SIGNAL_FIELDS` (number, amount, role, effort) and dates naming at
+# most one year with no open end, opens no funding table: stage 6 groups it
+# under H, where Honors prints its line, funder and year, and leaves one INFO
+# render-warnings record. A record that fills any of those is the author's
+# grant listed with the honors and stays funding (NECRGC UAURFU 71/72/75,
+# RBPXCD 129/131, AOJEQD 59, SPIHVQ 762: a K-series or NRSA award with its
+# title and years).
+HONOR_LISTED_AS_FUNDING_CODES = frozenset({'M2A', 'M2B', 'M2C'})
+HONOR_LISTED_AS_FUNDING_CHECK = 'honor_listed_as_funding_reroute'
+HONOR_CODE = 'H'
+# The stage-4 keys that name a PI besides FUNDING_SIGNAL_FIELDS' role keys.
+_PI_NAME_KEYS = ('pi_name', 'principal_investigator')
+_SPAN_KEYS = ('start_date', 'end_date')
+_SPAN_YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
+# One year or none: a span of two or more years is a period of support.
+_MAX_HONOR_SPAN_YEARS = 1
+
+
+def _names_one_year_at_most(fields: GrantFields) -> bool:
+    """Whether the record's dates name at most one distinct year and no open end."""
+    end = str(fields.get('end_date') or '').strip().lower()
+    if end and end in OPEN_ENDED_END_DATES:
+        return False
+    years = {year for key in _SPAN_KEYS for year in _SPAN_YEAR_RE.findall(str(fields.get(key) or ''))}
+    return len(years) <= _MAX_HONOR_SPAN_YEARS
+
+
+def is_honor_listed_as_funding(entry: dict, code: str) -> bool:
+    """True for a record grouped under `code` that is an award listed under
+    honors, not a grant to table (see the comment above, #1577)."""
+    if code not in HONOR_LISTED_AS_FUNDING_CODES:
+        return False
+    hierarchy = entry.get('hierarchy') or []
+    leaf = hierarchy if isinstance(hierarchy, str) else str(hierarchy[-1]) if hierarchy else ''
+    if not heading_names_honors(leaf):
+        return False
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    if _grant_title(fields):
+        return False
+    if any(_has_value(fields.get(key)) for key in (*_PI_NAME_KEYS, *FUNDING_SIGNAL_FIELDS)):
+        return False
+    return _names_one_year_at_most(fields)
+
+
+def honor_listed_as_funding_warnings(moved: list[object]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record naming every record grouped under H
+    by the #1577 guard, by element_idx_start only (never CV text); none
+    when nothing moved."""
+    if not moved:
+        return []
+    return [{
+        'check': HONOR_LISTED_AS_FUNDING_CHECK,
+        'code': 'M2',
+        'section': 'research_support',
+        'message': (f"grant record under an honors heading with no title, PI, funding detail or "
+                    f"multi-year span moved to Honors: {len(moved)} "
+                    f"entr{'y' if len(moved) == 1 else 'ies'}"),
+        'evidence': [f"element_idx_start {idx}" for idx in moved],
+        'severity': 'INFO',
+    }]
 
 
 def _optional_grant_rows(
