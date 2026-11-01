@@ -27,8 +27,12 @@ publication. So does the Q4C shape (RCBKFG JJUQDF 342-346): a bare journal
 name coded as an editorial board among journals coded as reviewing, which
 stage 3b reads that way when its batch holds none of the list's lead-in.
 
-Reads stage 3b only: the code, the heading path stage 2 gave the entry, and
-its text. One finding per shape and heading path, naming up to three entries.
+Reads stage 3b: the code, the heading path stage 2 gave the entry, and its
+text. One finding per shape and heading path, naming up to three entries.
+`lint_section_consistency` also reads stage 4 when the run has it, for the one
+thing stage 3b cannot say: which grant records stage 6's research-support
+guard lists under Honors (#1577), whose honor_as_funding shape stage 6 has
+already put right.
 
 `lint_pinned_heading_empty` (#1949) is the one lint here that also reads
 stage 3a: a heading 3a mapped to code X at the header-pin floor whose entries
@@ -60,6 +64,7 @@ from unified_pipeline.stage6.parsing.text import (
     heading_names_teaching_role,
     names_teaching_or_authorship_role,
 )
+from unified_pipeline.stage6.sections.research_support import is_honor_listed_as_funding
 from unified_pipeline.stage_6_word_template import RENDER_ROUTED_CODES
 
 from ..shared import _finding
@@ -341,11 +346,23 @@ def _is_honor_as_funding(entry: _ClassifiedEntry) -> bool:
     head: stage 6 renders it as a one-year funding table with no title and
     no PI (UVZNIC 117-126, ZDOAZO 333, IXJMKS 112). The marker and role tests
     are stage 3b's H pin's own (#1618); this reports what that pin leaves, a
-    confident grant answer or a heading stage 3a did not pin to H."""
+    confident grant answer or a heading stage 3a did not pin to H. A record
+    stage 6's research-support guard lists under Honors is left out by the
+    caller (`_rerouted_to_honors`)."""
     leaf = entry.heading_path[-1] if entry.heading_path else ""
     return (entry.code in _GRANT_CODES and heading_names_honors(leaf)
             and not GRANT_MARKER.search(entry.text)
             and not PI_ROLE_LEAD.match(entry.text))
+
+
+def _rerouted_to_honors(stage4: dict | None) -> frozenset[object]:
+    """The element_idx_start of every stage-4 record stage 6's research-support
+    guard groups under H (`is_honor_listed_as_funding`, #1577): Honors prints
+    it, so it is no honor_as_funding finding. Empty without stage 4."""
+    if not stage4:
+        return frozenset()
+    return frozenset(raw.get("element_idx_start") for raw in stage4.get("entries", [])
+                     if is_honor_listed_as_funding(raw, str(raw.get("taxonomy_code") or "")))
 
 
 def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
@@ -372,10 +389,13 @@ def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
     return message, evidence
 
 
-def lint_section_consistency(stage3b: dict) -> list[dict]:
+def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[dict]:
     """Stage-3b codes that contradict the entry's own heading, text or
-    siblings (EBYSBC E11/E30). One finding per shape and heading path."""
+    siblings (EBYSBC E11/E30). One finding per shape and heading path.
+    `stage4`, when the run has it, says which grant records stage 6 lists
+    under Honors (`_rerouted_to_honors`)."""
     entries = _classified_entries(stage3b)
+    rerouted = _rerouted_to_honors(stage4)
     siblings: dict[tuple[str, ...], Counter] = defaultdict(Counter)
     for entry in entries:
         siblings[entry.heading_path][entry.code] += 1
@@ -394,7 +414,7 @@ def lint_section_consistency(stage3b: dict) -> list[dict]:
         if _is_attended_as_teacher(entry, in_attendance_context):
             groups[("attended_as_teacher", "B2 (attended, not taught or presented)",
                     entry.heading_path)].append(entry)
-        if _is_honor_as_funding(entry):
+        if _is_honor_as_funding(entry) and entry.idx not in rerouted:
             groups[("honor_as_funding", "H (an award listed under honors, no grant marker)",
                     entry.heading_path)].append(entry)
         if _is_fellowship_as_membership(entry):

@@ -509,6 +509,35 @@ def test_every_honors_word_names_an_honors_heading_1577(heading):
     assert _shapes(_run(_entry("2015 Invented Seed Award", "M2B", heading))) == ["honor_as_funding"]
 
 
+def _stage4_record(entry, **fields):
+    return {**entry, "extracted_fields": fields, "extraction_success": True}
+
+
+def test_an_award_stage6_lists_under_honors_is_no_honor_as_funding_finding_1577():
+    """#1577 review B2 (VMMMEE 46's shape): stage 6's research-support guard
+    groups a record with only a funder and one year under H, so Honors prints
+    it; the lint, given the run's stage 4, does not report what is already
+    right. Without stage 4 it reads stage 3b alone, as before."""
+    award = _entry("2031 Invented MIRA Award", "M2A", "Honors and Awards", idx=46)
+    stage4 = {"entries": [_stage4_record(award, agency="Invented Institute", start_date="2031")]}
+    assert lint_section_consistency({"entries": [award]}, stage4) == []
+    assert _shapes(lint_section_consistency({"entries": [award]})) == ["honor_as_funding"]
+
+
+@pytest.mark.parametrize("fields", [
+    {"agency": "Invented Institute", "start_date": "2031", "title": "Example aims"},  # a title
+    {"agency": "Invented Institute", "start_date": "2031", "end_date": "2034"},       # a period
+])
+def test_an_award_stage6_tables_is_still_reported_1577(fields):
+    award = _entry("2031 Invented MIRA Award", "M2A", "Honors and Awards", idx=46)
+    other = _entry("2031 Invented Other Award", "M2A", "Honors and Awards", idx=47)
+    stage4 = {"entries": [_stage4_record(award, **fields),
+                          _stage4_record(other, agency="Invented Institute", start_date="2031")]}
+    [finding] = lint_section_consistency({"entries": [award, other]}, stage4)
+    assert finding["message"].startswith("honor_as_funding: 1 entr")
+    assert finding["evidence"][0].startswith("entry 46 (M2A): ")
+
+
 def test_honors_heading_is_read_on_the_leaf_for_a_grant_code_1577():
     """A grants list nested under an honors parent is the author's grants."""
     assert _run(_entry("2015 Invented Seed Award", "M2B", "Honors and Awards", "Grants")) == []
