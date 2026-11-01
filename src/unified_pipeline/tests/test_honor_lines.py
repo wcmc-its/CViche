@@ -60,6 +60,11 @@ def test_a_heading_naming_funding_or_no_honors_does_not(heading):
     "2031 Fellow of the Invented Heart Association (elected)",
     "Fellow, Invented Liver Association (elected 2031)",
     "Invented College of Nutrition, Elected as Fellow, 2031.",
+    "Fellow, Invented Academy of Microbes (elected in 2031)",
+    "Fellow, Invented College of Cardiology (FICC), elected 2031",
+    "Fellow, Invented Academy of Examples [elected 2031]",
+    # "Council on <field>" names the body the fellowship is in, not a role
+    "2031 Fellow of the Invented Heart Association, Council on Example Research (elected)",
 ])
 def test_an_elected_fellowship_is_an_honor_under_any_heading(text):
     assert is_honorific_fellowship(text, ("Professional Memberships",))
@@ -73,6 +78,20 @@ def test_an_elected_fellowship_is_an_honor_under_any_heading(text):
     # "elected" with no fellowship
     "Elected Member, Invented Society of Examples, 2031",
     "Elected President, Invented Society of Examples, 2031",
+    # a fellow elected to an office, not to the fellowship (#1577 review, B3)
+    "Fellow, Invented College of Physicians (elected Governor, Northern Chapter, 2031)",
+    "Fellow, Invented Academy of Examples (elected Trustee 2031)",
+    "Fellow, Invented Society of Examples (elected 2031); Governor, Northern Chapter",
+    # a body or office named for its fellows
+    "2031 Elected to the Fellowship Committee, Invented College of Examples",
+    "Elected Fellowship Committee Chair, Invented Society of Examples, 2031",
+    "2031 Named Fellowship Program Director, Invented Hospital",
+    "Elected to the Fellows Council, Invented Academy, 2031",
+    "Elected as Fellowship Subcommittee member, Invented Society, 2031",
+    "Invented Society of Examples, elected fellowship review panel, 2031",
+    # a body the role words cannot tell from an office ("Board" also names
+    # certifying bodies), so the line stays a membership row
+    "Invented Board of Example Medicine Society (elected Fellow 2031)",
 ])
 def test_an_election_that_is_not_the_lines_fellowship_is_not(text):
     assert not is_honorific_fellowship(text, ("Professional Societies",))
@@ -83,6 +102,7 @@ def test_an_election_that_is_not_the_lines_fellowship_is_not(text):
     "Invented Association (IA), 2001 - Present.\tElected as Fellow, 2009.",
     "1996-Present Fellow in the Invented Heart Association, Elected as fellow, 2002",
     "2001 \u2013 current Invented Society (elected Fellow 2009)",
+    "Invented Society, 2001-present (elected Fellow 2009; Fellow 2001-2009)",
 ])
 def test_a_membership_period_beside_a_separately_dated_election_is_the_membership(text):
     assert not is_honorific_fellowship(text, ("Professional Societies",))
@@ -92,14 +112,17 @@ def test_a_membership_period_beside_a_separately_dated_election_is_the_membershi
     # the period is the fellowship's own, or the election carries no other year
     "2005-present Invented Epidemiological Society (elected Fellow)",
     "Invented College of Nutrition, Elected as Fellow, 2006-2010.",
+    # an election in the period's own first year dates the fellowship (#1577 review, S1)
+    "2009-present Fellow, Invented Society of Examples (elected 2009)",
 ])
 def test_a_period_with_no_other_year_keeps_the_election(text):
     assert is_honorific_fellowship(text, ("Professional Societies",))
 
 
 @pytest.mark.parametrize("role", [
-    "Member", "Membership Liaison", "Committee", "Chairman", "Board", "Council", "President",
-    "Officer", "Secretary", "Treasurer",
+    "Member", "Membership Liaison", "Committee", "Chairman", "Board", "Council", "Councils",
+    "President", "Officer", "Secretary", "Treasurer", "Governor", "Regent", "Trustee",
+    "Director", "Delegate", "Councilor", "Councillor",
 ])
 def test_each_other_role_makes_a_later_election_a_membership_row(role):
     assert not is_honorific_fellowship(f"Invented Society (elected Fellow 2031; {role}, 2032-2034)",
@@ -126,6 +149,13 @@ def test_each_other_role_makes_a_later_election_a_membership_row(role):
     "1988-1991 Invented Society of Examples Fellow",                     # NTCULM 34
     "2031- FICNM, fellow of Invented College of Nuclear Examples",       # web175 80
     "Fellow in Example Clinical Research, Invented Federation for Aging 2031",  # SVSJKQ 135: no body word
+    # "Fellow" and up to four capitalised words ending in a body (#1577 review, S2)
+    "Fellow - Invented Heart Association (FIHA), 2031",
+    "2031  Honorary Fellow Invented Society of Anorectal Examples",     # web067 200
+    "Fellow Invented Royal College of Pathologists- 2031",              # YME2VA 23
+    "FELLOW INVENTED COLLEGE OF PHYSICIANS 2031",
+    # "fellowship of <body>" later in the line
+    "Apr 2031: Awarded Fellowship of Invented College of Radiology (FICR)",  # web051 133
 ])
 def test_a_fellowship_title_under_an_honors_heading_is_an_honor(text):
     assert is_honorific_fellowship(text, ("Professional Honors & Recognition", "National"))
@@ -147,6 +177,8 @@ def test_a_fellowship_title_under_an_honors_heading_is_an_honor(text):
     "Fellowship in Example Leadership, Invented Foundation, 2031",
     "Invented Society, Fellow Program 2031",
     "Fellowship - Invented Leadership Programme, 2031",
+    "Fellow Travel Award, Invented Society of Examples",
+    "Fellow Example Leadership Programme, 2031",
     # an acronym before "Fellow": a training or funding fellowship as often as an honorific one
     "NIH Fellow 1998",
     "INVA Fellow, June 2031",
@@ -178,3 +210,28 @@ def test_the_honors_word_may_sit_on_a_parent_heading():
     # MVUREJ 44: "Professional Honors & Recognition > International/National/Regional".
     assert is_honorific_fellowship("2031 Fellow, Invented College of Examples",
                                    ("Professional Honors & Recognition", "International/National/Regional"))
+
+
+@pytest.mark.parametrize("heading_path, honor", [
+    # the nearest heading that names honors or memberships decides (#1577 review, B3)
+    (("Honors and Professional Memberships", "National"), False),
+    (("Awards, Honors, and Membership in Honorary Societies", "National"), False),
+    (("Honors and Awards", "Memberships", "National"), False),
+    (("Honors, Awards and Memberships", "Honors"), True),
+    (("Professional Memberships", "Honors"), True),
+    (("Professional Honors & Recognition", "Service", "National"), True),
+])
+def test_the_nearest_honors_or_membership_heading_decides(heading_path, honor):
+    assert is_honorific_fellowship("2031 Fellow, Invented College of Examples", heading_path) is honor
+
+
+@pytest.mark.parametrize("heading_path, honor", [
+    # a heading that says its rows were elected (YME2VA "ELECTED MEMBERSHIPS")
+    (("ELECTED MEMBERSHIPS",), True),
+    (("Service", "Elected Fellowships"), True),
+    # "electronic" and "elective" name no election
+    (("Electronic Media",), False),
+    (("Elective Coursework", "Memberships"), False),
+])
+def test_a_fellowship_title_under_a_heading_naming_election_is_an_honor(heading_path, honor):
+    assert is_honorific_fellowship("Fellow Invented Royal College of Physicians - 2031", heading_path) is honor

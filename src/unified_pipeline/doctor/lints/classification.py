@@ -42,6 +42,9 @@ from collections import Counter, defaultdict
 from typing import NamedTuple
 
 from unified_pipeline.core.honor_lines import (
+    GRANT_MARKER,
+    MEMBERSHIP_CODE,
+    PI_ROLE_LEAD,
     heading_names_honors,
     is_honorific_fellowship,
 )
@@ -49,8 +52,6 @@ from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_context
 from unified_pipeline.stage3b.header_pin import (
     _GRANT_CODES,
-    _GRANT_MARKER,
-    _PI_ROLE_LEAD,
     HEADER_PIN_MIN_CONFIDENCE,
 )
 from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
@@ -117,7 +118,6 @@ INTERNAL_COMMITTEE_CODES = frozenset({"P", "O"})
 #: same heading is a segmentation slip, not this shape.
 NOT_GRANT_REVIEW_CODES = frozenset({"Q1", "Q2", "Q4A", "Q4B", "Q4C", "Q4D", "P", "O", "I"})
 UNCLASSIFIED_CODE = "T"
-MEMBERSHIP_CODE = "I"
 EDITORIAL_BOARD_CODE = "Q4C"
 JOURNAL_REVIEWER_CODE = "Q4D"
 #: Words that name the owner's part in a journal: an editorial board seat, an
@@ -344,8 +344,8 @@ def _is_honor_as_funding(entry: _ClassifiedEntry) -> bool:
     confident grant answer or a heading stage 3a did not pin to H."""
     leaf = entry.heading_path[-1] if entry.heading_path else ""
     return (entry.code in _GRANT_CODES and heading_names_honors(leaf)
-            and not _GRANT_MARKER.search(entry.text)
-            and not _PI_ROLE_LEAD.match(entry.text))
+            and not GRANT_MARKER.search(entry.text)
+            and not PI_ROLE_LEAD.match(entry.text))
 
 
 def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:

@@ -48,14 +48,20 @@ Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`, except `apply_non_seat_pins`, which reads the whole CV's
 entries after T-validation (where some of those rows got their Q2) and needs
 no context; no LLM, no I/O. Imports only `.context` and
-`core.honor_lines`, the fellowship test the doctor's lint shares.
+`core.honor_lines`, the grant marker and fellowship test the doctor's lint and
+stage 6's research-support guard share.
 """
 
 import logging
 import re
 from collections.abc import Iterable
 
-from ..core.honor_lines import is_honorific_fellowship
+from ..core.honor_lines import (
+    GRANT_MARKER,
+    MEMBERSHIP_CODE,
+    PI_ROLE_LEAD,
+    is_honorific_fellowship,
+)
 from .context import TaxonomyContext
 
 logger = logging.getLogger(__name__)
@@ -143,19 +149,12 @@ _NOT_A_GRANT_REVIEW = re.compile(
 # Award" or "2007 Example Group Grant, Example Fund" rendered as a one-year Current
 # Research Funding table with no title and no PI (UVZNIC, ZDOAZO, IXJMKS; model
 # confidence 0.50-0.55). A grant or activity number, a dollar amount, a period
-# with two ends, or a PI role at the head of the row keeps the model's grant code.
-_GRANT_CODES = frozenset({"M2", "M2A", "M2B", "M2C"})
+# with two ends, or a PI role at the head of the row keeps the model's grant code
+# (`core.honor_lines.GRANT_MARKER` and `PI_ROLE_LEAD`, which stage 6's
+# research-support guard and the doctor's honor_as_funding lint read too).
+_GRANT_SUBCODES = frozenset({"M2A", "M2B", "M2C"})
+_GRANT_CODES = _GRANT_SUBCODES | {"M2"}
 _H_PIN_MAX_MODEL_CONFIDENCE = 0.80
-_GRANT_MARKER = re.compile(
-    r"\b[A-Z]\d{2}\b"                                                       # R01, K23, T32
-    r"|\b(?=[A-Z0-9]*\d{2})(?=[A-Z0-9]*[A-Z]{2})[A-Z0-9]{6,}\b"            # 2T32GM000000
-    r"|\$\s?\d|\b\d[\d,.]*\s?(?i:USD|dollars)\b"                            # an amount
-    r"|\b(?:19|20)\d{2}\s*(?:[-\u2013\u2014]|\b(?i:to)\b)\s*(?:\d{1,2}/)?"  # two-ended period
-    r"(?:[A-Za-z]{3,9}\.?\s*)?(?:(?:19|20)\d{2}\b|\d{2}\b(?!/)|(?i:present|current|date)\b)"
-)
-_PI_ROLE_LEAD = re.compile(
-    r"^[\s\d/\-\u2013\u2014,.:;*\u2022]*(?:(?i:(?:principal|co-?)\s*investigator)\b|(?i:co-?)?PI\b)"
-)
 
 # --- YUYVIG BLBVPD-05 (#1577): the inverse, a funded award under a grants heading ---
 #
@@ -167,11 +166,11 @@ _PI_ROLE_LEAD = re.compile(
 # rendered as Honors rows, their number and amount nowhere. The marker is the
 # H pin's own, so one rule reads a line both ways. The leaf's code is the
 # subcode; step 5's date rule then corrects M2A/M2B by the line's dates. A
-# bare M2 leaf names no subcode, so it does not pin. A confident H keeps it
-# (a university award with its funds, at 0.90-0.95, under an internal-grants
-# heading).
-_GRANT_SUBCODES = frozenset({"M2A", "M2B", "M2C"})
-_GRANT_PIN_MAX_MODEL_CONFIDENCE = 0.80
+# bare M2 leaf names no subcode, so it does not pin. A confident H keeps it,
+# at the H pin's own ceiling (a university award with its funds, at
+# 0.90-0.95, under an internal-grants heading). The marker is wider than "a
+# number or an amount": the period with two ends is what reads "<Name>
+# Research Scholar, <Association>. 1983-1984." as the grant it is.
 
 # --- #1708: a journal article under a peer-reviewed journals heading is not an abstract ---
 #
@@ -427,8 +426,10 @@ _MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is 
 # pin is not confidence-gated (YUYVIG MVUREJ 44, IZIXVF 55, XNWSZN 53; NECRGC
 # ZASOTV, XYXIQJ, YIXQFB, AOJEQD, LWMSPJ, UAURFU). The test is
 # `core.honor_lines.is_honorific_fellowship`, the doctor's
-# fellowship_as_membership lint's own.
-_MEMBERSHIP_CODE = "I"
+# fellowship_as_membership lint's own. 73 of the 77 answers it recodes on the
+# #1243 farm are above 0.80, so a confidence gate would leave the decision
+# unapplied; the prompt change that would let the model apply it is #1577
+# item (d), which needs a paid stage-3b A/B.
 _FELLOWSHIP_HONOR_WHY = "An elected fellowship, or one listed under honors, is an honor"
 
 # --- #1573: rows a heading says are someone else's are not the owner's records ---
@@ -839,8 +840,8 @@ def _h_pin_takes(entry: dict) -> bool:
     return (
         entry.get("taxonomy_code") in _GRANT_CODES
         and _safe_confidence(entry) <= _H_PIN_MAX_MODEL_CONFIDENCE
-        and not _GRANT_MARKER.search(text)
-        and not _PI_ROLE_LEAD.match(text)
+        and not GRANT_MARKER.search(text)
+        and not PI_ROLE_LEAD.match(text)
     )
 
 
@@ -848,8 +849,8 @@ def _grant_pin_takes(entry: dict) -> bool:
     """Whether a grant-subcode leaf recodes this model answer: an unsure H on a row with a grant marker."""
     return (
         entry.get("taxonomy_code") == _HONOR_CODE
-        and _safe_confidence(entry) <= _GRANT_PIN_MAX_MODEL_CONFIDENCE
-        and bool(_GRANT_MARKER.search(entry.get("text") or ""))
+        and _safe_confidence(entry) <= _H_PIN_MAX_MODEL_CONFIDENCE
+        and bool(GRANT_MARKER.search(entry.get("text") or ""))
     )
 
 
@@ -1025,7 +1026,7 @@ def mentor_grant_pin_code(entry: dict) -> tuple[str, str] | None:
 
 def fellowship_pin_code(entry: dict) -> tuple[str, str] | None:
     """(H, why) for an I that `is_honorific_fellowship` reads as an honor, else None (#1577)."""
-    if entry.get("taxonomy_code") != _MEMBERSHIP_CODE:
+    if entry.get("taxonomy_code") != MEMBERSHIP_CODE:
         return None
     levels = [str(level) for level in entry.get("hierarchy") or []]
     if not is_honorific_fellowship(entry.get("text") or "", levels):

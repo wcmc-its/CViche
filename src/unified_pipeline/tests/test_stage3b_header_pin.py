@@ -541,6 +541,11 @@ def test_a_fellowship_the_decision_makes_an_honor_is_recoded_h_at_any_confidence
     # a membership row that mentions an election
     _row("I", "Example Academy (Active Member; Example Committee, 2031-2033; elected fellow 2034)",
          hierarchy=("Professional Societies",)),
+    # a fellow elected to an office, and a committee named for fellows (#1577 review, B3)
+    _row("I", "Fellow, Example College of Physicians (elected Governor, Example Chapter, 2031)",
+         hierarchy=("Professional Memberships",)),
+    _row("I", "2031 Elected to the Fellowship Committee, Example College of Examples",
+         hierarchy=("Professional Memberships",)),
     # already H, or another code
     _row("H", "Elected Fellow, Example Society", hierarchy=("Honors",)),
     _row("Q1", "Elected Fellow, Example Society", hierarchy=("Service",)),
