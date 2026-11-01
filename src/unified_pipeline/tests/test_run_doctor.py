@@ -6328,6 +6328,28 @@ def _build_clean_run(tmp_path, uid=_UID):
     return root
 
 
+def test_section_consistency_reads_stage4_for_what_stage6_lists_under_honors_1577(tmp_path):
+    """The registry passes the run's stage 4 to section_consistency
+    (optional): an award stage 6's research-support guard groups under H is
+    no honor_as_funding finding; without stage 4 the lint reads stage 3b."""
+    root = tmp_path / "outputs"
+    award = {"element_idx_start": 46, "element_idx_end": 46, "text": "2031 Invented MIRA Award",
+             "taxonomy_code": "M2A", "hierarchy": ["Honors and Awards"]}
+    _write_stage(root, "stage_3b_classified_entries", f"{_UID}_cv_classified.json",
+                 {"document_uid": _UID, "entries": [award]})
+
+    def honor_as_funding():
+        return [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "section_consistency" and f["message"].startswith("honor_as_funding")]
+
+    assert len(honor_as_funding()) == 1
+    _write_stage(root, "stage_4_field_extraction", f"{_UID}_cv_fields.json",
+                 {"document_uid": _UID, "cv_owner": _OWNER, "entries": [
+                     {**award, "extraction_success": True,
+                      "extracted_fields": {"agency": "Invented Institute", "start_date": "2031"}}]})
+    assert honor_as_funding() == []
+
+
 def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()

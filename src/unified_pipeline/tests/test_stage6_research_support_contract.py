@@ -3872,6 +3872,7 @@ def _honors_record(code='M2A', heading=('Honors and Awards',),
     {'funding_source': 'Example Fund', 'sponsor': 'Example Sponsor', 'status': 'completed',
      'notes': 'example note', 'description': 'example description', 'date': '2031'},
     {'submission_date': '2031'},
+    {'granting_body': 'Example Alliance', 'text': '2031 Example Investigator'},
 ])
 def test_an_untitled_one_year_record_under_honors_is_an_honor(code, fields):
     assert is_honor_listed_as_funding(_honors_record(code, **fields), code)

@@ -119,6 +119,23 @@ def test_a_period_with_no_other_year_keeps_the_election(text):
     assert is_honorific_fellowship(text, ("Professional Societies",))
 
 
+@pytest.mark.parametrize("body", [
+    "Committee", "Subcommittee", "Council", "Program", "Programme", "Director", "Board",
+    "Selection", "Review", "Panel", "Chair", "Coordinator",
+])
+def test_an_election_to_a_body_or_office_named_for_fellows_is_not_a_fellowship(body):
+    assert not is_honorific_fellowship(f"2031 Elected to the Fellowship {body}, Invented Society",
+                                       ("Honors and Awards",))
+    assert not is_honorific_fellowship(f"Invented Society, elected fellowship {body}, 2031",
+                                       ("Professional Societies",))
+
+
+@pytest.mark.parametrize("body", ["Council on Example Research", "Council for Example Research"])
+def test_a_council_named_for_its_field_is_the_fellowships_body_not_a_role(body):
+    assert is_honorific_fellowship(f"Fellow, Invented Heart Association {body} (elected 2031)",
+                                   ("Professional Societies",))
+
+
 @pytest.mark.parametrize("role", [
     "Member", "Membership Liaison", "Committee", "Chairman", "Board", "Council", "Councils",
     "President", "Officer", "Secretary", "Treasurer", "Governor", "Regent", "Trustee",

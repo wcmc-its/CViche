@@ -41,12 +41,12 @@ GRANT_MARKER = re.compile(
     r"\b[A-Z]\d{2}\b"                                                       # R01, K23, T32
     r"|\b(?=[A-Z0-9]*\d{2})(?=[A-Z0-9]*[A-Z]{2})[A-Z0-9]{6,}\b"            # 2T32GM000000
     r"|\$\s?\d|\b\d[\d,.]*\s?(?i:USD|dollars)\b"                            # an amount
-    r"|\b(?:19|20)\d{2}\s*(?:[-–—]|\b(?i:to)\b)\s*(?:\d{1,2}/)?"  # two-ended period
+    r"|\b(?:19|20)\d{2}\s*(?:[-\u2013\u2014]|\b(?i:to)\b)\s*(?:\d{1,2}/)?"  # two-ended period
     r"(?:[A-Za-z]{3,9}\.?\s*)?(?:(?:19|20)\d{2}\b|\d{2}\b(?!/)|(?i:present|current|date)\b)"
 )
 #: A PI role at the head of the row, after an optional date or bullet.
 PI_ROLE_LEAD = re.compile(
-    r"^[\s\d/\-–—,.:;*•]*(?:(?i:(?:principal|co-?)\s*investigator)\b|(?i:co-?)?PI\b)"
+    r"^[\s\d/\-\u2013\u2014,.:;*\u2022]*(?:(?i:(?:principal|co-?)\s*investigator)\b|(?i:co-?)?PI\b)"
 )
 
 #: A heading that names honors or awards, and one that names funding.
@@ -107,7 +107,7 @@ _OTHER_ROLE_RE = re.compile(
 #: year, under Certification). Recoding such a line to H would drop the
 #: membership, or the election's own year. An election in the period's first
 #: year ("2009-present Fellow, <Society> (elected 2009)") dates the fellowship.
-_OPEN_SPAN_RE = re.compile(r"\b((?:19|20)\d{2})\s*[-–—]\s*(?:present|current)\b", re.IGNORECASE)
+_OPEN_SPAN_RE = re.compile(r"\b((?:19|20)\d{2})\s*[-\u2013\u2014]\s*(?:present|current)\b", re.IGNORECASE)
 _YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 
 #: The words that name a society-like body.
@@ -134,12 +134,12 @@ _FELLOW_TITLE_RE = re.compile(
     r"^[\W\d]*(?:(?i:present)\W*)?"
     r"(?:(?i:distinguished|founding|honorary|associate)\s+)?(?i:fellow)\b"
     r"(?:\s*,|\s+(?i:of|in)\b|\s*\(|\s+\d|\s*[|\t]\s*(?=[A-Z])"
-    r"|\s*(?:[-–—]\s*)?(?:(?:the|of|and|for|[A-Z][\w&'’.-]*)\s+){0,4}(?i:" + _BODY + r")\b)"
+    r"|\s*(?:[-\u2013\u2014]\s*)?(?:[A-Z][\w&'\u2019.-]*\s+){0,4}(?i:" + _BODY + r")\b)"
     r"|^[\W\d]*(?i:fellowship)(?:\s*[,|\t]\s*|\s+(?i:in|of)\s+(?:(?i:the)\s+)?)"
     r"(?=[^,|\t]{0,40}\b(?i:" + _BODY + r")\b)"
-    r"|\b(?i:" + _BODY + r")(?:\s+(?i:of)\s+[\w&'’-]+){0,2}\s+(?i:fellow)\b"
+    r"|\b(?i:" + _BODY + r")(?:\s+(?i:of)\s+[\w&'\u2019-]+){0,2}\s+(?i:fellow)\b"
     r"|\b(?i:" + _BODY + r")\b[^,;|\t\n]{0,60},\s*(?i:fellow)\b(?!\s+(?i:travel|award|program))"
-    r"|\b(?i:fellow(?:ship)?)\s+(?i:of|in)\s+(?:(?i:the)\s+)?(?:[\w&'’-]+\s+){0,4}(?i:" + _BODY + r")\b")
+    r"|\b(?i:fellow(?:ship)?)\s+(?i:of|in)\s+(?:(?i:the)\s+)?(?:[\w&'\u2019-]+\s+){0,4}(?i:" + _BODY + r")\b")
 
 
 def heading_names_honors(heading: str) -> bool:
