@@ -3872,7 +3872,7 @@ def _honors_record(code='M2A', heading=('Honors and Awards',),
     {'funding_source': 'Example Fund', 'sponsor': 'Example Sponsor', 'status': 'completed',
      'notes': 'example note', 'description': 'example description', 'date': '2031'},
     {'submission_date': '2031'},
-    {'granting_body': 'Example Alliance', 'text': '2031 Example Investigator'},
+    {'granting_body': 'Example Alliance'},
 ])
 def test_an_untitled_one_year_record_under_honors_is_an_honor(code, fields):
     assert is_honor_listed_as_funding(_honors_record(code, **fields), code)
@@ -3923,6 +3923,12 @@ def test_an_untitled_one_year_record_under_honors_is_an_honor(code, fields):
 ])
 def test_a_record_with_a_grants_detail_or_off_an_honors_heading_is_not(entry, code):
     assert not is_honor_listed_as_funding(entry, code)
+
+
+def test_a_text_field_stage4_copied_from_the_line_is_an_honors_field():
+    entry = _honors_record()
+    entry['extracted_fields']['text'] = '2031 Example Investigator, Example Alliance for Research'
+    assert is_honor_listed_as_funding(entry, 'M2A')
 
 
 def test_the_honors_heading_is_read_on_the_leaf_and_may_be_a_string():

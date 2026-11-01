@@ -82,6 +82,8 @@ def test_an_elected_fellowship_is_an_honor_under_any_heading(text):
     "Fellow, Invented College of Physicians (elected Governor, Northern Chapter, 2031)",
     "Fellow, Invented Academy of Examples (elected Trustee 2031)",
     "Fellow, Invented Society of Examples (elected 2031); Governor, Northern Chapter",
+    # ... whatever the office is called: the election names no fellowship
+    "Fellow, Invented Society of Examples (elected Historian, 2031)",
     # a body or office named for its fellows
     "2031 Elected to the Fellowship Committee, Invented College of Examples",
     "Elected Fellowship Committee Chair, Invented Society of Examples, 2031",
