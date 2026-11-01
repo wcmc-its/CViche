@@ -53,7 +53,11 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
-from unified_pipeline.core.honor_lines import heading_names_honors
+from unified_pipeline.core.honor_lines import (
+    GRANT_MARKER,
+    PI_ROLE_LEAD,
+    heading_names_honors,
+)
 from unified_pipeline.core.text_norm import fold_quotes
 
 from ..formatting import (
@@ -1528,33 +1532,46 @@ def unfunded_grant_warning(diverted: DivertedGrant) -> dict[str, Any]:
 # 3b coded as a grant, and stage 4 extracted as one, rendered as a funding
 # table with a one-year "duration" and no project title, PI, role or amount.
 # Stage 3b's H pin catches the unsure answers; a confident one, or a heading
-# stage 3a did not pin to H, reaches stage 6. A record coded M2A/M2B/M2C whose
-# leaf heading names honors and no funding (`heading_names_honors`, the
-# doctor's honor_as_funding heading test), that has no title, no PI, none of
-# `FUNDING_SIGNAL_FIELDS` (number, amount, role, effort) and dates naming at
-# most one year with no open end, opens no funding table: stage 6 groups it
-# under H, where Honors prints its line, funder and year, and leaves one INFO
-# render-warnings record. A record that fills any of those is the author's
-# grant listed with the honors and stays funding (NECRGC UAURFU 71/72/75,
-# RBPXCD 129/131, AOJEQD 59, SPIHVQ 762: a K-series or NRSA award with its
-# title and years).
-HONOR_LISTED_AS_FUNDING_CODES = frozenset({'M2A', 'M2B', 'M2C'})
+# stage 3a did not pin to H, reaches stage 6. A record coded M2A/M2B/M2C opens
+# no funding table when all of these hold:
+# - its leaf heading names honors and no funding (`heading_names_honors`, the
+#   doctor's honor_as_funding heading test);
+# - its line carries no grant marker and no PI role at its head
+#   (`GRANT_MARKER`, `PI_ROLE_LEAD`: the #1618 pin's and the doctor's tests),
+#   so a K08 whose number only the line names stays funding;
+# - stage 4 did not fail on it (a failed batch writes empty fields, which say
+#   nothing about the record);
+# - its fields fill nothing but a funder, dates, a status or notes
+#   (`_HONOR_LISTING_KEYS`): no title, PI, number, amount, role or effort, and
+#   no key this section does not read;
+# - its dates name at most one year, and an end, if it has one, is a year.
+# Stage 6 then groups it under H, where Honors prints its line, funder and
+# year, and leaves one INFO render-warnings record. A record that fails any of
+# these is the author's grant listed with the honors and stays funding (NECRGC
+# UAURFU 71/72/75, RBPXCD 129/131, AOJEQD 59, SPIHVQ 762: a K-series or NRSA
+# award with its title and years). This narrows #1701's reading above, that a
+# career award filed under an awards heading with no number or amount is
+# funding, to one that also names no title and no second year.
+HONOR_LISTED_AS_FUNDING_CODES = frozenset(code for code, _header in RESEARCH_SUPPORT_SECTIONS)
 HONOR_LISTED_AS_FUNDING_CHECK = 'honor_listed_as_funding_reroute'
-HONOR_CODE = 'H'
-# The stage-4 keys that name a PI besides FUNDING_SIGNAL_FIELDS' role keys.
-_PI_NAME_KEYS = ('pi_name', 'principal_investigator')
-_SPAN_KEYS = ('start_date', 'end_date')
+# The stage-4 keys an award listed as a grant may fill: who gave it, when, and
+# what else its line says.
+_HONOR_LISTING_KEYS = frozenset({
+    'agency', 'funding_source', 'sponsor', 'granting_body', 'start_date', 'end_date', 'date',
+    'submission_date', 'status', 'notes', 'description', 'text'})
+_DATE_KEYS = ('start_date', 'end_date', 'date', 'submission_date')
 _SPAN_YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
 # One year or none: a span of two or more years is a period of support.
 _MAX_HONOR_SPAN_YEARS = 1
 
 
 def _names_one_year_at_most(fields: GrantFields) -> bool:
-    """Whether the record's dates name at most one distinct year and no open end."""
-    end = str(fields.get('end_date') or '').strip().lower()
-    if end and end in OPEN_ENDED_END_DATES:
+    """Whether the record's dates name at most one distinct year, and its end,
+    if it has one, is a year ("present", "to date" and "now" are open ends)."""
+    end = str(fields.get('end_date') or '').strip()
+    if end and not _SPAN_YEAR_RE.search(end):
         return False
-    years = {year for key in _SPAN_KEYS for year in _SPAN_YEAR_RE.findall(str(fields.get(key) or ''))}
+    years = {year for key in _DATE_KEYS for year in _SPAN_YEAR_RE.findall(str(fields.get(key) or ''))}
     return len(years) <= _MAX_HONOR_SPAN_YEARS
 
 
@@ -1567,10 +1584,13 @@ def is_honor_listed_as_funding(entry: dict, code: str) -> bool:
     leaf = hierarchy if isinstance(hierarchy, str) else str(hierarchy[-1]) if hierarchy else ''
     if not heading_names_honors(leaf):
         return False
-    fields = cast(GrantFields, entry.get('extracted_fields') or {})
-    if _grant_title(fields):
+    text = str(entry.get('text') or '')
+    if GRANT_MARKER.search(text) or PI_ROLE_LEAD.match(text):
         return False
-    if any(_has_value(fields.get(key)) for key in (*_PI_NAME_KEYS, *FUNDING_SIGNAL_FIELDS)):
+    if entry.get('extraction_success') is False:
+        return False
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    if any(_has_value(value) for key, value in fields.items() if key not in _HONOR_LISTING_KEYS):
         return False
     return _names_one_year_at_most(fields)
 

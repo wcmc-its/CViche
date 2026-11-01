@@ -204,7 +204,7 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     run_pii_pass,
     withheld_comment_text,
 )
-from unified_pipeline.stage6.record_dedup import deduplicate_record_groups
+from unified_pipeline.stage6.record_dedup import HONOR_CODE, deduplicate_record_groups
 from unified_pipeline.stage6.row_receipts import DiscardingLedger, RowReceiptLedger, SectionReceipt
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     _COLUMN_HEADER_WORDS,
@@ -302,7 +302,6 @@ from unified_pipeline.stage6.sections.postdoc_training import POSTDOC_TRAINING_H
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
 from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VERBATIM_M1
 from unified_pipeline.stage6.sections.research_support import (
-    HONOR_CODE,
     honor_listed_as_funding_warnings,
     is_honor_listed_as_funding,
 )

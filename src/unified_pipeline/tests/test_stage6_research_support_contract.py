@@ -3858,9 +3858,10 @@ def test_a_diverted_grant_is_marked_with_its_check():
 
 # --- #1577: an award under an honors heading with nothing a funding table needs ---
 
-def _honors_record(code='M2A', heading=('Honors and Awards',), **fields):
+def _honors_record(code='M2A', heading=('Honors and Awards',),
+                   text='2031 Example Investigator, Example Alliance for Research', **fields):
     return {'taxonomy_code': code, 'element_idx_start': 117, 'hierarchy': list(heading),
-            'text': '2031 Example Investigator, Example Alliance for Research',
+            'text': text,
             'extracted_fields': {'agency': 'Example Alliance for Research', 'start_date': '2031', **fields}}
 
 
@@ -3868,6 +3869,9 @@ def _honors_record(code='M2A', heading=('Honors and Awards',), **fields):
 @pytest.mark.parametrize('fields', [
     {}, {'end_date': '2031'}, {'start_date': None}, {'start_date': '06/2031', 'end_date': '2031-12'},
     {'title': '  ', 'pi_name': None, 'grant_number': ''},
+    {'funding_source': 'Example Fund', 'sponsor': 'Example Sponsor', 'status': 'completed',
+     'notes': 'example note', 'description': 'example description', 'date': '2031'},
+    {'submission_date': '2031'},
 ])
 def test_an_untitled_one_year_record_under_honors_is_an_honor(code, fields):
     assert is_honor_listed_as_funding(_honors_record(code, **fields), code)
@@ -3883,10 +3887,29 @@ def test_an_untitled_one_year_record_under_honors_is_an_honor(code, fields):
     (_honors_record(total_funding='$1,000'), 'M2A'),
     (_honors_record(pi_role='PI'), 'M2A'),
     (_honors_record(percent_effort='10%'), 'M2A'),
+    # a key this section does not read: whatever it is, the record is not an honor's
+    (_honors_record(amount='$5,000'), 'M2A'),
+    (_honors_record(direct_costs='$5,000'), 'M2A'),
+    (_honors_record(project_title='Example project'), 'M2A'),
+    (_honors_record(award_name='Example Investigator'), 'M2A'),
+    # M2C's own amount key
+    (_honors_record(total_funding_requested='$250,000'), 'M2C'),
+    # a grant marker or a PI role on the line, whatever stage 4 filled (#1577 review, B1)
+    (_honors_record(text='2031 Example Career Development Award (K08 XX000000), Example Institute'), 'M2A'),
+    (_honors_record(text='2031 Example R01 award, Example Institute of Health'), 'M2A'),
+    (_honors_record(text='2031 Example Foundation Pilot Award, $50,000'), 'M2A'),
+    (_honors_record(text='Example Scholar Award, Example Foundation, 2031-2034'), 'M2A'),
+    (_honors_record(text='2031-present Example K12 Scholar, Example Institute'), 'M2A'),
+    (_honors_record(text='PI, 2031 Example Foundation Award'), 'M2A'),
     # a period of support
     (_honors_record(end_date='2033'), 'M2B'),
     (_honors_record(end_date='present'), 'M2A'),
     (_honors_record(end_date='Current'), 'M2A'),
+    (_honors_record(end_date='to date'), 'M2A'),
+    (_honors_record(end_date='now'), 'M2A'),
+    (_honors_record(date='2031-2034'), 'M2A'),
+    (_honors_record(submission_date='2033'), 'M2C'),
+    (_honors_record(start_date=2031, end_date=2033), 'M2A'),
     # a heading that names funding too, or no honors
     (_honors_record(heading=('Grants and Contract Awards',)), 'M2A'),
     (_honors_record(heading=('Honors', 'Research Awards')), 'M2A'),
@@ -3908,9 +3931,18 @@ def test_the_honors_heading_is_read_on_the_leaf_and_may_be_a_string():
     assert is_honor_listed_as_funding(entry, 'M2A')
 
 
-def test_a_record_with_no_fields_is_read_from_its_heading_and_code_alone():
-    entry = {**_honors_record(), 'extracted_fields': None}
-    assert is_honor_listed_as_funding(entry, 'M2A')
+def test_a_record_stage4_failed_on_stays_funding():
+    """A failed stage-4 batch writes empty fields and extraction_success
+    False (stage4/extraction.py `_failed_entries`): the fields say nothing
+    about the record, so it keeps its funding table (#1577 review, B1)."""
+    failed = {**_honors_record(), 'extracted_fields': {}, 'extraction_success': False}
+    assert not is_honor_listed_as_funding(failed, 'M2A')
+
+
+def test_a_record_stage4_extracted_with_no_fields_is_read_from_its_line_heading_and_code():
+    for extracted in (None, {}):
+        entry = {**_honors_record(), 'extracted_fields': extracted, 'extraction_success': True}
+        assert is_honor_listed_as_funding(entry, 'M2A')
 
 
 def test_the_honor_listed_as_funding_record_names_indexes_only():

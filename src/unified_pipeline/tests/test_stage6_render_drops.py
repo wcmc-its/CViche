@@ -1462,6 +1462,10 @@ def test_a_record_with_no_funder_moves_with_no_granting_body() -> None:
     _honor_as_grant(grant_number="K08 XX000000"),
     _honor_as_grant(end_date="2034"),
     _honor_as_grant(heading="Current Research Support"),
+    # the line names the grant's number, whatever stage 4 filled (#1577 review, B1)
+    {**_honor_as_grant(), "text": "Quillmoor K08 Career Development Award, K08 XX000000, 2031-2036, $750,000"},
+    # stage 4 failed on the record: its empty fields say nothing about it
+    {**_honor_as_grant(), "extracted_fields": {}, "extraction_success": False},
 ])
 def test_a_grant_record_with_a_grants_detail_keeps_its_funding_code(entry: dict) -> None:
     gen = WCMTemplateGenerator(verbose=False)
