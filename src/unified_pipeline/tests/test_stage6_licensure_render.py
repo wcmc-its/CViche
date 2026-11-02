@@ -1022,6 +1022,9 @@ def test_a_credential_read_as_a_licence_is_regrouped_1577(entry, home):
     # an NPI and a DEA record are Licensure's own slots
     _f1("NPI 0000000000", license_number="0000000000"),
     _f1("DEA registration XX0000000", license_number="XX0000000"),
+    # an NPI or DEA number by its shape alone, the line naming neither
+    _f1("0000000000", license_number="0000000000"),
+    _f1("XX0000000", license_number="XX0000000"),
     # a line with no licence word but a state is a licence row
     _f1("Example State 12345, 2031", state_country="Example State", license_number="12345"),
     # a failed extraction says nothing about the record

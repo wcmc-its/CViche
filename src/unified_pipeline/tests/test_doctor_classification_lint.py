@@ -688,6 +688,10 @@ def test_a_credential_finding_names_the_home_it_points_to_1577():
     assert finding["message"].endswith(
         "the source points to B2 (other education: an exam, permit, course or certificate, "
         "not a licence or board)")
+    [finding] = _run(_entry("Licensed to practice in Invented State #XX 00000", "B2", "Education"))
+    assert finding["message"].endswith("the source points to F1 (licensure)")
+    [finding] = _run(_entry("1980 M(ASCP), Technologist in Invented Science", "F1", "Licensure"))
+    assert finding["message"].endswith("the source points to F2 (board certification)")
 
 
 def test_a_record_stage6_regroups_still_gets_every_other_shape_1577():
