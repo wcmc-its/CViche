@@ -1493,3 +1493,152 @@ def test_an_honor_coded_as_a_grant_renders_in_honors_not_as_a_funding_table(tmp_
     assert [cells[1] for cells in rows if cells[0].startswith("Award Source")] == ["N/A", "N/A"]
     assert [cells for cells in rows if any("Fernhollow" in cell for cell in cells)] == [
         ["Quillmoor Investigator Award", "Fernhollow Alliance for Research", "2031"]]
+
+
+# --- #1577 shape 3: a credential listed as a licence or board certification renders in its own section ---
+# Invented values. ZDOAZO 62's shape (a permit with a state and a number), ECXGAT 48's (a
+# technologist certificate), PPMTJH 28's (an early exam step coded F2), SPINJC 78's (a
+# certification split off a licence paragraph by stage 4's records) and a stage-3b
+# credential pin whose stage-4 fields are still the old code's.
+
+_PERMIT = "2031- Example State Fluoroscopy Operator and Supervisor (XX000000)"
+_PERMIT_FIELDS = {"state_country": "Example State", "license_number": "XX000000",
+                  "issue_date": "2031", "expiration_date": "present"}
+
+
+def _credential(code: str, text: str, fields: dict, idx: int = 62, **extra) -> dict:
+    return {"taxonomy_code": code, "element_idx_start": idx, "element_idx_end": idx, "text": text,
+            "hierarchy": ["Academic History", "Licensure"], "extracted_fields": fields, **extra}
+
+
+def _credential_records(gen: WCMTemplateGenerator) -> list[dict]:
+    return [w for w in gen._section_failures if w["check"] == "credential_listed_as_licence_reroute"]
+
+
+def test_a_permit_coded_f1_is_grouped_as_other_education_with_its_name() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_credential("F1", _PERMIT, dict(_PERMIT_FIELDS))])
+    assert "F1" not in groups
+    [moved] = groups["B2"]
+    assert (moved["taxonomy_code"], moved["taxonomy_code_original"]) == ("B2", "F1")
+    fields = moved["extracted_fields"]
+    assert fields["program_name"] == "Example State Fluoroscopy Operator and Supervisor (XX000000)"
+    assert (fields["start_date"], fields["end_date"]) == ("2031", "present")
+    [record] = _credential_records(gen)
+    assert (record["severity"], record["evidence"]) == ("INFO", ["element_idx_start 62 (F1->B2)"])
+    assert "Fluoroscopy" not in json.dumps(record)
+    assert _normalize_other_education_entry(moved).is_renderable
+
+
+def test_a_technologist_certificate_coded_f1_is_grouped_as_a_board_row() -> None:
+    entry = _credential("F1", "1980   M(ASCP), Technologist in Example Science, certificate #X000000",
+                        {"state_country": None, "license_number": "X000000", "issue_date": "1980"}, idx=48)
+    [moved] = _grouped(entry)["F2"]
+    fields = moved["extracted_fields"]
+    assert (fields["certificate_number"], fields["year_certified"]) == ("X000000", "1980")
+    assert fields["specialty"] == "M(ASCP), Technologist in Example Science"
+
+
+def test_an_early_exam_step_coded_f2_is_grouped_as_other_education() -> None:
+    entry = _credential("F2", "Example Board of Example Surgery Part I written exam, passed 2031",
+                        {"certifying_board": "Example Board of Example Surgery", "year_certified": "2031",
+                         "recertification_date": None, "specialty": None, "certificate_number": None}, idx=28)
+    [moved] = _grouped(entry)["B2"]
+    assert moved["extracted_fields"]["program_name"].startswith("Example Board of Example Surgery Part I")
+    assert moved["extracted_fields"]["start_date"] == "2031"
+
+
+def test_a_board_record_s_controlled_substance_line_is_grouped_as_a_licence() -> None:
+    entry = _credential("F2", "Example State Controlled Substance Registration, 2031",
+                        {"certifying_board": None, "certificate_number": "000000", "year_certified": "2031"})
+    [moved] = _grouped(entry)["F1"]
+    assert (moved["extracted_fields"]["license_number"], moved["extracted_fields"]["issue_date"]) == (
+        "000000", "2031")
+
+
+def test_a_certification_split_off_a_licence_paragraph_takes_its_own_clause() -> None:
+    paragraph = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
+                 "Example State (Inactive)")
+    entry = _credential("F1", paragraph, {
+        "state_country": "Example State", "issue_date": "2030", "expiration_date": "2031",
+        "stage4_records": [{"state_country": None, "license_number": None, "issue_date": "2031",
+                            "expiration_date": "2033"},
+                           {"state_country": "Example State", "license_number": None, "issue_date": "2030",
+                            "expiration_date": "2031"}]}, idx=78)
+    groups = _grouped(entry)
+    [certification] = groups["B2"]
+    assert certification["text"] == "2031-2033  Certified in Example Method, Example Institute"
+    assert "text_built_from_fields" not in certification
+    assert certification["extracted_fields"]["program_name"] == "Certified in Example Method, Example Institute"
+    [licence] = groups["F1"]
+    assert licence["extracted_fields"]["state_country"] == "Example State"
+
+
+def test_a_credential_pin_with_its_old_codes_fields_renders_its_name() -> None:
+    # Stage 3b's pin made it B2; the stored stage 4 still holds F1's fields.
+    entry = _credential("B2", _PERMIT, dict(_PERMIT_FIELDS), pre_pin_code="F1", taxonomy_confidence=0.6,
+                        hierarchy_mismatch_flag=True,
+                        hierarchy_mismatch_detail={"hierarchy": ["Licensure"], "assigned_code": "B2",
+                                                   "expected_codes": ["F1"]})
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    [moved] = groups["B2"]
+    assert moved["extracted_fields"]["program_name"].startswith("Example State Fluoroscopy")
+    # the pin is not rerouted back under its Licensure heading, nor regrouped as a credential
+    assert [w for w in gen._section_failures if w["check"] in (REROUTE_CHECK, "credential_listed_as_licence_reroute")] == []
+
+
+def test_a_credential_pin_keeps_the_fields_stage4_extracted_for_its_code() -> None:
+    entry = _credential("B2", _PERMIT, {"program_name": "Fluoroscopy Supervisor Permit", "start_date": "2031"},
+                        pre_pin_code="F1")
+    [moved] = _grouped(entry)["B2"]
+    assert moved["extracted_fields"] == {"program_name": "Fluoroscopy Supervisor Permit", "start_date": "2031"}
+
+
+def test_a_licence_pin_from_b2_fills_the_licence_dates() -> None:
+    entry = _credential("F1", "June 2031 Licensed to practice Example Medicine in the state of Example",
+                        {"program_name": "Licensed to practice Example Medicine", "start_date": "2031-06"},
+                        pre_pin_code="B2")
+    [moved] = _grouped(entry)["F1"]
+    assert moved["extracted_fields"]["issue_date"] == "2031-06"
+
+
+def test_a_board_pin_from_i_renders_the_line_as_the_specialty() -> None:
+    entry = _credential("F2", "2031-Present Diplomate, Example College of Example Medicine",
+                        {"organization": "Example College of Example Medicine", "start_date": "2031",
+                         "end_date": "present"}, pre_pin_code="I")
+    [moved] = _grouped(entry)["F2"]
+    fields = moved["extracted_fields"]
+    assert fields["specialty"] == "Diplomate, Example College of Example Medicine"
+    assert fields["year_certified"] == "2031" and "certificate_number" not in fields
+
+
+@pytest.mark.parametrize("entry", [
+    _credential("F1", "Example State Medical License 12345, 2031",
+                {"state_country": "Example State", "license_number": "12345", "issue_date": "2031"}),
+    _credential("F2", "American Board of Example Medicine, 2031",
+                {"certifying_board": "American Board of Example Medicine", "year_certified": "2031"}),
+    _credential("F1", "NPI 0000000000", {"license_number": "0000000000"}),
+])
+def test_a_licence_or_board_row_keeps_its_code(entry: dict) -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    assert list(groups) == [entry["taxonomy_code"]] and "taxonomy_code_original" not in entry
+    assert _credential_records(gen) == []
+
+
+def test_a_permit_coded_f1_renders_outside_licensure(tmp_path) -> None:
+    from docx import Document
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None  # no LLM, deterministic
+    source = tmp_path / "in.json"
+    source.write_text(json.dumps({"document_uid": "TESTCR", "entries": [
+        {"taxonomy_code": "A", "element_idx_start": 0, "text": "Name: Pat Example, MD", "extracted_fields": {}},
+        _credential("F1", _PERMIT, dict(_PERMIT_FIELDS))]}))
+    out = tmp_path / "out.docx"
+    gen.generate(str(source), str(out), research_summary_path=None)
+    rows = [[cell.text for cell in row.cells] for table in Document(str(out)).tables for row in table.rows]
+    named = [cells for cells in rows if any("Fluoroscopy" in cell for cell in cells)]
+    assert len(named) == 1 and named[0][0] == "Example State Fluoroscopy Operator and Supervisor (XX000000)"
+    assert not any(cells[:2] == ["Example State", "XX000000"] for cells in rows)

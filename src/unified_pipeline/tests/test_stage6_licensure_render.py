@@ -971,3 +971,163 @@ def test_a_row_with_only_a_state_or_only_a_number_is_under_the_header(fields):
              if r.last_registration_date]   # the header renders with no date
     assert dates == ["Expires 03/31/2019"]
 
+
+
+# --- #1577 shape 3: a credential listed as a licence or a board certification ---
+# Invented values. The shapes are ZDOAZO 62 (a permit with a state), VTRKUF 28 (an
+# ECFMG line with no state), ECXGAT 48 (a technologist certificate with a number),
+# PPMTJH 28 (an early exam step coded F2) and SPINJC 78 (a built fan-out child).
+
+from unified_pipeline.core.credential_lines import KIND_UNNAMED_CREDENTIAL  # noqa: E402
+from unified_pipeline.stage6.fan_out import BUILT_TEXT_KEY  # noqa: E402
+from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
+    CONTROLLED_SUBSTANCE_QUALIFIER,
+    CREDENTIAL_REROUTE_CHECK,
+    credential_listed_as_licence,
+    credential_reroute_warnings,
+    record_line,
+)
+
+
+def _f1(text, **fields):
+    return {"taxonomy_code": "F1", "element_idx_start": 62, "text": text,
+            "extracted_fields": {"state_country": None, "license_number": None,
+                                 "issue_date": None, "expiration_date": None, **fields}}
+
+
+def _home_of(entry, code="F1", parent_text=""):
+    reroute = credential_listed_as_licence(entry, code, parent_text)
+    return (reroute.home.code, reroute.home.kind) if reroute else None
+
+
+@pytest.mark.parametrize("entry,home", [
+    (_f1("2031- Example State Fluoroscopy Operator and Supervisor (XX000000)", state_country="Example State",
+         license_number="XX000000", issue_date="2031", expiration_date="present"), ("B2", "radiation_permit")),
+    (_f1("2031 Certified by Educational Commission for Foreign Medical Graduates (ECFMG)", issue_date="2031"),
+     ("B2", "ecfmg")),
+    (_f1("1980   M(ASCP), Technologist in Example Science, certificate #X000000", license_number="X000000",
+         issue_date="1980"), ("F2", "tech_registry")),
+    # b2: no state, no licence word, no identifier
+    (_f1("2031 - Present    Certified Example Coach by the Example Registry", issue_date="2031"),
+     ("B2", KIND_UNNAMED_CREDENTIAL)),
+])
+def test_a_credential_read_as_a_licence_is_regrouped_1577(entry, home):
+    assert _home_of(entry) == home
+
+
+@pytest.mark.parametrize("entry", [
+    _f1("Example State Medical License 12345, 2031", state_country="Example State", license_number="12345"),
+    # a licence word with no state stays a licence (#1346's raw-line class is out of slice)
+    _f1("Licensure and Certification"),
+    # an NPI and a DEA record are Licensure's own slots
+    _f1("NPI 0000000000", license_number="0000000000"),
+    _f1("DEA registration XX0000000", license_number="XX0000000"),
+    # a line with no licence word but a state is a licence row
+    _f1("Example State 12345, 2031", state_country="Example State", license_number="12345"),
+    # a failed extraction says nothing about the record
+    {**_f1("Example State 12345, 2031"), "extraction_success": False},
+    _f1(""),
+])
+def test_a_licence_and_what_licensure_cannot_read_stay_1577(entry):
+    assert _home_of(entry) is None
+
+
+def test_a_failed_extraction_still_moves_a_named_credential_1577():
+    entry = {**_f1("2031 Certified by Educational Commission for Foreign Medical Graduates (ECFMG)"),
+             "extraction_success": False}
+    assert _home_of(entry) == ("B2", "ecfmg")
+
+
+@pytest.mark.parametrize("text,home", [
+    ("American Board of Example Surgery Part I written exam, passed 2031", ("B2", "board_exam_early")),
+    ("Example State DEA registration, 2031", ("F1", "controlled_substance")),
+    ("American Board of Example Medicine, 2031", None),
+])
+def test_a_board_record_whose_line_names_another_credential_is_regrouped_1577(text, home):
+    entry = {"taxonomy_code": "F2", "element_idx_start": 28, "text": text,
+             "extracted_fields": {"certifying_board": None, "year_certified": "2031"}}
+    assert _home_of(entry, "F2") == home
+
+
+def test_other_codes_are_never_regrouped_1577():
+    assert _home_of(_f1("2031 Certified by ECFMG"), "B2") is None
+    assert _home_of(_f1("2031 Certified by ECFMG"), "I") is None
+
+
+_PARENT = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
+           "Example State (Inactive)")
+
+
+def _built_child(**fields):
+    return {**_f1("2031 | 2033", **fields), BUILT_TEXT_KEY: True}
+
+
+def test_a_built_child_reads_its_own_dated_clause_of_the_parent_line_1577():
+    child = _built_child(issue_date="2031", expiration_date="2033")
+    assert record_line(child, _PARENT) == "2031-2033  Certified in Example Method, Example Institute"
+    reroute = credential_listed_as_licence(child, "F1", _PARENT)
+    assert (reroute.home.code, reroute.home.kind, reroute.line) == (
+        "B2", KIND_UNNAMED_CREDENTIAL, "2031-2033  Certified in Example Method, Example Institute")
+
+
+@pytest.mark.parametrize("entry,parent", [
+    # no clause with the child's years: the built text is kept
+    (_built_child(issue_date="2040", expiration_date="2041"), _PARENT),
+    # no years at all
+    (_built_child(), _PARENT),
+    # no parent line
+    (_built_child(issue_date="2031", expiration_date="2033"), ""),
+    # not a built text
+    (_f1("2031 | 2033", issue_date="2031", expiration_date="2033"), _PARENT),
+    # two clauses with the same years: ambiguous, kept
+    (_built_child(issue_date="2031", expiration_date="2033"),
+     "2031-2033 Example Method certificate 2031-2033 Example Other certificate"),
+])
+def test_a_record_line_is_its_text_unless_one_clause_is_its_own_1577(entry, parent):
+    assert record_line(entry, parent) == entry["text"]
+
+
+def test_a_built_childs_field_years_ignore_non_scalar_values_1577():
+    child = _built_child(issue_date="2031", expiration_date="2033", notes=["2030"], extra={"year": "2030"})
+    assert record_line(child, _PARENT) == "2031-2033  Certified in Example Method, Example Institute"
+
+
+def test_the_reroute_warning_names_indexes_and_moves_only_1577():
+    assert credential_reroute_warnings([]) == []
+    [record] = credential_reroute_warnings([(62, "F1", "B2"), (48, "F1", "F2")])
+    assert record["check"] == CREDENTIAL_REROUTE_CHECK and record["severity"] == "INFO"
+    assert record["evidence"] == ["element_idx_start 62 (F1->B2)", "element_idx_start 48 (F1->F2)"]
+    assert "2 entries" in record["message"]
+    assert "1 entry" in credential_reroute_warnings([(62, "F1", "B2")])[0]["message"]
+
+
+# b4: a state controlled-substance registration names itself in the State cell.
+
+def _licence_row(text, **fields):
+    [record] = _resolve_licensure([{"text": text, "extracted_fields": fields}]).licenses
+    return record
+
+
+def test_a_controlled_substance_registration_names_itself_after_its_state_1577():
+    record = _licence_row("Example State Controlled Substance Registration #00000000B 2031- current",
+                          state_country="Example State", license_number="00000000B", issue_date="2031")
+    assert record.state == f"Example State ({CONTROLLED_SUBSTANCE_QUALIFIER})"
+
+
+@pytest.mark.parametrize("text,state,expected", [
+    # the line also names a licence to practise: the medical licence's own row
+    ("Example State Medical/Controlled Substance License #00000 2031", "Example State", "Example State"),
+    # the State cell already says it
+    ("Example (Controlled Substance) | 00000 | 2031", "Example (Controlled Substance)",
+     "Example (Controlled Substance)"),
+    # an ordinary licence
+    ("Example State Medical License #00000 2031", "Example State", "Example State"),
+])
+def test_other_rows_get_no_controlled_substance_qualifier_1577(text, state, expected):
+    assert _licence_row(text, state_country=state, license_number="00000").state == expected
+
+
+def test_a_stage4_licence_type_outranks_the_controlled_substance_qualifier_1577():
+    record = _licence_row("Example State Controlled Substance Registration 2031", state_country="Example State",
+                          license_number="00000", license_type="Pharmacy")
+    assert record.state == "Example State (Pharmacy)"

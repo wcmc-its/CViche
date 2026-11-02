@@ -58,6 +58,12 @@ except ImportError:
     logger.error("Error: python-docx not installed. Install with: pip install python-docx lxml")
     sys.exit(1)
 
+from unified_pipeline.core.credential_lines import (
+    BOARD_CODE,
+    LICENCE_CODE,
+    OTHER_EDUCATION_CODE,
+    is_credential_recode,
+)
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
 from unified_pipeline.core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -93,6 +99,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE, TemplateSnapshot, fill_empty_slots, snapshot_template
 from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
+    BUILT_TEXT_KEY,
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
     DeclinedList,
@@ -162,6 +169,7 @@ from unified_pipeline.stage6.normalization import (  # noqa: F401
     _strip_org_tail,
     _strip_taxonomy_code,
     grant_status_rebucket_target,
+    line_without_edge_dates,
     split_fused_citation_entries,
 )
 from unified_pipeline.stage6.parsing import (  # noqa: F401
@@ -301,6 +309,11 @@ from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 from unified_pipeline.stage6.sections.postdoc_training import POSTDOC_TRAINING_HEADING
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
 from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VERBATIM_M1
+from unified_pipeline.stage6.sections.licensure import (
+    credential_listed_as_licence,
+    credential_reroute_warnings,
+    record_line,
+)
 from unified_pipeline.stage6.sections.research_support import (
     honor_listed_as_funding_warnings,
     is_honor_listed_as_funding,
@@ -1602,6 +1615,12 @@ NON_SEAT_ATTENDED_CODE = 'B2'
 _B2_PROGRAM_KEYS = ('program_name', 'program_type', 'title')
 
 
+def _element_span_key(entry: Mapping[str, Any]) -> tuple[object, object]:
+    """(element_idx_start, element_idx_end): the key a fan-out child shares
+    with the entry it was split from."""
+    return entry.get('element_idx_start'), entry.get('element_idx_end')
+
+
 def is_non_seat_pin(entry: Mapping[str, Any]) -> bool:
     """Whether stage 3b's non-seat pin made *entry* D3 or B2 out of Q2 or P."""
     return (entry.get('pre_pin_code') in NON_SEAT_PIN_SOURCE_CODES
@@ -1642,6 +1661,109 @@ def _carry_non_seat_fields(entry: dict[str, Any]) -> None:
         if cell['committee_name'] and _is_blank_value(fields.get('institution')):
             fields['institution'] = cell['organization']
     entry['extracted_fields'] = fields
+
+
+# #1577 shape 3: a credential stage 3b's credential pin recoded
+# (`core.credential_lines`), or one stage 6's licensure guard regroups
+# (`licensure.credential_listed_as_licence`), renders under its new code's
+# writer, which reads that code's stage-4 fields. A fresh run's stage 4
+# extracts them; a record stage 4 read under the old code, or found no
+# fields for, would render a blank row or none (B2 drops a row with no
+# program and no institution). Its empty target fields are filled from its
+# old code's fields, else from its line less its dates; a field stage 4
+# filled is kept (`_carry_credential_fields`):
+# - B2: program_name from the line less its dates; start and end dates from
+#   a licence's issue and expiration dates or a board's certification and
+#   recertification dates;
+# - F2: certificate_number from the licence number, year_certified from the
+#   issue or start date, specialty from the line less its dates and number;
+# - F1: license_number from the certificate number, issue and expiration
+#   dates from the certification or start and end dates.
+# A pinned record is not rerouted by the hierarchy mismatch either: under
+# the Licensure heading the row was listed under, a low-confidence B2 went
+# back to F1, as #1580's non-seat pin found for D3 under committee headings.
+_CREDENTIAL_NUMBER_KEYS = ('license_number', 'certificate_number', 'number')
+_CREDENTIAL_START_KEYS = ('issue_date', 'year_certified', 'start_date', 'year', 'date')
+_CREDENTIAL_END_KEYS = ('expiration_date', 'recertification_date', 'end_date')
+_B2_DATE_KEYS = ('start_date', 'end_date', 'year', 'year_awarded')
+_BOARD_NAME_KEYS = ('certifying_board', 'specialty')
+# A certificate or licence number's label before it ("certificate #", "No.").
+_NUMBER_LABEL = r'(?:\b(?:certificate|cert\.?|licen[cs]e|registration)\s*)?(?:#|\bno\.?|\bnumber)?\s*:?\s*'
+
+
+def is_credential_pin(entry: Mapping[str, Any]) -> bool:
+    """Whether stage 3b's credential pin recoded *entry* (`is_credential_recode`)."""
+    return is_credential_recode(entry.get('pre_pin_code'), entry.get('taxonomy_code'))
+
+
+def _first_field_text(fields: Mapping[str, Any], keys: Sequence[str]) -> str:
+    """The first of `keys` whose value is a non-blank string or number."""
+    for key in keys:
+        value = fields.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
+            return str(value).strip()
+    return ''
+
+
+def _without_number(line: str, number: str) -> str:
+    """`line` less `number` and its label, and any parentheses it leaves empty."""
+    if not number or number not in line:
+        return line
+    cut = re.sub(_NUMBER_LABEL + re.escape(number), '', line, count=1, flags=re.IGNORECASE)
+    cut = re.sub(r'\s{2,}', ' ', re.sub(r'\(\s*\)', '', cut)).strip(' ,;:\t')
+    return cut or line
+
+
+def _carry_credential_fields(entry: dict[str, Any], target_code: str, line: str) -> None:
+    """Fill the empty `target_code` (B2, F2 or F1) fields of a credential
+    record from its other fields, else from `line` (see the comment above)."""
+    fields = dict(entry.get('extracted_fields') or {})
+    number = _first_field_text(fields, _CREDENTIAL_NUMBER_KEYS)
+    start = _first_field_text(fields, _CREDENTIAL_START_KEYS)
+    end = _first_field_text(fields, _CREDENTIAL_END_KEYS)
+    name = line_without_edge_dates(line, start, end)
+    blank = {key for key, value in fields.items() if _is_blank_value(value)} | (
+        set(_B2_PROGRAM_KEYS + _B2_DATE_KEYS + _BOARD_NAME_KEYS) - set(fields))
+    if target_code == OTHER_EDUCATION_CODE:
+        if blank.issuperset(_B2_PROGRAM_KEYS):
+            fields['program_name'] = name
+        if blank.issuperset(_B2_DATE_KEYS):
+            fields.update({key: value for key, value in (('start_date', start), ('end_date', end)) if value})
+    elif target_code == BOARD_CODE:
+        if blank.issuperset(_BOARD_NAME_KEYS):
+            fields['specialty'] = _without_number(name, number)
+        fields.update({key: value for key, value in (('certificate_number', number), ('year_certified', start))
+                       if value and _is_blank_value(fields.get(key))})
+    elif target_code == LICENCE_CODE:
+        fields.update({key: value for key, value in (('license_number', number), ('issue_date', start),
+                                                     ('expiration_date', end))
+                       if value and _is_blank_value(fields.get(key))})
+    entry['extracted_fields'] = fields
+
+
+def _route_credential_listed_as_licence(entry: dict[str, Any], code: str, parent_text: str,
+                                        moved: list[tuple[object, str, str]]) -> str:
+    """The code to group *entry* under: its credential's own code for a
+    licence or board record whose line names another credential
+    (`credential_listed_as_licence`, #1577), its fields carried
+    (`_carry_credential_fields`) and its element_idx_start and move
+    appended to *moved*; *code* otherwise, and always for a record stage
+    3b's credential pin already recoded. A record whose text stage 6 built
+    from its fields takes its own clause of `parent_text` as its text."""
+    if is_credential_pin(entry):
+        return code
+    reroute = credential_listed_as_licence(entry, code, parent_text)
+    if reroute is None:
+        return code
+    target = reroute.home.code
+    if reroute.line != str(entry.get('text') or ''):
+        entry['text'] = reroute.line
+        entry.pop(BUILT_TEXT_KEY, None)
+    _carry_credential_fields(entry, target, reroute.line)
+    entry.setdefault('taxonomy_code_original', code)
+    entry['taxonomy_code'] = target
+    moved.append((entry.get('element_idx_start'), code, target))
+    return target
 
 
 def _split_record_position(entry: Mapping[str, Any]) -> tuple[int, int] | None:
@@ -2331,7 +2453,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         leadership_moved: list[tuple[object, tuple[int, int]]] = []
         grant_reviews_moved: list[object] = []
         honors_moved: list[object] = []
+        credentials_moved: list[tuple[object, str, str]] = []
         self._declined_lists = []
+        parent_texts = {_element_span_key(entry): str(entry.get('text') or '') for entry in entries}
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY, declined=self._declined_lists)
@@ -2339,8 +2463,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
             code = normalize_retired_code(entry)
+            parent_text = parent_texts.get(_element_span_key(entry), '')
             if is_non_seat_pin(entry):
                 _carry_non_seat_fields(entry)
+            elif is_credential_pin(entry):
+                _carry_credential_fields(entry, code, record_line(entry, parent_text))
             else:
                 code = self._correct_mismatch_if_needed(entry, code, reroutes)
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
@@ -2348,6 +2475,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             code = _route_d2_leadership_title(entry, code, leadership_moved)
             code = _route_p_grant_review(entry, code, grant_reviews_moved)
             code = _route_honor_listed_as_funding(entry, code, honors_moved)
+            code = _route_credential_listed_as_licence(entry, code, parent_text, credentials_moved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
@@ -2358,6 +2486,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._section_failures.extend(d2_leadership_reroute_warnings(leadership_moved))
         self._section_failures.extend(p_grant_review_reroute_warnings(grant_reviews_moved))
         self._section_failures.extend(honor_listed_as_funding_warnings(honors_moved))
+        self._section_failures.extend(credential_reroute_warnings(credentials_moved))
         self._section_failures.extend(outcome_mentee_warnings(annotate_outcome_mentees(coded)))
         consume_institution_headings(coded, entries_by_code, _is_heading_shaped, warnings=self._section_failures)
 
