@@ -31,8 +31,9 @@ credential's home (`core.credential_lines.misfiled_credential_home`, read
 as F2 or F1) corrects to that home instead (#1577 shape 3): "Diplomate,
 National Board of Medical Examiners, <year>" is a licensing exam and an ATLS
 "Certificate #" a life-support course, both B2, so the corrector no longer
-undoes stage 3b's credential pin for them (it sent 46 of the farm's 226
-pinned B2 lines back to F2); and a line already at that home keeps its code.
+undoes stage 3b's credential pin for them (on the #1243 farm it sent 43 of
+the 223 lines the pin makes B2 back to F2, and 3 NBME lines the model coded
+I or H to F2); and a line already at that home keeps its code.
 """
 
 import re
