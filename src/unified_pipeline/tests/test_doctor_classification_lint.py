@@ -600,7 +600,7 @@ def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
     # No honors word on the path, and no election.
     ("Fellow, Invented College of Examples", "I", ("Professional Societies",)),
     # An honors parent over a leaf that names memberships or credentials.
-    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Honorary Societies")),
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Professional Associations")),
     ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Memberships")),
     ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Organizations")),
     ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Affiliations")),
@@ -645,6 +645,9 @@ def test_fellowship_shapes_that_are_quiet_1577(text, code, headings):
     ("Fellow Invented Royal College of Physicians - 2031", ("ELECTED MEMBERSHIPS",), True),
     ("Fellow, Invented College of Physicians (elected Governor, 2031)", ("Professional Societies",), False),
     ("2031 Fellow, Invented College of Examples", ("Honors and Professional Memberships", "National"), False),
+    ("2031- Fellow, Invented Society of Body Examples",
+     ("E. Post-Degree Honors, Awards, and Professional Associations", "Professional Associations"), False),
+    ("2031 Fellow, Invented College of Examples", ("Honors and Awards", "Honor Societies"), True),
 ])
 def test_the_lint_reports_exactly_what_the_stage3b_fellowship_pin_recodes_1577(text, headings, honor):
     """One test, two readers (CODING_STANDARDS.md §1.5): the lint reports an I

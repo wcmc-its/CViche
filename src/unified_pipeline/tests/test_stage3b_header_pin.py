@@ -538,6 +538,8 @@ def test_a_fellowship_the_decision_makes_an_honor_is_recoded_h_at_any_confidence
     _row("I", "Fellow, Example College of Surgeons", hierarchy=("Professional Memberships",)),
     _row("I", "2031 Fellow, Example College of Examples", hierarchy=("Awards, Honors and Membership in Honorary Societies",)),
     _row("I", "2031 Example Head and Neck Society, Fellow", hierarchy=("CERTIFICATION",)),
+    _row("I", "2031- Fellow, Example Society of Body Examples",
+         hierarchy=("E. Post-Degree Honors, Awards, and Professional Associations", "Professional Associations")),
     # a membership row that mentions an election
     _row("I", "Example Academy (Active Member; Example Committee, 2031-2033; elected fellow 2034)",
          hierarchy=("Professional Societies",)),

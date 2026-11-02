@@ -210,7 +210,9 @@ def test_lines_that_are_no_fellowship_title_are_not_an_honor(text):
     # the leaf names memberships or credentials: the author put it there (UVZNIC 131, HBALTD 26, EUCSNU 45)
     ("Awards, Honors, and Membership in Honorary Societies",),
     ("Honors and Awards", "Memberships"),
-    ("Honors and Awards", "Honorary Societies"),
+    ("Honors and Awards", "Professional Associations"),
+    ("Honors and Awards", "Committees and Associations"),
+    ("Honors and Awards", "Honorary and Professional Societies"),
     ("Honors and Awards", "Organizations"),
     ("Honors and Awards", "Affiliations"),
     ("Honors and Awards", "Certifications"),
@@ -239,9 +241,34 @@ def test_the_honors_word_may_sit_on_a_parent_heading():
     (("Honors, Awards and Memberships", "Honors"), True),
     (("Professional Memberships", "Honors"), True),
     (("Professional Honors & Recognition", "Service", "National"), True),
+    # a heading that mixes honors with associations is no honors path (SBPHNA 171's shape)
+    (("E. Post-Degree Honors, Awards, and Professional Associations", "Professional Associations"), False),
+    (("E. Post-Degree Honors, Awards, and Professional Associations", "National"), False),
+    (("E. Post-Degree Honors, Awards, and Professional Associations",), False),
+    (("E. Post-Degree Honors, Awards, and Professional Associations", "Awards"), True),
+    # an honor society is an honors heading; a singular "Association" is one body's name
+    (("Honors and Awards", "Honorary Societies"), True),
+    (("Honor Societies",), True),
+    (("Honours", "Honour Society"), True),
+    (("Awards", "Honors Societies"), True),
+    (("Honor  Societies",), True),
+    (("Awards and Honors", "Invented Heart Association"), True),
 ])
 def test_the_nearest_honors_or_membership_heading_decides(heading_path, honor):
     assert is_honorific_fellowship("2031 Fellow, Invented College of Examples", heading_path) is honor
+
+
+@pytest.mark.parametrize("text, honor", [
+    # a fellowship grade among member rows under an associations leaf (SBPHNA 171's shape)
+    ("2031- Fellow, Invented Society of Body Examples", False),
+    ("2031- Member, Invented Society of Body Examples", False),
+    # election wording still makes it an honor there
+    ("2031- Fellow, Invented Society of Body Examples (elected 2031)", True),
+    ("2031 Elected Fellow, Invented Society of Body Examples", True),
+])
+def test_an_associations_leaf_under_a_mixed_heading_keeps_only_an_elected_fellowship(text, honor):
+    heading_path = ("E. Post-Degree Honors, Awards, and Professional Associations", "Professional Associations")
+    assert is_honorific_fellowship(text, heading_path) is honor
 
 
 @pytest.mark.parametrize("heading_path, honor", [
