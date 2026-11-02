@@ -23,10 +23,12 @@ read a line the same way.
   keeps a fellowship title that no election wording comes with ("Awards,
   Honors, and Membership in Honorary Societies", UVZNIC; "Professional
   Associations", SBPHNA 171), and so does a heading that mixes honors with
-  memberships, unless a nearer heading names honors alone. An honor society
-  is an honors heading. The decision names no other heading, so a
-  credential heading ("Professional Certifications", HBALTD 26;
-  "CERTIFICATION", EUCSNU 45) keeps one too, until the owner rules on it.
+  memberships, unless a nearer heading names honors alone. A heading that
+  opens with an honor society ("Honor Societies") is an honors heading;
+  "Professional and Honorary Societies" mixes the two. A credential heading
+  ("Professional Certifications", HBALTD 26; "CERTIFICATION", EUCSNU 45)
+  keeps one too: the owner ruled on 2026-11-02 that such a fellowship stays
+  a membership.
 
 Pure: data in, bool out; imports nothing but `re` and `collections.abc`.
 """
@@ -67,9 +69,13 @@ _FUNDING_HEADING_RE = re.compile(
 #: that body's honors, and "Associate Editor" names a role.
 _MEMBERSHIP_HEADING_RE = re.compile(
     r"member|societ|organi[sz]ation|affiliation|associations|certific|licens", re.IGNORECASE)
-#: An honor society is an honors list, so its "societ" names no membership:
-#: "Honor Societies", "Honorary Societies", "Honour Society".
-_HONOR_SOCIETY_RE = re.compile(r"honou?r(?:s|ary)?\s+societ", re.IGNORECASE)
+#: A heading that opens with an honor society is an honors list, so its
+#: "societ" names no membership: "Honor Societies", "Honorary Societies",
+#: "Honour Society", "2. Honor Societies". Later in a heading the phrase may
+#: share its "Societies" with a membership word before it: "Professional and
+#: Honorary Societies" also lists professional societies (#1577 slice A). A
+#: lettered heading ("E. Honor Societies") reads as mixed, which keeps I.
+_HONOR_SOCIETY_RE = re.compile(r"^[\W\d]*honou?r(?:s|ary)?\s+societ", re.IGNORECASE)
 #: A heading that says its rows were elected ("ELECTED MEMBERSHIPS", YME2VA):
 #: the CV says a fellowship title under it was elected.
 _ELECTED_HEADING_RE = re.compile(r"\belected\b", re.IGNORECASE)
@@ -181,10 +187,11 @@ def _lists_under_honors(heading_path: Sequence[str]) -> bool:
     National" (MVUREJ 44) and "Honors and Awards > Honor Societies" do;
     "Honors and Professional Memberships > National", "Awards, Honors, and
     Membership in Honorary Societies" (UVZNIC), "Honors and Awards >
-    Memberships" and "Honors, Awards, and Professional Associations >
-    Professional Associations" (SBPHNA 171) do not. So a heading that mixes
-    honors with memberships is no honors path: under it only a nearer
-    honors-only heading, or election wording, makes a fellowship an honor."""
+    Memberships", "Professional and Honorary Societies" and "Honors, Awards,
+    and Professional Associations > Professional Associations" (SBPHNA 171)
+    do not. So a heading that mixes honors with memberships is no honors
+    path: under it only a nearer honors-only heading, or election wording,
+    makes a fellowship an honor."""
     for level in reversed(heading_path):
         names_honors = bool(_HONORS_HEADING_RE.search(level))
         names_membership = _names_memberships(level)

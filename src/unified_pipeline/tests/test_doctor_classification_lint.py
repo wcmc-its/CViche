@@ -648,6 +648,8 @@ def test_fellowship_shapes_that_are_quiet_1577(text, code, headings):
     ("2031- Fellow, Invented Society of Body Examples",
      ("E. Post-Degree Honors, Awards, and Professional Associations", "Professional Associations"), False),
     ("2031 Fellow, Invented College of Examples", ("Honors and Awards", "Honor Societies"), True),
+    ("2031 Fellow, Invented College of Surgeons", ("Professional and Honorary Societies",), False),
+    ("2031 Fellow, Invented College of Examples", ("Scientific and Honor Societies",), False),
 ])
 def test_the_lint_reports_exactly_what_the_stage3b_fellowship_pin_recodes_1577(text, headings, honor):
     """One test, two readers (CODING_STANDARDS.md §1.5): the lint reports an I

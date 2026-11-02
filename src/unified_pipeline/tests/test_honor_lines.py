@@ -252,7 +252,18 @@ def test_the_honors_word_may_sit_on_a_parent_heading():
     (("Honours", "Honour Society"), True),
     (("Awards", "Honors Societies"), True),
     (("Honor  Societies",), True),
+    (("2. Honor Societies",), True),
     (("Awards and Honors", "Invented Heart Association"), True),
+    # an honor society that shares its "Societies" with a membership word before it is mixed
+    (("Professional and Honorary Societies",), False),
+    (("Professional and Honor Societies",), False),
+    (("Scientific and Honor Societies",), False),
+    (("Learned and Honorary Societies",), False),
+    (("Professional, Scientific and Honorary Societies",), False),
+    (("Honors and Awards", "Professional and Honorary Societies"), False),
+    # boundaries that keep I: a lettered honor-society heading, an honors heading naming associations
+    (("E. Honor Societies",), False),
+    (("Honors from Professional Associations",), False),
 ])
 def test_the_nearest_honors_or_membership_heading_decides(heading_path, honor):
     assert is_honorific_fellowship("2031 Fellow, Invented College of Examples", heading_path) is honor
