@@ -1096,6 +1096,7 @@ def test_the_reroute_warning_names_indexes_and_moves_only_1577():
     assert credential_reroute_warnings([]) == []
     [record] = credential_reroute_warnings([(62, "F1", "B2"), (48, "F1", "F2")])
     assert record["check"] == CREDENTIAL_REROUTE_CHECK and record["severity"] == "INFO"
+    assert (record["code"], record["section"]) == ("F1", "licensure")
     assert record["evidence"] == ["element_idx_start 62 (F1->B2)", "element_idx_start 48 (F1->F2)"]
     assert "2 entries" in record["message"]
     assert "1 entry" in credential_reroute_warnings([(62, "F1", "B2")])[0]["message"]
@@ -1111,7 +1112,8 @@ def _licence_row(text, **fields):
 def test_a_controlled_substance_registration_names_itself_after_its_state_1577():
     record = _licence_row("Example State Controlled Substance Registration #00000000B 2031- current",
                           state_country="Example State", license_number="00000000B", issue_date="2031")
-    assert record.state == f"Example State ({CONTROLLED_SUBSTANCE_QUALIFIER})"
+    assert record.state == "Example State (Controlled Substance Registration)"
+    assert CONTROLLED_SUBSTANCE_QUALIFIER in record.state
 
 
 @pytest.mark.parametrize("text,state,expected", [

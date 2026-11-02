@@ -1588,6 +1588,29 @@ def test_a_credential_pin_with_its_old_codes_fields_renders_its_name() -> None:
     assert [w for w in gen._section_failures if w["check"] in (REROUTE_CHECK, "credential_listed_as_licence_reroute")] == []
 
 
+def test_each_split_record_reads_its_own_entrys_line() -> None:
+    paragraph = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
+                 "Example State (Inactive)")
+    split = _credential("F1", paragraph, {
+        "state_country": "Example State", "issue_date": "2030", "expiration_date": "2031",
+        "stage4_records": [{"state_country": None, "issue_date": "2031", "expiration_date": "2033"},
+                           {"state_country": "Example State", "issue_date": "2030", "expiration_date": "2031"}]},
+        idx=78)
+    later = _credential("F1", "Example State Medical License 12345, 2040",
+                        {"state_country": "Example State", "license_number": "12345", "issue_date": "2040"}, idx=80)
+    [certification] = _grouped(split, later)["B2"]
+    assert certification["text"] == "2031-2033  Certified in Example Method, Example Institute"
+
+
+def test_a_controlled_substance_pin_from_f2_fills_the_licence_dates_it_lacks() -> None:
+    entry = _credential("F1", "Example State Controlled Substance Registration, 2031-2033",
+                        {"certificate_number": "000000", "year_certified": "2031", "recertification_date": "2033",
+                         "issue_date": "2030"}, pre_pin_code="F2")
+    [moved] = _grouped(entry)["F1"]
+    fields = moved["extracted_fields"]
+    assert (fields["license_number"], fields["issue_date"], fields["expiration_date"]) == ("000000", "2030", "2033")
+
+
 def test_a_credential_pin_keeps_the_fields_stage4_extracted_for_its_code() -> None:
     entry = _credential("B2", _PERMIT, {"program_name": "Fluoroscopy Supervisor Permit", "start_date": "2031"},
                         pre_pin_code="F1")
