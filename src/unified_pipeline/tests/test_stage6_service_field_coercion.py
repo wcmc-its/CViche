@@ -1359,6 +1359,8 @@ def test_line_without_shown_role_and_dates(text, role, start, end, expected):
     # A line that is only its dates is kept whole.
     ("2031 | 2033", "2031", "2033", "2031 | 2033"),
     ("Example Coach certificate", None, None, "Example Coach certificate"),
+    # A missing text is an empty cell, as `_cell_text` reads it.
+    (None, "2031", None, ""),
 ])
 def test_line_without_edge_dates(text, start, end, expected):
     assert line_without_edge_dates(text, start, end) == expected

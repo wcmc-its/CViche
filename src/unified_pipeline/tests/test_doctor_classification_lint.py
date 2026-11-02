@@ -683,6 +683,21 @@ def test_a_misfiled_credential_is_reported_as_info_1577(text, code, headings, ex
     assert f"the source points to {expected} (" in findings[0]["message"]
 
 
+def test_a_credential_finding_names_the_home_it_points_to_1577():
+    [finding] = _run(_entry("2031- Invented State Fluoroscopy Operator (XX000000)", "F1", "Licensure"))
+    assert finding["message"].endswith(
+        "the source points to B2 (other education: an exam, permit, course or certificate, "
+        "not a licence or board)")
+
+
+def test_a_record_stage6_regroups_still_gets_every_other_shape_1577():
+    # stage 6 regroups the F1 line (no state, no licence word), but only the
+    # credential shapes read that: the cross-reference shape still reports it
+    findings = lint_section_consistency({"entries": [_entry("see Section 4", "F1", "Licensure")]},
+                                        _f1_stage4("see Section 4"))
+    assert _shapes(findings) == ["cross_reference_as_record"]
+
+
 def test_an_unworded_line_after_a_board_row_is_reported_as_the_pin_reads_it_1577():
     board = _entry("Board Certified Invented Medicine 2031, recertified 2041", "F2", "Personal Data", idx=14)
     line = _entry("Invented Academy of Invented Medicine 2033", "I", "Personal Data", idx=15)

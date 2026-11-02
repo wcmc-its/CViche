@@ -162,9 +162,25 @@ def test_a_registry_or_board_certification_coded_f1_is_f2(text, kind):
     assert _home(text, LICENCE_CODE) == (BOARD_CODE, kind)
 
 
-def test_a_controlled_substance_registration_coded_f2_is_f1():
-    assert _home("Example State Controlled Substance Registration, 2031", BOARD_CODE) == (
-        LICENCE_CODE, "controlled_substance")
+@pytest.mark.parametrize("text", [
+    "Example State Controlled Substance Registration, 2031",
+    "Example State Controlled Dangerous Substances, 2031",
+    "DEA registration, 2031",
+    "Drug Enforcement Administration, 2031",
+    "Example State CDS, 2031",
+    "Example State CSR 2031",
+    "X-waiver 2031",
+    "DATA 2000 waiver, 2031",
+    "DATA waiver, 2031",
+    "Buprenorphine prescriber, 2031",
+    "Suboxone prescriber, 2031",
+    "Narcotic registration, 2031",
+])
+def test_a_controlled_substance_registration_coded_f2_is_f1(text):
+    assert _home(text, BOARD_CODE) == (LICENCE_CODE, "controlled_substance")
+
+
+def test_a_board_line_naming_a_substance_stays_the_boards():
     # A board line that also mentions a substance stays the board's.
     assert _home("American Board of Example Medicine, controlled substances, 2031", BOARD_CODE) is None
 
@@ -255,6 +271,16 @@ def test_a_board_statement_coded_elsewhere_is_f2(code, text):
     ("F2", "Example recertification written exam, 2031"),
     ("F2", "Example Diplomate, written exam 2031"),
     ("F2", "Maintenance of Certification, written exam 2031"),
+    # each certification statement on its own keeps an early-step word's line in F2
+    ("F2", "Board certificate holder, written exam 2031"),
+    ("F2", "Written exam passed 2031; MOC current"),
+    ("F2", "Maintenance of certification written exam, passed 2031"),
+    ("F2", "Certifying exam, written portion, passed 2031"),
+    ("F2", "Oral and written exams, passed 2031"),
+    ("F2", "Part I and Part II exams passed 2031"),
+    ("F2", "Part 1 and Part 2 exams passed 2031"),
+    ("F2", "Part one and part two exams passed 2031"),
+    ("F2", "Subspecialty written exam passed 2031"),
     # A specialty board certification, and a line naming nothing, stay F2.
     ("F2", "American Board of Example Medicine, 2031"),
     ("F2", "Example Medicine, 2031"),

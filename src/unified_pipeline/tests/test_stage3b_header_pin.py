@@ -2130,6 +2130,19 @@ def test_apply_non_seat_pins_keeps_the_models_answer_and_counts_each_recode():
 
 # --- #1577 shape 3: a credential coded as the wrong one of licence, board and other education ---
 
+@pytest.mark.parametrize("code,text,reason", [
+    ("F1", "2031 Certified by Educational Commission for Foreign Medical Graduates (ECFMG)",
+     "A credential that is no licence and no board certification is other education (category B2)"),
+    ("B2", "Licensed to practice Example Medicine in the state of Example",
+     "A licence to practise or a controlled-substance registration is licensure (category F1)"),
+    ("F1", "M(ASCP), Technologist in Example Science, certificate #X000000",
+     "A board, registry or specialty certification is board certification (category F2)"),
+])
+def test_the_credential_pin_says_why_in_its_reasoning_1577(code, text, reason):
+    (out,), _ = apply_header_pin([_row(code, text)], NO_PIN_CTX)
+    assert out["classification_reasoning"].startswith(reason)
+
+
 @pytest.mark.parametrize("code,text,hierarchy,expected", [
     # ZDOAZO 62's shape: a fluoroscopy permit under Licensure
     ("F1", "2031- Example State Fluoroscopy Operator and Supervisor (XX000000)", ("Licensure",), "B2"),
@@ -2195,7 +2208,8 @@ def test_an_unworded_line_after_a_board_row_is_its_blocks_certification_1577():
     out, n = apply_header_pin(_block(("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)), NO_PIN_CTX)
     assert n == 1 and [row["taxonomy_code"] for row in out] == ["F2", "F2"]
     assert out[1]["pre_pin_code"] == "I"
-    assert out[1]["classification_reasoning"].startswith("A credential line listed in a board-certification block")
+    assert out[1]["classification_reasoning"].startswith(
+        "A credential line listed in a board-certification block is board certification (category F2)")
 
 
 @pytest.mark.parametrize("rows,codes", [
