@@ -1005,7 +1005,7 @@ Any lint not listed here has no verdicts and is a comment.
 | `role_consistency`: `role_in_title` | 3 / 3 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
 | `role_consistency`: `pi_cell_from_title` | 4 / 4 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
 | `role_consistency`: `pi_cell_not_a_person` | 14 / 20 (70%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
-| `section_consistency` | 30 / 30 (100%) | 13 / 24 (54%) | 43 / 54 (80%) | — | comment |
+| `section_consistency` | 30 / 30 (100%) | 13 / 24 (54%) | same; held out not folded (changed since dev-259) | — | comment |
 | `section_lost` | 0 / 1 (0%) | 1 / 3 (33%) | 1 / 4 (25%) | — | review note |
 | `segmentation_collapse` | 1 / 1 (100%) | 1 / 1 (100%) | 2 / 2 (100%) | — | comment |
 | `span_count` | 117 / 123 (95%) | 6 / 28 (21%), before #1607 | same; held out not folded (changed since dev-259) | — | comment |
