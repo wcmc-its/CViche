@@ -204,7 +204,7 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     run_pii_pass,
     withheld_comment_text,
 )
-from unified_pipeline.stage6.record_dedup import deduplicate_record_groups
+from unified_pipeline.stage6.record_dedup import HONOR_CODE, deduplicate_record_groups
 from unified_pipeline.stage6.row_receipts import DiscardingLedger, RowReceiptLedger, SectionReceipt
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     _COLUMN_HEADER_WORDS,
@@ -301,6 +301,10 @@ from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 from unified_pipeline.stage6.sections.postdoc_training import POSTDOC_TRAINING_HEADING
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
 from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VERBATIM_M1
+from unified_pipeline.stage6.sections.research_support import (
+    honor_listed_as_funding_warnings,
+    is_honor_listed_as_funding,
+)
 from unified_pipeline.stage6.sections.service import (
     EXTRAMURAL_ORGANIZATION_FIELDS,
     GRANT_REVIEWING_CODE,
@@ -1561,6 +1565,24 @@ def p_grant_review_reroute_warnings(moved: list[object]) -> list[dict[str, Any]]
     }]
 
 
+def _route_honor_listed_as_funding(entry: dict[str, Any], code: str, moved: list[object]) -> str:
+    """The code to group *entry* under: H for an award listed under honors
+    that has nothing a funding table needs (`is_honor_listed_as_funding`,
+    #1577), its element_idx_start appended to *moved*; *code* otherwise.
+    Honors reads the funder as `granting_body`, so a stage-4 `agency` fills
+    an empty one; the award's name and year come from its line and dates."""
+    if not is_honor_listed_as_funding(entry, code):
+        return code
+    fields = dict(entry.get('extracted_fields') or {})
+    if _is_blank_value(fields.get('granting_body')) and not _is_blank_value(fields.get('agency')):
+        fields['granting_body'] = fields['agency']
+    entry['extracted_fields'] = fields
+    entry.setdefault('taxonomy_code_original', code)
+    entry['taxonomy_code'] = HONOR_CODE
+    moved.append(entry.get('element_idx_start'))
+    return HONOR_CODE
+
+
 # #1580: stage 3b's non-seat pin (`header_pin.non_seat_pin_code`) recodes a Q2
 # or P row that is no seat on a body D3 (consulting) or B2 (a meeting
 # attended), the model's code kept in pre_pin_code; no other stage-3b step
@@ -2308,6 +2330,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         bare_mentees_resolved: list[tuple[object, str]] = []
         leadership_moved: list[tuple[object, tuple[int, int]]] = []
         grant_reviews_moved: list[object] = []
+        honors_moved: list[object] = []
         self._declined_lists = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
@@ -2324,6 +2347,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
             code = _route_d2_leadership_title(entry, code, leadership_moved)
             code = _route_p_grant_review(entry, code, grant_reviews_moved)
+            code = _route_honor_listed_as_funding(entry, code, honors_moved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
@@ -2333,6 +2357,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._section_failures.extend(bare_mentee_resolution_warnings(bare_mentees_resolved))
         self._section_failures.extend(d2_leadership_reroute_warnings(leadership_moved))
         self._section_failures.extend(p_grant_review_reroute_warnings(grant_reviews_moved))
+        self._section_failures.extend(honor_listed_as_funding_warnings(honors_moved))
         self._section_failures.extend(outcome_mentee_warnings(annotate_outcome_mentees(coded)))
         consume_institution_headings(coded, entries_by_code, _is_heading_shaped, warnings=self._section_failures)
 

@@ -18,6 +18,7 @@ from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     apply_header_pin,
     apply_non_seat_pins,
     content_pin_code,
+    fellowship_pin_code,
     is_note_not_record,
     is_reviewer_lead_in,
     leaf_header_code,
@@ -411,7 +412,7 @@ def test_h_pin_breaks_a_tie_and_does_not_overrule_a_firm_grant_answer():
 
 
 @pytest.mark.parametrize("code,text", [
-    ("I", "2031 Fellow, Example College of Examples"),     # a fellowship stays the model's call
+    ("I", "2031 Member, Example College of Examples"),     # a membership stays the model's call
     ("M2D", "2031 Example dataset deposit"),
     ("K4", "2031 Example teaching award lecture"),
 ])
@@ -445,6 +446,136 @@ def test_h_pin_is_not_flipped_back_by_the_reasoning_or_grant_status_checks():
     (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
     (status,), _ = apply_grant_status_corrections([corrected])
     assert out["taxonomy_code"] == corrected["taxonomy_code"] == status["taxonomy_code"] == "H"
+
+
+# --- YUYVIG BLBVPD-05 (#1577): an unsure H with a grant marker under a grant-subcode leaf ---
+
+PAST_GRANTS_CTX = _ctx(meta=_node("GRANT SUPPORT", "M2"),
+                       section=_node("PRINCIPAL INVESTIGATOR OF GRANTS: PAST", "M2B"))
+PAST_GRANTS = ("GRANT SUPPORT", "PRINCIPAL INVESTIGATOR OF GRANTS: PAST")
+
+
+@pytest.mark.parametrize("text", [
+    "Example Investigator Award, Example Heart Institute, HL-00001. 2031 - 2036, $225,000.",  # amount
+    "Example Research Scholar, Example Lung Association. 2032-2033.",                          # two-ended period
+    "Example Scholar. 2035-2038, $225,000.",
+    "Example Career Award (K08), Example Institute, 2031",                                     # activity code
+])
+def test_unsure_h_with_a_grant_marker_under_a_grant_subcode_leaf_takes_the_leafs_code(text):
+    (out,), n = apply_header_pin([_row("H", text, confidence=0.75, hierarchy=PAST_GRANTS)], PAST_GRANTS_CTX)
+    assert n == 1 and out["taxonomy_code"] == "M2B" and out["pre_pin_code"] == "H"
+
+
+@pytest.mark.parametrize("leaf", ["M2A", "M2C"])
+def test_the_grant_pin_takes_each_subcode_the_leaf_names(leaf):
+    ctx = _ctx(meta=_node("Research Support", leaf))
+    (out,), _ = apply_header_pin([_row("H", "Example Scholar Award, 2031-2034", hierarchy=("Research Support",))],
+                                 ctx)
+    assert out["taxonomy_code"] == leaf
+
+
+def test_grant_pin_breaks_a_tie_and_does_not_overrule_a_firm_h():
+    text = "Example University Associate Award, 2031-2033 ($25,000 unrestricted funds)"
+    (at_ceiling,), _ = apply_header_pin([_row("H", text, confidence=0.80, hierarchy=PAST_GRANTS)], PAST_GRANTS_CTX)
+    assert at_ceiling["taxonomy_code"] == "M2B"
+    firm = _row("H", text, confidence=0.85, hierarchy=PAST_GRANTS)
+    (out,), n = apply_header_pin([firm], PAST_GRANTS_CTX)
+    assert n == 0 and out == firm
+
+
+@pytest.mark.parametrize("entry, ctx", [
+    # no grant marker: a lone dated award line keeps the model's H
+    (_row("H", "Example Public Service Award and Grant 05/2031", hierarchy=PAST_GRANTS), PAST_GRANTS_CTX),
+    # a bare M2 leaf names no subcode
+    (_row("H", "Example Scholar. 2031-2034, $1,000.", hierarchy=("GRANT SUPPORT",)),
+     _ctx(meta=_node("GRANT SUPPORT", "M2"))),
+    # a leaf mapped below the floor
+    (_row("H", "Example Scholar. 2031-2034, $1,000.", hierarchy=PAST_GRANTS),
+     _ctx(meta=_node("GRANT SUPPORT", "M2"),
+          section=_node("PRINCIPAL INVESTIGATOR OF GRANTS: PAST", "M2B", HEADER_PIN_MIN_CONFIDENCE - 0.01))),
+    # another code under the same leaf
+    (_row("I", "Example Society, 2031-2034, $1,000.", hierarchy=PAST_GRANTS), PAST_GRANTS_CTX),
+    (_row("C", "Example Research Fellow, 2031-2034, $1,000.", hierarchy=PAST_GRANTS), PAST_GRANTS_CTX),
+])
+def test_grant_pin_leaves_other_rows_alone(entry, ctx):
+    (out,), n = apply_header_pin([entry], ctx)
+    assert n == 0 and out == entry
+
+
+def test_grant_pin_survives_the_reasoning_pass_and_takes_its_status_from_the_dates():
+    from unified_pipeline.core.validators.grant_status_corrector import (
+        apply_grant_status_corrections,
+    )
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    current = _ctx(meta=_node("GRANT SUPPORT", "M2"), section=_node("PRINCIPAL INVESTIGATOR OF GRANTS", "M2A"))
+    entry = {**_row("H", "Example Research Scholar, Example Association. 2001-2004, $10,000.",
+                    confidence=0.75, hierarchy=("GRANT SUPPORT", "PRINCIPAL INVESTIGATOR OF GRANTS")),
+             "classification_reasoning": "a named scholar award is an honor (H)"}
+    (out,), _ = apply_header_pin([entry], current)
+    (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    (status,), _ = apply_grant_status_corrections([corrected])
+    assert (out["taxonomy_code"], corrected["taxonomy_code"], status["taxonomy_code"]) == ("M2A", "M2A", "M2B")
+
+
+# --- #1577 shape 2: an elected fellowship, or one listed under honors, is H (decision 2026-10-30) ---
+
+@pytest.mark.parametrize("text, hierarchy", [
+    ("2017: Elected Fellow of the Example Society for Cell Examples", ("3. Service", "(b) Awards etc.")),
+    ("Elected Fellow, Example Association of Examples, 2031", ("Awards, Honors",)),
+    ("2031 Fellow, Example College of Medical Examples (ECME)", ("Professional Honors & Recognition", "National")),
+    ("2031-present Example Society (elected Fellow)", ("Professional Memberships",)),
+])
+def test_a_fellowship_the_decision_makes_an_honor_is_recoded_h_at_any_confidence(text, hierarchy):
+    (out,), n = apply_header_pin([_row("I", text, confidence=0.95, hierarchy=hierarchy)], TaxonomyContext())
+    assert n == 1 and out["taxonomy_code"] == "H" and out["pre_pin_code"] == "I"
+    assert "(category H)" in out["classification_reasoning"]
+
+
+@pytest.mark.parametrize("entry", [
+    # a fellowship grade under a membership heading, with no election wording
+    _row("I", "Fellow, Example College of Surgeons", hierarchy=("Professional Memberships",)),
+    _row("I", "2031 Fellow, Example College of Examples", hierarchy=("Awards, Honors and Membership in Honorary Societies",)),
+    _row("I", "2031 Example Head and Neck Society, Fellow", hierarchy=("CERTIFICATION",)),
+    _row("I", "2031- Fellow, Example Society of Body Examples",
+         hierarchy=("E. Post-Degree Honors, Awards, and Professional Associations", "Professional Associations")),
+    _row("I", "2031 Fellow, Example College of Surgeons", hierarchy=("Professional and Honorary Societies",)),
+    # a membership row that mentions an election
+    _row("I", "Example Academy (Active Member; Example Committee, 2031-2033; elected fellow 2034)",
+         hierarchy=("Professional Societies",)),
+    # a fellow elected to an office, and a committee named for fellows (#1577 review, B3)
+    _row("I", "Fellow, Example College of Physicians (elected Governor, Example Chapter, 2031)",
+         hierarchy=("Professional Memberships",)),
+    _row("I", "2031 Elected to the Fellowship Committee, Example College of Examples",
+         hierarchy=("Professional Memberships",)),
+    # already H, or another code
+    _row("H", "Elected Fellow, Example Society", hierarchy=("Honors",)),
+    _row("Q1", "Elected Fellow, Example Society", hierarchy=("Service",)),
+    _row("C", "2031-2032 Fellow, Example Surgery, Example Hospital", hierarchy=("Honors and Awards",)),
+])
+def test_the_fellowship_pin_leaves_everything_else(entry):
+    assert fellowship_pin_code(entry) is None
+    (out,), n = apply_header_pin([entry], TaxonomyContext())
+    assert n == 0 and out == entry
+
+
+def test_the_fellowship_pin_reads_only_model_answers():
+    entry = {**_row("I", "Elected Fellow, Example Society, 2031", hierarchy=("Honors",)),
+             "classification_source": "fallback"}
+    (out,), n = apply_header_pin([entry], TaxonomyContext())
+    assert n == 0 and out == entry
+
+
+def test_the_fellowship_pin_survives_the_reasoning_pass():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    entry = {**_row("I", "Elected Fellow, Example Society, 2031", confidence=0.95, hierarchy=("Honors",)),
+             "classification_reasoning": "fellow status in a professional society is membership (I)"}
+    (out,), _ = apply_header_pin([entry], TaxonomyContext())
+    (corrected,), _ = apply_reasoning_corrections([out], min_confidence=0.80)
+    assert out["taxonomy_code"] == corrected["taxonomy_code"] == "H"
 
 
 # --- #1708: an unsure S8 with a PMID or DOI under an S1 pin ----------------------

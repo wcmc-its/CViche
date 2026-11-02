@@ -24,7 +24,11 @@ the owner as mentor or sponsor to N2. `someone_elses_pin_code` (#1573) sends a
 paper under an acknowledgements heading, and a "mentee" under a review panel's
 or a laboratory staff heading, to the Appendix (T), and an abstract that names
 its award under an abstracts heading to S8.
-An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
+An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors,
+and its inverse keeps an unsure H with a grant marker under a heading 3a maps
+to a grant subcode in funding. `fellowship_pin_code` (#1577, the owner's
+decision of 2026-10-30) recodes an I for an elected fellowship, or for one
+listed under honors, to H.
 An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
 A content pin (#1695) recodes a per-article citation-metrics line ("<Surname> et
@@ -43,13 +47,21 @@ and a meeting the owner attended is B2.
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`, except `apply_non_seat_pins`, which reads the whole CV's
 entries after T-validation (where some of those rows got their Q2) and needs
-no context; no LLM, no I/O. Imports only `.context`.
+no context; no LLM, no I/O. Imports only `.context` and
+`core.honor_lines`, the grant marker and fellowship test the doctor's lint and
+stage 6's research-support guard share.
 """
 
 import logging
 import re
 from collections.abc import Iterable
 
+from ..core.honor_lines import (
+    GRANT_MARKER,
+    MEMBERSHIP_CODE,
+    PI_ROLE_LEAD,
+    is_honorific_fellowship,
+)
 from .context import TaxonomyContext
 
 logger = logging.getLogger(__name__)
@@ -137,19 +149,28 @@ _NOT_A_GRANT_REVIEW = re.compile(
 # Award" or "2007 Example Group Grant, Example Fund" rendered as a one-year Current
 # Research Funding table with no title and no PI (UVZNIC, ZDOAZO, IXJMKS; model
 # confidence 0.50-0.55). A grant or activity number, a dollar amount, a period
-# with two ends, or a PI role at the head of the row keeps the model's grant code.
-_GRANT_CODES = frozenset({"M2", "M2A", "M2B", "M2C"})
+# with two ends, or a PI role at the head of the row keeps the model's grant code
+# (`core.honor_lines.GRANT_MARKER` and `PI_ROLE_LEAD`, which stage 6's
+# research-support guard and the doctor's honor_as_funding lint read too).
+_GRANT_SUBCODES = frozenset({"M2A", "M2B", "M2C"})
+_GRANT_CODES = _GRANT_SUBCODES | {"M2"}
 _H_PIN_MAX_MODEL_CONFIDENCE = 0.80
-_GRANT_MARKER = re.compile(
-    r"\b[A-Z]\d{2}\b"                                                       # R01, K23, T32
-    r"|\b(?=[A-Z0-9]*\d{2})(?=[A-Z0-9]*[A-Z]{2})[A-Z0-9]{6,}\b"            # 2T32GM000000
-    r"|\$\s?\d|\b\d[\d,.]*\s?(?i:USD|dollars)\b"                            # an amount
-    r"|\b(?:19|20)\d{2}\s*(?:[-\u2013\u2014]|\b(?i:to)\b)\s*(?:\d{1,2}/)?"  # two-ended period
-    r"(?:[A-Za-z]{3,9}\.?\s*)?(?:(?:19|20)\d{2}\b|\d{2}\b(?!/)|(?i:present|current|date)\b)"
-)
-_PI_ROLE_LEAD = re.compile(
-    r"^[\s\d/\-\u2013\u2014,.:;*\u2022]*(?:(?i:(?:principal|co-?)\s*investigator)\b|(?i:co-?)?PI\b)"
-)
+
+# --- YUYVIG BLBVPD-05 (#1577): the inverse, a funded award under a grants heading ---
+#
+# Under a heading 3a maps, on its most specific level, to a grant subcode,
+# an unsure H on a line that carries a grant marker is the author's grant:
+# "Clinical Investigator Award, <Institute>, HL-01064. 1982 - 1987, $225,000."
+# and "<Name> Research Scholar, <Association>. 1983-1984." under "PRINCIPAL
+# INVESTIGATOR OF GRANTS: PAST" (3a: M2B at 1.0; model H at 0.70-0.75)
+# rendered as Honors rows, their number and amount nowhere. The marker is the
+# H pin's own, so one rule reads a line both ways. The leaf's code is the
+# subcode; step 5's date rule then corrects M2A/M2B by the line's dates. A
+# bare M2 leaf names no subcode, so it does not pin. A confident H keeps it,
+# at the H pin's own ceiling (a university award with its funds, at
+# 0.90-0.95, under an internal-grants heading). The marker is wider than "a
+# number or an amount": the period with two ends is what reads "<Name>
+# Research Scholar, <Association>. 1983-1984." as the grant it is.
 
 # --- #1708: a journal article under a peer-reviewed journals heading is not an abstract ---
 #
@@ -393,6 +414,23 @@ _MENTOR_GRANT_HEADING = re.compile(
     rf"\bas\s+{_MENTOR_ROLE}\b|^\s*{_MENTOR_ROLE}(?:\s+(?:or|and)\s+{_MENTOR_ROLE})*[\s:]*$", re.I
 )
 _MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is a mentored trainee grant"
+
+# --- #1577 shape 2: an elected fellowship, or one listed under honors, is an honor ---
+#
+# The owner's decision of 2026-10-30: a fellowship the CV says was elected, or
+# lists under an honors heading, is H and renders under Honors with its year;
+# a fellowship grade members apply for (FACS, FACC), under a membership
+# heading, stays I. The model answers I (0.75-0.95) because prompt rules 16, 26
+# and 27 still say "Fellow, [Society]" is I even under Honors, so the
+# confidence measures agreement with a rule the decision reverses, and this
+# pin is not confidence-gated (YUYVIG MVUREJ 44, IZIXVF 55, XNWSZN 53; NECRGC
+# ZASOTV, XYXIQJ, YIXQFB, AOJEQD, LWMSPJ, UAURFU). The test is
+# `core.honor_lines.is_honorific_fellowship`, the doctor's
+# fellowship_as_membership lint's own. 73 of the 77 answers it recodes on the
+# #1243 farm are above 0.80, so a confidence gate would leave the decision
+# unapplied; the prompt change that would let the model apply it is #1577
+# item (d), which needs a paid stage-3b A/B.
+_FELLOWSHIP_HONOR_WHY = "An elected fellowship, or one listed under honors, is an honor"
 
 # --- #1573: rows a heading says are someone else's are not the owner's records ---
 #
@@ -748,8 +786,9 @@ def leaf_header_code(context: TaxonomyContext) -> str | None:
 
     Unlike `pinned_header_code` the parent levels need not agree: a grant-reviewer
     sub-heading under a general service heading mapped Q2/Q4 still says Q3.
-    Used only for the grant-review (Q3), mentoring-programs (N1) and
-    clinical-leadership (L3) pins, whose override sets are one or two codes wide.
+    Used only for the grant-review (Q3), mentoring-programs (N1),
+    clinical-leadership (L3) and grant-subcode (M2A/M2B/M2C over H) pins,
+    whose override sets are one or two codes wide.
     """
     for level in (context.subsection, context.section, context.meta_section):
         if level and level.get("taxonomy_options"):
@@ -801,8 +840,17 @@ def _h_pin_takes(entry: dict) -> bool:
     return (
         entry.get("taxonomy_code") in _GRANT_CODES
         and _safe_confidence(entry) <= _H_PIN_MAX_MODEL_CONFIDENCE
-        and not _GRANT_MARKER.search(text)
-        and not _PI_ROLE_LEAD.match(text)
+        and not GRANT_MARKER.search(text)
+        and not PI_ROLE_LEAD.match(text)
+    )
+
+
+def _grant_pin_takes(entry: dict) -> bool:
+    """Whether a grant-subcode leaf recodes this model answer: an unsure H on a row with a grant marker."""
+    return (
+        entry.get("taxonomy_code") == _HONOR_CODE
+        and _safe_confidence(entry) <= _H_PIN_MAX_MODEL_CONFIDENCE
+        and bool(GRANT_MARKER.search(entry.get("text") or ""))
     )
 
 
@@ -844,6 +892,8 @@ def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | Non
         return pin
     if pin == _HONOR_CODE and _h_pin_takes(entry):
         return _HONOR_CODE
+    if leaf in _GRANT_SUBCODES and _grant_pin_takes(entry):
+        return leaf
     if pin == _S1_PIN and _s1_pin_takes(entry):
         return _S1_PIN
     if leaf == _GRANT_REVIEW_PIN and code in _GRANT_REVIEW_OVERRIDABLE and _is_grant_review(entry):
@@ -972,6 +1022,16 @@ def mentor_grant_pin_code(entry: dict) -> tuple[str, str] | None:
     if not any(_MENTOR_GRANT_HEADING.search(str(level)) for level in entry.get("hierarchy") or []):
         return None
     return _MENTOR_GRANT_CODE, _MENTOR_GRANT_WHY
+
+
+def fellowship_pin_code(entry: dict) -> tuple[str, str] | None:
+    """(H, why) for an I that `is_honorific_fellowship` reads as an honor, else None (#1577)."""
+    if entry.get("taxonomy_code") != MEMBERSHIP_CODE:
+        return None
+    levels = [str(level) for level in entry.get("hierarchy") or []]
+    if not is_honorific_fellowship(entry.get("text") or "", levels):
+        return None
+    return _HONOR_CODE, _FELLOWSHIP_HONOR_WHY
 
 
 def is_heading_line(entry: dict) -> bool:
@@ -1145,14 +1205,15 @@ def apply_non_seat_pins(entries: Iterable[dict]) -> tuple[list[dict], dict]:
 def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
              after_unseen_reviewer_lead_in: bool, lead: str) -> tuple[str, str] | None:
     """(code, why) for one model answer: the header pin, then the mentor-grant,
-    mentee, someone-else's, content and reviewer pins. A mentee's abstract under
-    a students level is the mentee's (N4), not the owner's (S8)."""
+    mentee, someone-else's, content, reviewer and fellowship pins. A mentee's
+    abstract under a students level is the mentee's (N4), not the owner's (S8)."""
     header_code = header_pin_code(entry, pin, leaf)
     if header_code:
         return header_code, _HEADER_PIN_WHY
     return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee)
             or someone_elses_pin_code(entry, lead) or content_pin_code(entry)
-            or reviewer_pin_code(entry, after_unseen_reviewer_lead_in))
+            or reviewer_pin_code(entry, after_unseen_reviewer_lead_in)
+            or fellowship_pin_code(entry))
 
 
 def _in_later_batch(position: int, lead_in_at: int | None, batch_size: int | None) -> bool:
@@ -1170,7 +1231,8 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
     in `pre_pin_code` / `pre_pin_reasoning`; `classification_source` stays
     "llm" (stage 3b's zero-classification gate counts it). The header pin is
     checked first, then the mentor-grant pin (#1710), the mentee pin (#1251),
-    the someone-else's pin (#1573), a content pin and the reviewer pin (#1413).
+    the someone-else's pin (#1573), a content pin, the reviewer pin (#1413)
+    and the fellowship pin (#1577).
 
     `batch_size` is the number of entries per classification call the group was
     sent in, in the order given here; None means the group went in one call, so

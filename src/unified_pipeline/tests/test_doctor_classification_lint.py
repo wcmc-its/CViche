@@ -509,6 +509,35 @@ def test_every_honors_word_names_an_honors_heading_1577(heading):
     assert _shapes(_run(_entry("2015 Invented Seed Award", "M2B", heading))) == ["honor_as_funding"]
 
 
+def _stage4_record(entry, **fields):
+    return {**entry, "extracted_fields": fields, "extraction_success": True}
+
+
+def test_an_award_stage6_lists_under_honors_is_no_honor_as_funding_finding_1577():
+    """#1577 review B2 (VMMMEE 46's shape): stage 6's research-support guard
+    groups a record with only a funder and one year under H, so Honors prints
+    it; the lint, given the run's stage 4, does not report what is already
+    right. Without stage 4 it reads stage 3b alone, as before."""
+    award = _entry("2031 Invented MIRA Award", "M2A", "Honors and Awards", idx=46)
+    stage4 = {"entries": [_stage4_record(award, agency="Invented Institute", start_date="2031")]}
+    assert lint_section_consistency({"entries": [award]}, stage4) == []
+    assert _shapes(lint_section_consistency({"entries": [award]})) == ["honor_as_funding"]
+
+
+@pytest.mark.parametrize("fields", [
+    {"agency": "Invented Institute", "start_date": "2031", "title": "Example aims"},  # a title
+    {"agency": "Invented Institute", "start_date": "2031", "end_date": "2034"},       # a period
+])
+def test_an_award_stage6_tables_is_still_reported_1577(fields):
+    award = _entry("2031 Invented MIRA Award", "M2A", "Honors and Awards", idx=46)
+    other = _entry("2031 Invented Other Award", "M2A", "Honors and Awards", idx=47)
+    stage4 = {"entries": [_stage4_record(award, **fields),
+                          _stage4_record(other, agency="Invented Institute", start_date="2031")]}
+    [finding] = lint_section_consistency({"entries": [award, other]}, stage4)
+    assert finding["message"].startswith("honor_as_funding: 1 entr")
+    assert finding["evidence"][0].startswith("entry 46 (M2A): ")
+
+
 def test_honors_heading_is_read_on_the_leaf_for_a_grant_code_1577():
     """A grants list nested under an honors parent is the author's grants."""
     assert _run(_entry("2015 Invented Seed Award", "M2B", "Honors and Awards", "Grants")) == []
@@ -571,7 +600,7 @@ def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
     # No honors word on the path, and no election.
     ("Fellow, Invented College of Examples", "I", ("Professional Societies",)),
     # An honors parent over a leaf that names memberships or credentials.
-    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Honorary Societies")),
+    ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Professional Associations")),
     ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Memberships")),
     ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Organizations")),
     ("Fellow, Invented College of Examples", "I", ("Honors and Awards", "Affiliations")),
@@ -600,6 +629,36 @@ def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
 ])
 def test_fellowship_shapes_that_are_quiet_1577(text, code, headings):
     assert _run(_entry(text, code, *headings)) == []
+
+
+@pytest.mark.parametrize("text, headings, honor", [
+    ("2017: Elected Fellow of the Invented Society for Cell Examples", ("Professional Memberships",), True),
+    ("2031-present Invented Epidemiological Society (elected Fellow)", ("Professional Memberships",), True),
+    ("2031 Fellowship, Invented College of Physicians", ("Honors and Awards",), True),
+    ("Invented College of Physicians, Fellow | 2031", ("Professional Honors and Awards", "Service"), True),
+    ("2031 Fellow, Invented College of Examples", ("Professional Honors & Recognition", "National"), True),
+    ("2031 Fellow, Invented College of Examples", ("Awards, Honors, and Membership in Honorary Societies",),
+     False),
+    ("2031 Invented Head and Neck Society, Fellow", ("CERTIFICATION",), False),
+    ("Invented Academy (Active Member; elected fellow 2031)", ("Professional Societies",), False),
+    ("Fellow - Invented Leadership Programme, 2031", ("Honors and Awards",), False),
+    ("Fellow Invented Royal College of Physicians - 2031", ("ELECTED MEMBERSHIPS",), True),
+    ("Fellow, Invented College of Physicians (elected Governor, 2031)", ("Professional Societies",), False),
+    ("2031 Fellow, Invented College of Examples", ("Honors and Professional Memberships", "National"), False),
+    ("2031- Fellow, Invented Society of Body Examples",
+     ("E. Post-Degree Honors, Awards, and Professional Associations", "Professional Associations"), False),
+    ("2031 Fellow, Invented College of Examples", ("Honors and Awards", "Honor Societies"), True),
+    ("2031 Fellow, Invented College of Surgeons", ("Professional and Honorary Societies",), False),
+    ("2031 Fellow, Invented College of Examples", ("Scientific and Honor Societies",), False),
+])
+def test_the_lint_reports_exactly_what_the_stage3b_fellowship_pin_recodes_1577(text, headings, honor):
+    """One test, two readers (CODING_STANDARDS.md §1.5): the lint reports an I
+    line as fellowship_as_membership exactly when stage 3b's fellowship pin
+    recodes it to H, so a fresh run leaves the lint nothing the pin read."""
+    from unified_pipeline.stage3b.header_pin import fellowship_pin_code
+    entry = _entry(text, "I", *headings)
+    assert (fellowship_pin_code(entry) is not None) is honor
+    assert (_shapes(_run(entry)) == ["fellowship_as_membership"]) is honor
 
 
 # --- pinned_heading_empty (#1949) ------------------------------------------

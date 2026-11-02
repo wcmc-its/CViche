@@ -74,6 +74,8 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     filter_role_effort_headers,
     grant_id_tokens,
     heading_role,
+    honor_listed_as_funding_warnings,
+    is_honor_listed_as_funding,
     is_role_effort_header,
     lacks_funding_signal,
     match_effort_for_title,
@@ -3852,3 +3854,114 @@ def test_a_diverted_grant_is_marked_with_its_check():
     [copy] = gen._declined_grant_entries
     assert copy['grant_diversion_check'] == 'grant_not_funded_application'
     assert 'grant_diversion_check' not in entry
+
+
+# --- #1577: an award under an honors heading with nothing a funding table needs ---
+
+def _honors_record(code='M2A', heading=('Honors and Awards',),
+                   text='2031 Example Investigator, Example Alliance for Research', **fields):
+    return {'taxonomy_code': code, 'element_idx_start': 117, 'hierarchy': list(heading),
+            'text': text,
+            'extracted_fields': {'agency': 'Example Alliance for Research', 'start_date': '2031', **fields}}
+
+
+@pytest.mark.parametrize('code', ['M2A', 'M2B', 'M2C'])
+@pytest.mark.parametrize('fields', [
+    {}, {'end_date': '2031'}, {'start_date': None}, {'start_date': '06/2031', 'end_date': '2031-12'},
+    {'title': '  ', 'pi_name': None, 'grant_number': ''},
+    {'funding_source': 'Example Fund', 'sponsor': 'Example Sponsor', 'status': 'completed',
+     'notes': 'example note', 'description': 'example description', 'date': '2031'},
+    {'submission_date': '2031'},
+    {'granting_body': 'Example Alliance'},
+])
+def test_an_untitled_one_year_record_under_honors_is_an_honor(code, fields):
+    assert is_honor_listed_as_funding(_honors_record(code, **fields), code)
+
+
+@pytest.mark.parametrize('entry, code', [
+    # a title, a PI, or any funding signal: the author's grant listed with the honors
+    (_honors_record(title='Example signals in example tissue'), 'M2A'),
+    (_honors_record(trial_title='Example trial'), 'M2A'),
+    (_honors_record(pi_name='J. Example'), 'M2A'),
+    (_honors_record(principal_investigator='J. Example'), 'M2A'),
+    (_honors_record(grant_number='K08 XX000000'), 'M2A'),
+    (_honors_record(total_funding='$1,000'), 'M2A'),
+    (_honors_record(pi_role='PI'), 'M2A'),
+    (_honors_record(percent_effort='10%'), 'M2A'),
+    # a key this section does not read: whatever it is, the record is not an honor's
+    (_honors_record(amount='$5,000'), 'M2A'),
+    (_honors_record(direct_costs='$5,000'), 'M2A'),
+    (_honors_record(project_title='Example project'), 'M2A'),
+    (_honors_record(award_name='Example Investigator'), 'M2A'),
+    # M2C's own amount key
+    (_honors_record(total_funding_requested='$250,000'), 'M2C'),
+    # a grant marker or a PI role on the line, whatever stage 4 filled (#1577 review, B1)
+    (_honors_record(text='2031 Example Career Development Award (K08 XX000000), Example Institute'), 'M2A'),
+    (_honors_record(text='2031 Example R01 award, Example Institute of Health'), 'M2A'),
+    (_honors_record(text='2031 Example Foundation Pilot Award, $50,000'), 'M2A'),
+    (_honors_record(text='Example Scholar Award, Example Foundation, 2031-2034'), 'M2A'),
+    (_honors_record(text='2031-present Example K12 Scholar, Example Institute'), 'M2A'),
+    (_honors_record(text='PI, 2031 Example Foundation Award'), 'M2A'),
+    # a period of support
+    (_honors_record(end_date='2033'), 'M2B'),
+    (_honors_record(end_date='present'), 'M2A'),
+    (_honors_record(end_date='Current'), 'M2A'),
+    (_honors_record(end_date='to date'), 'M2A'),
+    (_honors_record(end_date='now'), 'M2A'),
+    (_honors_record(date='2031-2034'), 'M2A'),
+    (_honors_record(submission_date='2033'), 'M2C'),
+    (_honors_record(start_date=2031, end_date=2033), 'M2A'),
+    # a heading that names funding too, or no honors
+    (_honors_record(heading=('Grants and Contract Awards',)), 'M2A'),
+    (_honors_record(heading=('Honors', 'Research Awards')), 'M2A'),
+    (_honors_record(heading=('Awards and Honors', 'Grants')), 'M2A'),
+    (_honors_record(heading=()), 'M2A'),
+    # a code no funding table renders
+    (_honors_record(), 'H'),
+    (_honors_record(), 'M2'),
+    (_honors_record(), 'M2D'),
+])
+def test_a_record_with_a_grants_detail_or_off_an_honors_heading_is_not(entry, code):
+    assert not is_honor_listed_as_funding(entry, code)
+
+
+def test_a_text_field_stage4_copied_from_the_line_is_an_honors_field():
+    entry = _honors_record()
+    entry['extracted_fields']['text'] = '2031 Example Investigator, Example Alliance for Research'
+    assert is_honor_listed_as_funding(entry, 'M2A')
+
+
+def test_the_honors_heading_is_read_on_the_leaf_and_may_be_a_string():
+    assert is_honor_listed_as_funding(_honors_record(heading=('Grants', 'Honors')), 'M2A')
+    assert not is_honor_listed_as_funding(_honors_record(heading=('Honors', 'Funding')), 'M2A')
+    entry = {**_honors_record(), 'hierarchy': 'Honors and Awards'}
+    assert is_honor_listed_as_funding(entry, 'M2A')
+
+
+def test_a_record_stage4_failed_on_stays_funding():
+    """A failed stage-4 batch writes empty fields and extraction_success
+    False (stage4/extraction.py `_failed_entries`): the fields say nothing
+    about the record, so it keeps its funding table (#1577 review, B1)."""
+    failed = {**_honors_record(), 'extracted_fields': {}, 'extraction_success': False}
+    assert not is_honor_listed_as_funding(failed, 'M2A')
+
+
+def test_a_record_stage4_extracted_with_no_fields_is_read_from_its_line_heading_and_code():
+    for extracted in (None, {}):
+        entry = {**_honors_record(), 'extracted_fields': extracted, 'extraction_success': True}
+        assert is_honor_listed_as_funding(entry, 'M2A')
+
+
+def test_the_honor_listed_as_funding_record_names_indexes_only():
+    assert honor_listed_as_funding_warnings([]) == []
+    [record] = honor_listed_as_funding_warnings([117, 126])
+    assert record == {
+        'check': 'honor_listed_as_funding_reroute',
+        'code': 'M2',
+        'section': 'research_support',
+        'message': ('grant record under an honors heading with no title, PI, funding detail or '
+                    'multi-year span moved to Honors: 2 entries'),
+        'evidence': ['element_idx_start 117', 'element_idx_start 126'],
+        'severity': 'INFO',
+    }
+    assert honor_listed_as_funding_warnings([117])[0]['message'].endswith(': 1 entry')

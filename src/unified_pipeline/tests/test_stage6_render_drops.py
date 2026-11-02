@@ -1416,3 +1416,80 @@ def test_only_the_non_seat_pin_is_carried(entry: dict, carried: bool) -> None:
     before = dict(entry["extracted_fields"])
     [grouped] = [e for group in _grouped(entry).values() for e in group]
     assert (grouped["extracted_fields"] != before) is carried
+
+
+# --- #1577: an award under an honors heading that stage 3b coded as a grant ---
+# UVZNIC-02's shape: "2031 Example Investigator, <funder>" coded M2A under an honors heading,
+# stage 4 filling only the funder and a start year. Invented values.
+
+def _honor_as_grant(code: str = "M2A", idx: int = 117, heading: str = "Awards and Honors", **fields) -> dict:
+    return {"taxonomy_code": code, "element_idx_start": idx, "hierarchy": [heading],
+            "text": "2031 Quillmoor Investigator Award, Fernhollow Alliance for Research",
+            "extracted_fields": {"agency": "Fernhollow Alliance for Research", "start_date": "2031", **fields}}
+
+
+def _honors_moved_records(gen: WCMTemplateGenerator) -> list[dict]:
+    return [w for w in gen._section_failures if w["check"] == "honor_listed_as_funding_reroute"]
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_an_untitled_one_year_grant_record_under_honors_is_grouped_as_an_honor(code: str) -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_honor_as_grant(code)])
+    [moved] = groups["H"]
+    assert code not in groups
+    assert (moved["taxonomy_code"], moved["taxonomy_code_original"]) == ("H", code)
+    assert moved["extracted_fields"]["granting_body"] == "Fernhollow Alliance for Research"
+    [record] = _honors_moved_records(gen)
+    assert (record["severity"], record["evidence"]) == ("INFO", ["element_idx_start 117"])
+    assert "Fernhollow" not in json.dumps(record)
+
+
+def test_a_granting_body_stage4_wrote_is_kept() -> None:
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code(
+        [_honor_as_grant(granting_body="Quillmoor Foundation")])
+    assert groups["H"][0]["extracted_fields"]["granting_body"] == "Quillmoor Foundation"
+
+
+def test_a_record_with_no_funder_moves_with_no_granting_body() -> None:
+    entry = {**_honor_as_grant(), "extracted_fields": {"start_date": "2031"}}
+    [moved] = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])["H"]
+    assert "granting_body" not in moved["extracted_fields"]
+
+
+@pytest.mark.parametrize("entry", [
+    _honor_as_grant(title="Example signals in example tissue"),
+    _honor_as_grant(grant_number="K08 XX000000"),
+    _honor_as_grant(end_date="2034"),
+    _honor_as_grant(heading="Current Research Support"),
+    # the line names the grant's number, whatever stage 4 filled (#1577 review, B1)
+    {**_honor_as_grant(), "text": "Quillmoor K08 Career Development Award, K08 XX000000, 2031-2036, $750,000"},
+    # stage 4 failed on the record: its empty fields say nothing about it
+    {**_honor_as_grant(), "extracted_fields": {}, "extraction_success": False},
+])
+def test_a_grant_record_with_a_grants_detail_keeps_its_funding_code(entry: dict) -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    assert "H" not in groups and len(groups["M2A"]) == 1
+    assert "taxonomy_code_original" not in entry
+    assert _honors_moved_records(gen) == []
+
+
+def test_an_honor_coded_as_a_grant_renders_in_honors_not_as_a_funding_table(tmp_path) -> None:
+    from docx import Document
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None  # no LLM, deterministic
+    source = tmp_path / "in.json"
+    source.write_text(json.dumps({"document_uid": "TESTAB", "entries": [
+        {"taxonomy_code": "A", "element_idx_start": 0, "text": "Name: Pat Example, MD",
+         "extracted_fields": {}},
+        _honor_as_grant()]}))
+    out = tmp_path / "out.docx"
+    gen.generate(str(source), str(out), research_summary_path=None)
+    document = Document(str(out))
+    rows = [[cell.text for cell in row.cells] for table in document.tables for row in table.rows]
+    # The funding headings keep only the template's N/A placeholder rows.
+    assert [cells[1] for cells in rows if cells[0].startswith("Award Source")] == ["N/A", "N/A"]
+    assert [cells for cells in rows if any("Fernhollow" in cell for cell in cells)] == [
+        ["Quillmoor Investigator Award", "Fernhollow Alliance for Research", "2031"]]
