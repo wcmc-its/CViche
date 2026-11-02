@@ -103,3 +103,39 @@ def test_board_abbreviation_national_board_and_b2_rows_become_f2(text, hierarchy
 )
 def test_board_abbreviation_mid_line_or_in_award_context_is_not_flipped(text, hierarchy, code):
     assert _code_after(text, hierarchy, code) == code
+
+
+# --- #1577 shape 3: a signature on a line whose own words name another credential's home ---
+
+def _entry_after(text, hierarchy, code):
+    entries = [{"text": text, "hierarchy": hierarchy, "taxonomy_code": code}]
+    apply_wcm_table_corrections(entries)
+    return entries[0]
+
+
+@pytest.mark.parametrize(
+    "text,hierarchy,code,expected",
+    [
+        # A licensing exam the board signature reads as a board: B2, not F2.
+        ("Diplomate, National Board of Medical Examiners, 2031", ["Education"], "H", "B2"),
+        ("Certifications:   National Board of Medical Examiners  2031", ["Experience"], "I", "B2"),
+        # Stage 3b's credential pin made these B2; the corrector leaves them there.
+        ("Diplomate, National Board of Medical Examiners, 2031", ["Education"], "B2", "B2"),
+        ("ATLS Certificate # 12345, 2031", ["Licensure"], "B2", "B2"),
+        ("American Board of Example Surgery Part I written exam, passed 2031", ["Licensure"], "B2", "B2"),
+        # A licence signature on an ECFMG line: B2, not F1.
+        ("ECFMG Certificate (required for medical licensure), 2031", ["Credentials"], "T", "B2"),
+        # Lines that are what the signature says still get its code.
+        ("Medical License number 12345, Example State", ["Licensure"], "T", "F1"),
+        ("Diplomate, American Board of Example Medicine, 2031", ["Memberships"], "I", "F2"),
+    ],
+)
+def test_a_signature_defers_to_the_lines_credential_home_1577(text, hierarchy, code, expected):
+    entry = _entry_after(text, hierarchy, code)
+    assert entry["taxonomy_code"] == expected
+    if expected != code:
+        assert entry["wcm_table_correction"]["original_code"] == code
+        if expected == "B2":
+            assert "homed B2 as" in entry["wcm_table_correction"]["reason"]
+    else:
+        assert "wcm_table_correction" not in entry

@@ -18,6 +18,7 @@ from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     apply_header_pin,
     apply_non_seat_pins,
     content_pin_code,
+    credential_pin_code,
     fellowship_pin_code,
     is_note_not_record,
     is_reviewer_lead_in,
@@ -811,6 +812,10 @@ def test_content_pins_leave_other_rows(code, text, hierarchy):
     ("S2", "Wrote an invited example article (see publication #12).", NO_PIN_CTX),
     ("S1", "2. Quorlenby et al. (2031) Example Membrane Letters JIF: 9.9 cited 3 times", NO_PIN_CTX),
     ("K1", '"I learned so much in this course; the lectures were clear."', NO_PIN_CTX),
+    # #1577 shape 3: the credential pin's three answers and its board-block rule's
+    ("F1", "2031 Certified by Educational Commission for Foreign Medical Graduates (ECFMG)", NO_PIN_CTX),
+    ("F1", "1980   M(ASCP), Technologist in Example Science, certificate #X000000", NO_PIN_CTX),
+    ("B2", "June 2031 Licensed to practice Example Medicine in the state of Example", NO_PIN_CTX),
 ])
 def test_no_new_pin_is_flipped_back_by_the_reasoning_check(code, text, ctx):
     from unified_pipeline.core.validators.reasoning_consistency_checker import (
@@ -2121,3 +2126,98 @@ def test_apply_non_seat_pins_keeps_the_models_answer_and_counts_each_recode():
         "from": "Q2", "to": "D3", "reason": non_seat_pin_code(consulting)[1]}}]
     assert stats["correction_details"][0]["correction"]["reason"].startswith("Consulting")
     assert non_seat_pin_code(_service("Q2", "Attendee Example Day 2031"))[1].startswith("A meeting the owner attended")
+
+
+# --- #1577 shape 3: a credential coded as the wrong one of licence, board and other education ---
+
+@pytest.mark.parametrize("code,text,hierarchy,expected", [
+    # ZDOAZO 62's shape: a fluoroscopy permit under Licensure
+    ("F1", "2031- Example State Fluoroscopy Operator and Supervisor (XX000000)", ("Licensure",), "B2"),
+    # VTRKUF 28 / JPNUDX 46: an ECFMG certificate
+    ("F1", "2031 Certified by Educational Commission for Foreign Medical Graduates (ECFMG)",
+     ("Licensure and Certification",), "B2"),
+    # PPMTJH 28: an early board-exam step coded F2
+    ("F2", "American Board of Example Surgery Part I written exam, passed 2031", ("Board Certification",), "B2"),
+    # VTRKUF 65: an equivalency evaluation coded F2
+    ("F2", "US Educational Equivalent Degree: M.D.\tCredentials assessed by Example Evaluators, Inc.",
+     ("Credentialing",), "B2"),
+    # HXBPCT 138 and 145-155: an accreditation and laser-procedure credentials
+    ("F1", "Example State, USA Level II accreditation, 2031", ("Credentials",), "B2"),
+    ("F1", "2031 Excimer laser credential, Example Laser Systems", ("Credentials",), "B2"),
+    # ECXGAT 48/50: a technologist certificate coded F1
+    ("F1", "1980   M(ASCP), Technologist in Example Science, certificate #X000000", ("Personal Data",), "F2"),
+    # LTTYWI 56: a licence to practise coded B2; LTTYWI 58: a diplomate line coded I
+    ("B2", "June 2031 Licensed to practice Example Medicine and Surgery in the state of Example",
+     ("Education",), "F1"),
+    ("I", "2031-Present Diplomate, Example College of Example Medicine", ("Memberships",), "F2"),
+    ("F2", "Example State Controlled Substance Registration, 2031", ("Board Certification",), "F1"),
+    # the life-support content pin this widens: a spelled-out name
+    ("F1", "Basic Cardiac Life Support, 2031", ("Licensure",), "B2"),
+])
+def test_a_misfiled_credential_is_recoded_whatever_its_confidence_1577(code, text, hierarchy, expected):
+    (out,), n = apply_header_pin([_row(code, text, confidence=0.95, hierarchy=hierarchy)], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == expected and out["pre_pin_code"] == code
+    assert f"(category {expected})" in out["classification_reasoning"]
+    assert credential_pin_code(_row(code, text, hierarchy=hierarchy), False)[0] == expected
+
+
+@pytest.mark.parametrize("code,text,hierarchy", [
+    # The owner's ruling of 2026-11-02: a fellowship under a certification heading stays I
+    # (EUCSNU 45, FVQANK 63, HBALTD 26, TVQZIP 45).
+    ("I", "2031 Example Society, Fellow", ("CERTIFICATION",)),
+    ("I", "Fellow, Example College of Surgeons (FACXY), 2031", ("Certifications",)),
+    ("I", "Fellow of the Royal College of Physicians of Example (FRCPC), 2031", ("Board Certification",)),
+    # A licence, a late board-exam step (HVSKET 26/27) and an identifier stay where they are.
+    ("F1", "Example State Medical License #12345, 2031", ("Licensure",)),
+    ("F2", "American Board of Example Surgery, oral examination passed 2031", ("Board Certification",)),
+    ("F1", "NPI 0000000000", ("Licensure",)),
+    # A heading line (T) and a position (D) are never moved.
+    ("T", "Licensed to practice in Example State", ("Licensure",)),
+    ("D2", "Diplomate, American Board of Example Medicine, 2031", ("Appointments",)),
+])
+def test_what_the_credential_pin_leaves_1577(code, text, hierarchy):
+    entry = _row(code, text, hierarchy=hierarchy)
+    assert credential_pin_code(entry, True) is None
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+_BOARD_ROW = "Board Certified Example Medicine 2031, recertified 2041"
+_UNWORDED_BOARD_LINE = "Example Academy of Example Medicine 2033"
+
+
+def _block(*rows: tuple[str, str]) -> list[dict]:
+    return [_row(code, text, confidence=0.7, hierarchy=("Personal Data",)) for code, text in rows]
+
+
+def test_an_unworded_line_after_a_board_row_is_its_blocks_certification_1577():
+    # FCAAUV 15: the third line of an inline Board Certification block, coded I.
+    out, n = apply_header_pin(_block(("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)), NO_PIN_CTX)
+    assert n == 1 and [row["taxonomy_code"] for row in out] == ["F2", "F2"]
+    assert out[1]["pre_pin_code"] == "I"
+    assert out[1]["classification_reasoning"].startswith("A credential line listed in a board-certification block")
+
+
+@pytest.mark.parametrize("rows,codes", [
+    # It does not chain: the row before must be F2 by another answer than its own.
+    ([("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE), ("I", "Example Academy of Example Surgery 2034")],
+     ["F2", "F2", "I"]),
+    # The row right before must be a board row.
+    ([("H", "Example Award 2031"), ("I", _UNWORDED_BOARD_LINE)], ["H", "I"]),
+    ([("F2", _BOARD_ROW), ("I", "Member, Example Society"), ("I", _UNWORDED_BOARD_LINE)], ["F2", "I", "I"]),
+    ([("I", _UNWORDED_BOARD_LINE)], ["I"]),
+    # A society or a fellowship after a board row stays a membership.
+    ([("F2", _BOARD_ROW), ("I", "Example Society of Example Medicine 2033")], ["F2", "I"]),
+    ([("F2", _BOARD_ROW), ("I", "Fellow, Example Academy 2033")], ["F2", "I"]),
+])
+def test_the_board_block_rule_reads_only_the_row_right_before_1577(rows, codes):
+    out, _ = apply_header_pin(_block(*rows), NO_PIN_CTX)
+    assert [row["taxonomy_code"] for row in out] == codes
+
+
+def test_a_fallback_board_row_still_opens_a_block_but_a_fallback_line_is_not_pinned_1577():
+    board, line = _block(("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE))
+    out, n = apply_header_pin([{**board, "classification_source": "fallback"}, line], NO_PIN_CTX)
+    assert n == 1 and out[1]["taxonomy_code"] == "F2"
+    out, n = apply_header_pin([board, {**line, "classification_source": "fallback"}], NO_PIN_CTX)
+    assert n == 0

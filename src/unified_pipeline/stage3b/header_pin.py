@@ -43,19 +43,35 @@ in an earlier batch.
 `non_seat_pin_code` (#1580) recodes a Q2 or P row that is no seat on a body:
 consulting, a company's advisory board and expert work in litigation are D3,
 and a meeting the owner attended is B2.
+`credential_pin_code` (#1577 shape 3) recodes a credential coded as the wrong
+one of licence, board certification and other education
+(`core.credential_lines.misfiled_credential_home`): a permit, an exam, a
+procedure credential or a life-support or teaching certificate coded F1 or F2
+is B2, a registry certification coded F1 is F2, a licence to practise coded
+B2 or I is F1, and a diplomate line coded I is F2; so is an unworded line
+listed right after a board certification.
 
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`, except `apply_non_seat_pins`, which reads the whole CV's
 entries after T-validation (where some of those rows got their Q2) and needs
-no context; no LLM, no I/O. Imports only `.context` and
-`core.honor_lines`, the grant marker and fellowship test the doctor's lint and
-stage 6's research-support guard share.
+no context; no LLM, no I/O. Imports only `.context`, `core.honor_lines`
+(the grant marker and fellowship test the doctor's lint and stage 6's
+research-support guard share) and `core.credential_lines` (the credential
+homes the WCM table corrector, stage 6's licensure guard and the doctor's
+credential_misfiled lint share).
 """
 
 import logging
 import re
 from collections.abc import Iterable
 
+from ..core.credential_lines import (
+    BOARD_CODE,
+    KIND_BOARD_BLOCK_LINE,
+    LICENCE_CODE,
+    OTHER_EDUCATION_CODE,
+    misfiled_credential_home,
+)
 from ..core.honor_lines import (
     GRANT_MARKER,
     MEMBERSHIP_CODE,
@@ -269,17 +285,6 @@ _DATE = rf"(?:{_MONTH}\s+)?(?:\d{{1,2}}/)?(?:(?:19|20)\d{{2}}|['\u2019]?\d{{2}})
 _DATE_LEAD = rf"(?:{_DATE}(?:\s*(?:{_ANY_DASH}|to\b)\s*(?:{_DATE}|present\b|current\b|date\b)?)?[\s,:;.]*)?"
 _CHIEF_TRAINEE = re.compile(rf"^[\s\u2022*]*{_DATE_LEAD}chief\s+(?:residen(?:t|cy)|fellow)\b", re.I)
 _CHIEF_TRAINEE_WHY = "A chief resident or chief fellow is postdoctoral training"
-_LIFE_SUPPORT = re.compile(
-    r"\b(?:BCLS|BLS|ACLS|PALS|NRP|ATLS|basic\s+life\s+support"
-    r"|advanced\s+(?:cardiac|cardiovascular|trauma|pediatric)\s+life\s+support)\b",
-    re.I,
-)
-# A teaching certificate or licence, not any row that says "teaching" ("teaching hospital").
-_TEACHING_CERTIFICATE = re.compile(
-    r"\bteach(?:er|ers|ing)?\s+(?:certif|licen[cs]|credential)"
-    r"|\b(?:certif\w*|licen[cs]\w*|credential\w*)\s+(?:of\s+|as\s+(?:an?\s+)?|in\s+)?teach(?:er|ers|ing)?\b",
-    re.I,
-)
 # A note that points at a numbered publication listed elsewhere ("see publication
 # #88", "(publication #90)") is not a second copy of that citation.
 _PUBLICATION_POINTER = re.compile(r"\bpublications?\s*#\s*\d+", re.I)
@@ -431,6 +436,41 @@ _MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is 
 # unapplied; the prompt change that would let the model apply it is #1577
 # item (d), which needs a paid stage-3b A/B.
 _FELLOWSHIP_HONOR_WHY = "An elected fellowship, or one listed under honors, is an honor"
+
+# --- #1577 shape 3: a credential coded as the wrong one of licence, board and other education ---
+#
+# Stage 3b codes a fluoroscopy permit (ZDOAZO 62), an accreditation and six
+# laser-procedure credentials (HXBPCT 138, 145-155), a technologist and a
+# registered-microbiologist certificate (ECXGAT 48/50), an ECFMG certificate
+# (VTRKUF 28, JPNUDX 46), an equivalency evaluation (VTRKUF 65) and an early
+# board-exam step (PPMTJH 28) F1 or F2, and stage 6 renders each as a licence
+# or board row with its name gone. A licence to practise coded B2 (LTTYWI 56)
+# and a diplomate line coded I (LTTYWI 58) leave Licensure or Board
+# Certification empty. `core.credential_lines.misfiled_credential_home` names
+# a line's home by its own words, the doctor's credential_misfiled lint's own
+# test, and this pin applies it to the model's answer. It is not
+# confidence-gated: 142 of the 246 answers it recodes on the #1243 farm are
+# above 0.80 (ZDOAZO 62, ECXGAT 48 and PPMTJH 28 at 0.85), so a gate would
+# split one kind across the threshold. It replaces and widens the F1
+# life-support and teaching-certificate content pin. The prompt and taxonomy
+# narrowing that would let the model code these lines itself is the #1577
+# residual that needs a paid stage-3b A/B.
+#
+# An I line right after a board certification in the same group, with one
+# year and no fellowship, membership, society, association or role word, is
+# the block's next certification (FCAAUV 15, "<Academy> <field> 2013", the
+# third line of an inline Board Certification block; one fire on the farm, so
+# coverage is thin). The row before must be F2 by the model's answer or a pin
+# other than this one, so a run of lines after one board row does not chain.
+_CREDENTIAL_OTHER_EDUCATION_WHY = "A credential that is no licence and no board certification is other education"
+_CREDENTIAL_LICENCE_WHY = "A licence to practise or a controlled-substance registration is licensure"
+_CREDENTIAL_BOARD_WHY = "A board, registry or specialty certification is board certification"
+_BOARD_BLOCK_WHY = "A credential line listed in a board-certification block is board certification"
+_CREDENTIAL_WHY = {
+    OTHER_EDUCATION_CODE: _CREDENTIAL_OTHER_EDUCATION_WHY,
+    LICENCE_CODE: _CREDENTIAL_LICENCE_WHY,
+    BOARD_CODE: _CREDENTIAL_BOARD_WHY,
+}
 
 # --- #1573: rows a heading says are someone else's are not the owner's records ---
 #
@@ -926,7 +966,6 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
     Attended courses are B2, never K4, unless the row names a teaching role;
     a training title at the head of a position row is C (postdoctoral training);
     a chief resident or chief fellow at the head of a position or leadership row is C;
-    a life-support or teaching certificate is B2, not a medical licence (F1);
     a publication code on a note that points at a numbered publication is T;
     a publication or editorial code on a per-article metrics line is S0;
     a teaching code under a student, course or teaching evaluations heading is T
@@ -940,8 +979,6 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
         return "C", "An intern, resident or fellow title is postdoctoral training"
     if code in _CHIEF_TRAINEE_OVERRIDABLE and _CHIEF_TRAINEE.match(text):
         return _CHIEF_TRAINEE_CODE, _CHIEF_TRAINEE_WHY
-    if code == "F1" and (_LIFE_SUPPORT.search(text) or _TEACHING_CERTIFICATE.search(text)):
-        return "B2", "A life-support or teaching certificate is not a medical licence"
     if code and _PUBLICATION_CODE.match(code) and _PUBLICATION_POINTER.search(text):
         return "T", "A note pointing at a numbered publication is not a second citation"
     if code and (_PUBLICATION_CODE.match(code) or _EDITORIAL_CODE.match(code)) and _is_metrics_stub(text):
@@ -1032,6 +1069,24 @@ def fellowship_pin_code(entry: dict) -> tuple[str, str] | None:
     if not is_honorific_fellowship(entry.get("text") or "", levels):
         return None
     return _HONOR_CODE, _FELLOWSHIP_HONOR_WHY
+
+
+def credential_pin_code(entry: dict, after_board_row: bool) -> tuple[str, str] | None:
+    """(code, why) for a credential coded as the wrong one of licence, board
+    certification and other education, or for an unworded I line right after
+    a board certification in its group (`after_board_row`); else None
+    (`misfiled_credential_home`, #1577)."""
+    home = misfiled_credential_home(entry.get("text") or "", entry.get("taxonomy_code") or "", after_board_row)
+    if home is None:
+        return None
+    return home.code, _BOARD_BLOCK_WHY if home.kind == KIND_BOARD_BLOCK_LINE else _CREDENTIAL_WHY[home.code]
+
+
+def _is_board_row(entry: dict) -> bool:
+    """An F2 row that the next row's board-block test reads as a board
+    certification: not one the board-block rule itself made F2."""
+    return (entry.get("taxonomy_code") == BOARD_CODE
+            and not str(entry.get("classification_reasoning") or "").startswith(_BOARD_BLOCK_WHY))
 
 
 def is_heading_line(entry: dict) -> bool:
@@ -1203,15 +1258,17 @@ def apply_non_seat_pins(entries: Iterable[dict]) -> tuple[list[dict], dict]:
 
 
 def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
-             after_unseen_reviewer_lead_in: bool, lead: str) -> tuple[str, str] | None:
+             after_unseen_reviewer_lead_in: bool, lead: str, after_board_row: bool) -> tuple[str, str] | None:
     """(code, why) for one model answer: the header pin, then the mentor-grant,
-    mentee, someone-else's, content, reviewer and fellowship pins. A mentee's
-    abstract under a students level is the mentee's (N4), not the owner's (S8)."""
+    mentee, someone-else's, content, credential, reviewer and fellowship pins.
+    A mentee's abstract under a students level is the mentee's (N4), not the
+    owner's (S8)."""
     header_code = header_pin_code(entry, pin, leaf)
     if header_code:
         return header_code, _HEADER_PIN_WHY
     return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee)
             or someone_elses_pin_code(entry, lead) or content_pin_code(entry)
+            or credential_pin_code(entry, after_board_row)
             or reviewer_pin_code(entry, after_unseen_reviewer_lead_in)
             or fellowship_pin_code(entry))
 
@@ -1231,8 +1288,8 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
     in `pre_pin_code` / `pre_pin_reasoning`; `classification_source` stays
     "llm" (stage 3b's zero-classification gate counts it). The header pin is
     checked first, then the mentor-grant pin (#1710), the mentee pin (#1251),
-    the someone-else's pin (#1573), a content pin, the reviewer pin (#1413)
-    and the fellowship pin (#1577).
+    the someone-else's pin (#1573), a content pin, the credential pin, the
+    reviewer pin (#1413) and the fellowship pin (#1577).
 
     `batch_size` is the number of entries per classification call the group was
     sent in, in the order given here; None means the group went in one call, so
@@ -1240,14 +1297,16 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
     """
     pin, leaf = pinned_header_code(context), leaf_header_code(context)
     out, recoded, after_mentee, reviewer_lead_in_at, lead = [], 0, False, None, ""
+    after_board_row = False
     for position, entry in enumerate(entries):
         as_coded = entry  # the lead line is read off the model's codes, not the pins' (#1573)
         if entry.get("classification_source") == _MODEL_SOURCE:
             unseen_lead_in = _in_later_batch(position, reviewer_lead_in_at, batch_size)
-            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in, lead)
+            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in, lead, after_board_row)
             if pinned and pinned[0] != entry.get("taxonomy_code"):
                 recoded += 1
                 entry = _recode(entry, *pinned)
+        after_board_row = _is_board_row(entry)
         after_mentee = after_mentee or entry.get("taxonomy_code") in _MENTEE_RECORD_CODES
         reviewer_lead_in_at = _next_reviewer_lead_in(entry, position, reviewer_lead_in_at)
         lead = next_lead(as_coded, lead)

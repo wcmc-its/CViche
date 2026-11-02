@@ -25,9 +25,19 @@ overrides a small allow-list of known-wrong source codes so it never clobbers a
 confident, correct classification. These signatures are the same structured
 patterns stage_6 already recognizes when rendering the WCM template, so the
 codes are made to agree with how the content is ultimately laid out.
+
+A board or licence signature on a line whose own words name another
+credential's home (`core.credential_lines.misfiled_credential_home`, read
+as F2 or F1) corrects to that home instead (#1577 shape 3): "Diplomate,
+National Board of Medical Examiners, <year>" is a licensing exam and an ATLS
+"Certificate #" a life-support course, both B2, so the corrector no longer
+undoes stage 3b's credential pin for them (it sent 46 of the farm's 226
+pinned B2 lines back to F2); and a line already at that home keeps its code.
 """
 
 import re
+
+from ..credential_lines import misfiled_credential_home
 
 # --- detection signatures ---------------------------------------------------
 _MENTEE_PERIOD = re.compile(r"mentoring\s*period", re.I)
@@ -95,6 +105,20 @@ def _is_board_name_with_year(entry: dict, text: str) -> bool:
     return not _NON_CERT_HIERARCHY.search(" ".join(entry.get("hierarchy") or []))
 
 
+def _signature_code(text: str, code: str, signature_code: str,
+                    reason: str) -> tuple[str | None, str | None]:
+    """(code, reason) a table signature corrects to: `signature_code`, unless
+    the line read as that code belongs under another credential code
+    (`misfiled_credential_home`, #1577), then that home; (None, None) when
+    the line already has that home."""
+    home = misfiled_credential_home(text, signature_code)
+    if home is None:
+        return signature_code, reason
+    if home.code == code:
+        return None, None
+    return home.code, f"{reason}, homed {home.code} as {home.kind} (#1577)"
+
+
 def _correct(entry: dict):
     """Return (new_code, reason) or (None, None) if no correction applies."""
     text = entry.get("text", "") or ""
@@ -111,12 +135,12 @@ def _correct(entry: dict):
     # the empty WCM table-header row and an awards/committee/membership line
     # naming a board are NOT promoted to a content code.
     if code in _BOARD_FROM and _is_board_certification(entry):
-        return "F2", "WCM board-certification signature"
+        return _signature_code(text, code, "F2", "WCM board-certification signature")
 
     # Licensure.
     if _LICENSURE.search(text):
         if code in _LICENSE_FROM:
-            return "F1", "WCM licensure signature (DEA/NPI/license number)"
+            return _signature_code(text, code, "F1", "WCM licensure signature (DEA/NPI/license number)")
 
     return None, None
 
