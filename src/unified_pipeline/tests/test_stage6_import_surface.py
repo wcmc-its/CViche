@@ -88,6 +88,7 @@ STAGE6_IMPORT_SURFACE = (
     "_get_cleaned_institution_name",
     "_labels_its_own_address_slots",
     "_labels_its_own_phone_slots",
+    "_parent_texts",
     "_parse_date_components",
     "_phone_cell_text",
     "_pii_fragments",
