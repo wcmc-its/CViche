@@ -120,10 +120,10 @@ _JOINED_VALUE_SEPARATOR = ';'
 # The built-text separator: the same one stage 2 uses between table cells, so
 # a child's built text reads as the record line it stands for and stays visible
 # to `_recover_unrendered_records`, which verifies pipe/tab record lines.
-_BUILT_TEXT_SEPARATOR = ' | '
+BUILT_TEXT_SEPARATOR = ' | '
 
 # Set True on a child whose text is that built line (`_child_texts`), not a
-# line of the CV. Its pipes are `_BUILT_TEXT_SEPARATOR`, so a renderer that
+# line of the CV. Its pipes are `BUILT_TEXT_SEPARATOR`, so a renderer that
 # re-parses a source pipe column out of the text (#627) must not: the fields
 # the line was built from are the record (#1556 e: OIEPQD BMYYOX 63, the
 # role rendered inside the name cell). Read it through `has_built_text`.
@@ -793,7 +793,7 @@ def _segments(text: object) -> list[str]:
 
 def _built_text(record: Mapping[str, Any]) -> str:
     """One line out of a record's own string values, in the record's key order."""
-    return _BUILT_TEXT_SEPARATOR.join(
+    return BUILT_TEXT_SEPARATOR.join(
         str(value).strip() for value in record.values()
         if isinstance(value, (str, int, float)) and str(value).strip())
 

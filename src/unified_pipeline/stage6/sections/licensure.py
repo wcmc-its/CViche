@@ -107,9 +107,10 @@ from unified_pipeline.core.credential_lines import (
     names_licence,
     names_state_controlled_substance,
 )
+from unified_pipeline.core.honor_lines import YEAR_RE
 from unified_pipeline.core.text_norm import date_clauses, record_date_anchors
 
-from ..fan_out import has_built_text
+from ..fan_out import LAST_STAGE4_RECORD, fallback_text, has_built_text
 from ..formatting import _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem
 from ..normalization.pii import _dea_check_digit_ok
@@ -729,16 +730,27 @@ def _resolve_licensure(
 #   pin's own test): a permit, an exam, the ECFMG, a procedure credential or
 #   a course is B2, a registry certification coded F1 is F2, a
 #   controlled-substance registration coded F2 is F1;
-# - b2: an F1 record with no state whose line names no licence and no
-#   identifier, and whose extraction did not fail (a failed batch writes
-#   empty fields, which say nothing about the record), is B2: it rendered
-#   its whole line in the State cell.
-# The line of a record whose text stage 6 built from its fields (a fan-out
-# child, "2011 | 2020") is its own dated clause of its parent's line, the
-# clause whose years are its fields' years (SPINJC 78: a crisis-intervention
-# certification and an inactive licence on one paragraph).
+# - b2: an F1 record with no state and no number whose line names no
+#   licence and no identifier, and whose extraction did not fail (a failed
+#   batch writes empty fields, which say nothing about the record), is B2:
+#   it rendered its whole line in the State cell. A numbered row renders
+#   " | <number> | ..." and is a licence whose state stage 4 missed
+#   ("Physician's and Surgeon's Certificate A12345", "MD 123456").
+# The line of one record of a multi-record entry (`record_line`) is its own:
+# for a child whose text stage 6 built from its fields ("2011 | 2020"), and
+# for the last record, whose text is the parent's whole line, the dated
+# clause of the parent's line whose years are its fields' years (SPINJC 78:
+# a crisis-intervention certification and an inactive licence on one
+# paragraph); else the record's own line (`fan_out.fallback_text`). So a
+# licence fused with an ECFMG certificate on one paragraph stays a licence,
+# and two life-support records of one line do not both print the line.
 CREDENTIAL_REROUTE_CHECK = 'credential_listed_as_licence_reroute'
-_FIELD_YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
+#: The section a reroute warning names, by the code a record left (the
+#: `TAXONOMY_TO_SECTION` names of F1 and F2).
+_REROUTED_FROM_SECTION = {LICENCE_CODE: 'licensure', BOARD_CODE: 'board_certification'}
+#: What joins one clause of a paragraph to the next ("<certificate>, 2029;
+#: <licence>"): not part of either clause's line.
+_CLAUSE_EDGE_CHARS = ' \t;,'
 
 
 class CredentialReroute(NamedTuple):
@@ -751,27 +763,47 @@ def _field_years(entry: Mapping[str, Any]) -> frozenset[str]:
     """The four-digit years the record's scalar stage-4 fields write."""
     fields = entry.get('extracted_fields') or {}
     return frozenset(year for value in fields.values() if isinstance(value, (str, int))
-                     for year in _FIELD_YEAR_RE.findall(str(value)))
+                     for year in YEAR_RE.findall(str(value)))
+
+
+def _own_dated_clause(entry: Mapping[str, Any], parent_text: str) -> str:
+    """The one dated clause of `parent_text` whose years are the record's
+    fields' years, or '' when there is none, or two."""
+    years = _field_years(entry)
+    if not years or not parent_text:
+        return ''
+    clauses = [clause.text.strip(_CLAUSE_EDGE_CHARS)
+               for clause in date_clauses(parent_text, record_date_anchors(parent_text)) if clause.years == years]
+    return clauses[0] if len(clauses) == 1 else ''
+
+
+def is_last_stage4_record(entry: Mapping[str, Any]) -> bool:
+    """Whether `entry` is the last of stage 4's records of a multi-record
+    entry, whose text is the parent's whole line (`LAST_STAGE4_RECORD`)."""
+    return LAST_STAGE4_RECORD in entry
 
 
 def record_line(entry: Mapping[str, Any], parent_text: str = '') -> str:
-    """The line a record stands for: its text, or, when that text is built
-    from its fields (`has_built_text`), the one dated clause of
-    `parent_text` whose years are its fields' years. A built text with no
-    such clause, or with two, is kept."""
+    """The line a record stands for: its text; for a record whose text is
+    built from its fields (`has_built_text`) or the last of stage 4's
+    records (whose text is the parent's whole line), its own dated clause
+    of the parent's line (`_own_dated_clause`), else its own line
+    (`fallback_text`: a built child's built line, the last record's own
+    line, or the parent's whole line when stage 4's records leave words of
+    it unheld). `parent_text` is the parent's line for a built child; the
+    last record's own text is that line."""
     text = str(entry.get('text') or '')
-    if not has_built_text(entry) or not parent_text:
+    last = is_last_stage4_record(entry)
+    if not (has_built_text(entry) or last):
         return text
-    years = _field_years(entry)
-    clauses = [clause.text.strip() for clause in date_clauses(parent_text, record_date_anchors(parent_text))
-               if years and clause.years == years]
-    return clauses[0] if len(clauses) == 1 else text
+    return _own_dated_clause(entry, text if last else parent_text) or fallback_text(entry)
 
 
 def _unnamed_licence_row(entry: LicensureEntry, raw: Mapping[str, Any], line: str) -> bool:
-    """b2: no state, a line naming no licence and no identifier, and an
-    extraction that did not fail."""
-    return (not entry.state and bool(line.strip()) and raw.get('extraction_success') is not False
+    """b2: no state and no number, a line naming no licence and no
+    identifier, and an extraction that did not fail."""
+    return (not entry.state and not entry.number and bool(line.strip())
+            and raw.get('extraction_success') is not False
             and not names_licence(line) and not names_identifier(line))
 
 
@@ -799,20 +831,25 @@ def credential_listed_as_licence(entry: Mapping[str, Any], code: str,
 
 
 def credential_reroute_warnings(moved: list[tuple[object, str, str]]) -> list[dict[str, Any]]:
-    """One INFO render-warnings record naming every record
-    `credential_listed_as_licence` regrouped, by element_idx_start and the
-    move only (never CV text); none when nothing moved."""
-    if not moved:
-        return []
-    return [{
-        'check': CREDENTIAL_REROUTE_CHECK,
-        'code': LICENCE_CODE,
-        'section': 'licensure',
-        'message': (f"credential listed as a licence or board certification moved to its own "
-                    f"section: {len(moved)} entr{'y' if len(moved) == 1 else 'ies'}"),
-        'evidence': [f"element_idx_start {idx} ({source}->{target})" for idx, source, target in moved],
-        'severity': 'INFO',
-    }]
+    """One INFO render-warnings record per code the records
+    `credential_listed_as_licence` regrouped left (F1, then F2), naming
+    that code's section and each record by element_idx_start and the move
+    only (never CV text); none when nothing moved."""
+    records = []
+    for source, section in _REROUTED_FROM_SECTION.items():
+        left = [(idx, target) for idx, from_code, target in moved if from_code == source]
+        if not left:
+            continue
+        records.append({
+            'check': CREDENTIAL_REROUTE_CHECK,
+            'code': source,
+            'section': section,
+            'message': (f"credential listed as a licence or board certification moved to its own "
+                        f"section: {len(left)} entr{'y' if len(left) == 1 else 'ies'}"),
+            'evidence': [f"element_idx_start {idx} ({source}->{target})" for idx, target in left],
+            'severity': 'INFO',
+        })
+    return records
 
 
 #: The section name the #821 Word comment names a withheld DEA number

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from unified_pipeline.core.credential_lines import CREDENTIAL_PIN_WHY
 from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
 from unified_pipeline.stage6.parsing import (
     _is_mentee_record,
@@ -1515,6 +1516,11 @@ def _credential_records(gen: WCMTemplateGenerator) -> list[dict]:
     return [w for w in gen._section_failures if w["check"] == "credential_listed_as_licence_reroute"]
 
 
+def _pin_why(code: str) -> str:
+    """The reasoning stage 3b's credential pin writes for a recode to `code`."""
+    return f"{CREDENTIAL_PIN_WHY[code]} (category {code}); reading the entry alone had suggested X."
+
+
 def test_a_permit_coded_f1_is_grouped_as_other_education_with_its_name() -> None:
     gen = WCMTemplateGenerator(verbose=False)
     groups = gen._group_entries_by_code([_credential("F1", _PERMIT, dict(_PERMIT_FIELDS))])
@@ -1577,7 +1583,7 @@ def test_a_certification_split_off_a_licence_paragraph_takes_its_own_clause() ->
 def test_a_credential_pin_with_its_old_codes_fields_renders_its_name() -> None:
     # Stage 3b's pin made it B2; the stored stage 4 still holds F1's fields.
     entry = _credential("B2", _PERMIT, dict(_PERMIT_FIELDS), pre_pin_code="F1", taxonomy_confidence=0.6,
-                        hierarchy_mismatch_flag=True,
+                        classification_reasoning=_pin_why("B2"), hierarchy_mismatch_flag=True,
                         hierarchy_mismatch_detail={"hierarchy": ["Licensure"], "assigned_code": "B2",
                                                    "expected_codes": ["F1"]})
     gen = WCMTemplateGenerator(verbose=False)
@@ -1605,7 +1611,7 @@ def test_each_split_record_reads_its_own_entrys_line() -> None:
 def test_a_controlled_substance_pin_from_f2_fills_the_licence_dates_it_lacks() -> None:
     entry = _credential("F1", "Example State Controlled Substance Registration, 2031-2033",
                         {"certificate_number": "000000", "year_certified": "2031", "recertification_date": "2033",
-                         "issue_date": "2030"}, pre_pin_code="F2")
+                         "issue_date": "2030"}, pre_pin_code="F2", classification_reasoning=_pin_why("F1"))
     [moved] = _grouped(entry)["F1"]
     fields = moved["extracted_fields"]
     assert (fields["license_number"], fields["issue_date"], fields["expiration_date"]) == ("000000", "2030", "2033")
@@ -1613,7 +1619,7 @@ def test_a_controlled_substance_pin_from_f2_fills_the_licence_dates_it_lacks() -
 
 def test_a_credential_pin_keeps_the_fields_stage4_extracted_for_its_code() -> None:
     entry = _credential("B2", _PERMIT, {"program_name": "Fluoroscopy Supervisor Permit", "start_date": "2031"},
-                        pre_pin_code="F1")
+                        pre_pin_code="F1", classification_reasoning=_pin_why("B2"))
     [moved] = _grouped(entry)["B2"]
     assert moved["extracted_fields"] == {"program_name": "Fluoroscopy Supervisor Permit", "start_date": "2031"}
 
@@ -1621,7 +1627,7 @@ def test_a_credential_pin_keeps_the_fields_stage4_extracted_for_its_code() -> No
 def test_a_licence_pin_from_b2_fills_the_licence_dates() -> None:
     entry = _credential("F1", "June 2031 Licensed to practice Example Medicine in the state of Example",
                         {"program_name": "Licensed to practice Example Medicine", "start_date": "2031-06"},
-                        pre_pin_code="B2")
+                        pre_pin_code="B2", classification_reasoning=_pin_why("F1"))
     [moved] = _grouped(entry)["F1"]
     assert moved["extracted_fields"]["issue_date"] == "2031-06"
 
@@ -1629,11 +1635,126 @@ def test_a_licence_pin_from_b2_fills_the_licence_dates() -> None:
 def test_a_board_pin_from_i_renders_the_line_as_the_specialty() -> None:
     entry = _credential("F2", "2031-Present Diplomate, Example College of Example Medicine",
                         {"organization": "Example College of Example Medicine", "start_date": "2031",
-                         "end_date": "present"}, pre_pin_code="I")
+                         "end_date": "present"}, pre_pin_code="I", classification_reasoning=_pin_why("F2"))
     [moved] = _grouped(entry)["F2"]
     fields = moved["extracted_fields"]
     assert fields["specialty"] == "Diplomate, Example College of Example Medicine"
     assert fields["year_certified"] == "2031" and "certificate_number" not in fields
+
+
+def test_a_licence_fused_with_an_exam_or_the_ecfmg_stays_a_licence() -> None:
+    # #1577 review B1: one record holding a licensing exam and the licence it led to.
+    entry = _credential("F1", "USMLE Steps 1-3, 2029; Example State Medical License #123456, 2031",
+                        {"state_country": "Example State", "license_number": "123456", "issue_date": "2031"})
+    assert list(_grouped(entry)) == ["F1"]
+
+
+def test_split_records_of_a_fused_ecfmg_and_licence_paragraph_each_read_their_own_clause() -> None:
+    # #1577 review B1: stage 4 split the paragraph into the certificate and the licence; the
+    # licence is the last record, whose text is the parent's whole line.
+    paragraph = "ECFMG Certificate #0-000-000-0, 2029; Example State Medical License #123456, 2031"
+    entry = _credential("F1", paragraph, {
+        "state_country": "Example State", "license_number": "123456", "issue_date": "2031",
+        "stage4_records": [{"state_country": None, "license_number": "0-000-000-0", "issue_date": "2029"},
+                           {"state_country": "Example State", "license_number": "123456", "issue_date": "2031"}]})
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    [certificate] = groups["B2"]
+    assert certificate["text"] == "ECFMG Certificate #0-000-000-0, 2029"
+    [licence] = groups["F1"]
+    assert licence["text"] == paragraph and licence["extracted_fields"]["license_number"] == "123456"
+    [record] = _credential_records(gen)
+    assert record["evidence"] == ["element_idx_start 62 (F1->B2)"]
+
+
+def test_two_life_support_records_of_one_line_each_print_their_own_name() -> None:
+    # #1577 measurement (a stage-4 split of "<provider>: BLS, ACLS"): the last record used to take
+    # the parent's whole line as its name, so BLS printed twice.
+    line = "Example Heart Association: Basic Life Support (BLS), Advanced Cardiac Life Support (ACLS)."
+    records = [{"certifying_board": "Example Heart Association", "specialty": "Basic Life Support (BLS)"},
+               {"certifying_board": "Example Heart Association",
+                "specialty": "Advanced Cardiac Life Support (ACLS)"}]
+    entry = _credential("F2", line, {**records[1], "stage4_records": records}, idx=228)
+    names = [moved["extracted_fields"]["program_name"] for moved in _grouped(entry)["B2"]]
+    assert names == ["Example Heart Association, Basic Life Support (BLS)",
+                     "Example Heart Association, Advanced Cardiac Life Support (ACLS)"]
+
+
+def test_a_board_record_moved_out_of_licensure_keeps_its_recertification_year() -> None:
+    # #1577 measurement: a fused licence paragraph's board records, moved F1 -> F2, lost
+    # "Recertified <year>" (the name's year went, and no field showed it).
+    paragraph = ("Diplomate, American Board of Example Medicine 2030, Recertified 2040 "
+                 "Example State Medical License A000000")
+    entry = _credential("F1", paragraph, {
+        "state_country": "Example State", "license_number": "A000000",
+        "stage4_records": [{"state_country": None, "issue_date": "2030", "expiration_date": "2040",
+                            "note": "Diplomate, American Board of Example Medicine; Recertified 2040"},
+                           {"state_country": "Example State", "license_number": "A000000"}]}, idx=3029)
+    [board] = _grouped(entry)["F2"]
+    fields = board["extracted_fields"]
+    assert (fields["year_certified"], fields["recertification_date"]) == ("2030", "2040")
+
+
+def test_an_open_end_is_no_recertification() -> None:
+    entry = _credential("F2", "2031-Present Diplomate, Example College of Example Medicine",
+                        {"start_date": "2031", "end_date": "present"}, pre_pin_code="I",
+                        classification_reasoning=_pin_why("F2"))
+    [moved] = _grouped(entry)["F2"]
+    assert "recertification_date" not in moved["extracted_fields"]
+
+
+def test_a_licence_pinned_into_licensure_names_its_profession() -> None:
+    # #1577 measurement (LTTYWI 56's shape): Licensure prints "<state> | <number> | dates", so a
+    # licence to practise another profession said nothing of what it licenses.
+    from unified_pipeline.stage6.sections.licensure import (
+        _license_record,
+        _normalize_licensure_entry,
+    )
+
+    entry = _credential("F1", "June 2031 Licensed to practice Veterinary Medicine and Surgery in the state of "
+                        "Example, #00000", {"state_country": "Example State", "license_number": "00000",
+                                           "issue_date": "2031-06"},
+                        pre_pin_code="B2", classification_reasoning=_pin_why("F1"))
+    [moved] = _grouped(entry)["F1"]
+    assert moved["extracted_fields"]["license_type"] == "Veterinary Medicine and Surgery"
+    record = _license_record(_normalize_licensure_entry(moved))
+    assert record.state == "Example State (Veterinary Medicine and Surgery)"
+    medical = _credential("F1", "Licensed to practice medicine in the state of Example", {
+        "state_country": "Example State"}, pre_pin_code="B2", classification_reasoning=_pin_why("F1"))
+    [kept] = _grouped(medical)["F1"]
+    assert "license_type" not in kept["extracted_fields"]
+
+
+def test_the_reroute_warning_names_the_section_each_record_left() -> None:
+    # #1577 review M4: a board record leaves Board Certification, not Licensure.
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._group_entries_by_code([
+        _credential("F1", _PERMIT, dict(_PERMIT_FIELDS)),
+        _credential("F2", "Example Board of Example Surgery Part I written exam, passed 2031",
+                    {"certifying_board": "Example Board of Example Surgery", "year_certified": "2031"}, idx=28)])
+    assert [(r["code"], r["section"], r["evidence"]) for r in _credential_records(gen)] == [
+        ("F1", "licensure", ["element_idx_start 62 (F1->B2)"]),
+        ("F2", "board_certification", ["element_idx_start 28 (F2->B2)"])]
+
+
+def test_a_span_two_entries_share_gives_no_parent_line() -> None:
+    # #1577 review M9: a built record must not read another entry's line as its parent's.
+    from unified_pipeline.stage_6_word_template import _parent_texts
+
+    one = _credential("F1", "Example line one 2031", {}, idx=78)
+    other = _credential("F1", "Example line two 2032", {}, idx=78)
+    alone = _credential("F1", "Example line three 2033", {}, idx=80)
+    assert _parent_texts([one, other, alone]) == {(80, 80): "Example line three 2033"}
+
+
+def test_another_steps_recode_off_an_earlier_pin_is_regrouped_like_any_record() -> None:
+    # #1577 review M10: the fellowship pin's I -> H, then the corrector's H -> F2, keeps
+    # pre_pin_code I; stage 6 must not read it as the credential pin's answer.
+    entry = _credential("F2", "Example Board Part I written exam, passed 2031",
+                        {"certifying_board": "Example Board", "year_certified": "2031"}, idx=30,
+                        pre_pin_code="I",
+                        classification_reasoning="[WCM-table corrected H->F2] An elected fellowship is an honor")
+    assert list(_grouped(entry)) == ["B2"]
 
 
 @pytest.mark.parametrize("entry", [
