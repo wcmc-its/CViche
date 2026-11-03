@@ -38,6 +38,14 @@ An institution field of the literal string "none" is treated as absent; field
 extraction emits it. An entry with neither a program name nor an institution is
 skipped, since the remaining columns would say nothing.
 
+An institution the Description already writes whole is not printed again in
+the Institution cell, which keeps only the place the Description does not say
+(#1577: "Diplomate, <board> | <board> | <year>" on 45 of the real-record
+A/B's 215 rows). The Description keeps it, because there it is part of the
+credential's own name as the line writes it ("Certified by <commission>",
+"Candidate, <board> (<exam step>)", "<board>, #<number>"); cut out of it, the
+name would be left as "Certified by" or "Candidate, (<exam step>)".
+
 A program name that is only the label of the credential list the line sat in
 ("Certifications", "Board Certification": stage 4 took the line's lead label
 for the name, CAOACN 40 and SVYSGY 44) names nothing; the record's own line,
@@ -60,6 +68,7 @@ from typing import Any
 
 from unified_pipeline.core.credential_lines import is_credential_list_label
 from unified_pipeline.core.honor_lines import YEAR_RE
+from unified_pipeline.core.text_norm import fold_quotes, norm
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
 from ..fan_out import BUILT_TEXT_SEPARATOR, fallback_text, has_built_text
@@ -254,23 +263,35 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
     )
 
 
+def _named_in_program(institution: str, program: object) -> bool:
+    """Whether the Description (`program`) writes the whole `institution`
+    as words of its own, case, accents, quotes and spacing aside (#1577)."""
+    if not (institution and isinstance(program, str)):
+        return False
+    name = re.escape(norm(fold_quotes(institution)))
+    return re.search(rf'(?<!\w){name}(?!\w)', norm(fold_quotes(program))) is not None
+
+
 def _b2_institution_content(record: OtherEducationRecord) -> list[tuple[str, bool, str]]:
     """The runs of the institution cell: (text, is_tracked_insertion, author).
     An enriched location is a tracked insertion after the institution; an
     extracted one is plain text joined onto it. Only the part of the location
     the institution does not already say is added (`_location_remainder`):
-    a row whose institution IS the place no longer repeats it (#1257)."""
+    a row whose institution IS the place no longer repeats it (#1257). An
+    institution the Description already writes is left out, its location
+    kept (`_named_in_program`, #1577)."""
     location = _location_remainder(record.location, record.institution)
+    institution = '' if _named_in_program(record.institution, record.program) else record.institution
     if location and record.location_is_enriched:
-        if record.institution:
-            return [(record.institution, False, ""),
+        if institution:
+            return [(institution, False, ""),
                     (f", {location}", True, INSTITUTION_ENRICHMENT_REASON)]
         return [(location, True, INSTITUTION_ENRICHMENT_REASON)]
     if location:
-        institution_full = (f"{record.institution}, {location}"
-                            if record.institution else location)
+        institution_full = (f"{institution}, {location}"
+                            if institution else location)
         return [(institution_full, False, "")]
-    return [(record.institution, False, "")]
+    return [(institution, False, "")]
 
 
 class OtherEducationSection:

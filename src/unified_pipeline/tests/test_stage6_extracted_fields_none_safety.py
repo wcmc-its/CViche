@@ -755,6 +755,59 @@ def test_b2_location_already_trailing_the_institution_is_not_appended():
     assert gen.doc.tables[0].rows[1].cells[1].text == 'Some College, Riverton, OR'
 
 
+# --- other education: an institution the Description writes is printed once (#1577 D1)
+# Invented values; the shape is "Diplomate, <board> | <board> | <year>".
+
+def _b2_institution_cell(program, institution, **extra):
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': f'{program} 2031',
+         'extracted_fields': {'program_name': program, 'institution': institution, 'year': '2031'}, **extra}])
+    row = gen.doc.tables[0].rows[1]
+    return row.cells[0].text, row.cells[1]
+
+
+@pytest.mark.parametrize("program, institution, shown", [
+    ('Diplomate, Example Board of Examiners', 'Example Board of Examiners', ''),
+    ('Certified by Example Commission for Graduates (ECG)', 'Example Commission for Graduates (ECG)', ''),
+    ('Certified, ECG course IS-000, Example Incident Course', 'ECG', ''),
+    ('Example Worker\u2019s Board Level II', "Example Worker's Board", ''),
+    ('diplomate, example board of examiners', 'Example Board  of Examiners', ''),
+    # not the whole institution, or not as words of their own: the cell keeps it
+    ('Diplomate, Example Board', 'Example Board of Examiners', 'Example Board of Examiners'),
+    ('ECGX Example Course', 'ECG', 'ECG'),
+    ('Example Course', 'Example College', 'Example College'),
+], ids=['diplomate', 'whole-name-with-acronym', 'acronym-as-a-word', 'typographic-apostrophe',
+        'case-and-spacing', 'part-of-the-institution', 'inside-a-longer-word', 'not-in-the-description'])
+def test_b2_institution_the_description_writes_is_printed_once(program, institution, shown):
+    description, cell = _b2_institution_cell(program, institution)
+    assert (description, cell.text) == (program, shown)
+
+
+def test_b2_institution_beside_a_program_written_as_a_list_is_kept():
+    _, cell = _b2_institution_cell(['Example College Course', 'Example Other Course'], 'Example College')
+    assert cell.text == 'Example College'
+
+
+def test_b2_institution_left_out_keeps_its_enriched_location():
+    _, cell = _b2_institution_cell(
+        'Example Course of Duke University', 'Duke University, Durham',
+        institution_enrichment={'cleaned_name': 'Duke University', 'city': 'Durham',
+                                'state': 'North Carolina', 'country_code': 'US'})
+    assert cell.text == ''  # python-docx text skips w:ins
+    assert _insertions(cell) == [('Institution Enrichment', 'Durham, NC')]
+
+
+def test_b2_institution_left_out_keeps_its_extracted_location():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Example College Course, Example College',
+         'extracted_fields': {'program_name': 'Example College Course', 'institution': 'Example College',
+                              'location': 'Boston, MA'}}])
+
+    assert gen.doc.tables[0].rows[1].cells[1].text == 'Boston, MA'
+
+
 # --- other education: an expiry or renewal date is no date attended (#1577 D2) --
 # Invented values; the shapes are 4SOTEA 37, web211 36, web190 953, web068 48 and
 # VQFSDI 139.
