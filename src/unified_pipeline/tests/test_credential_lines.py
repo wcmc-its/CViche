@@ -196,8 +196,8 @@ def test_a_board_line_naming_a_substance_stays_the_boards():
     ("B2", "Licensed to practice in Example State #XX 00000"),
     ("I", "Example State Physician License #00000000A 2031-Pres"),
     ("I", "Example State  Lic # 00.000000    Exp. 07-2031"),
-    ("H", "Example State Medical License, active"),
-    ("H", "Licensure: Example State, 2031"),
+    ("I", "Example State Medical License, active"),
+    ("B2", "Licensure: Example State, 2031"),
     ("I", "Example State Board of Medicine #12345, 2031"),
     ("I", "Licensed in the state of Example, 2031"),
     ("B2", "Licensed by the Example Board, 2031"),
@@ -220,6 +220,20 @@ def test_a_board_line_naming_a_substance_stays_the_boards():
 ])
 def test_a_licence_statement_coded_elsewhere_is_f1(code, text):
     assert _home(text, code) == (LICENCE_CODE, "licence_statement")
+
+
+@pytest.mark.parametrize("text", [
+    "Example State Medical License with Distinction, 2031",
+    "Example State Medical License, active",
+    "Licensure: Example State, 2031",
+    # nor does a board statement on the same line move it to F2
+    "Board certified in Example Medicine; Example State Medical License, 2031",
+])
+def test_a_licence_statement_coded_h_stays_h(text):
+    # The owner's decision of 2026-11-03 (#1577): an honors line that states a licence
+    # stays an honor; the same line coded B2 or I is still a licence.
+    assert _home(text, "H") is None
+    assert _home(text, "I") == _home(text, OTHER_EDUCATION_CODE) == (LICENCE_CODE, "licence_statement")
 
 
 @pytest.mark.parametrize("code,text", [

@@ -1499,8 +1499,9 @@ def test_an_honor_coded_as_a_grant_renders_in_honors_not_as_a_funding_table(tmp_
 # --- #1577 shape 3: a credential listed as a licence or board certification renders in its own section ---
 # Invented values. ZDOAZO 62's shape (a permit with a state and a number), ECXGAT 48's (a
 # technologist certificate), PPMTJH 28's (an early exam step coded F2), SPINJC 78's (a
-# certification split off a licence paragraph by stage 4's records) and a stage-3b
-# credential pin whose stage-4 fields are still the old code's.
+# certification split off a licence paragraph by stage 4's records, which stays in Licensure
+# by the owner's decision of 2026-11-03) and a stage-3b credential pin whose stage-4 fields
+# are still the old code's.
 
 _PERMIT = "2031- Example State Fluoroscopy Operator and Supervisor (XX000000)"
 _PERMIT_FIELDS = {"state_country": "Example State", "license_number": "XX000000",
@@ -1562,7 +1563,9 @@ def test_a_board_record_s_controlled_substance_line_is_grouped_as_a_licence() ->
         "000000", "2031")
 
 
-def test_a_certification_split_off_a_licence_paragraph_takes_its_own_clause() -> None:
+def test_a_certification_split_off_a_licence_paragraph_stays_in_licensure() -> None:
+    # The owner's decision of 2026-11-03 removed the guard rule that gave a record stage 6
+    # built from its fields its own dated clause of the parent's line and moved it to B2.
     paragraph = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
                  "Example State (Inactive)")
     entry = _credential("F1", paragraph, {
@@ -1571,13 +1574,11 @@ def test_a_certification_split_off_a_licence_paragraph_takes_its_own_clause() ->
                             "expiration_date": "2033"},
                            {"state_country": "Example State", "license_number": None, "issue_date": "2030",
                             "expiration_date": "2031"}]}, idx=78)
-    groups = _grouped(entry)
-    [certification] = groups["B2"]
-    assert certification["text"] == "2031-2033  Certified in Example Method, Example Institute"
-    assert "text_built_from_fields" not in certification
-    assert certification["extracted_fields"]["program_name"] == "Certified in Example Method, Example Institute"
-    [licence] = groups["F1"]
-    assert licence["extracted_fields"]["state_country"] == "Example State"
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    assert list(groups) == ["F1"] and len(groups["F1"]) == 2
+    assert all("taxonomy_code_original" not in record for record in groups["F1"])
+    assert _credential_records(gen) == []
 
 
 def test_a_credential_pin_with_its_old_codes_fields_renders_its_name() -> None:
@@ -1594,20 +1595,6 @@ def test_a_credential_pin_with_its_old_codes_fields_renders_its_name() -> None:
     assert [w for w in gen._section_failures if w["check"] in (REROUTE_CHECK, "credential_listed_as_licence_reroute")] == []
 
 
-def test_each_split_record_reads_its_own_entrys_line() -> None:
-    paragraph = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
-                 "Example State (Inactive)")
-    split = _credential("F1", paragraph, {
-        "state_country": "Example State", "issue_date": "2030", "expiration_date": "2031",
-        "stage4_records": [{"state_country": None, "issue_date": "2031", "expiration_date": "2033"},
-                           {"state_country": "Example State", "issue_date": "2030", "expiration_date": "2031"}]},
-        idx=78)
-    later = _credential("F1", "Example State Medical License 12345, 2040",
-                        {"state_country": "Example State", "license_number": "12345", "issue_date": "2040"}, idx=80)
-    [certification] = _grouped(split, later)["B2"]
-    assert certification["text"] == "2031-2033  Certified in Example Method, Example Institute"
-
-
 def test_a_controlled_substance_pin_from_f2_fills_the_licence_dates_it_lacks() -> None:
     entry = _credential("F1", "Example State Controlled Substance Registration, 2031-2033",
                         {"certificate_number": "000000", "year_certified": "2031", "recertification_date": "2033",
@@ -1622,6 +1609,18 @@ def test_a_credential_pin_keeps_the_fields_stage4_extracted_for_its_code() -> No
                         pre_pin_code="F1", classification_reasoning=_pin_why("B2"))
     [moved] = _grouped(entry)["B2"]
     assert moved["extracted_fields"] == {"program_name": "Fluoroscopy Supervisor Permit", "start_date": "2031"}
+
+
+def test_a_credential_pin_on_a_split_entry_names_its_last_record_by_its_own_clause() -> None:
+    # The last of stage 4's records holds the parent's whole line; the pin's field carry reads
+    # that record's own dated clause (`record_line`), so its name is not both records' line.
+    line = "Basic Life Support, 2029; Advanced Cardiac Life Support, Example Heart Association, 2031"
+    records = [{"program_name": "Basic Life Support", "institution": None, "start_date": "2029"},
+               {"program_name": None, "institution": "Example Heart Association", "start_date": "2031"}]
+    entry = _credential("B2", line, {**records[1], "stage4_records": records}, idx=40, pre_pin_code="F1",
+                        classification_reasoning=_pin_why("B2"))
+    names = [moved["extracted_fields"]["program_name"] for moved in _grouped(entry)["B2"]]
+    assert names == ["Basic Life Support", "Advanced Cardiac Life Support, Example Heart Association"]
 
 
 def test_a_licence_pin_from_b2_fills_the_licence_dates() -> None:
@@ -1649,9 +1648,11 @@ def test_a_licence_fused_with_an_exam_or_the_ecfmg_stays_a_licence() -> None:
     assert list(_grouped(entry)) == ["F1"]
 
 
-def test_split_records_of_a_fused_ecfmg_and_licence_paragraph_each_read_their_own_clause() -> None:
+def test_the_licence_record_of_a_fused_ecfmg_and_licence_paragraph_stays_a_licence() -> None:
     # #1577 review B1: stage 4 split the paragraph into the certificate and the licence; the
-    # licence is the last record, whose text is the parent's whole line.
+    # licence is the last record, whose text is the parent's whole line, and reads its own
+    # clause. The certificate's text is the line stage 6 built from its fields, which names no
+    # credential (its parent-clause lookup went with the owner's decision of 2026-11-03).
     paragraph = "ECFMG Certificate #0-000-000-0, 2029; Example State Medical License #123456, 2031"
     entry = _credential("F1", paragraph, {
         "state_country": "Example State", "license_number": "123456", "issue_date": "2031",
@@ -1659,12 +1660,11 @@ def test_split_records_of_a_fused_ecfmg_and_licence_paragraph_each_read_their_ow
                            {"state_country": "Example State", "license_number": "123456", "issue_date": "2031"}]})
     gen = WCMTemplateGenerator(verbose=False)
     groups = gen._group_entries_by_code([entry])
-    [certificate] = groups["B2"]
-    assert certificate["text"] == "ECFMG Certificate #0-000-000-0, 2029"
-    [licence] = groups["F1"]
+    assert list(groups) == ["F1"]
+    certificate, licence = groups["F1"]
+    assert certificate["text"] == "0-000-000-0 | 2029"
     assert licence["text"] == paragraph and licence["extracted_fields"]["license_number"] == "123456"
-    [record] = _credential_records(gen)
-    assert record["evidence"] == ["element_idx_start 62 (F1->B2)"]
+    assert _credential_records(gen) == []
 
 
 def test_two_life_support_records_of_one_line_each_print_their_own_name() -> None:
@@ -1737,23 +1737,6 @@ def test_the_reroute_warning_names_the_section_each_record_left() -> None:
         ("F2", "board_certification", ["element_idx_start 28 (F2->B2)"])]
 
 
-def test_a_span_two_entries_share_gives_no_parent_line() -> None:
-    # #1577 review M9: a built record must not read another entry's line as its parent's. Two
-    # entries share element 78; the second holds a clause with the split child's own years.
-    paragraph = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
-                 "Example State (Inactive)")
-    split = _credential("F1", paragraph, {
-        "state_country": "Example State", "issue_date": "2030", "expiration_date": "2031",
-        "stage4_records": [{"state_country": None, "issue_date": "2031", "expiration_date": "2033"},
-                           {"state_country": "Example State", "issue_date": "2030", "expiration_date": "2031"}]},
-        idx=78)
-    other_line = "2031-2033 Example Other Registry listing"
-    other = _credential("F1", other_line, {"state_country": "Example State", "license_number": "1"}, idx=78)
-    groups = _grouped(split, other)
-    assert all(entry["text"] != other_line for entry in groups.get("B2", []))
-    assert [entry["text"] for entry in groups["F1"]].count(other_line) == 1
-
-
 def test_another_steps_recode_off_an_earlier_pin_is_regrouped_like_any_record() -> None:
     # #1577 review M10: the fellowship pin's I -> H, then the corrector's H -> F2, keeps
     # pre_pin_code I; stage 6 must not read it as the credential pin's answer.
@@ -1793,3 +1776,24 @@ def test_a_permit_coded_f1_renders_outside_licensure(tmp_path) -> None:
     named = [cells for cells in rows if any("Fluoroscopy" in cell for cell in cells)]
     assert len(named) == 1 and named[0][0] == "Example State Fluoroscopy Operator and Supervisor (XX000000)"
     assert not any(cells[:2] == ["Example State", "XX000000"] for cells in rows)
+
+
+def test_a_licence_row_with_no_state_number_or_credential_name_renders_in_licensure(tmp_path) -> None:
+    # The owner's decision of 2026-11-03 removed the guard rule that moved such a row to Other
+    # Educational Experiences: it renders as on dev, its whole line in Licensure's State cell.
+    from docx import Document
+
+    line = "2031 - Present    Certified Example Coach by the Example Registry"
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None  # no LLM, deterministic
+    source = tmp_path / "in.json"
+    source.write_text(json.dumps({"document_uid": "TESTCR", "entries": [
+        {"taxonomy_code": "A", "element_idx_start": 0, "text": "Name: Pat Example, MD", "extracted_fields": {}},
+        _credential("F1", line, {"state_country": None, "license_number": None, "issue_date": "2031",
+                                 "expiration_date": "present"})]}))
+    out = tmp_path / "out.docx"
+    gen.generate(str(source), str(out), research_summary_path=None)
+    tables = [[[cell.text for cell in row.cells] for row in table.rows] for table in Document(str(out)).tables]
+    holding = [(table[0][:2], row) for table in tables for row in table if any("Example Coach" in c for c in row)]
+    assert holding == [(["State", "Number"], [line, "", "", ""])]
+    assert _credential_records(gen) == []

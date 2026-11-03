@@ -2206,6 +2206,9 @@ def test_a_misfiled_credential_is_recoded_whatever_its_confidence_1577(code, tex
     ("E", "Physician, private practice; Example State medical license", ("Employment",)),
     ("H", "Board Certification Exam: 99th percentile, ABXY 2031", ("Honors",)),
     ("I", "Example State Board of Medicine, 2031-present", ("Memberships",)),
+    # The owner's decision of 2026-11-03: a licence statement coded H stays an honor.
+    ("H", "Example State Medical License with Distinction, 2031", ("Honors and Awards",)),
+    ("H", "Board certified in Example Medicine; Example State Medical License, 2031", ("Honors",)),
 ])
 def test_what_the_credential_pin_leaves_1577(code, text, hierarchy):
     entry = _row(code, text, hierarchy=hierarchy)

@@ -98,19 +98,15 @@ except ImportError as exc:
 
 from unified_pipeline.core.credential_lines import (
     BOARD_CODE,
-    KIND_UNNAMED_CREDENTIAL,
     LICENCE_CODE,
-    OTHER_EDUCATION_CODE,
     CredentialHome,
     misfiled_credential_home,
-    names_identifier,
-    names_licence,
     names_state_controlled_substance,
 )
 from unified_pipeline.core.honor_lines import YEAR_RE
 from unified_pipeline.core.text_norm import date_clauses, record_date_anchors
 
-from ..fan_out import LAST_STAGE4_RECORD, fallback_text, has_built_text
+from ..fan_out import LAST_STAGE4_RECORD, fallback_text
 from ..formatting import _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem, line_without_edge_dates
 from ..normalization.pii import _dea_check_digit_ok
@@ -755,26 +751,19 @@ def _resolve_licensure(
 #
 # A record coded F1 that Licensure reads as a licence (not an NPI or DEA
 # record), or a record coded F2, is grouped under its credential's own code
-# when its line says it belongs there:
-# - b1/b3: the line names a credential whose home is another code
-#   (`core.credential_lines.misfiled_credential_home`, stage 3b's credential
-#   pin's own test): a permit, an exam, the ECFMG, a procedure credential or
-#   a course is B2, a registry certification coded F1 is F2, a
-#   controlled-substance registration coded F2 is F1;
-# - b2: an F1 record with no state and no number whose line names no
-#   licence and no identifier, and whose extraction did not fail (a failed
-#   batch writes empty fields, which say nothing about the record), is B2:
-#   it rendered its whole line in the State cell. A numbered row renders
-#   " | <number> | ..." and is a licence whose state stage 4 missed
-#   ("Physician's and Surgeon's Certificate A12345", "MD 123456").
-# The line of one record of a multi-record entry (`record_line`) is its own:
-# for a child whose text stage 6 built from its fields ("2011 | 2020"), and
-# for the last record, whose text is the parent's whole line, the dated
-# clause of the parent's line whose years are its fields' years (SPINJC 78:
-# a crisis-intervention certification and an inactive licence on one
-# paragraph); else the record's own line (`fan_out.fallback_text`). So a
-# licence fused with an ECFMG certificate on one paragraph stays a licence,
-# and two life-support records of one line do not both print the line.
+# when its line names a credential whose home is another code
+# (`core.credential_lines.misfiled_credential_home`, stage 3b's credential
+# pin's own test): a permit, an exam, the ECFMG, a procedure credential or a
+# course is B2, a registry certification coded F1 is F2, a
+# controlled-substance registration coded F2 is F1. A licence row with no
+# state and no number whose line names none of these stays in Licensure,
+# its whole line in the State cell (the owner's decision of 2026-11-03).
+# The line of the last record of a multi-record entry, whose text is the
+# parent's whole line, is its own (`record_line`): the dated clause of that
+# line whose years are its fields' years, else the record's own line
+# (`fan_out.fallback_text`). So a licence fused with an ECFMG certificate on
+# one paragraph stays a licence, and two life-support records of one line do
+# not both print the line. Any other record's line is its text.
 CREDENTIAL_REROUTE_CHECK = 'credential_listed_as_licence_reroute'
 #: The section a reroute warning names, by the code a record left (the
 #: `TAXONOMY_TO_SECTION` names of F1 and F2).
@@ -814,35 +803,22 @@ def is_last_stage4_record(entry: Mapping[str, Any]) -> bool:
     return LAST_STAGE4_RECORD in entry
 
 
-def record_line(entry: Mapping[str, Any], parent_text: str = '') -> str:
-    """The line a record stands for: its text; for a record whose text is
-    built from its fields (`has_built_text`) or the last of stage 4's
+def record_line(entry: Mapping[str, Any]) -> str:
+    """The line a record stands for: its text; for the last of stage 4's
     records (whose text is the parent's whole line), its own dated clause
-    of the parent's line (`_own_dated_clause`), else its own line
-    (`fallback_text`: a built child's built line, the last record's own
-    line, or the parent's whole line when stage 4's records leave words of
-    it unheld). `parent_text` is the parent's line for a built child; the
-    last record's own text is that line."""
+    of that line (`_own_dated_clause`), else its own line (`fallback_text`:
+    the last record's own line, or the parent's whole line when stage 4's
+    records leave words of it unheld)."""
     text = str(entry.get('text') or '')
-    last = is_last_stage4_record(entry)
-    if not (has_built_text(entry) or last):
+    if not is_last_stage4_record(entry):
         return text
-    return _own_dated_clause(entry, text if last else parent_text) or fallback_text(entry)
+    return _own_dated_clause(entry, text) or fallback_text(entry)
 
 
-def _unnamed_licence_row(entry: LicensureEntry, raw: Mapping[str, Any], line: str) -> bool:
-    """b2: no state and no number, a line naming no licence and no
-    identifier, and an extraction that did not fail."""
-    return (not entry.state and not entry.number and bool(line.strip())
-            and raw.get('extraction_success') is not False
-            and not names_licence(line) and not names_identifier(line))
-
-
-def credential_listed_as_licence(entry: Mapping[str, Any], code: str,
-                                 parent_text: str = '') -> CredentialReroute | None:
+def credential_listed_as_licence(entry: Mapping[str, Any], code: str) -> CredentialReroute | None:
     """Where a record grouped under `code` (F1 or F2) belongs instead, and
     the line read (`record_line`), or None (see the comment above)."""
-    line = record_line(entry, parent_text)
+    line = record_line(entry)
     if code == BOARD_CODE:
         home = misfiled_credential_home(line, BOARD_CODE)
         return CredentialReroute(home, line) if home else None
@@ -854,11 +830,7 @@ def credential_listed_as_licence(entry: Mapping[str, Any], code: str,
     if kind != KIND_LICENSE:
         return None
     home = misfiled_credential_home(line, LICENCE_CODE)
-    if home is not None:
-        return CredentialReroute(home, line)
-    if _unnamed_licence_row(licence, entry, line):
-        return CredentialReroute(CredentialHome(OTHER_EDUCATION_CODE, KIND_UNNAMED_CREDENTIAL), line)
-    return None
+    return CredentialReroute(home, line) if home else None
 
 
 def credential_reroute_warnings(moved: list[tuple[object, str, str]]) -> list[dict[str, Any]]:

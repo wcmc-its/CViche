@@ -41,7 +41,8 @@ the licence's row), a line that names an identifier (NPI, DEA, CDS, UPIN,
 Medicare) anywhere, or a line it cannot read; and it moves into F1 or F2
 only from the codes `MOVABLE_INTO_CREDENTIAL_CODES` names (other education,
 membership, honors: never T, D, a position, a training or an affiliation
-code). With `in_board_block` (the row before, in the same heading group,
+code), and into F1 never from honors (`LICENCE_STATEMENT_SOURCE_CODES`).
+With `in_board_block` (the row before, in the same heading group,
 is a board certification inside a board-certification block,
 `next_in_board_block`) it also reads an unworded membership line as the
 block's next certification (`_is_board_block_line`, FCAAUV 15).
@@ -73,6 +74,11 @@ OTHER_EDUCATION_CODE = "B2"
 #: licence ("Physician, private practice; <state> medical license") is that
 #: row, and none moved on the #1243 farm.
 MOVABLE_INTO_CREDENTIAL_CODES = frozenset({OTHER_EDUCATION_CODE, MEMBERSHIP_CODE, "H"})
+#: The codes a licence statement may be moved out of into F1: other education
+#: and membership, not honors. An honors line that states a licence stays
+#: where it is, and goes to no other code either (the owner's decision of
+#: 2026-11-03 on #1577).
+LICENCE_STATEMENT_SOURCE_CODES = frozenset({OTHER_EDUCATION_CODE, MEMBERSHIP_CODE})
 #: The codes a credential line is moved out of.
 CREDENTIAL_CODES = frozenset({LICENCE_CODE, BOARD_CODE})
 #: Every code a credential recode starts from.
@@ -95,9 +101,6 @@ KIND_CONTROLLED_SUBSTANCE = "controlled_substance"
 KIND_LICENCE_STATEMENT = "licence_statement"
 KIND_BOARD_STATEMENT = "board_statement"
 KIND_BOARD_BLOCK_LINE = "board_block_line"
-#: Stage 6's licensure guard only: a licence row with no state whose line
-#: names no licence and no identifier (a coaching or EMT certification).
-KIND_UNNAMED_CREDENTIAL = "unnamed_credential"
 
 
 class CredentialHome(NamedTuple):
@@ -531,7 +534,9 @@ def misfiled_credential_home(text: str, code: str, in_board_block: bool = False)
     An F1 or F2 line moves out when it names a credential whose home is
     another code (`credential_kind`); a line coded one of
     `MOVABLE_INTO_CREDENTIAL_CODES` moves into F1 or F2 when it states a
-    licence or a board certification. A membership line with neither moves
+    licence or a board certification, into F1 only from
+    `LICENCE_STATEMENT_SOURCE_CODES` (an honors line that states a licence
+    moves nowhere). A membership line with neither moves
     to F2 when `in_board_block` says the row before it in its heading group
     is a board certification inside a board-certification block
     (`next_in_board_block`) and the line is an unworded one
@@ -543,6 +548,8 @@ def misfiled_credential_home(text: str, code: str, in_board_block: bool = False)
     if code not in MOVABLE_INTO_CREDENTIAL_CODES:
         return None
     home = _into_credential_code(text)
+    if home is not None and home.code == LICENCE_CODE and code not in LICENCE_STATEMENT_SOURCE_CODES:
+        return None
     if home is None and in_board_block and code == MEMBERSHIP_CODE and _is_board_block_line(text):
         return CredentialHome(BOARD_CODE, KIND_BOARD_BLOCK_LINE)
     return home

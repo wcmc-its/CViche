@@ -683,6 +683,14 @@ def test_a_misfiled_credential_is_reported_as_info_1577(text, code, headings, ex
     assert f"the source points to {expected} (" in findings[0]["message"]
 
 
+def test_a_licence_statement_coded_h_is_no_credential_finding_1577():
+    # The owner's decision of 2026-11-03: stage 3b's pin leaves an honors line that states a
+    # licence, so the lint does not point it to F1; coded I, it does.
+    text = "Invented State Medical License with Distinction, 2031"
+    assert _run(_entry(text, "H", "Honors and Awards")) == []
+    assert _shapes(_run(_entry(text, "I", "Memberships"))) == ["credential_misfiled"]
+
+
 def test_a_credential_finding_names_the_home_it_points_to_1577():
     [finding] = _run(_entry("2031- Invented State Fluoroscopy Operator (XX000000)", "F1", "Licensure"))
     assert finding["message"].endswith(
@@ -695,10 +703,10 @@ def test_a_credential_finding_names_the_home_it_points_to_1577():
 
 
 def test_a_record_stage6_regroups_still_gets_every_other_shape_1577():
-    # stage 6 regroups the F1 line (no state, no licence word), but only the
+    # stage 6 regroups the F1 line (a life-support course), but only the
     # credential shapes read that: the cross-reference shape still reports it
-    findings = lint_section_consistency({"entries": [_entry("see Section 4", "F1", "Licensure")]},
-                                        _f1_stage4("see Section 4"))
+    text = "ACLS 2031, see Section 4"
+    findings = lint_section_consistency({"entries": [_entry(text, "F1", "Licensure")]}, _f1_stage4(text))
     assert _shapes(findings) == ["cross_reference_as_record"]
 
 
@@ -786,6 +794,9 @@ def test_a_licensing_exam_naming_a_board_is_no_board_certification_1577():
     ("Board Certified, American Board of Invented Medicine 2031; ACLS current", "F2", ("Board Certification",)),
     ("Limited Training Permit, Invented State, 2029-2031", "F1", ("Licensure",)),
     ("Invented State Board of Medicine, 2031-present", "I", ("Memberships",)),
+    # the owner's decision of 2026-11-03: a licence statement coded H stays an honor, coded I it moves
+    ("Invented State Medical License with Distinction, 2031", "H", ("Honors and Awards",)),
+    ("Invented State Medical License with Distinction, 2031", "I", ("Memberships",)),
 ])
 def test_the_lint_reports_exactly_what_the_stage3b_credential_pin_recodes_1577(text, code, headings):
     """One test, two readers (CODING_STANDARDS.md §1.5): credential_misfiled

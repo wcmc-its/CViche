@@ -975,10 +975,9 @@ def test_a_row_with_only_a_state_or_only_a_number_is_under_the_header(fields):
 
 # --- #1577 shape 3: a credential listed as a licence or a board certification ---
 # Invented values. The shapes are ZDOAZO 62 (a permit with a state), VTRKUF 28 (an
-# ECFMG line with no state), ECXGAT 48 (a technologist certificate with a number),
-# PPMTJH 28 (an early exam step coded F2) and SPINJC 78 (a built fan-out child).
+# ECFMG line with no state), ECXGAT 48 (a technologist certificate with a number)
+# and PPMTJH 28 (an early exam step coded F2).
 
-from unified_pipeline.core.credential_lines import KIND_UNNAMED_CREDENTIAL  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     BUILT_TEXT_KEY,
     LAST_STAGE4_RECORD,
@@ -999,8 +998,8 @@ def _f1(text, **fields):
                                  "issue_date": None, "expiration_date": None, **fields}}
 
 
-def _home_of(entry, code="F1", parent_text=""):
-    reroute = credential_listed_as_licence(entry, code, parent_text)
+def _home_of(entry, code="F1"):
+    reroute = credential_listed_as_licence(entry, code)
     return (reroute.home.code, reroute.home.kind) if reroute else None
 
 
@@ -1011,9 +1010,6 @@ def _home_of(entry, code="F1", parent_text=""):
      ("B2", "ecfmg")),
     (_f1("1980   M(ASCP), Technologist in Example Science, certificate #X000000", license_number="X000000",
          issue_date="1980"), ("F2", "tech_registry")),
-    # b2: no state, no licence word, no identifier
-    (_f1("2031 - Present    Certified Example Coach by the Example Registry", issue_date="2031"),
-     ("B2", KIND_UNNAMED_CREDENTIAL)),
 ])
 def test_a_credential_read_as_a_licence_is_regrouped_1577(entry, home):
     assert _home_of(entry) == home
@@ -1031,8 +1027,9 @@ def test_a_credential_read_as_a_licence_is_regrouped_1577(entry, home):
     _f1("XX0000000", license_number="XX0000000"),
     # a line with no licence word but a state is a licence row
     _f1("Example State 12345, 2031", state_country="Example State", license_number="12345"),
-    # b2 reads only a row with no number: a numbered row is a licence whose state stage 4
-    # missed (#1577 review B2)
+    # a line that names no credential, with no state and no number (the owner's decision of
+    # 2026-11-03), or with a number: a licence whose state stage 4 missed (#1577 review B2)
+    _f1("2031 - Present    Certified Example Coach by the Example Registry", issue_date="2031"),
     _f1("Example State Physician's and Surgeon's Certificate A12345, 2031", license_number="A12345",
         issue_date="2031"),
     _f1("Certificate of Registration #123456, 2031", license_number="123456", issue_date="2031"),
@@ -1078,37 +1075,13 @@ def test_other_codes_are_never_regrouped_1577():
     assert _home_of(_f1("2031 Certified by ECFMG"), "I") is None
 
 
-_PARENT = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
-           "Example State (Inactive)")
-
-
-def _built_child(**fields):
-    return {**_f1("2031 | 2033", **fields), BUILT_TEXT_KEY: True}
-
-
-def test_a_built_child_reads_its_own_dated_clause_of_the_parent_line_1577():
-    child = _built_child(issue_date="2031", expiration_date="2033")
-    assert record_line(child, _PARENT) == "2031-2033  Certified in Example Method, Example Institute"
-    reroute = credential_listed_as_licence(child, "F1", _PARENT)
-    assert (reroute.home.code, reroute.home.kind, reroute.line) == (
-        "B2", KIND_UNNAMED_CREDENTIAL, "2031-2033  Certified in Example Method, Example Institute")
-
-
-@pytest.mark.parametrize("entry,parent", [
-    # no clause with the child's years: the built text is kept
-    (_built_child(issue_date="2040", expiration_date="2041"), _PARENT),
-    # no years at all
-    (_built_child(), _PARENT),
-    # no parent line
-    (_built_child(issue_date="2031", expiration_date="2033"), ""),
-    # not a built text
-    (_f1("2031 | 2033", issue_date="2031", expiration_date="2033"), _PARENT),
-    # two clauses with the same years: ambiguous, kept
-    (_built_child(issue_date="2031", expiration_date="2033"),
-     "2031-2033 Example Method certificate 2031-2033 Example Other certificate"),
-])
-def test_a_record_line_is_its_text_unless_one_clause_is_its_own_1577(entry, parent):
-    assert record_line(entry, parent) == entry["text"]
+def test_a_licence_row_with_no_state_number_or_credential_name_renders_its_line_1577():
+    # The owner's decision of 2026-11-03 removed the guard rule that moved such a row to B2:
+    # it stays in Licensure as on dev, its whole line in the State cell.
+    text = "2031 - Present    Certified Example Coach by the Example Registry"
+    entry = _f1(text, issue_date="2031", expiration_date="present")
+    assert _home_of(entry) is None
+    assert _resolve_licensure([entry]).licenses == (LicenseRecord(state=text),)
 
 
 def _last_record(text, own_text, **fields):
@@ -1127,18 +1100,33 @@ _FUSED = "ECFMG Certificate #0-000-000-0, 2029; Example State Medical License #1
     (_last_record("Example Provider: BLS, ACLS", None), "Example Provider: BLS, ACLS"),
 ])
 def test_the_last_record_reads_its_own_line_not_the_parents_1577(entry, line):
-    assert record_line(entry, entry["text"]) == line
     assert record_line(entry) == line
+
+
+@pytest.mark.parametrize("entry", [
+    # not a last record: its text, whatever its fields say
+    _f1("2031 | 2033", issue_date="2031", expiration_date="2033"),
+    # a record whose text stage 6 built from its fields reads that text, no clause of its
+    # parent's line (the owner's decision of 2026-11-03)
+    {**_f1("2031 | 2033", issue_date="2031", expiration_date="2033"), BUILT_TEXT_KEY: True},
+    # a last record with no clause of its fields' years, with no years, or with two such clauses
+    _last_record(_FUSED, None, issue_date="2040"),
+    _last_record(_FUSED, None),
+    _last_record("2031-2033 Example Method certificate 2031-2033 Example Other certificate", None,
+                 issue_date="2031", expiration_date="2033"),
+])
+def test_a_record_line_is_its_text_unless_one_clause_is_its_own_1577(entry):
+    assert record_line(entry) == entry["text"]
 
 
 def test_a_last_record_licence_of_a_fused_ecfmg_paragraph_stays_a_licence_1577():
     entry = _last_record(_FUSED, None, state_country="Example State", license_number="123456", issue_date="2031")
-    assert _home_of(entry, parent_text=_FUSED) is None
+    assert _home_of(entry) is None
 
 
-def test_a_built_childs_field_years_ignore_non_scalar_values_1577():
-    child = _built_child(issue_date="2031", expiration_date="2033", notes=["2030"], extra={"year": "2030"})
-    assert record_line(child, _PARENT) == "2031-2033  Certified in Example Method, Example Institute"
+def test_a_last_records_field_years_ignore_non_scalar_values_1577():
+    entry = _last_record(_FUSED, None, issue_date="2031", notes=["2029"], extra={"year": "2029"})
+    assert record_line(entry) == "Example State Medical License #123456, 2031"
 
 
 def test_the_reroute_warning_names_indexes_and_moves_only_1577():

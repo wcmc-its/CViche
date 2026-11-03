@@ -101,7 +101,6 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE, TemplateSnapshot, fill_empty_slots, snapshot_template
 from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
-    BUILT_TEXT_KEY,
     BUILT_TEXT_SEPARATOR,
     FANNED_OUT_FROM,
     LAST_STAGE4_RECORD,
@@ -316,7 +315,6 @@ from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VE
 from unified_pipeline.stage6.sections.licensure import (
     credential_listed_as_licence,
     credential_reroute_warnings,
-    is_last_stage4_record,
     line_without_number,
     record_line,
 )
@@ -1621,21 +1619,6 @@ NON_SEAT_ATTENDED_CODE = 'B2'
 _B2_PROGRAM_KEYS = ('program_name', 'program_type', 'title')
 
 
-def _element_span_key(entry: Mapping[str, Any]) -> tuple[object, object]:
-    """(element_idx_start, element_idx_end): the key a fan-out child shares
-    with the entry it was split from."""
-    return entry.get('element_idx_start'), entry.get('element_idx_end')
-
-
-def _parent_texts(entries: Sequence[Mapping[str, Any]]) -> dict[tuple[object, object], str]:
-    """Each entry's text by its span (`_element_span_key`), for the spans
-    one entry holds: two entries on one span leave it out, so a fan-out
-    child never reads another entry's line as its parent's."""
-    spans = Counter(_element_span_key(entry) for entry in entries)
-    return {_element_span_key(entry): str(entry.get('text') or '') for entry in entries
-            if spans[_element_span_key(entry)] == 1}
-
-
 def is_non_seat_pin(entry: Mapping[str, Any]) -> bool:
     """Whether stage 3b's non-seat pin made *entry* D3 or B2 out of Q2 or P."""
     return (entry.get('pre_pin_code') in NON_SEAT_PIN_SOURCE_CODES
@@ -1755,24 +1738,20 @@ def _carry_credential_fields(entry: dict[str, Any], target_code: str, line: str)
     entry['extracted_fields'] = fields
 
 
-def _route_credential_listed_as_licence(entry: dict[str, Any], code: str, parent_text: str,
+def _route_credential_listed_as_licence(entry: dict[str, Any], code: str,
                                         moved: list[tuple[object, str, str]]) -> str:
     """The code to group *entry* under: its credential's own code for a
     licence or board record whose line names another credential
     (`credential_listed_as_licence`, #1577), its fields carried
     (`_carry_credential_fields`) and its element_idx_start and move
     appended to *moved*; *code* otherwise, and always for a record stage
-    3b's credential pin already recoded. A record whose text stage 6 built
-    from its fields takes its own clause of `parent_text` as its text."""
+    3b's credential pin already recoded."""
     if is_credential_pin(entry):
         return code
-    reroute = credential_listed_as_licence(entry, code, parent_text)
+    reroute = credential_listed_as_licence(entry, code)
     if reroute is None:
         return code
     target = reroute.home.code
-    if reroute.line != str(entry.get('text') or '') and not is_last_stage4_record(entry):
-        entry['text'] = reroute.line
-        entry.pop(BUILT_TEXT_KEY, None)
     _carry_credential_fields(entry, target, reroute.line)
     entry.setdefault('taxonomy_code_original', code)
     entry['taxonomy_code'] = target
@@ -2469,7 +2448,6 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         honors_moved: list[object] = []
         credentials_moved: list[tuple[object, str, str]] = []
         self._declined_lists = []
-        parent_texts = _parent_texts(entries)
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY, declined=self._declined_lists)
@@ -2477,11 +2455,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
             code = normalize_retired_code(entry)
-            parent_text = parent_texts.get(_element_span_key(entry), '')
             if is_non_seat_pin(entry):
                 _carry_non_seat_fields(entry)
             elif is_credential_pin(entry):
-                _carry_credential_fields(entry, code, record_line(entry, parent_text))
+                _carry_credential_fields(entry, code, record_line(entry))
             else:
                 code = self._correct_mismatch_if_needed(entry, code, reroutes)
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
@@ -2489,7 +2466,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             code = _route_d2_leadership_title(entry, code, leadership_moved)
             code = _route_p_grant_review(entry, code, grant_reviews_moved)
             code = _route_honor_listed_as_funding(entry, code, honors_moved)
-            code = _route_credential_listed_as_licence(entry, code, parent_text, credentials_moved)
+            code = _route_credential_listed_as_licence(entry, code, credentials_moved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
