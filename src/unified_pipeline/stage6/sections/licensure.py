@@ -112,7 +112,7 @@ from unified_pipeline.core.text_norm import date_clauses, record_date_anchors
 
 from ..fan_out import LAST_STAGE4_RECORD, fallback_text, has_built_text
 from ..formatting import _set_font, format_date_for_section
-from ..normalization import CAT_DEA, WithheldItem
+from ..normalization import CAT_DEA, WithheldItem, line_without_edge_dates
 from ..normalization.pii import _dea_check_digit_ok
 from ..parsing.dates import CURRENT_DATE_VALUES
 from ..sorting import sort_entries_reverse_chronological
@@ -520,7 +520,7 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     """
     if entry.state or entry.number:
         return LicenseRecord(
-            state=_with_qualifier(entry.state,
+            state=_with_qualifier(entry.state or _unstated_state_name(entry),
                                   entry.license_type or _controlled_substance_qualifier(entry),
                                   f"{entry.state} {entry.number}"),
             number=entry.number,
@@ -533,6 +533,37 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
         # dropped the tail of every long credential mid-word (#1576).
         return LicenseRecord(state=entry.original_text)
     return None
+
+
+#: A certificate or licence number's label before it ("certificate #", "No.").
+_NUMBER_LABEL = r'(?:\b(?:certificate|cert\.?|licen[cs]e|registration)\s*)?(?:#|\bno\.?|\bnumber)?\s*:?\s*'
+#: A word of a name: three letters or more.
+_NAME_WORD_RE = re.compile(r'[^\W\d_]{3,}')
+
+
+def line_without_number(line: str, number: str) -> str:
+    """`line` less `number` and its label, and any parentheses it leaves empty."""
+    if not number or number not in line:
+        return line
+    cut = re.sub(_NUMBER_LABEL + re.escape(number), '', line, count=1, flags=re.IGNORECASE)
+    cut = re.sub(r'\s{2,}', ' ', re.sub(r'\(\s*\)', '', cut)).strip(' ,;:\t')
+    return cut or line
+
+
+def _unstated_state_name(entry: LicensureEntry) -> str:
+    """The State cell of a numbered licence row whose state stage 4 did not
+    extract (#1577): the line's own words less its number and the dates the
+    row's date cells show, so the row says what it licenses ("<Register> of
+    <profession> #00000 2010-2013" reads "<Register> of <profession>", not
+    " | 00000 | 2010 | 2013"); '' when the number is not on the line or no
+    word is left."""
+    if not entry.number or entry.number not in entry.original_text:
+        return ''
+    name = line_without_number(entry.original_text, entry.number)
+    if entry.number in name:
+        return ''
+    name = ' '.join(line_without_edge_dates(name, entry.issue_date, entry.expiration_date).split())
+    return name if _NAME_WORD_RE.search(name) else ''
 
 
 #: The State-cell qualifier of a state controlled-substance registration

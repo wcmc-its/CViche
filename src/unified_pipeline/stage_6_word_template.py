@@ -317,6 +317,7 @@ from unified_pipeline.stage6.sections.licensure import (
     credential_listed_as_licence,
     credential_reroute_warnings,
     is_last_stage4_record,
+    line_without_number,
     record_line,
 )
 from unified_pipeline.stage6.sections.research_support import (
@@ -1711,8 +1712,6 @@ _CREDENTIAL_START_KEYS = ('issue_date', 'year_certified', 'start_date', 'year', 
 _CREDENTIAL_END_KEYS = ('expiration_date', 'recertification_date', 'end_date')
 _B2_DATE_KEYS = ('start_date', 'end_date', 'year', 'year_awarded')
 _BOARD_NAME_KEYS = ('certifying_board', 'specialty')
-# A certificate or licence number's label before it ("certificate #", "No.").
-_NUMBER_LABEL = r'(?:\b(?:certificate|cert\.?|licen[cs]e|registration)\s*)?(?:#|\bno\.?|\bnumber)?\s*:?\s*'
 
 
 def _first_field_text(fields: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -1722,15 +1721,6 @@ def _first_field_text(fields: Mapping[str, Any], keys: Sequence[str]) -> str:
         if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
             return str(value).strip()
     return ''
-
-
-def _without_number(line: str, number: str) -> str:
-    """`line` less `number` and its label, and any parentheses it leaves empty."""
-    if not number or number not in line:
-        return line
-    cut = re.sub(_NUMBER_LABEL + re.escape(number), '', line, count=1, flags=re.IGNORECASE)
-    cut = re.sub(r'\s{2,}', ' ', re.sub(r'\(\s*\)', '', cut)).strip(' ,;:\t')
-    return cut or line
 
 
 def _carry_credential_fields(entry: dict[str, Any], target_code: str, line: str) -> None:
@@ -1752,7 +1742,7 @@ def _carry_credential_fields(entry: dict[str, Any], target_code: str, line: str)
             fields.update({key: value for key, value in (('start_date', start), ('end_date', end)) if value})
     elif target_code == BOARD_CODE:
         if blank.issuperset(_BOARD_NAME_KEYS):
-            fields['specialty'] = _without_number(name, number)
+            fields['specialty'] = line_without_number(name, number)
         recertified = end if YEAR_RE.search(end) else ''
         fields.update({key: value for key, value in (('certificate_number', number), ('year_certified', start),
                                                      ('recertification_date', recertified))

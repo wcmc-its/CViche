@@ -1188,6 +1188,34 @@ def test_other_rows_get_no_controlled_substance_qualifier_1577(text, state, expe
     assert _licence_row(text, state_country=state, license_number="00000").state == expected
 
 
+@pytest.mark.parametrize("text,fields,state", [
+    # #1577 fix round: a numbered licence row stage 4 gave no state says what it licenses
+    ("Example National Register of Health Service\tProviders in Example Psychology  #00000 2031-2033",
+     {"license_number": "00000", "issue_date": "2031", "expiration_date": "2033"},
+     "Example National Register of Health Service Providers in Example Psychology"),
+    ("2031 - present | Example Dental Association\nDentistry, 00000",
+     {"license_number": "00000", "issue_date": "2031", "expiration_date": "present"},
+     "Example Dental Association Dentistry"),
+    ("Example State Board of Social Work Examiners Registered Supervisor, 2031 to current, #00000",
+     {"license_number": "#00000", "issue_date": "2031", "expiration_date": "current"},
+     "Example State Board of Social Work Examiners Registered Supervisor"),
+    ("Example State Physician's and Surgeon's Certificate A00000, 2031",
+     {"license_number": "A00000", "issue_date": "2031"}, "Example State Physician's and Surgeon's"),
+    # a line holding only a label and the number names nothing
+    ("Certificate #00000", {"license_number": "00000"}, ""),
+    # nothing but the number, a short label and dates: the row stays as it was
+    ("MD 00000 (2031-present)", {"license_number": "00000", "issue_date": "2031"}, ""),
+    ("#00000, 2031", {"license_number": "00000", "issue_date": "2031"}, ""),
+    # the number is not on the line: the name cannot be told from it
+    ("Example Register of Example Providers", {"license_number": "99999", "issue_date": "2031"}, ""),
+    # a state stage 4 extracted is the cell, as before
+    ("Example Register #00000, 2031", {"state_country": "Example State", "license_number": "00000"},
+     "Example State"),
+])
+def test_a_numbered_licence_with_no_state_is_named_by_its_line_1577(text, fields, state):
+    assert _licence_row(text, **fields).state == state
+
+
 def test_a_stage4_licence_type_outranks_the_controlled_substance_qualifier_1577():
     record = _licence_row("Example State Controlled Substance Registration 2031", state_country="Example State",
                           license_number="00000", license_type="Pharmacy")
