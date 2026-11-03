@@ -67,11 +67,8 @@ from collections.abc import Iterable
 
 from ..core.credential_lines import (
     BOARD_BLOCK_WHY,
-    BOARD_CODE,
     CREDENTIAL_PIN_WHY,
     KIND_BOARD_BLOCK_LINE,
-    LICENCE_CODE,
-    OTHER_EDUCATION_CODE,
     misfiled_credential_home,
     next_in_board_block,
 )
@@ -471,13 +468,9 @@ _FELLOWSHIP_HONOR_WHY = "An elected fellowship, or one listed under honors, is a
 # row before must be F2 by the model's answer or a pin other than this one,
 # so a run of lines after one board row does not chain.
 #
-# The reasoning texts are `core.credential_lines`'s, which stage 6 and the
-# doctor read to tell this pin's recode from another step's
-# (`is_credential_pin`).
-_CREDENTIAL_OTHER_EDUCATION_WHY = CREDENTIAL_PIN_WHY[OTHER_EDUCATION_CODE]
-_CREDENTIAL_LICENCE_WHY = CREDENTIAL_PIN_WHY[LICENCE_CODE]
-_CREDENTIAL_BOARD_WHY = CREDENTIAL_PIN_WHY[BOARD_CODE]
-_BOARD_BLOCK_WHY = BOARD_BLOCK_WHY
+# The reasoning texts are `core.credential_lines`'s (`CREDENTIAL_PIN_WHY`,
+# `BOARD_BLOCK_WHY`), which stage 6 and the doctor read to tell this pin's
+# recode from another step's (`is_credential_pin`).
 
 # --- #1573: rows a heading says are someone else's are not the owner's records ---
 #
@@ -1086,7 +1079,7 @@ def credential_pin_code(entry: dict, in_board_block: bool) -> tuple[str, str] | 
     home = misfiled_credential_home(entry.get("text") or "", entry.get("taxonomy_code") or "", in_board_block)
     if home is None:
         return None
-    return home.code, _BOARD_BLOCK_WHY if home.kind == KIND_BOARD_BLOCK_LINE else CREDENTIAL_PIN_WHY[home.code]
+    return home.code, BOARD_BLOCK_WHY if home.kind == KIND_BOARD_BLOCK_LINE else CREDENTIAL_PIN_WHY[home.code]
 
 
 def _next_in_board_block(in_block: bool, entry: dict) -> bool:
