@@ -400,6 +400,19 @@ def test_a_line_where_it_belongs_or_unreadable_stays(code, text):
     ("I", "ABXY, Association for Example Analysis International"),
     ("I", "ABXY - Example Academy of Example Medicine, 2031"),
     ("H", "ABXY: Example College of Example Surgeons, 2031"),
+    ("I", "ABXY - Example Federation of Example Societies, 2031"),
+    ("I", "ABXY - Example Institute of Example Medicine, 2031"),
+    ("I", "ABXY - Example Foundation, 2031"),
+    ("I", "ABXY - Example Facilities Group, 2031"),
+    ("I", "ABXY - Example Council on Example Care, 2031"),
+    ("I", "ABXY - Example Network of Example Clinics, 2031"),
+    ("I", "ABXY - Example Consortium, 2031"),
+    ("I", "ABXY - Example Alliance, 2031"),
+    ("I", "ABXY - Example Coalition, 2031"),
+    ("I", "ABXY - Example Forum, 2031"),
+    ("I", "ABXY - Example Union of Example Physicians, 2031"),
+    ("I", "ABXY - Example League, 2031"),
+    ("I", "ABXY - Example Club, 2031"),
 ])
 def test_what_never_moves(code, text):
     assert _home(text, code) is None
@@ -553,6 +566,9 @@ def test_a_training_permit_and_a_physicians_and_surgeons_certificate_name_a_lice
     ("F2", "American Board of Example Surgery, Example Critical Care; ATLS Instructor 2031", None),
     ("F2", "American Board of Example Medicine, 2031; ACLS 2033", None),
     ("F2", "ABXY Example Medicine 2031; BLS current", None),
+    ("F2", "Board certified in Example Medicine 2031; BLS current", None),
+    ("F2", "National Board of Example Echocardiography, 2031; ACLS current", None),
+    ("F2", "American Osteopathic Board of Example Medicine 2031; PALS current", None),
     ("F1", "Board Certified, American Board of Example Medicine 2031; ACLS current",
      (BOARD_CODE, "board_cert")),
     # Recertification of the course itself, and ABLS, are the course's (EQGGRB 48-50).
@@ -572,6 +588,8 @@ def test_a_specialty_board_outranks_a_course_on_its_line(code, text, home):
     ("ABXY - American Board of Example Medicine, 2031", "I", (BOARD_CODE, "board_statement")),
     ("(D)ABXY, Example Specialty, 2031", "I", (BOARD_CODE, "board_statement")),
     ("ABXY: Example Board of Example Surgery, 2031", "H", (BOARD_CODE, "board_statement")),
+    # a body word beside "board" is the board's own name
+    ("ABXY - Example Board of Example Surgery, Example College, 2031", "I", (BOARD_CODE, "board_statement")),
 ])
 def test_an_ab_acronym_naming_a_board_is_a_board_statement(text, code, home):
     assert _home(text, code) == home
