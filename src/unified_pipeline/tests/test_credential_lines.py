@@ -730,7 +730,7 @@ def test_a_list_label_alone_is_a_credential_list_label(text):
 
 @pytest.mark.parametrize("text", [
     "Certifications: Example Board of Examiners", "Board Certified", "Board certification in Example Medicine",
-    "Example Coach Certification", "Education", "Certificate", "", None,
+    "Example Coach Certification", "Education", "Certificate", "", None, ["Certifications"],
 ])
 def test_a_name_with_more_than_the_label_is_no_list_label(text):
     assert not is_credential_list_label(text)

@@ -788,6 +788,14 @@ def test_b2_program_that_is_only_its_list_label_takes_the_line(text, fields, pro
     assert record.program == program
 
 
+def test_b2_program_written_as_a_list_is_kept_as_it_was():
+    names = ['Example Writing Course', 'Example Statistics Course']
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': 'Example Writing Course\tExample Statistics Course',
+         'extracted_fields': {'program_name': names, 'start_date': '2031'}})
+    assert (record.program, record.dates) == (names, '2031')
+
+
 def test_b2_split_record_named_by_its_list_label_reads_its_own_line():
     entry = {'taxonomy_code': 'B2', 'text': 'Certifications | Example Board of Examiners | 2031',
              BUILT_TEXT_KEY: True,

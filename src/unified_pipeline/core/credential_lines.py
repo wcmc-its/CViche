@@ -362,12 +362,13 @@ def names_licence(text: str) -> bool:
     return bool(_LICENCE_WORD.search(without_exams) or _LICENCE_STATEMENT.search(_NBME.sub(" ", text)))
 
 
-def is_credential_list_label(text: str) -> bool:
+def is_credential_list_label(text: object) -> bool:
     """Whether `text` is only the label a CV names a credential list by
     ("Certifications", "Board Certification", "Licensure and
     Certification"), no credential of its own: the name stage 4 gave
-    a record from its line's lead label (CAOACN 40, SVYSGY 44, #1577)."""
-    return bool(_LIST_LABEL.match(text or ""))
+    a record from its line's lead label (CAOACN 40, SVYSGY 44, #1577). A
+    value that is no string (stage 4 has written a list of names) is none."""
+    return isinstance(text, str) and bool(_LIST_LABEL.match(text))
 
 
 def names_identifier(text: str) -> bool:
