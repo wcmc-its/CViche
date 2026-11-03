@@ -66,6 +66,8 @@ from unified_pipeline.stage6.sections.bibliography import SOURCE_HEADING_NOTE_RE
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
+    KIND_LICENSE,
+    _classify_licensure_entry,
     _license_record,
     _normalize_licensure_entry,
     credential_listed_as_licence,
@@ -852,6 +854,25 @@ def _rendered_code(entry: Mapping) -> str:
     return reroute.home.code if reroute else code
 
 
+def _section_lost_text(entry: Mapping, code: str) -> str:
+    """What section_lost looks for of a stage-4 entry: its text, except for a
+    licence stage 6 renders as a State / Number / dates row
+    (`_license_record`, a licence with a state or a number), whose line's
+    words that row never prints: the row's cells. #1577: once the
+    credentials listed as licences rendered elsewhere, real licence rows
+    alone read as lost (JUWDFE, VBNCOF on the #1243 farm)."""
+    text = str(entry.get("text") or "")
+    if code != LICENSURE_CODE:
+        return text
+    licence = _normalize_licensure_entry(entry)
+    if not (licence.state or licence.number) or _classify_licensure_entry(
+            licence.state, licence.number, licence.license_type, licence.original_text) != KIND_LICENSE:
+        return text
+    row = _license_record(licence)
+    return " ".join(str(cell) for cell in (row.state, row.number, row.issue_date, row.last_registration_date)
+                    if cell)
+
+
 def lint_section_lost(stage4: dict,
                       blocks: list[tuple[str, str]]) -> list[dict]:
     """One WARN per taxonomy code whose entries are absent from the code's
@@ -862,7 +883,7 @@ def lint_section_lost(stage4: dict,
     for e in stage4.get("entries", []):
         code = _rendered_code(e)
         if code and code not in _SECTION_LOST_SKIP_CODES and code[0] in _SECTION_LETTERS:
-            texts[code].append(str(e.get("text") or ""))
+            texts[code].append(_section_lost_text(e, code))
     sections = _section_tokens(blocks)
     ubiquitous = _rendered_lines(blocks).ubiquitous | _template_label_tokens()
     findings = []
