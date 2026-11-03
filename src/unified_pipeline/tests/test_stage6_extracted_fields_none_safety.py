@@ -755,6 +755,57 @@ def test_b2_location_already_trailing_the_institution_is_not_appended():
     assert gen.doc.tables[0].rows[1].cells[1].text == 'Some College, Riverton, OR'
 
 
+# --- other education: an expiry or renewal date is no date attended (#1577 D2) --
+# Invented values; the shapes are 4SOTEA 37, web211 36, web190 953, web068 48 and
+# VQFSDI 139.
+
+@pytest.mark.parametrize("text, fields, dates, from_text", [
+    ("Example Basic Certificate | Exp. 4/2031", {'end_date': '2031-04'}, 'Expires 04/31', False),
+    ("Example Life Support        Expires 8/09/29", {'end_date': '2029-08-09'}, 'Expires 08/29', False),
+    ("Example Course, Expiration date: 2031", {'year': '2031'}, 'Expires 2031', False),
+    ("Example Course, valid through 2031", {'start_date': '2031'}, 'Expires 2031', False),
+    ("Example Course (expires June 28, 2031)", {'start_date': '2031-06', 'end_date': '2031-06'},
+     'Expires 06/31', False),
+    ("Example Life Support, last renewal February 2029", {'end_date': '2029-02'}, 'Renewed 02/29', False),
+    # the Description already writes the date after its label: printed once, there
+    ("Example Life Support, last renewal February 2029",
+     {'program_name': 'Example Life Support, last renewal February 2029', 'end_date': '2029-02'}, '', False),
+    ("Example Life Support, Example Association. Expiration 7/31/2031.",
+     {'program_name': 'Example Life Support. Expiration 7/31/2031.'}, '', False),
+    # a year read from the text keeps its label, as an inferred value
+    ("Example Life Support, Expiration 7/31/2031", {}, 'Expires 2031', True),
+    # no label, a label on another year, a label word inside another word, a range
+    ("Example Course | 4/2031", {'end_date': '2031-04'}, '04/31', False),
+    ("Example Course 2029, expires 2031", {'start_date': '2029'}, '2029', False),
+    ("Example research experience 2010", {'start_date': '2010'}, '2010', False),
+    ("Example Course 2029, expires 2031", {'start_date': '2029', 'end_date': '2031'}, '2029-2031', False),
+    ("Example Course, renewed 2029, held 2029-2031", {'start_date': '2029', 'end_date': '2031'}, '2029-2031',
+     False),
+], ids=['exp-dot-month-year', 'expires-two-digit-year', 'expiration-date-year-field', 'valid-through-start',
+        'expires-month-name-same-start-and-end', 'renewal', 'description-holds-the-renewal',
+        'description-holds-the-expiry', 'text-year-labelled', 'unlabelled', 'label-on-another-year',
+        'label-inside-a-word', 'range', 'range-with-a-labelled-start'])
+def test_b2_expiry_or_renewal_date_keeps_its_label(text, fields, dates, from_text):
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': text,
+         'extracted_fields': {'program_name': 'Example Course', **fields}})
+    assert (record.dates, record.dates_from_text) == (dates, from_text)
+
+
+def test_b2_labelled_expiry_reaches_the_dates_cell():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Example Basic Certificate | Exp. 4/2031',
+         'extracted_fields': {'program_name': 'Example Basic Certificate', 'end_date': '2031-04'}},
+        {'taxonomy_code': 'B2', 'text': 'Example Life Support, Expiration 7/31/2030',
+         'extracted_fields': {'program_name': 'Example Life Support'}}])
+
+    rows = {row.cells[0].text: row.cells[2] for row in gen.doc.tables[0].rows[1:]}
+    assert rows['Example Basic Certificate'].text == 'Expires 04/31'
+    assert _insertions(rows['Example Basic Certificate']) == []
+    assert _insertions(rows['Example Life Support']) == [('Text Extraction', 'Expires 2030')]
+
+
 # --- other education: a program that is only its list's label (#1577 D4) -------
 # Invented values; the shapes are CAOACN 40 and SVYSGY 44.
 

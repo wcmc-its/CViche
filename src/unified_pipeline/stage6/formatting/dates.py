@@ -363,6 +363,13 @@ EXTRA_SPAN_CODES = frozenset({'O', 'P', 'Q1', 'Q2', 'D1', 'D2', 'D3',
 # How the spans of one record are joined in its date cell: "2019-2020, 2021".
 DATE_SPAN_SEPARATOR = ', '
 
+# The word a date cell writes before a date the source labels as an expiry
+# or a renewal (`parsing.dates.EXPIRY_LABEL`, `RENEWAL_LABEL`), so it reads
+# as neither an issue nor an attendance date: "Expires 05/2011" in
+# Licensure (#1698), "Expires 04/27" in Other Educational Experiences (#1577).
+EXPIRES_PREFIX = 'Expires'
+RENEWED_PREFIX = 'Renewed'
+
 # A string of extra dates is a list: "1993-12; 1995-09" or "2010, 2012".
 _EXTRA_DATE_STRING_SPLIT_RE = re.compile(r'\s*[;,]\s*')
 

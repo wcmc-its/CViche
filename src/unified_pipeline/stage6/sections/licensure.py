@@ -108,10 +108,10 @@ from unified_pipeline.core.honor_lines import YEAR_RE
 from unified_pipeline.core.text_norm import date_clauses, record_date_anchors
 
 from ..fan_out import LAST_STAGE4_RECORD, fallback_text
-from ..formatting import _set_font, format_date_for_section
+from ..formatting import EXPIRES_PREFIX, _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem, line_without_edge_dates
 from ..normalization.pii import _dea_check_digit_ok
-from ..parsing.dates import CURRENT_DATE_VALUES
+from ..parsing.dates import CURRENT_DATE_VALUES, EXPIRY_LABEL
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -223,12 +223,8 @@ _NOT_ACTIVE_RE = re.compile(
     r'\b(?:inactive|expired|lapsed|retired|relinquished|surrendered|revoked'
     r'|suspended)\b', re.IGNORECASE)
 _EXPIRY_LABEL_RE = re.compile(
-    r'\b(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))\.?'
-    r'(?:\s+date)?\s*:?\s*\d', re.IGNORECASE)
-_EXPIRES_PREFIX = 'Expires'
-_EXPIRY_COLUMN_LABEL_RE = re.compile(
-    r'\b(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))\b',
-    re.IGNORECASE)
+    rf'\b{EXPIRY_LABEL}\.?(?:\s+date)?\s*:?\s*\d', re.IGNORECASE)
+_EXPIRY_COLUMN_LABEL_RE = re.compile(rf'\b{EXPIRY_LABEL}\b', re.IGNORECASE)
 _NUMBER_COLUMN_LABEL_RE = re.compile(
     r'(?:\blicen[cs]e\b|\bnumber\b|\bno\b|#)', re.IGNORECASE)
 _DIGIT_RE = re.compile(r'\d')
@@ -452,7 +448,7 @@ def _last_registration_cell(entry: LicensureEntry) -> str:
     date = format_date_for_section(expiration, 'F1') if expiration else ''
     if date and (entry.expiry_by_column_header
                  or _EXPIRY_LABEL_RE.search(entry.original_text)):
-        date = f"{_EXPIRES_PREFIX} {date}"
+        date = f"{EXPIRES_PREFIX} {date}"
     return _with_qualifier(date, status, date)
 
 

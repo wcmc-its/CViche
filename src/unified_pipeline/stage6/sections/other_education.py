@@ -26,6 +26,14 @@ things can be attributed:
 The date falls back in three steps -- a start/end range, then a single year
 field, then the recovered year -- and each is formatted for B2 (mm/yy).
 
+A record's one date that its line writes after an expiry or renewal label
+("Exp. 4/2027", "last renewal February 2021") is no date attended, and the
+column is "Dates attended": it is printed once, with its label. When the
+Description already writes it after its label, the Dates cell is left empty;
+otherwise the cell writes the label before the date, "Expires 04/27" (#1577:
+4SOTEA 37, web211 36/37 and web190 953/954 printed bare future dates, and
+VQFSDI 139 printed its renewal date twice).
+
 An institution field of the literal string "none" is treated as absent; field
 extraction emits it. An entry with neither a program name nor an institution is
 skipped, since the remaining columns would say nothing.
@@ -45,19 +53,25 @@ RENDER_ROUTED_CODES, so `generate()` treats it as rendered, and
 warning is the record that content was dropped.
 """
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from unified_pipeline.core.credential_lines import is_credential_list_label
+from unified_pipeline.core.honor_lines import YEAR_RE
+from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
 from ..fan_out import BUILT_TEXT_SEPARATOR, fallback_text, has_built_text
 from ..formatting import (
+    EXPIRES_PREFIX,
+    RENEWED_PREFIX,
     format_date_for_section,
     format_date_range,
 )
 from ..normalization import _get_cleaned_institution_name, line_without_edge_dates
-from ..parsing import _extract_year_from_text
+from ..parsing import _extract_year_from_text, _parse_date_components
+from ..parsing.dates import EXPIRY_LABEL, RENEWAL_LABEL
 from ..resolution import _get_institution_location, _location_remainder
 from ..sorting import sort_entries_reverse_chronological
 
@@ -84,6 +98,20 @@ MISSING_INSTITUTION_SENTINEL = 'none'
 # Track-change authors for the two attributable cell parts.
 INSTITUTION_ENRICHMENT_REASON = "Institution Enrichment"
 TEXT_EXTRACTION_REASON = "Text Extraction"
+
+# How far past its label a labelled date's year may sit: "June 28, " before
+# "2026", "8/09/" before "21".
+LABELLED_DATE_MAX_CHARS = 20
+# A date a line writes after an expiry or renewal label (`EXPIRY_LABEL`,
+# `RENEWAL_LABEL`), read up to its year: four digits, or the two after a
+# slash, dot or hyphen that end the date ("Exp. 4/2027", "Expires 8/09/21",
+# "(expires June 28, 2026)", "last renewal February 2021"). The label is a
+# whole word, so "experience 2010" names no expiry.
+_LABELLED_DATE_RE = re.compile(
+    rf"\b(?:(?P<expiry>{EXPIRY_LABEL})|{RENEWAL_LABEL})\b\.?(?:\s+date)?\s*:?\s*"
+    rf"[^;|\t\n]{{0,{LABELLED_DATE_MAX_CHARS}}}?"
+    rf"(?:(?P<year>{YEAR_RE.pattern})|(?<=[/.-])(?P<yy>\d{{2}})(?![\d/.-]))",
+    re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -113,7 +141,35 @@ class OtherEducationRecord:
         return bool(self.program or self.institution)
 
 
-def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bool]:
+def _date_label(text: object, year: int | None) -> str:
+    """The word a date cell writes before a date in `year` that `text`
+    writes after an expiry or renewal label (`_LABELLED_DATE_RE`):
+    `EXPIRES_PREFIX` or `RENEWED_PREFIX`; '' when it writes none, or is no
+    string (a program stage 4 wrote as a list)."""
+    if not isinstance(text, str):
+        return ''
+    for match in _LABELLED_DATE_RE.finditer(text):
+        found = int(match['year']) if match['year'] else expand_two_digit_year(int(match['yy']))
+        if found == year:
+            return EXPIRES_PREFIX if match['expiry'] else RENEWED_PREFIX
+    return ''
+
+
+def _labelled_dates(dates: str, lone_date: object, raw_text: str, program: str) -> str:
+    """`dates`, the Dates cell of a record whose one date is `lone_date`,
+    unless the line writes that date after an expiry or renewal label
+    (#1577): '' when the Description already writes it after its label, so
+    it is printed once; else the cell with the label before it ("Expires
+    04/27"), so it reads as no date attended. `dates` as it is for a date
+    the line labels no such way."""
+    year = _parse_date_components(str(lone_date or ''))[0]
+    if _date_label(program, year):
+        return ''
+    label = _date_label(raw_text, year)
+    return f"{label} {dates}" if label else dates
+
+
+def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str, program: str) -> tuple[str, bool]:
     """(formatted dates, came-from-raw-text) by the three-step precedence:
     a start/end range (B1's nested `dates_attended` when the flat keys are
     empty), then a single year field (year, then year_awarded),
@@ -122,7 +178,9 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bo
 
     A start with no end is one attended occasion, so it renders as the bare
     date; `raw_text` is passed so a source that writes the range open
-    ("2020-", "present") still renders "<start>-Present" (#1220).
+    ("2020-", "present") still renders "<start>-Present" (#1220). A record's
+    one date that its line labels an expiry or a renewal keeps its label,
+    or is left to the Description (`_labelled_dates`, #1577).
     """
     start = fields.get('start_date', '')
     end = fields.get('end_date', '')
@@ -131,13 +189,19 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bo
         start = attended.get('start_date') or ''
         end = attended.get('end_date') or ''
     if start or end:
-        return format_date_range(start, end, B2_TAXONOMY_CODE, raw_text), False
+        dates = format_date_range(start, end, B2_TAXONOMY_CODE, raw_text)
+        if start and end and start != end:
+            return dates, False
+        return _labelled_dates(dates, start or end, raw_text, program), False
     year = fields.get('year', '') or fields.get('year_awarded', '')
     if year:
-        return format_date_for_section(year, B2_TAXONOMY_CODE), False
+        dates = format_date_for_section(year, B2_TAXONOMY_CODE)
+        return _labelled_dates(dates, year, raw_text, program), False
     extracted_year = _extract_year_from_text(raw_text) if raw_text else ''
     if extracted_year:
-        return format_date_for_section(extracted_year, B2_TAXONOMY_CODE), True
+        dates = _labelled_dates(format_date_for_section(extracted_year, B2_TAXONOMY_CODE),
+                                extracted_year, raw_text, program)
+        return dates, bool(dates)
     return '', False
 
 
@@ -177,7 +241,7 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
     institution = _get_cleaned_institution_name(entry) or institution
 
     location, location_is_enriched = _get_institution_location(entry)
-    dates, dates_from_text = _resolve_b2_dates(fields, raw_text)
+    dates, dates_from_text = _resolve_b2_dates(fields, raw_text, program)
 
     return OtherEducationRecord(
         program=program,
