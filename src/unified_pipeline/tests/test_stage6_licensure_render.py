@@ -1208,3 +1208,50 @@ def test_a_stage4_licence_type_outranks_the_controlled_substance_qualifier_1577(
     record = _licence_row("Example State Controlled Substance Registration 2031", state_country="Example State",
                           license_number="00000", license_type="Pharmacy")
     assert record.state == "Example State (Pharmacy)"
+
+
+# --- #1577 D5: a row the credential pin moved into Licensure, with no state and no number ---
+# Invented values. The shape is XUTTKJ 133, a prescribing waiver pinned F2 -> F1: its
+# whole line printed in the State cell and its year in no date cell.
+
+from unified_pipeline.core.credential_lines import CREDENTIAL_PIN_WHY  # noqa: E402
+
+
+def _pinned_f1(text, pre_pin_code="F2", **fields):
+    return {**_f1(text, **fields), "pre_pin_code": pre_pin_code,
+            "classification_reasoning": f"{CREDENTIAL_PIN_WHY['F1']} (category F1)"}
+
+
+def test_a_pinned_licence_row_with_no_state_or_number_is_named_by_its_line_1577():
+    [record] = _resolve_licensure([_pinned_f1("Example Prescribing Certification (active)\t2031",
+                                              issue_date="2031")]).licenses
+    assert record == LicenseRecord(state="Example Prescribing Certification (active)", issue_date="2031")
+
+
+def test_a_pinned_split_record_is_named_by_its_own_line_not_the_parents_1577():
+    entry = {**_pinned_f1("Example Prescribing Certification 2031; Example Other Permit 2033",
+                          issue_date="2031"),
+             LAST_STAGE4_RECORD: {"key": "stage4_records", "index": 1, "count": 2,
+                                  OWN_TEXT_KEY: "Example Prescribing Certification 2031"}}
+    [record] = _resolve_licensure([entry]).licenses
+    assert (record.state, record.issue_date) == ("Example Prescribing Certification", "2031")
+
+
+@pytest.mark.parametrize("entry", [
+    # not moved by the pin: the raw line, as on dev (rule b2 stays removed)
+    _f1("Example Prescribing Certification (active)\t2031", issue_date="2031"),
+    # another step's recode that kept a pin code: not the pin's own reasoning
+    {**_f1("Example Prescribing Certification (active)\t2031", issue_date="2031"), "pre_pin_code": "F2",
+     "classification_reasoning": "Recoded by another step"},
+    # a pinned line with no word of a name left once its dates are gone
+    _pinned_f1("2031", issue_date="2031"),
+])
+def test_other_rows_with_no_state_or_number_keep_their_raw_line_1577(entry):
+    assert _resolve_licensure([entry]).licenses == (LicenseRecord(state=entry["text"]),)
+
+
+def test_a_pinned_row_keeps_a_state_or_number_stage4_extracted_1577():
+    [record] = _resolve_licensure([_pinned_f1("Example State Prescribing Registration #00000 2031",
+                                              state_country="Example State", license_number="00000",
+                                              issue_date="2031")]).licenses
+    assert (record.state, record.number, record.issue_date) == ("Example State", "00000", "2031")

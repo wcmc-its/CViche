@@ -100,6 +100,7 @@ from unified_pipeline.core.credential_lines import (
     BOARD_CODE,
     LICENCE_CODE,
     CredentialHome,
+    is_credential_pin,
     misfiled_credential_home,
     names_state_controlled_substance,
 )
@@ -245,6 +246,11 @@ class LicensureEntry:
     Built only by `_normalize_licensure_entry`. Nothing downstream reads
     `extracted_fields`, so there is one place -- and one place only -- where
     'state_country' vs 'state' vs 'jurisdiction' is decided.
+
+    `pinned_line` is the record's own line (`fan_out.fallback_text`) when
+    stage 3b's credential pin recoded it (`is_credential_pin`), '' for
+    every other record: what names a pinned row with no state and no
+    number (`_unstated_state_name`, #1577).
     """
 
     state: str = ''
@@ -255,6 +261,7 @@ class LicensureEntry:
     status: str = ''
     original_text: str = ''
     expiry_by_column_header: bool = False
+    pinned_line: str = ''
 
 
 @dataclass(frozen=True)
@@ -403,6 +410,7 @@ def _normalize_licensure_entry(entry: Mapping[str, Any]) -> LicensureEntry:
         license_type=_field_text(fields.get('license_type')),
         status=_field_text(fields.get('status')),
         original_text=str(entry.get('text') or ''),
+        pinned_line=fallback_text(entry) if is_credential_pin(entry) else '',
     )
 
 
@@ -514,10 +522,10 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     the fallback therefore proves neither label is present -- re-testing
     here would only duplicate the classifier's own answer (#573 review).
     """
-    if entry.state or entry.number:
+    state = entry.state or _unstated_state_name(entry)
+    if state or entry.number:
         return LicenseRecord(
-            state=_with_qualifier(entry.state or _unstated_state_name(entry),
-                                  entry.license_type or _controlled_substance_qualifier(entry),
+            state=_with_qualifier(state, entry.license_type or _controlled_substance_qualifier(entry),
                                   f"{entry.state} {entry.number}"),
             number=entry.number,
             issue_date=(format_date_for_section(entry.issue_date, 'F1')
@@ -547,17 +555,24 @@ def line_without_number(line: str, number: str) -> str:
 
 
 def _unstated_state_name(entry: LicensureEntry) -> str:
-    """The State cell of a numbered licence row whose state stage 4 did not
-    extract (#1577): the line's own words less its number and the dates the
-    row's date cells show, so the row says what it licenses ("<Register> of
+    """The State cell of a licence row whose state stage 4 did not extract
+    (#1577): the line's own words less its number and the dates the row's
+    date cells show, so the row says what it licenses ("<Register> of
     <profession> #00000 2010-2013" reads "<Register> of <profession>", not
     " | 00000 | 2010 | 2013"); '' when the number is not on the line or no
-    word is left."""
-    if not entry.number or entry.number not in entry.original_text:
+    word is left. A row with no number is named so only when stage 3b's
+    credential pin moved it (`pinned_line`: XUTTKJ 133, a prescribing
+    waiver pinned F2 -> F1, printed its whole line in the State cell and
+    its year in none); any other keeps its raw line, as on dev (the
+    owner's decision of 2026-11-03)."""
+    if not entry.number:
+        name = entry.pinned_line
+    elif entry.number not in entry.original_text:
         return ''
-    name = line_without_number(entry.original_text, entry.number)
-    if entry.number in name:
-        return ''
+    else:
+        name = line_without_number(entry.original_text, entry.number)
+        if entry.number in name:
+            return ''
     name = ' '.join(line_without_edge_dates(name, entry.issue_date, entry.expiration_date).split())
     return name if _NAME_WORD_RE.search(name) else ''
 
