@@ -68,6 +68,7 @@ from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
     _license_record,
     _normalize_licensure_entry,
+    credential_listed_as_licence,
 )
 from unified_pipeline.stage6.supplementary import PRESENTATION_TITLE_FIELDS
 from unified_pipeline.stage_6_word_template import (
@@ -837,14 +838,29 @@ def _code_absent_from_section(texts: list[str], section: set[str],
             and bool(entry_hits) and max(entry_hits) < SECTION_LOST_ENTRY_HITS)
 
 
+def _rendered_code(entry: Mapping) -> str:
+    """The code stage 6 groups a stage-4 entry under: its own, or, for a
+    licence or board record its licensure guard regroups
+    (`credential_listed_as_licence`, #1577: a permit, an exam or a course
+    listed as a licence renders under Other Educational Experiences), the
+    home it moves the record to. The guard reads each record of a
+    multi-record entry; this reads the entry whole. (Stage 6 leaves a
+    record stage 3b's credential pin recoded to its code; the guard, which
+    reads the pin's own test, would leave it there too.)"""
+    code = str(entry.get("taxonomy_code") or "")
+    reroute = credential_listed_as_licence(entry, code)
+    return reroute.home.code if reroute else code
+
+
 def lint_section_lost(stage4: dict,
                       blocks: list[tuple[str, str]]) -> list[dict]:
     """One WARN per taxonomy code whose entries are absent from the code's
     own output section (see `_code_absent_from_section`): lost at render,
-    or rendered in another section or the Appendix."""
+    or rendered in another section or the Appendix. A record stage 6
+    regroups is read under the code it renders in (`_rendered_code`)."""
     texts: dict[str, list[str]] = defaultdict(list)
     for e in stage4.get("entries", []):
-        code = e.get("taxonomy_code") or ""
+        code = _rendered_code(e)
         if code and code not in _SECTION_LOST_SKIP_CODES and code[0] in _SECTION_LETTERS:
             texts[code].append(str(e.get("text") or ""))
     sections = _section_tokens(blocks)

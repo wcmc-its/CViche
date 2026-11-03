@@ -703,13 +703,30 @@ def test_a_record_stage6_regroups_still_gets_every_other_shape_1577():
 
 
 def test_an_unworded_line_after_a_board_row_is_reported_as_the_pin_reads_it_1577():
+    # FCAAUV 13-15's shape: an inline Board Certification label opens the block.
+    lead = _entry("Board CertificationDiplomate, Invented Board of Invented Medicine 2029", "F2",
+                  "Personal Data", idx=13)
     board = _entry("Board Certified Invented Medicine 2031, recertified 2041", "F2", "Personal Data", idx=14)
-    line = _entry("Invented Academy of Invented Medicine 2033", "I", "Personal Data", idx=15)
-    findings = _run(board, line)
+    line = _entry("Invented Academy Invented Medicine 2033", "I", "Personal Data", idx=15)
+    findings = _run(lead, board, line)
     assert _shapes(findings) == ["credential_misfiled"] and "entry 15 (I)" in findings[0]["evidence"][0]
-    # under another heading, or with no board row before it, it is quiet
-    assert _run(board, {**line, "hierarchy": ["Memberships"]}) == []
+    # under another heading, with no block opened before it, or with no board row before it, it is quiet
+    assert _run(lead, board, {**line, "hierarchy": ["Memberships"]}) == []
+    assert _run(board, line) == []
     assert _run(line) == []
+
+
+def test_a_row_the_board_block_rule_made_f2_opens_no_block_for_the_next_1577():
+    # #1577 review M1: the lint reads a block as the pin does, so it does not report the pin's
+    # own output on a fresh run.
+    from unified_pipeline.core.credential_lines import BOARD_BLOCK_WHY
+    lead = _entry("Board Certification: Invented Board of Invented Medicine 2029", "F2", "Personal Data", idx=13)
+    pinned = {**_entry("Invented Academy Invented Medicine 2033", "F2", "Personal Data", idx=14),
+              "pre_pin_code": "I", "classification_reasoning": f"{BOARD_BLOCK_WHY} (category F2); x"}
+    after = _entry("Invented Academy Invented Surgery 2034", "I", "Personal Data", idx=15)
+    assert _run(lead, pinned, after) == []
+    model_f2 = _entry("Invented Academy Invented Medicine 2033", "F2", "Personal Data", idx=14)
+    assert _shapes(_run(lead, model_f2, after)) == ["credential_misfiled"]
 
 
 def test_a_record_stage6_regroups_or_stage3b_pinned_is_not_reported_1577():
@@ -717,9 +734,15 @@ def test_a_record_stage6_regroups_or_stage3b_pinned_is_not_reported_1577():
     assert _shapes(_run(_entry(permit, "F1", "Licensure"))) == ["credential_misfiled"]
     assert lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, _f1_stage4(permit)) == []
     # a stage-4 record stage 3b's credential pin recoded renders where it belongs
+    from unified_pipeline.core.credential_lines import CREDENTIAL_PIN_WHY
     pinned = {"entries": [{"element_idx_start": 10, "taxonomy_code": "B2", "pre_pin_code": "F1", "text": permit,
+                           "classification_reasoning": f"{CREDENTIAL_PIN_WHY['B2']} (category B2)",
                            "extracted_fields": {}}]}
     assert lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, pinned) == []
+    # another step's recode that kept an earlier pin's pre_pin_code is no credential pin (review M10)
+    other_step = {"entries": [{**pinned["entries"][0], "classification_reasoning": "[WCM-table corrected]"}]}
+    assert _shapes(lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, other_step)) == [
+        "credential_misfiled"]
     # a stage-4 record stage 6 keeps as a licence leaves the finding
     other = _f1_stage4("Invented State Medical License 12345", idx=11)
     assert _shapes(lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, other)) == [

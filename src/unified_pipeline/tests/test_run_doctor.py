@@ -2224,6 +2224,21 @@ def test_section_lost_reads_c_under_education_and_k_under_educational_contributi
         _stage4(("C", postdoc), ("K1", course)), swapped)} == {"C:", "K1"}
 
 
+def test_section_lost_reads_a_credential_stage6_regroups_under_the_section_it_renders_in():
+    # #1577 measurement: stage 6's licensure guard renders permits and life-support cards coded
+    # F1 under Other Educational Experiences; read under F1 they made LICENSURE look lost.
+    permits = ["2031- Quillfeather State Fluoroscopy Operator and Supervisor (XX000000)",
+               "Marbleton Excimer Laser Photorefractive Keratectomy credential, Brambleton Systems 2032"]
+    stage4 = {"entries": [{"taxonomy_code": "F1", "text": t,
+                           "extracted_fields": {"state_country": None, "license_number": None}} for t in permits]}
+    blocks = _page(("EDUCATION", ["Other Educational Experiences", *permits]),
+                   ("LICENSURE, BOARD CERTIFICATION", ["Licensure: N/A"]))
+    assert lint_section_lost(stage4, blocks) == []
+    # the same records rendered in neither section are still lost, under the code they render in
+    lost = lint_section_lost(stage4, _page(("EDUCATION", []), ("LICENSURE, BOARD CERTIFICATION", [])))
+    assert [f["message"][:3] for f in lost] == ["B2:"]
+
+
 # -------------------------------------------------- lint 9: enrichment failures
 
 def _enriched_entry(text, status=None):

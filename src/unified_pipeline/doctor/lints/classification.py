@@ -59,8 +59,9 @@ from unified_pipeline.core.credential_lines import (
     LIFE_SUPPORT,
     OTHER_EDUCATION_CODE,
     CredentialHome,
-    is_credential_recode,
+    is_credential_pin,
     misfiled_credential_home,
+    next_in_board_block,
 )
 from unified_pipeline.core.honor_lines import (
     GRANT_MARKER,
@@ -307,6 +308,9 @@ class _ClassifiedEntry(NamedTuple):
     code: str
     heading_path: tuple[str, ...]
     text: str
+    #: The code's reasoning: a credential_misfiled row made F2 by stage 3b's
+    #: board-block rule opens no board block for the row after it.
+    reasoning: str = ""
 
 
 def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
@@ -316,6 +320,7 @@ def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
             code=str(entry.get("taxonomy_code") or ""),
             heading_path=tuple(str(h) for h in entry.get("hierarchy") or ()),
             text=str(entry.get("text") or ""),
+            reasoning=str(entry.get("classification_reasoning") or ""),
         )
         for entry in stage3b.get("entries", [])
     ]
@@ -432,19 +437,20 @@ def _regrouped_by_stage6(stage4: dict | None) -> frozenset[object]:
         return frozenset()
     return frozenset(raw.get("element_idx_start") for raw in stage4.get("entries", [])
                      if credential_listed_as_licence(raw, str(raw.get("taxonomy_code") or ""))
-                     or is_credential_recode(raw.get("pre_pin_code"), raw.get("taxonomy_code")))
+                     or is_credential_pin(raw))
 
 
 def _misfiled_credentials(entries: list[_ClassifiedEntry]) -> list[CredentialHome | None]:
-    """Per entry, the home `misfiled_credential_home` gives it, the row
+    """Per entry, the home `misfiled_credential_home` gives it, the rows
     before it under the same heading path telling it whether it follows a
-    board certification, as stage 3b's credential pin reads its group."""
-    previous: dict[tuple[str, ...], str] = {}
+    board certification inside a board-certification block
+    (`next_in_board_block`), as stage 3b's credential pin reads its group."""
+    in_block: dict[tuple[str, ...], bool] = {}
     homes = []
     for entry in entries:
-        homes.append(misfiled_credential_home(entry.text, entry.code,
-                                              previous.get(entry.heading_path) == BOARD_CODE))
-        previous[entry.heading_path] = entry.code
+        homes.append(misfiled_credential_home(entry.text, entry.code, in_block.get(entry.heading_path, False)))
+        in_block[entry.heading_path] = next_in_board_block(in_block.get(entry.heading_path, False), entry.code,
+                                                           entry.text, entry.reasoning, entry.heading_path)
     return homes
 
 
