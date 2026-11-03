@@ -30,6 +30,11 @@ An institution field of the literal string "none" is treated as absent; field
 extraction emits it. An entry with neither a program name nor an institution is
 skipped, since the remaining columns would say nothing.
 
+A program name that is only the label of the credential list the line sat in
+("Certifications", "Board Certification": stage 4 took the line's lead label
+for the name, CAOACN 40 and SVYSGY 44) names nothing; the record's own line,
+less the dates its Dates cell shows, is its Description instead (#1577).
+
 The heading has three names across template revisions ("OTHER EDUCATIONAL",
 "SPECIAL TRAINING", "ADDITIONAL TRAINING"). When none of them is present, or
 the heading has no table after it, or that table does not have the three
@@ -44,11 +49,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from unified_pipeline.core.credential_lines import is_credential_list_label
+
+from ..fan_out import BUILT_TEXT_SEPARATOR, fallback_text, has_built_text
 from ..formatting import (
     format_date_for_section,
     format_date_range,
 )
-from ..normalization import _get_cleaned_institution_name
+from ..normalization import _get_cleaned_institution_name, line_without_edge_dates
 from ..parsing import _extract_year_from_text
 from ..resolution import _get_institution_location, _location_remainder
 from ..sorting import sort_entries_reverse_chronological
@@ -133,6 +141,18 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bo
     return '', False
 
 
+def _line_as_program(entry: Mapping[str, Any], fields: Mapping[str, Any]) -> str:
+    """The record's own line (`fan_out.fallback_text`; a line built from a
+    split record's fields reads its values comma-joined) less the dates its
+    Dates cell shows, whitespace collapsed: the program of a record whose
+    name is only its list's label (#1577)."""
+    line = fallback_text(entry)
+    if has_built_text(entry):
+        line = line.replace(BUILT_TEXT_SEPARATOR, ', ')
+    start = fields.get('start_date') or fields.get('year') or fields.get('year_awarded')
+    return ' '.join(line_without_edge_dates(line, start, fields.get('end_date')).split())
+
+
 def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducationRecord:
     """Resolve one raw stage-4 B2 dict into a typed record.
 
@@ -146,6 +166,8 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
 
     program = (fields.get('program_name', '') or fields.get('program_type', '')
                or fields.get('title', ''))
+    if is_credential_list_label(program):
+        program = _line_as_program(entry, fields) or program
 
     # Institution: the stage-5b cleaned name wins over the raw field; the
     # literal "none" is an absent value.

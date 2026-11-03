@@ -165,11 +165,16 @@ _LICENCE_STATEMENT = re.compile(r"""
   | \bboard\s+of\s+(?:medical\s+examiners|medicine|registration\s+in\s+medicine|physicians)\b
        [^\#\d]{0,40}(?:\#|\bno\.?|\bnumber)\s*:?\s*[A-Z]{0,3}\d
 """, re.I | re.X)
+#: A word a CV names a credential list by, alone or joined to others
+#: ("Licensure", "Licenses and Certifications").
+_LIST_LABEL_WORD = r"(?:licen[cs](?:ure|es?)|certifications?|credentials?)"
+_LIST_LABEL_WORDS = rf"{_LIST_LABEL_WORD}(?:\s*(?:and|&|/)\s*{_LIST_LABEL_WORD})*"
 #: A heading-like label at the head of a line ("Licensure:", "Licenses and
 #: Certifications:"): the list's name, not a licence the line names.
-_LEAD_LABEL = re.compile(
-    r"^\W*(?:licen[cs](?:ure|es?)|certifications?|credentials?)"
-    r"(?:\s*(?:and|&|/)\s*(?:licen[cs](?:ure|es?)|certifications?|credentials?))*\s*:\s*", re.I)
+_LEAD_LABEL = re.compile(rf"^\W*{_LIST_LABEL_WORDS}\s*:\s*", re.I)
+#: A name that is such a label and nothing else, "Board Certification"
+#: included (`is_credential_list_label`).
+_LIST_LABEL = re.compile(rf"^\W*(?:board\s+)?{_LIST_LABEL_WORDS}\W*$", re.I)
 #: A federal or payer identifier, or a controlled-substance registration:
 #: Licensure's own slots (NPI, DEA) and lines it keeps (#821).
 _IDENTIFIER = re.compile(
@@ -355,6 +360,14 @@ def names_licence(text: str) -> bool:
     name and the NBME are no licence words."""
     without_exams = _LICENSING_EXAM_PHRASE.sub(" ", _NBME.sub(" ", text))
     return bool(_LICENCE_WORD.search(without_exams) or _LICENCE_STATEMENT.search(_NBME.sub(" ", text)))
+
+
+def is_credential_list_label(text: str) -> bool:
+    """Whether `text` is only the label a CV names a credential list by
+    ("Certifications", "Board Certification", "Licensure and
+    Certification"), no credential of its own: the name stage 4 gave
+    a record from its line's lead label (CAOACN 40, SVYSGY 44, #1577)."""
+    return bool(_LIST_LABEL.match(text or ""))
 
 
 def names_identifier(text: str) -> bool:

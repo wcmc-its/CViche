@@ -755,6 +755,55 @@ def test_b2_location_already_trailing_the_institution_is_not_appended():
     assert gen.doc.tables[0].rows[1].cells[1].text == 'Some College, Riverton, OR'
 
 
+# --- other education: a program that is only its list's label (#1577 D4) -------
+# Invented values; the shapes are CAOACN 40 and SVYSGY 44.
+
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    BUILT_TEXT_KEY,
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+)
+
+@pytest.mark.parametrize("text, fields, program", [
+    ("Certifications:   Example Board of Examiners  2031",
+     {'program_name': 'Certifications', 'institution': 'Example Board of Examiners', 'start_date': '2031'},
+     'Certifications: Example Board of Examiners'),
+    ("Board Certification:\nExample Board of Examiners, 2031",
+     {'program_name': 'Board Certification', 'institution': 'Example Board of Examiners', 'year': '2031'},
+     'Board Certification: Example Board of Examiners'),
+    ("Certifications: Example Board of Examiners 2029-2031",
+     {'program_name': 'Certifications', 'start_date': '2029', 'end_date': '2031'},
+     'Certifications: Example Board of Examiners'),
+    # a line that says no more than the label keeps the name stage 4 gave
+    ("Certifications: 2031", {'program_name': 'Certifications', 'start_date': '2031'}, 'Certifications'),
+    # no line to read: the name stage 4 gave
+    ("", {'program_name': 'Certifications', 'institution': 'Example Board of Examiners'}, 'Certifications'),
+    # a name that says more than the label is kept
+    ("Certifications: Example Coach Certification 2031",
+     {'program_name': 'Example Coach Certification', 'start_date': '2031'}, 'Example Coach Certification'),
+], ids=['lead-label-and-colon', 'label-on-its-own-line', 'range', 'label-only-line', 'no-line',
+        'named-program'])
+def test_b2_program_that_is_only_its_list_label_takes_the_line(text, fields, program):
+    record = _normalize_other_education_entry({'taxonomy_code': 'B2', 'text': text, 'extracted_fields': fields})
+    assert record.program == program
+
+
+def test_b2_split_record_named_by_its_list_label_reads_its_own_line():
+    entry = {'taxonomy_code': 'B2', 'text': 'Certifications | Example Board of Examiners | 2031',
+             BUILT_TEXT_KEY: True,
+             'extracted_fields': {'program_name': 'Certifications',
+                                  'institution': 'Example Board of Examiners', 'start_date': '2031'}}
+    assert _normalize_other_education_entry(entry).program == 'Certifications, Example Board of Examiners'
+
+
+def test_b2_last_split_record_named_by_its_list_label_reads_its_own_line_not_the_parents():
+    entry = {'taxonomy_code': 'B2', 'text': 'Example Course 2029\tCertifications: Example Board 2031',
+             LAST_STAGE4_RECORD: {'key': 'stage4_records', 'index': 1, 'count': 2,
+                                  OWN_TEXT_KEY: 'Certifications: Example Board 2031'},
+             'extracted_fields': {'program_name': 'Certifications', 'start_date': '2031'}}
+    assert _normalize_other_education_entry(entry).program == 'Certifications: Example Board'
+
+
 # --- patents: row counts, ordering, instruction removal --------------------------
 
 def _patent(text: str, **fields) -> dict:

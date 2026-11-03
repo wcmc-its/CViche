@@ -24,6 +24,7 @@ from unified_pipeline.core.credential_lines import (  # noqa: E402
     OTHER_EDUCATION_CODE,
     CredentialHome,
     credential_kind,
+    is_credential_list_label,
     is_credential_pin,
     is_credential_recode,
     licensed_profession,
@@ -715,3 +716,21 @@ def test_a_licence_names_its_profession_other_than_medicine(text, profession):
 ])
 def test_a_credential_pin_is_read_off_its_own_reasoning(entry, pinned):
     assert is_credential_pin(entry) is pinned
+
+
+# --- #1577 D4: a name that is only a credential list's label ---
+
+@pytest.mark.parametrize("text", [
+    "Certifications", "Certification:", "Board Certification", "Board Certifications:",
+    "Licensure and Certification", "Licenses & Credentials", " Licensure/Certifications ",
+])
+def test_a_list_label_alone_is_a_credential_list_label(text):
+    assert is_credential_list_label(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Certifications: Example Board of Examiners", "Board Certified", "Board certification in Example Medicine",
+    "Example Coach Certification", "Education", "Certificate", "", None,
+])
+def test_a_name_with_more_than_the_label_is_no_list_label(text):
+    assert not is_credential_list_label(text)
