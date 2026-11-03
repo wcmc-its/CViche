@@ -862,7 +862,10 @@ def test_b2_labelled_expiry_reaches_the_dates_cell():
 # --- other education: one row for the records fan-out folded (#1577 D3) --------
 # Invented values; the shapes are EQGGRB 48 and ULHCAP 44.
 
-from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  # noqa: E402
+from unified_pipeline.stage4.schemas import (  # noqa: E402
+    FIELD_SCHEMAS,
+    STAGE4_RECORDS_KEY,
+)
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FOLDED_DATES_KEY,
     fan_out_multi_record_entries,
@@ -926,6 +929,7 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
     LAST_STAGE4_RECORD,
     OWN_TEXT_KEY,
 )
+
 
 @pytest.mark.parametrize("text, fields, program", [
     ("Certifications:   Example Board of Examiners  2031",
