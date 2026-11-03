@@ -859,6 +859,65 @@ def test_b2_labelled_expiry_reaches_the_dates_cell():
     assert _insertions(rows['Example Life Support']) == [('Text Extraction', 'Expires 2030')]
 
 
+# --- other education: one row for the records fan-out folded (#1577 D3) --------
+# Invented values; the shapes are EQGGRB 48 and ULHCAP 44.
+
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    FOLDED_DATES_KEY,
+    fan_out_multi_record_entries,
+)
+
+
+@pytest.mark.parametrize("folded, dates", [
+    ([{'start_date': '2029'}, {'start_date': '2030'}, {'start_date': '2031'}], '2029, 2030, 2031'),
+    ([{'start_date': '2001-08', 'end_date': '2002-05'}, {'start_date': '2003-09', 'end_date': '2005-07'}],
+     '08/01-05/02, 09/03-07/05'),
+    ([{'year': '2029'}, {'start_date': '2031-06-13', 'end_date': '2031-06-13'}], '2029, 06/31'),
+    ([{'start_date': '2031'}, {'start_date': '2031'}], '2031'),
+    ([{'start_date': '2029'}, {}], '2029'),
+    # one record is no fold: the row's own fields
+    ([{'start_date': '2029'}], '2028'),
+], ids=['years', 'ranges', 'year-field-and-a-day', 'a-repeat', 'an-undated-record', 'one-record'])
+def test_b2_folded_row_lists_each_records_dates(folded, dates):
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': 'Example Life Support', FOLDED_DATES_KEY: folded,
+         'extracted_fields': {'program_name': 'Example Life Support', 'start_date': '2028'}})
+    assert (record.dates, record.dates_from_text) == (dates, False)
+
+
+def test_b2_records_of_one_course_on_three_dates_render_one_row():
+    records = [{'program_name': 'Recertified, Example Life Support', 'institution': None,
+                'start_date': year, 'end_date': None} for year in ('2029', '2030', '2031')]
+    entry = {'taxonomy_code': 'B2', 'element_idx_start': 48,
+             'text': '2029, 2030, 2031 Recertified, Example Life Support',
+             'extracted_fields': {**records[-1], STAGE4_RECORDS_KEY: records}}
+    gen = _b2_doc()
+    gen._fill_other_education(fan_out_multi_record_entries([entry], FIELD_SCHEMAS,
+                                                           records_key=STAGE4_RECORDS_KEY))
+
+    assert [[cell.text for cell in row.cells] for row in gen.doc.tables[0].rows[1:]] == [
+        ['Recertified, Example Life Support', '', '2029, 2030, 2031']]
+
+
+def test_b2_parts_of_one_numbered_diploma_render_one_row():
+    records = [{'program_name': f'Diplomate, Example Board of Examiners, #000001 \u2013 {part}',
+                'institution': 'Example Board of Examiners', 'start_date': date, 'end_date': date}
+               for part, date in (('Part I', '2028-06-13'), ('Part II', '2029-04-09'),
+                                  ('Certificate date', '2030-07-01'))]
+    entry = {'taxonomy_code': 'B2', 'element_idx_start': 44,
+             'text': '2030 Diplomate, Example Board of Examiners, #000001\tPart I \u2013 6/13/2028\t'
+                     'Part II \u2013 4/9/2029\tCertificate date \u2013 7/1/2030',
+             'extracted_fields': {**records[-1], STAGE4_RECORDS_KEY: records}}
+    gen = _b2_doc()
+    gen._fill_other_education(fan_out_multi_record_entries([entry], FIELD_SCHEMAS,
+                                                           records_key=STAGE4_RECORDS_KEY))
+
+    assert [[cell.text for cell in row.cells] for row in gen.doc.tables[0].rows[1:]] == [
+        ['Diplomate, Example Board of Examiners, #000001 \u2013 Part I, Part II, Certificate date', '',
+         '06/28, 04/29, 07/30']]
+
+
 # --- other education: a program that is only its list's label (#1577 D4) -------
 # Invented values; the shapes are CAOACN 40 and SVYSGY 44.
 

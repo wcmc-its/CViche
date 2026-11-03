@@ -62,8 +62,9 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NamedTuple
 
+from unified_pipeline.core.credential_lines import OTHER_EDUCATION_CODE
 from unified_pipeline.core.text_norm import norm
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 from unified_pipeline.stage6.formatting.dates import format_date_for_section
@@ -1196,6 +1197,92 @@ def _repeated_rows(records: Sequence[Mapping[str, Any]], rendered: frozenset[str
     return {i for i, identity in enumerate(identities) if identity in identities[i + 1:]}
 
 
+# #1577 (D3): the records of one B2 entry that print the same row but for
+# its dates are one course or credential taken, renewed or held on several
+# dates ("2017, 2018, 2020 Recertified, <course>"; "<course> Attendee 2016,
+# 2015, ..."), and so are the records that name one numbered credential and
+# differ in the part their name ends with ("<board>, #<number> - Part I",
+# "... - Part II": ULHCAP 44). They printed one row per date, interleaved
+# with other rows by year (EQGGRB 48-50, HXBPCT 138); they render as one
+# row, the last of them, which lists every date in order
+# (`FOLDED_DATES_KEY`), its name the numbered credential and its parts in
+# order. Records that name different credentials stay rows of their own.
+# B2 only: its Dates attended column lists occasions, where a board's
+# certification and recertification years have a cell grammar of their own
+# and a talk or a term is a row of its own.
+FOLDED_DATES_KEY = 'folded_record_dates'
+_FOLDED_CODES = frozenset({OTHER_EDUCATION_CODE})
+_FOLDED_NAME_KEY = 'program_name'
+#: What sets a record's part off from the credential its name opens with.
+_NAME_PART_SEPARATOR_RE = re.compile(r'\s+[-\u2013\u2014]\s+')
+#: A credential number, as the CV marks one: "#226088", "# AB12345".
+_CREDENTIAL_NUMBER_RE = re.compile(r'#\s*\w*\d')
+
+
+class _Fold(NamedTuple):
+    """Records of one entry that render as one row: their indexes in order,
+    the last the row's own, and its name when they are one numbered
+    credential's parts (None to keep the last record's name)."""
+    members: tuple[int, ...]
+    name: str | None
+
+
+def _undated_identity(record: Mapping[str, Any], rendered: frozenset[str], code: str,
+                      left_out: str = '') -> tuple[tuple[str, str], ...]:
+    """`_row_identity` less every date, and less the `left_out` field."""
+    return tuple(sorted((key, norm(_rendered_text(key, value, code)))
+                        for key, value in record.items()
+                        if key in rendered and key != left_out and not _is_date_key(key)
+                        and not _is_blank(value)))
+
+
+def _numbered_part(name: object) -> tuple[str, str, str] | None:
+    """(credential, separator, part) of a name that ends with a part set off
+    from a credential holding a number (`_CREDENTIAL_NUMBER_RE`), or None."""
+    cuts = list(_NAME_PART_SEPARATOR_RE.finditer(name)) if isinstance(name, str) else []
+    if not cuts:
+        return None
+    head, part = name[:cuts[-1].start()], name[cuts[-1].end():]
+    if not part or _CREDENTIAL_NUMBER_RE.search(head) is None:
+        return None
+    return head, cuts[-1].group(), part
+
+
+def _record_folds(records: Sequence[Mapping[str, Any]], rendered: frozenset[str],
+                  code: str) -> list[_Fold]:
+    """The records of one entry that render as one row (see the comment
+    above): two or more whose rows differ in their dates alone, then two or
+    more of the rest that name one numbered credential's parts."""
+    same: dict[tuple[tuple[str, str], ...], list[int]] = {}
+    for i, record in enumerate(records):
+        identity = _undated_identity(record, rendered, code)
+        if identity:
+            same.setdefault(identity, []).append(i)
+    folds = [_Fold(tuple(members), None) for members in same.values() if len(members) > 1]
+    folded = {i for fold in folds for i in fold.members}
+    parts: dict[tuple[str, tuple[tuple[str, str], ...]], list[tuple[int, str, str]]] = {}
+    for i, record in enumerate(records):
+        numbered = None if i in folded else _numbered_part(record.get(_FOLDED_NAME_KEY))
+        if numbered is not None:
+            head, separator, part = numbered
+            key = (head, _undated_identity(record, rendered, code, _FOLDED_NAME_KEY))
+            parts.setdefault(key, []).append((i, separator, part))
+    for (head, _), members in parts.items():
+        if len(members) > 1:
+            names = list(dict.fromkeys(part for _, _, part in members))
+            folds.append(_Fold(tuple(i for i, _, _ in members), f"{head}{members[0][1]}{', '.join(names)}"))
+    return folds
+
+
+def _fold_into(child: dict[str, Any], records: Sequence[Mapping[str, Any]], fold: _Fold) -> None:
+    """Give `child`, the row of `fold`'s last record, every folded record's
+    dates (`FOLDED_DATES_KEY`), and the fold's name when it has one."""
+    child[FOLDED_DATES_KEY] = [{key: value for key, value in records[i].items() if _is_date_key(key)}
+                               for i in fold.members]
+    if fold.name is not None:
+        child['extracted_fields'][_FOLDED_NAME_KEY] = fold.name
+
+
 def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
                      records_key: str) -> list[dict[str, Any]] | None:
     """One child per record stage 4 kept under `records_key`, or None.
@@ -1224,7 +1311,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
 
     #1445: a record keeps no dates its own line does not give it
     (`_unsourced_date_records`), and an earlier record whose row a later one
-    prints identically is not emitted (`_repeated_rows`).
+    prints identically is not emitted (`_repeated_rows`). #1577: nor is an
+    earlier B2 record folded into a later one's row (`_record_folds`).
     """
     code = str(entry.get('taxonomy_code'))
     rendered = _RENDERED_FIELDS.get(code)
@@ -1243,13 +1331,14 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     unsourced = _unsourced_date_records(records, entry.get('text'), code)
     records = [_without_dates(record) if i in unsourced else dict(record)
                for i, record in enumerate(records)]
-    repeated = _repeated_rows(records, rendered, code)
+    folds = _record_folds(records, rendered, code) if code in _FOLDED_CODES else []
+    repeated = _repeated_rows(records, rendered, code) | {i for fold in folds for i in fold.members[:-1]}
     citation = {key: fields[key] for key in _CITATION_KEYS if key in fields}
     bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
-    earlier = [_child(bare, {**copy.deepcopy(record), **(citation if i == cited else {})},
-                      text, records_key, i, len(records), built=built)
+    earlier = {i: _child(bare, {**copy.deepcopy(record), **(citation if i == cited else {})},
+                         text, records_key, i, len(records), built=built)
                for i, (record, text) in enumerate(zip(records[:-1], texts))
-               if i not in repeated]
+               if i not in repeated}
     last = copy.deepcopy(dict(entry))
     last_cited = cited == len(records) - 1
     last['extracted_fields'] = {key: value for key, value in last['extracted_fields'].items()
@@ -1258,7 +1347,10 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
         last['extracted_fields'] = _without_dates(last['extracted_fields'])
     last[LAST_STAGE4_RECORD] = {'key': records_key, 'index': len(records) - 1,
                                 'count': len(records), OWN_TEXT_KEY: own_text}
-    return [*earlier, last]
+    rows = {**earlier, len(records) - 1: last}
+    for fold in folds:
+        _fold_into(rows[fold.members[-1]], records, fold)
+    return [*earlier.values(), last]
 
 
 def _title_words(text: object) -> str:

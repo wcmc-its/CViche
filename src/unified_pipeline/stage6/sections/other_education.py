@@ -71,8 +71,14 @@ from unified_pipeline.core.honor_lines import YEAR_RE
 from unified_pipeline.core.text_norm import fold_quotes, norm
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
-from ..fan_out import BUILT_TEXT_SEPARATOR, fallback_text, has_built_text
+from ..fan_out import (
+    BUILT_TEXT_SEPARATOR,
+    FOLDED_DATES_KEY,
+    fallback_text,
+    has_built_text,
+)
 from ..formatting import (
+    DATE_SPAN_SEPARATOR,
     EXPIRES_PREFIX,
     RENEWED_PREFIX,
     format_date_for_section,
@@ -178,7 +184,38 @@ def _labelled_dates(dates: str, lone_date: object, raw_text: str, program: str) 
     return f"{label} {dates}" if label else dates
 
 
-def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str, program: str) -> tuple[str, bool]:
+def _field_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, object]:
+    """(formatted dates, the one date) of a record's date fields, by the
+    first two steps of `_resolve_b2_dates`'s precedence; the one date is ''
+    for a range, and both are '' for a record with no date field."""
+    start = fields.get('start_date', '')
+    end = fields.get('end_date', '')
+    attended = fields.get(B1_DATES_ATTENDED_KEY)
+    if not (start or end) and isinstance(attended, Mapping):
+        start = attended.get('start_date') or ''
+        end = attended.get('end_date') or ''
+    if start or end:
+        lone = '' if start and end and start != end else start or end
+        return format_date_range(start, end, B2_TAXONOMY_CODE, raw_text), lone
+    year = fields.get('year', '') or fields.get('year_awarded', '')
+    if year:
+        return format_date_for_section(year, B2_TAXONOMY_CODE), year
+    return '', ''
+
+
+def _folded_dates(folded: object, raw_text: str) -> str:
+    """The Dates cell of a row fan-out folded several records of one entry
+    into (`fan_out.FOLDED_DATES_KEY`, #1577): each record's dates
+    (`_field_dates`) in order, repeats dropped, joined with
+    `DATE_SPAN_SEPARATOR`; '' when fewer than two records were folded."""
+    if not isinstance(folded, list) or len(folded) < 2:
+        return ''
+    shown = [_field_dates(fields, raw_text)[0] for fields in folded]
+    return DATE_SPAN_SEPARATOR.join(dict.fromkeys(dates for dates in shown if dates))
+
+
+def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str, program: str,
+                      folded: object = None) -> tuple[str, bool]:
     """(formatted dates, came-from-raw-text) by the three-step precedence:
     a start/end range (B1's nested `dates_attended` when the flat keys are
     empty), then a single year field (year, then year_awarded),
@@ -189,23 +226,15 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str, program: str) ->
     date; `raw_text` is passed so a source that writes the range open
     ("2020-", "present") still renders "<start>-Present" (#1220). A record's
     one date that its line labels an expiry or a renewal keeps its label,
-    or is left to the Description (`_labelled_dates`, #1577).
+    or is left to the Description (`_labelled_dates`, #1577). A row folded
+    from several records lists all their dates (`_folded_dates`, #1577).
     """
-    start = fields.get('start_date', '')
-    end = fields.get('end_date', '')
-    attended = fields.get(B1_DATES_ATTENDED_KEY)
-    if not (start or end) and isinstance(attended, Mapping):
-        start = attended.get('start_date') or ''
-        end = attended.get('end_date') or ''
-    if start or end:
-        dates = format_date_range(start, end, B2_TAXONOMY_CODE, raw_text)
-        if start and end and start != end:
-            return dates, False
-        return _labelled_dates(dates, start or end, raw_text, program), False
-    year = fields.get('year', '') or fields.get('year_awarded', '')
-    if year:
-        dates = format_date_for_section(year, B2_TAXONOMY_CODE)
-        return _labelled_dates(dates, year, raw_text, program), False
+    folded_dates = _folded_dates(folded, raw_text)
+    if folded_dates:
+        return folded_dates, False
+    dates, lone = _field_dates(fields, raw_text)
+    if dates:
+        return (_labelled_dates(dates, lone, raw_text, program) if lone else dates), False
     extracted_year = _extract_year_from_text(raw_text) if raw_text else ''
     if extracted_year:
         dates = _labelled_dates(format_date_for_section(extracted_year, B2_TAXONOMY_CODE),
@@ -250,7 +279,7 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
     institution = _get_cleaned_institution_name(entry) or institution
 
     location, location_is_enriched = _get_institution_location(entry)
-    dates, dates_from_text = _resolve_b2_dates(fields, raw_text, program)
+    dates, dates_from_text = _resolve_b2_dates(fields, raw_text, program, entry.get(FOLDED_DATES_KEY))
 
     return OtherEducationRecord(
         program=program,
