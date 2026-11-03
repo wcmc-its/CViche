@@ -16,17 +16,23 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.core.credential_lines import (  # noqa: E402
+    BOARD_BLOCK_WHY,
     BOARD_CODE,
+    CREDENTIAL_PIN_WHY,
     LICENCE_CODE,
     LIFE_SUPPORT,
     OTHER_EDUCATION_CODE,
     CredentialHome,
     credential_kind,
+    is_credential_pin,
     is_credential_recode,
+    licensed_profession,
     misfiled_credential_home,
     names_identifier,
     names_licence,
     names_state_controlled_substance,
+    next_in_board_block,
+    opens_board_block,
 )
 
 
@@ -191,9 +197,9 @@ def test_a_board_line_naming_a_substance_stays_the_boards():
     ("I", "Example State Physician License #00000000A 2031-Pres"),
     ("I", "Example State  Lic # 00.000000    Exp. 07-2031"),
     ("H", "Example State Medical License, active"),
-    ("C", "Licensure: Example State, 2031"),
-    ("G", "Example State Board of Medicine, 2031"),
-    ("E", "Licensed in the state of Example, 2031"),
+    ("H", "Licensure: Example State, 2031"),
+    ("I", "Example State Board of Medicine #12345, 2031"),
+    ("I", "Licensed in the state of Example, 2031"),
     ("B2", "Licensed by the Example Board, 2031"),
     ("B2", "License No. 12345, Example State, 2031"),
     ("B2", "Permanent license, Example State, 2031"),
@@ -208,8 +214,9 @@ def test_a_board_line_naming_a_substance_stays_the_boards():
     ("B2", "Veterinary license, Example State, 2031"),
     ("B2", "Pharmacist license, Example State, 2031"),
     ("B2", "Licensed to practise, Example State, 2031"),
-    ("B2", "Example State Board of Physicians, 2031"),
-    ("B2", "Example State Board of Registration in Medicine, 2031"),
+    ("B2", "Example State Board of Physicians #12345, 2031"),
+    ("B2", "Example State Board of Registration in Medicine, No. 12345, 2031"),
+    ("B2", "Board of Medical Examiners, Example State, number: A12345"),
 ])
 def test_a_licence_statement_coded_elsewhere_is_f1(code, text):
     assert _home(text, code) == (LICENCE_CODE, "licence_statement")
@@ -376,6 +383,23 @@ def test_a_line_where_it_belongs_or_unreadable_stays(code, text):
     ("T", "Licensed to practice in Example State"),
     ("D1", "Diplomate, American Board of Example Medicine"),
     ("S1", "Board certified, Example Medicine, 2031"),
+    # Nor a training, affiliation or employment row that mentions a licence (#1577 review M5).
+    ("E", "Physician, private practice; Example State medical license"),
+    ("C", "Resident, Example Hospital; Example State training license, 2031"),
+    ("G", "Example Hospital privileges; Example State license #12345"),
+    # A licensing board's name alone may be a seat on it (#1577 review M5).
+    ("I", "Example State Board of Medicine, 2031-present"),
+    ("B2", "Example State Board of Physicians, 2031"),
+    # An exam result under honors names a board certification exam, not a certification.
+    ("H", "Board Certification Exam: 99th percentile, ABXY 2031"),
+    ("I", "American Board of Example Medicine exam, top score 2031"),
+    # A membership whose society's acronym starts with AB (#1577 review B3).
+    ("I", "ABXY - Example Brachytherapy Society, 2031-present"),
+    ("I", "ABXY - Example Burn Association, 2031-present"),
+    ("I", "ABXYZ - Association of Example Resource Facilities, 2031-present"),
+    ("I", "ABXY, Association for Example Analysis International"),
+    ("I", "ABXY - Example Academy of Example Medicine, 2031"),
+    ("H", "ABXY: Example College of Example Surgeons, 2031"),
 ])
 def test_what_never_moves(code, text):
     assert _home(text, code) is None
@@ -467,10 +491,10 @@ def test_an_unworded_line_after_a_board_row_is_the_blocks_certification(text, af
 
 @pytest.mark.parametrize("previous,code,recode", [
     ("F1", "B2", True), ("F2", "B2", True), ("F1", "F2", True), ("F2", "F1", True),
-    ("B2", "F1", True), ("I", "F2", True), ("H", "F2", True), ("C", "F1", True),
-    ("G", "F1", True), ("E", "F2", True),
+    ("B2", "F1", True), ("I", "F2", True), ("H", "F2", True),
     ("I", "B2", False), ("K4", "B2", False), ("Q2", "B2", False), ("F1", "F1", False),
     ("B2", "B2", False), ("I", "H", False), (None, "F1", False), ("T", "F2", False),
+    ("C", "F1", False), ("G", "F1", False), ("E", "F2", False),
 ])
 def test_a_credential_recode_is_one_this_module_makes(previous, code, recode):
     assert is_credential_recode(previous, code) is recode
@@ -479,3 +503,183 @@ def test_a_credential_recode_is_one_this_module_makes(previous, code, recode):
 def test_an_empty_line_moves_nowhere():
     assert misfiled_credential_home("", "F1") is None
     assert misfiled_credential_home(None, "I", True) is None
+
+
+# --- #1577 slice B review: the fix round's classes ---
+
+@pytest.mark.parametrize("text", [
+    # B1: a licensing exam or the ECFMG certificate beside a licence is the licence's row.
+    "USMLE Steps 1-3; Example State Medical License #123456, 2031",
+    "FLEX 2029; Example State Medical License #12345",
+    "ECFMG Certificate #0-000-000-0, 2029; Example State Medical License #123456, 2031",
+    "COMLEX Level 3, 2029; licensed to practice in the state of Example, 2031",
+])
+def test_an_exam_beside_a_licence_is_the_licences_row_and_both_readings_agree(text):
+    assert _home(text, LICENCE_CODE) is None
+    # Read as other education, the same line is a licence: the predicate never sends a line
+    # out of F1 that it would send back into F1.
+    assert _home(text, OTHER_EDUCATION_CODE) in (None, (LICENCE_CODE, "licence_statement"))
+
+
+@pytest.mark.parametrize("text,kind", [
+    # A list's lead label is no licence the line names.
+    ("Licensure: USMLE Steps 1-3, 2031", "licensing_exam"),
+    ("Licenses and Certifications: ACLS 2031", "life_support"),
+    ("Credentials: ECFMG Certificate, 2031", "ecfmg"),
+])
+def test_a_lead_label_is_no_licence_word(text, kind):
+    assert _home(text, LICENCE_CODE) == (OTHER_EDUCATION_CODE, kind)
+
+
+@pytest.mark.parametrize("text", [
+    # B5: a training licence is a licence whatever it is called.
+    "Limited Training Permit, Example State, 2029-2031",
+    "Physician-in-Training Permit, Example State, 2029-2031",
+    "Postgraduate Training Registration, Example State, 2031",
+    "Educational Permit, Example State, 2031",
+    "Temporary training registration, Example State, 2031",
+    # B2: California's licence title, possessive or not.
+    "Example State Physician's and Surgeon's Certificate A12345, 2031",
+    "Physician and Surgeon Certificate No. G12345, 2031",
+])
+def test_a_training_permit_and_a_physicians_and_surgeons_certificate_name_a_licence(text):
+    assert names_licence(text)
+    assert _home(text, LICENCE_CODE) is None
+
+
+@pytest.mark.parametrize("code,text,home", [
+    # B4: a specialty board on the line outranks a life-support course.
+    ("F2", "Board Certified, American Board of Example Medicine 2031; ACLS, PALS current", None),
+    ("F2", "American Board of Example Surgery, Example Critical Care; ATLS Instructor 2031", None),
+    ("F2", "American Board of Example Medicine, 2031; ACLS 2033", None),
+    ("F2", "ABXY Example Medicine 2031; BLS current", None),
+    ("F1", "Board Certified, American Board of Example Medicine 2031; ACLS current",
+     (BOARD_CODE, "board_cert")),
+    # Recertification of the course itself, and ABLS, are the course's (EQGGRB 48-50).
+    ("F2", "Recertified, Advanced Cardiac Life Support, 2031", (OTHER_EDUCATION_CODE, "life_support")),
+    ("F2", "ABLS 2031", (OTHER_EDUCATION_CODE, "life_support")),
+    ("F2", "Advanced Burn Life Support (ABLS) provider, 2031", (OTHER_EDUCATION_CODE, "life_support")),
+    # A permit beside a board certification stays the board's, F1 or F2.
+    ("F1", "American Board of Example Medicine certified 2031; fluoroscopy permit", (BOARD_CODE, "board_cert")),
+    ("F2", "American Board of Example Medicine certified 2031; fluoroscopy permit", None),
+])
+def test_a_specialty_board_outranks_a_course_on_its_line(code, text, home):
+    assert _home(text, code) == home
+
+
+@pytest.mark.parametrize("text,code,home", [
+    # B3: an AB acronym that names a board keeps reading as one.
+    ("ABXY - American Board of Example Medicine, 2031", "I", (BOARD_CODE, "board_statement")),
+    ("(D)ABXY, Example Specialty, 2031", "I", (BOARD_CODE, "board_statement")),
+    ("ABXY: Example Board of Example Surgery, 2031", "H", (BOARD_CODE, "board_statement")),
+])
+def test_an_ab_acronym_naming_a_board_is_a_board_statement(text, code, home):
+    assert _home(text, code) == home
+
+
+@pytest.mark.parametrize("text", [
+    # B6: fellowship post-nominals, honor societies, trainee and faculty titles, a course.
+    "FAXY 2031", "FXYZ, 2031", "Alpha Omega Alpha 2031", "AOA 2031", "Phi Beta Kappa 2031",
+    "Sigma Xi 2031", "Phi Kappa Phi 2031", "Golden Key 2031", "Chief Resident 2031",
+    "Example Residency 2031", "Example Internship 2031", "Attending, Example Hospital 2031",
+    "Professor, Example University 2031", "Instructor 2031", "Lecturer 2031", "ACLS 2031",
+    "Example Training Course 2031",
+])
+def test_inside_a_board_block_a_titled_or_kinded_line_stays_a_membership(text):
+    assert _home(text, "I", True) is None
+
+
+@pytest.mark.parametrize("text,hierarchy,opens", [
+    ("Board CertificationDiplomate, Example Board 2031", ("Personal Data",), True),
+    ("Board Certification: Example Board 2031", (), True),
+    ("Board Certifications - Example Board 2031", (), True),
+    ("Board Certification", (), True),
+    ("Board certification in Example Medicine, 2031", ("Personal Data",), False),
+    ("Board Certified Example Medicine 2031", ("Personal Data",), False),
+    ("Example Board 2031", ("CV", "Board Certification"), True),
+    ("Example Board 2031", ("Diplomate Status",), True),
+    ("Example Board 2031", ("Specialty Certification",), True),
+    ("Example Board 2031", ("Board Certification and Memberships",), False),
+    ("Example Board 2031", ("Board Certification", "Societies"), False),
+    ("Example Board 2031", ("Board Certification, Affiliations",), False),
+    ("Example Board 2031", ("Board Certification and Organizations",), False),
+    ("Example Board 2031", ("Board Certification and Fellowships",), False),
+    ("Example Board 2031", ("Board Certification and Honors",), False),
+    ("Example Board 2031", ("Board Certification and Awards",), False),
+    ("Example Board 2031", ("Licensure and Board Certification",), False),
+])
+def test_a_board_block_opens_under_a_board_heading_or_an_inline_label(text, hierarchy, opens):
+    assert opens_board_block(text, hierarchy) is opens
+
+
+def test_the_board_block_follows_board_rows_and_not_the_rules_own_recodes():
+    lead = "Board Certification: Example Board 2031"
+    assert next_in_board_block(False, BOARD_CODE, lead, "x", ()) is True
+    assert next_in_board_block(True, BOARD_CODE, "Example Board 2033", "x", ()) is True
+    assert next_in_board_block(False, BOARD_CODE, "Example Board 2033", "x", ()) is False
+    assert next_in_board_block(True, "I", lead, "x", ()) is False
+    assert next_in_board_block(True, BOARD_CODE, "Example Academy 2033", f"{BOARD_BLOCK_WHY} (category F2)",
+                               ()) is False
+    assert next_in_board_block(False, BOARD_CODE, lead, None, ()) is True
+
+
+@pytest.mark.parametrize("text,named", [
+    # M3: a licence fused with a registration is the licence's line.
+    ("Example State License #12345 and Controlled Substance Registration XX12345", False),
+    ("Example State #12345; Example Controlled Substances Registration (ECSR) #XX12345", True),
+    ("Example State Controlled Substance License #12345", True),
+    ("Example State Controlled Substance Permit 2031", True),
+    ("Example State CDS certificate 2031", True),
+    ("Example State Medical License; CSR #12345", False),
+])
+def test_a_registration_fused_with_a_licence_is_not_named_as_the_registration(text, named):
+    assert names_state_controlled_substance(text) is named
+
+
+@pytest.mark.parametrize("text,profession", [
+    ("Licensed to practice Veterinary Medicine and Surgery in the state of Example", "Veterinary Medicine and Surgery"),
+    ("Licensed to practice PT in Example State #PT 00000", "PT"),
+    ("Example State Dental Surgery license", "Dental Surgery"),
+    ("Example State Dentistry license", "Dentistry"),
+    ("Registered Nurse, Example State", "Registered Nurse"),
+    ("Nurse Practitioner license, Example State", "Nurse Practitioner"),
+    ("Nursing license, Example State", "Nursing"),
+    ("Pharmacy license", "Pharmacy"),
+    ("Pharmacist license", "Pharmacist"),
+    ("Psychologist license", "Psychologist"),
+    ("Physical Therapist license", "Physical Therapist"),
+    ("Occupational Therapy license", "Occupational Therapy"),
+    ("Social Worker license", "Social Worker"),
+    ("Chiropractic license", "Chiropractic"),
+    ("Optometry license", "Optometry"),
+    ("Podiatric Medicine license", "Podiatric Medicine"),
+    ("Physician Assistant license", "Physician Assistant"),
+    ("Midwifery license", "Midwifery"),
+    ("Dietitian license", "Dietitian"),
+    ("Speech-Language Pathology license", "Speech-Language Pathology"),
+    ("Audiology license", "Audiology"),
+    ("Example State Medical License #12345", ""),
+    ("Example State license, pt 2031", ""),
+    ("", ""),
+])
+def test_a_licence_names_its_profession_other_than_medicine(text, profession):
+    assert licensed_profession(text) == profession
+
+
+@pytest.mark.parametrize("entry,pinned", [
+    ({"pre_pin_code": "F1", "taxonomy_code": "B2",
+      "classification_reasoning": f"{CREDENTIAL_PIN_WHY[OTHER_EDUCATION_CODE]} (category B2); x"}, True),
+    ({"pre_pin_code": "B2", "taxonomy_code": "F1",
+      "classification_reasoning": f"[WCM-table corrected B2->F1] {CREDENTIAL_PIN_WHY[LICENCE_CODE]}"}, True),
+    ({"pre_pin_code": "I", "taxonomy_code": "F2",
+      "classification_reasoning": f"{CREDENTIAL_PIN_WHY[BOARD_CODE]} (category F2)"}, True),
+    ({"pre_pin_code": "I", "taxonomy_code": "F2",
+      "classification_reasoning": f"{BOARD_BLOCK_WHY} (category F2)"}, True),
+    # M10: the fellowship pin's I to H, then the corrector's H to F2, is no credential pin.
+    ({"pre_pin_code": "I", "taxonomy_code": "F2",
+      "classification_reasoning": "[WCM-table corrected H->F2] An elected fellowship is an honor"}, False),
+    ({"pre_pin_code": "F1", "taxonomy_code": "B2", "classification_reasoning": None}, False),
+    ({"taxonomy_code": "B2", "classification_reasoning": CREDENTIAL_PIN_WHY[OTHER_EDUCATION_CODE]}, False),
+])
+def test_a_credential_pin_is_read_off_its_own_reasoning(entry, pinned):
+    assert is_credential_pin(entry) is pinned

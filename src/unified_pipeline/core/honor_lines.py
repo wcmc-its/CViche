@@ -124,7 +124,9 @@ _OTHER_ROLE_RE = re.compile(
 #: membership, or the election's own year. An election in the period's first
 #: year ("2009-present Fellow, <Society> (elected 2009)") dates the fellowship.
 _OPEN_SPAN_RE = re.compile(r"\b((?:19|20)\d{2})\s*[-\u2013\u2014]\s*(?:present|current)\b", re.IGNORECASE)
-_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+#: A four-digit year standing alone: the one year pattern core/credential_lines
+#: and stage 6's licensure guard read too.
+YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 
 #: The words that name a society-like body.
 _BODY = r"(?:association|society|college|academy|institute)"
@@ -171,7 +173,7 @@ def _is_membership_row(text: str) -> bool:
     span = _OPEN_SPAN_RE.search(text)
     if not span:
         return False
-    other_years = set(_YEAR_RE.findall(text[:span.start()] + " " + text[span.end():]))
+    other_years = set(YEAR_RE.findall(text[:span.start()] + " " + text[span.end():]))
     return bool(other_years - {span.group(1)})
 
 

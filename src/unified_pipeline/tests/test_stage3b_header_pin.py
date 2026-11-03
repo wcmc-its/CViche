@@ -2195,34 +2195,63 @@ def test_what_the_credential_pin_leaves_1577(code, text, hierarchy):
     assert n == 0 and out == entry
 
 
+# FCAAUV 13-15's shape: an inline Board Certification block, its label fused to
+# the first certification, under no heading of its own.
+_BLOCK_LEAD = "Board CertificationDiplomate, Example Board of Example Medicine 2029"
 _BOARD_ROW = "Board Certified Example Medicine 2031, recertified 2041"
-_UNWORDED_BOARD_LINE = "Example Academy of Example Medicine 2033"
+_UNWORDED_BOARD_LINE = "Example Academy Example Medicine 2033"
 
 
-def _block(*rows: tuple[str, str]) -> list[dict]:
-    return [_row(code, text, confidence=0.7, hierarchy=("Personal Data",)) for code, text in rows]
+def _block(*rows: tuple[str, str], hierarchy: tuple[str, ...] = ("Personal Data",)) -> list[dict]:
+    return [_row(code, text, confidence=0.7, hierarchy=hierarchy) for code, text in rows]
 
 
 def test_an_unworded_line_after_a_board_row_is_its_blocks_certification_1577():
     # FCAAUV 15: the third line of an inline Board Certification block, coded I.
-    out, n = apply_header_pin(_block(("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)), NO_PIN_CTX)
-    assert n == 1 and [row["taxonomy_code"] for row in out] == ["F2", "F2"]
-    assert out[1]["pre_pin_code"] == "I"
-    assert out[1]["classification_reasoning"].startswith(
+    out, n = apply_header_pin(_block(("F2", _BLOCK_LEAD), ("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)),
+                              NO_PIN_CTX)
+    assert n == 1 and [row["taxonomy_code"] for row in out] == ["F2", "F2", "F2"]
+    assert out[2]["pre_pin_code"] == "I"
+    assert out[2]["classification_reasoning"].startswith(
         "A credential line listed in a board-certification block is board certification (category F2)")
+
+
+@pytest.mark.parametrize("rows,hierarchy,codes", [
+    # A heading naming board certification and nothing else opens the block too.
+    ([("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)], ("Board Certification",), ["F2", "F2"]),
+    ([("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)], ("Specialty Certifications",), ["F2", "F2"]),
+    # A heading that also names memberships, or a licence, is no board block (#1577 review B6):
+    # an academy line after a board row there is a membership.
+    ([("F2", _BOARD_ROW), ("I", "Example Academy of Example Medicine, 2031")],
+     ("Board Certification and Memberships",), ["F2", "I"]),
+    ([("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)], ("Licensure and Board Certification",), ["F2", "I"]),
+    # No board heading and no "Board Certification" label: no block.
+    ([("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE)], ("Personal Data",), ["F2", "I"]),
+    ([("F2", "Board certification in Example Medicine, 2031"), ("I", _UNWORDED_BOARD_LINE)],
+     ("Personal Data",), ["F2", "I"]),
+])
+def test_the_board_block_is_a_board_heading_or_an_inline_board_label_1577(rows, hierarchy, codes):
+    out, _ = apply_header_pin(_block(*rows, hierarchy=hierarchy), NO_PIN_CTX)
+    assert [row["taxonomy_code"] for row in out] == codes
 
 
 @pytest.mark.parametrize("rows,codes", [
     # It does not chain: the row before must be F2 by another answer than its own.
-    ([("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE), ("I", "Example Academy of Example Surgery 2034")],
+    ([("F2", _BLOCK_LEAD), ("I", _UNWORDED_BOARD_LINE), ("I", "Example Academy Example Surgery 2034")],
      ["F2", "F2", "I"]),
-    # The row right before must be a board row.
-    ([("H", "Example Award 2031"), ("I", _UNWORDED_BOARD_LINE)], ["H", "I"]),
-    ([("F2", _BOARD_ROW), ("I", "Member, Example Society"), ("I", _UNWORDED_BOARD_LINE)], ["F2", "I", "I"]),
+    # The row right before must be a board row of the block.
+    ([("F2", _BLOCK_LEAD), ("H", "Example Award 2031"), ("I", _UNWORDED_BOARD_LINE)], ["F2", "H", "I"]),
+    ([("F2", _BLOCK_LEAD), ("I", "Member, Example Society"), ("I", _UNWORDED_BOARD_LINE)], ["F2", "I", "I"]),
     ([("I", _UNWORDED_BOARD_LINE)], ["I"]),
     # A society or a fellowship after a board row stays a membership.
-    ([("F2", _BOARD_ROW), ("I", "Example Society of Example Medicine 2033")], ["F2", "I"]),
-    ([("F2", _BOARD_ROW), ("I", "Fellow, Example Academy 2033")], ["F2", "I"]),
+    ([("F2", _BLOCK_LEAD), ("I", "Example Society of Example Medicine 2033")], ["F2", "I"]),
+    ([("F2", _BLOCK_LEAD), ("I", "Fellow, Example Academy 2033")], ["F2", "I"]),
+    # So do a fellowship grade's post-nominal, an honor society, a trainee title and a
+    # life-support course (#1577 review B6).
+    ([("F2", _BLOCK_LEAD), ("I", "FAXY 2033")], ["F2", "I"]),
+    ([("F2", _BLOCK_LEAD), ("I", "Alpha Omega Alpha 2033")], ["F2", "I"]),
+    ([("F2", _BLOCK_LEAD), ("I", "Chief Resident 2033")], ["F2", "I"]),
+    ([("F2", _BLOCK_LEAD), ("I", "ACLS 2033")], ["F2", "I"]),
 ])
 def test_the_board_block_rule_reads_only_the_row_right_before_1577(rows, codes):
     out, _ = apply_header_pin(_block(*rows), NO_PIN_CTX)
@@ -2230,7 +2259,7 @@ def test_the_board_block_rule_reads_only_the_row_right_before_1577(rows, codes):
 
 
 def test_a_fallback_board_row_still_opens_a_block_but_a_fallback_line_is_not_pinned_1577():
-    board, line = _block(("F2", _BOARD_ROW), ("I", _UNWORDED_BOARD_LINE))
+    board, line = _block(("F2", _BLOCK_LEAD), ("I", _UNWORDED_BOARD_LINE))
     out, n = apply_header_pin([{**board, "classification_source": "fallback"}, line], NO_PIN_CTX)
     assert n == 1 and out[1]["taxonomy_code"] == "F2"
     out, n = apply_header_pin([board, {**line, "classification_source": "fallback"}], NO_PIN_CTX)

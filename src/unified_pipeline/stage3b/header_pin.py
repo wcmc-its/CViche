@@ -66,11 +66,14 @@ import re
 from collections.abc import Iterable
 
 from ..core.credential_lines import (
+    BOARD_BLOCK_WHY,
     BOARD_CODE,
+    CREDENTIAL_PIN_WHY,
     KIND_BOARD_BLOCK_LINE,
     LICENCE_CODE,
     OTHER_EDUCATION_CODE,
     misfiled_credential_home,
+    next_in_board_block,
 )
 from ..core.honor_lines import (
     GRANT_MARKER,
@@ -456,21 +459,25 @@ _FELLOWSHIP_HONOR_WHY = "An elected fellowship, or one listed under honors, is a
 # narrowing that would let the model code these lines itself is the #1577
 # residual that needs a paid stage-3b A/B.
 #
-# An I line right after a board certification in the same group, with one
-# year and no fellowship, membership, society, association or role word, is
+# An I line right after a board certification inside a board-certification
+# block, with one year and no credential kind, fellowship, membership,
+# society, association, role, post-nominal, honor-society or trainee word, is
 # the block's next certification (FCAAUV 15, "<Academy> <field> 2013", the
 # third line of an inline Board Certification block; one fire on the farm, so
-# coverage is thin). The row before must be F2 by the model's answer or a pin
-# other than this one, so a run of lines after one board row does not chain.
-_CREDENTIAL_OTHER_EDUCATION_WHY = "A credential that is no licence and no board certification is other education"
-_CREDENTIAL_LICENCE_WHY = "A licence to practise or a controlled-substance registration is licensure"
-_CREDENTIAL_BOARD_WHY = "A board, registry or specialty certification is board certification"
-_BOARD_BLOCK_WHY = "A credential line listed in a board-certification block is board certification"
-_CREDENTIAL_WHY = {
-    OTHER_EDUCATION_CODE: _CREDENTIAL_OTHER_EDUCATION_WHY,
-    LICENCE_CODE: _CREDENTIAL_LICENCE_WHY,
-    BOARD_CODE: _CREDENTIAL_BOARD_WHY,
-}
+# coverage is thin). The block is a heading that names board certification
+# and nothing else, or a line opening with a "Board Certification" label
+# (`core.credential_lines.next_in_board_block`): under "Board Certification
+# and Memberships" an academy line after a board row is a membership. The
+# row before must be F2 by the model's answer or a pin other than this one,
+# so a run of lines after one board row does not chain.
+#
+# The reasoning texts are `core.credential_lines`'s, which stage 6 and the
+# doctor read to tell this pin's recode from another step's
+# (`is_credential_pin`).
+_CREDENTIAL_OTHER_EDUCATION_WHY = CREDENTIAL_PIN_WHY[OTHER_EDUCATION_CODE]
+_CREDENTIAL_LICENCE_WHY = CREDENTIAL_PIN_WHY[LICENCE_CODE]
+_CREDENTIAL_BOARD_WHY = CREDENTIAL_PIN_WHY[BOARD_CODE]
+_BOARD_BLOCK_WHY = BOARD_BLOCK_WHY
 
 # --- #1573: rows a heading says are someone else's are not the owner's records ---
 #
@@ -1071,22 +1078,23 @@ def fellowship_pin_code(entry: dict) -> tuple[str, str] | None:
     return _HONOR_CODE, _FELLOWSHIP_HONOR_WHY
 
 
-def credential_pin_code(entry: dict, after_board_row: bool) -> tuple[str, str] | None:
+def credential_pin_code(entry: dict, in_board_block: bool) -> tuple[str, str] | None:
     """(code, why) for a credential coded as the wrong one of licence, board
     certification and other education, or for an unworded I line right after
-    a board certification in its group (`after_board_row`); else None
-    (`misfiled_credential_home`, #1577)."""
-    home = misfiled_credential_home(entry.get("text") or "", entry.get("taxonomy_code") or "", after_board_row)
+    a board certification inside a board-certification block
+    (`in_board_block`); else None (`misfiled_credential_home`, #1577)."""
+    home = misfiled_credential_home(entry.get("text") or "", entry.get("taxonomy_code") or "", in_board_block)
     if home is None:
         return None
-    return home.code, _BOARD_BLOCK_WHY if home.kind == KIND_BOARD_BLOCK_LINE else _CREDENTIAL_WHY[home.code]
+    return home.code, _BOARD_BLOCK_WHY if home.kind == KIND_BOARD_BLOCK_LINE else CREDENTIAL_PIN_WHY[home.code]
 
 
-def _is_board_row(entry: dict) -> bool:
-    """An F2 row that the next row's board-block test reads as a board
-    certification: not one the board-block rule itself made F2."""
-    return (entry.get("taxonomy_code") == BOARD_CODE
-            and not str(entry.get("classification_reasoning") or "").startswith(_BOARD_BLOCK_WHY))
+def _next_in_board_block(in_block: bool, entry: dict) -> bool:
+    """Whether the row after `entry` follows a board certification inside a
+    board-certification block (`next_in_board_block`, read off `entry`'s
+    final code and reasoning and its heading path)."""
+    return next_in_board_block(in_block, entry.get("taxonomy_code") or "", entry.get("text") or "",
+                               str(entry.get("classification_reasoning") or ""), entry.get("hierarchy") or [])
 
 
 def is_heading_line(entry: dict) -> bool:
@@ -1258,7 +1266,7 @@ def apply_non_seat_pins(entries: Iterable[dict]) -> tuple[list[dict], dict]:
 
 
 def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
-             after_unseen_reviewer_lead_in: bool, lead: str, after_board_row: bool) -> tuple[str, str] | None:
+             after_unseen_reviewer_lead_in: bool, lead: str, in_board_block: bool) -> tuple[str, str] | None:
     """(code, why) for one model answer: the header pin, then the mentor-grant,
     mentee, someone-else's, content, credential, reviewer and fellowship pins.
     A mentee's abstract under a students level is the mentee's (N4), not the
@@ -1268,7 +1276,7 @@ def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
         return header_code, _HEADER_PIN_WHY
     return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee)
             or someone_elses_pin_code(entry, lead) or content_pin_code(entry)
-            or credential_pin_code(entry, after_board_row)
+            or credential_pin_code(entry, in_board_block)
             or reviewer_pin_code(entry, after_unseen_reviewer_lead_in)
             or fellowship_pin_code(entry))
 
@@ -1297,16 +1305,16 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
     """
     pin, leaf = pinned_header_code(context), leaf_header_code(context)
     out, recoded, after_mentee, reviewer_lead_in_at, lead = [], 0, False, None, ""
-    after_board_row = False
+    in_board_block = False
     for position, entry in enumerate(entries):
         as_coded = entry  # the lead line is read off the model's codes, not the pins' (#1573)
         if entry.get("classification_source") == _MODEL_SOURCE:
             unseen_lead_in = _in_later_batch(position, reviewer_lead_in_at, batch_size)
-            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in, lead, after_board_row)
+            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in, lead, in_board_block)
             if pinned and pinned[0] != entry.get("taxonomy_code"):
                 recoded += 1
                 entry = _recode(entry, *pinned)
-        after_board_row = _is_board_row(entry)
+        in_board_block = _next_in_board_block(in_board_block, entry)
         after_mentee = after_mentee or entry.get("taxonomy_code") in _MENTEE_RECORD_CODES
         reviewer_lead_in_at = _next_reviewer_lead_in(entry, position, reviewer_lead_in_at)
         lead = next_lead(as_coded, lead)

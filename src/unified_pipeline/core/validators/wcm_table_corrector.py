@@ -31,14 +31,18 @@ credential's home (`core.credential_lines.misfiled_credential_home`, read
 as F2 or F1) corrects to that home instead (#1577 shape 3): "Diplomate,
 National Board of Medical Examiners, <year>" is a licensing exam and an ATLS
 "Certificate #" a life-support course, both B2, so the corrector no longer
-undoes stage 3b's credential pin for them (on the #1243 farm it sent 43 of
-the 223 lines the pin makes B2 back to F2, and 3 NBME lines the model coded
-I or H to F2); and a line already at that home keeps its code.
+undoes stage 3b's credential pin for them, nor sends an NBME line the model
+coded I or H to F2; and a line already at that home keeps its code. This
+includes a T line: the corrector moves a T line that carries
+a signature (it always promoted one to F2 or F1), so it moves it to the
+line's credential home, where `core.credential_lines` itself never moves a
+T line into a credential code. A board's abbreviation is the shared
+`core.credential_lines.BOARD_ACRONYM_LEAD`.
 """
 
 import re
 
-from ..credential_lines import misfiled_credential_home
+from ..credential_lines import BOARD_ACRONYM_LEAD, misfiled_credential_home
 
 # --- detection signatures ---------------------------------------------------
 _MENTEE_PERIOD = re.compile(r"mentoring\s*period", re.I)
@@ -54,8 +58,8 @@ _BOARD = re.compile(
 # Disease 1995"), matched case-sensitively so ordinary words never read as one.
 # Only at the head: a residency row that names the board later on stays a residency
 # (#312, EBYSBC E11). A short parenthetical may come first ("(D)ABXY ...", the
-# diplomate mark; EBYSBC MRJDWE-03).
-_BOARD_ABBREV = re.compile(r"^[^A-Za-z]*(?:\([A-Za-z]{1,3}\)\s*)?AB[A-Z]{1,4}\b")
+# diplomate mark; EBYSBC MRJDWE-03). ABLS (a life-support course) is none.
+_BOARD_ABBREV = re.compile(BOARD_ACRONYM_LEAD)
 # A board-certification shape beyond the board's name (#1235): a certification
 # word, or a board name plus a year outside an awards/honors/committee/
 # membership context.

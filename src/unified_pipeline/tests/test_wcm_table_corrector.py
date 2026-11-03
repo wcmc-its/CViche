@@ -123,8 +123,16 @@ def _entry_after(text, hierarchy, code):
         ("Diplomate, National Board of Medical Examiners, 2031", ["Education"], "B2", "B2"),
         ("ATLS Certificate # 12345, 2031", ["Licensure"], "B2", "B2"),
         ("American Board of Example Surgery Part I written exam, passed 2031", ["Licensure"], "B2", "B2"),
-        # A licence signature on an ECFMG line: B2, not F1.
-        ("ECFMG Certificate (required for medical licensure), 2031", ["Credentials"], "T", "B2"),
+        # A licence signature on an ECFMG line under a list's lead label: B2, not F1.
+        ("Licensure: ECFMG Certificate #0-000-000-0, 2031", ["Credentials"], "T", "B2"),
+        # A line naming a licence beside an exam or the ECFMG is the licence's (#1577 review B1).
+        ("ECFMG Certificate (required for medical licensure), 2031", ["Credentials"], "T", "F1"),
+        ("USMLE Steps 1-3; Medical License number 12345, Example State", ["Experience"], "I", "F1"),
+        # A board certification beside a life-support course is the board's (#1577 review B4).
+        ("American Board of Example Medicine Certified 2031, ACLS 2033", ["Experience"], "I", "F2"),
+        ("ABXY Example Medicine 2031; BLS current", ["Experience"], "I", "F2"),
+        # ABLS is a life-support course, not a board's abbreviation.
+        ("ABLS 2031", ["Experience"], "B2", "B2"),
         # Lines that are what the signature says still get its code.
         ("Medical License number 12345, Example State", ["Licensure"], "T", "F1"),
         ("Diplomate, American Board of Example Medicine, 2031", ["Memberships"], "I", "F2"),
