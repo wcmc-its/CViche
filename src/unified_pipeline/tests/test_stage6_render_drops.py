@@ -1738,13 +1738,20 @@ def test_the_reroute_warning_names_the_section_each_record_left() -> None:
 
 
 def test_a_span_two_entries_share_gives_no_parent_line() -> None:
-    # #1577 review M9: a built record must not read another entry's line as its parent's.
-    from unified_pipeline.stage_6_word_template import _parent_texts
-
-    one = _credential("F1", "Example line one 2031", {}, idx=78)
-    other = _credential("F1", "Example line two 2032", {}, idx=78)
-    alone = _credential("F1", "Example line three 2033", {}, idx=80)
-    assert _parent_texts([one, other, alone]) == {(80, 80): "Example line three 2033"}
+    # #1577 review M9: a built record must not read another entry's line as its parent's. Two
+    # entries share element 78; the second holds a clause with the split child's own years.
+    paragraph = ("2031-2033  Certified in Example Method, Example Institute 2030-2031  Licensed Psychologist, "
+                 "Example State (Inactive)")
+    split = _credential("F1", paragraph, {
+        "state_country": "Example State", "issue_date": "2030", "expiration_date": "2031",
+        "stage4_records": [{"state_country": None, "issue_date": "2031", "expiration_date": "2033"},
+                           {"state_country": "Example State", "issue_date": "2030", "expiration_date": "2031"}]},
+        idx=78)
+    other_line = "2031-2033 Example Other Registry listing"
+    other = _credential("F1", other_line, {"state_country": "Example State", "license_number": "1"}, idx=78)
+    groups = _grouped(split, other)
+    assert all(entry["text"] != other_line for entry in groups.get("B2", []))
+    assert [entry["text"] for entry in groups["F1"]].count(other_line) == 1
 
 
 def test_another_steps_recode_off_an_earlier_pin_is_regrouped_like_any_record() -> None:
