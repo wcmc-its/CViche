@@ -2166,6 +2166,10 @@ def test_the_credential_pin_says_why_in_its_reasoning_1577(code, text, reason):
     ("F2", "Example State Controlled Substance Registration, 2031", ("Board Certification",), "F1"),
     # the life-support content pin this widens: a spelled-out name
     ("F1", "Basic Cardiac Life Support, 2031", ("Licensure",), "B2"),
+    # a board certification coded F1 with a life-support course beside it is the board's (#1577 review B4)
+    ("F1", "Board Certified, American Board of Example Medicine 2031; ACLS current", ("Licensure",), "F2"),
+    # a list's lead label is no licence the line names (#1577 review B1)
+    ("F1", "Licensure: USMLE Steps 1-3, 2031", ("Credentials",), "B2"),
 ])
 def test_a_misfiled_credential_is_recoded_whatever_its_confidence_1577(code, text, hierarchy, expected):
     (out,), n = apply_header_pin([_row(code, text, confidence=0.95, hierarchy=hierarchy)], NO_PIN_CTX)
@@ -2187,6 +2191,21 @@ def test_a_misfiled_credential_is_recoded_whatever_its_confidence_1577(code, tex
     # A heading line (T) and a position (D) are never moved.
     ("T", "Licensed to practice in Example State", ("Licensure",)),
     ("D2", "Diplomate, American Board of Example Medicine, 2031", ("Appointments",)),
+    # #1577 review B1: a licensing exam or the ECFMG certificate beside a licence is the licence's row.
+    ("F1", "USMLE Steps 1-3, 2029; Example State Medical License #123456, 2031", ("Licensure",)),
+    ("F1", "ECFMG Certificate #0-000-000-0, 2029; Example State Medical License #123456, 2031", ("Licensure",)),
+    # B3: a membership whose society's acronym starts with AB.
+    ("I", "ABXY - Example Brachytherapy Society, 2031-present", ("Professional Memberships",)),
+    # B4: a board certification beside a life-support course.
+    ("F2", "Board Certified, American Board of Example Medicine 2031; ACLS, PALS current",
+     ("Board Certification",)),
+    # B5: a training licence called a permit or a registration.
+    ("F1", "Limited Training Permit, Example State, 2029-2031", ("Licensure",)),
+    ("F1", "Postgraduate Training Registration, Example State, 2031", ("Licensure",)),
+    # M5: an employment row naming a licence, an exam result under honors, a board's name alone.
+    ("E", "Physician, private practice; Example State medical license", ("Employment",)),
+    ("H", "Board Certification Exam: 99th percentile, ABXY 2031", ("Honors",)),
+    ("I", "Example State Board of Medicine, 2031-present", ("Memberships",)),
 ])
 def test_what_the_credential_pin_leaves_1577(code, text, hierarchy):
     entry = _row(code, text, hierarchy=hierarchy)

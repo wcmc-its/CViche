@@ -780,6 +780,12 @@ def test_a_licensing_exam_naming_a_board_is_no_board_certification_1577():
     ("Invented State Medical License #12345, 2031", "F1", ("Licensure",)),
     ("American Board of Invented Surgery, oral examination passed 2031", "F2", ("Board Certification",)),
     ("Licensed to practice in Invented State", "T", ("Licensure",)),
+    # the fix round's classes (#1577 review B1, B3, B4, B5, M5)
+    ("USMLE Steps 1-3, 2029; Invented State Medical License #123456, 2031", "F1", ("Licensure",)),
+    ("ABXY - Invented Brachytherapy Society, 2031-present", "I", ("Professional Memberships",)),
+    ("Board Certified, American Board of Invented Medicine 2031; ACLS current", "F2", ("Board Certification",)),
+    ("Limited Training Permit, Invented State, 2029-2031", "F1", ("Licensure",)),
+    ("Invented State Board of Medicine, 2031-present", "I", ("Memberships",)),
 ])
 def test_the_lint_reports_exactly_what_the_stage3b_credential_pin_recodes_1577(text, code, headings):
     """One test, two readers (CODING_STANDARDS.md §1.5): credential_misfiled
