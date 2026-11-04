@@ -721,6 +721,36 @@ def test_1223_child_counts_names_and_birth_lines_are_shapes():
     assert len(lint_protected_data_in_output(appendix)) == 1
 
 
+@pytest.mark.parametrize("text", [
+    "Birth: Sampleton, ZZ",
+    "Birth:\tSampleton, ZZ",
+    "Birth:      Port Sampleton, Region",
+    "• BIRTH - Sampleton, ZZ",
+])
+def test_2061_a_bare_birth_label_with_a_place_is_a_shape_and_a_finding(text, tmp_path):
+    """HTGWYH-01's shape (invented values): a line-initial "Birth" label with
+    a place and no date. The matcher now knows it too, so the lint reports it
+    once, and the scorer caps the run."""
+    assert _shape_categories(text) == ["place of birth"]
+    findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p(text)])
+    assert len(findings) == 1
+    assert "(place of birth)" in findings[0]["message"]
+    assert "Sampleton" not in findings[0]["message"]
+    blocks = [_p("T. APPENDIX"), _p("")]
+    assert len(lint_protected_data_in_output(blocks, [_p(""), _p(text)])) == 1
+    _write_flat_docx(tmp_path, ["T. APPENDIX", text])
+    assert score_protected_data(tmp_path)[2] == PROTECTED_DATA_CAP
+
+
+@pytest.mark.parametrize("text", [
+    "Birth: A History of Midwifery",
+    "Birth cohort, Sampleton, ZZ",
+    "An example study of preterm birth: Sampleton, ZZ",
+])
+def test_2061_birth_titles_are_not_place_of_birth_shapes(text):
+    assert _shape_categories(text) == []
+
+
 def test_1223_titles_institutions_and_research_text_are_not_findings():
     """The negative controls the shapes were tuned on: none carries a family,
     birth or home VALUE after its keyword."""

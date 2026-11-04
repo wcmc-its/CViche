@@ -325,6 +325,13 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:^|(?<=[\n\t|;]))[ \t]*(?:[•·*–—-][ \t]*)?(?i:birth)"
                 + r"(?:[ \t]*[:\-–—][ \t]*|[ \t]+)(?P<value>" + _FULL_DATE + ")"),
      CAT_DATE_OF_BIRTH),
+    # #2061 (HTGWYH): the same line-initial "Birth" label with a place and no
+    # date -- "Birth: <city>, <state>". The comma is what makes it a place:
+    # "Birth: A History" names none.
+    (re.compile(r"(?:^|(?<=[\n\t|;]))[ \t]*(?:[•·*–—-][ \t]*)?(?i:birth)"
+                + r"(?:[ \t]*[:\-–—][ \t]*|\t[ \t]*|[ ]{2,})"
+                + r"(?P<value>" + _NAMES + r"[ \t]*,[ \t]*[A-Z][\w.'’-]*)"),
+     CAT_PLACE_OF_BIRTH),
     (re.compile(r"\b(?i:born|birthplace|place[ \t]+of[ \t]+birth)\b"
                 + r"(?:" + _SEP + r"|[ \t]+(?i:in)[ \t]+)(?P<value>" + _NAMES + ")"),
      CAT_PLACE_OF_BIRTH),
