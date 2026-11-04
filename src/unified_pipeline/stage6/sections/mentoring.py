@@ -780,19 +780,50 @@ def _source_supervision_type(text: str) -> str:
     return ''
 
 
-def _infer_supervision_type(level_text: str) -> str:
-    """Supervision type from the mentee's level/position when stage 4 gave
-    none. Checked in this order on purpose: a "clinical fellow" is Research
-    (fellow) before it is Clinical, and the short 'ms'/'ma' tokens are tried
-    last so they cannot pre-empt 'resident' inside a longer word."""
-    level_lower = level_text.lower()
-    if any(x in level_lower for x in ['phd', 'thesis', 'dissertation', 'doctoral']):
-        return 'Research'
-    if any(x in level_lower for x in ['postdoc', 'fellow']):
-        return 'Research'
-    if any(x in level_lower for x in ['resident', 'clinical']):
-        return 'Clinical'
-    if any(x in level_lower for x in ['master', 'ms', 'ma']):
+#: Level words that imply a Type of Supervision, tried in this order: a
+#: "clinical fellow" is Research (fellow) before it is Clinical. Each word
+#: must START a word -- "resident" matches "residents" but
+#: not "president" -- and the degree abbreviations must be the whole word.
+#: These were bare substrings before #2066, so "ma" in "Pharmacology" or an
+#: institution acronym, and "ms" in "programs", filled "Research" on mentees
+#: whose source states no level at all (OXCCQM: 4 records). The forms that
+#: reached Research only by that accident -- "MSc", "MSPH", "MSW", "MSTP",
+#: "Predoctoral" -- are named. "MS1".."MS4" is a medical student's year, not
+#: a master's degree, so a digit ends no match.
+_RESEARCH_DEGREE_RE = re.compile(
+    r'(?<![a-z])(?:phd|thesis|dissertation|(?:pre)?doctoral|mstp(?![a-z]))', re.I)
+_SUPERVISION_LEVEL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (_RESEARCH_DEGREE_RE, 'Research'),
+    (re.compile(r'(?<![a-z])(?:postdoc|fellow)', re.I), 'Research'),
+    (re.compile(r'(?<![a-z])(?:resident|clinical)', re.I), 'Clinical'),
+    (re.compile(r'(?<![a-z])(?:master|m[sa](?:c|ph|w)?(?![a-z0-9]))', re.I), 'Research'),
+)
+
+#: The dotted degrees ("Ph.D.", "Ph D", "M.S.", "M.A.", "M.Sc.", "M.S.P.H."),
+#: tried after every rule above, so "M.D., Ph.D., ... resident" stays
+#: Clinical. With no level they count only at the start of Site/Position
+#: ("Ph.D., <program>"): later in it they are as often a supervisor's
+#: credential ("P.I. <name>, Ph.D.") as the mentee's level.
+_DOTTED_DEGREE_RE = re.compile(
+    r'(?<![a-z])(?:ph\. ?d|ph d|m\.[sa]\.?(?:[a-z]{1,2}\.?)*)(?![a-z])', re.I)
+
+
+def _infer_supervision_type(mentee_level: str, site_position: str) -> str:
+    """Supervision type when stage 4 and the source gave none: the first
+    `_SUPERVISION_LEVEL_RULES` entry matching the level (or, with no level,
+    Site/Position), else Research for a dotted degree (`_DOTTED_DEGREE_RE`).
+    When the level is a word such as a department name that implies
+    nothing, a Site/Position naming a PhD, thesis or dissertation
+    (`_RESEARCH_DEGREE_RE`) still gives Research, as it did by accident
+    before #2066; the other rules are not tried on it, since a site's ", MA"
+    (a state) or "Clinical Research" names no level. Else ''."""
+    level_text = mentee_level or site_position
+    for pattern, supervision_type in _SUPERVISION_LEVEL_RULES:
+        if pattern.search(level_text):
+            return supervision_type
+    dotted = (_DOTTED_DEGREE_RE.search(mentee_level) if mentee_level
+              else _DOTTED_DEGREE_RE.match(site_position))
+    if dotted or (mentee_level and _RESEARCH_DEGREE_RE.search(site_position)):
         return 'Research'
     return ''
 
@@ -857,7 +888,7 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     role_match = _ROLE_LINE_RE.search(_text(entry.get('text')))
     role = role_match.group(1).strip() if role_match else ''
     if not supervision_type:
-        supervision_type = _infer_supervision_type(mentee_level or site_pos_raw)
+        supervision_type = _infer_supervision_type(mentee_level, site_pos_raw)
     if role and role.casefold() not in supervision_type.casefold():
         supervision_type = f"{supervision_type} ({role})" if supervision_type else role
 

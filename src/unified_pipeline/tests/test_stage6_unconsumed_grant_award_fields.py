@@ -295,6 +295,70 @@ def test_the_pipe_row_still_wins_over_an_inline_value():
     assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research"
 
 
+def _inferred_supervision(mentee_level="", site_position=""):
+    fields = {"mentee_name": "Jane Roe", "mentee_level": mentee_level, "site_position": site_position}
+    return _normalize_mentee({"text": "Jane Roe", "extracted_fields": fields}, ongoing=True).supervision_type
+
+
+@pytest.mark.parametrize("site_position", [
+    "Acme Pharma Institute",         # "ma" inside a word (#2066, OXCCQM)
+    "Programs Office",               # "ms" inside a word
+    "Northfield Medical Center, AMI",
+    "Department of Pharmacology",
+    "Primary Advisor",
+])
+def test_a_level_word_inside_another_word_infers_nothing(site_position):
+    assert _inferred_supervision(site_position=site_position) == ""
+
+
+@pytest.mark.parametrize("mentee_level", ["MS1", "MS3", "MS1-4", "Freshman", "Undergraduate major"])
+def test_a_medical_student_year_or_a_major_is_not_a_masters_degree(mentee_level):
+    assert _inferred_supervision(mentee_level) == ""
+
+
+@pytest.mark.parametrize(("mentee_level", "expected"), [
+    ("PhD student", "Research"),
+    ("Predoctoral Trainee", "Research"),
+    ("MSTP Student", "Research"),
+    ("Postdoctoral Fellow", "Research"),
+    ("Clinical fellow", "Research"),       # fellow is tried before clinical
+    ("Surgery residents", "Clinical"),
+    ("Vice President", ""),                # "resident" must start a word
+    ("Preclinical student", ""),
+    ("MS", "Research"),
+    ("MSc candidate", "Research"),
+    ("MSPH", "Research"),
+    ("MSW", "Research"),
+    ("Masters student", "Research"),
+])
+def test_level_words_infer_the_supervision_type(mentee_level, expected):
+    assert _inferred_supervision(mentee_level) == expected
+
+
+@pytest.mark.parametrize("mentee_level", ["Ph.D.", "Ph. D.", "Ph D (joint)", "M.S.", "M.A. (Psychology)",
+                                          "M.Sc. student", "M.S.P.H.", "B.S., M.S."])
+def test_a_dotted_degree_in_the_level_is_research(mentee_level):
+    assert _inferred_supervision(mentee_level) == "Research"
+
+
+def test_a_resident_with_a_dotted_phd_stays_clinical():
+    assert _inferred_supervision("M.D., Ph.D., PGY-2 surgery resident") == "Clinical"
+
+
+def test_a_dotted_degree_in_site_position_counts_only_at_its_start():
+    assert _inferred_supervision(site_position="Ph.D., Genetics Program") == "Research"
+    assert _inferred_supervision(site_position="P.I. John Doe, Ph.D., Genetics") == ""
+
+
+def test_site_position_naming_a_phd_backs_up_an_uninformative_level():
+    # The level is a department, so it implies nothing; the site names the PhD.
+    assert _inferred_supervision("Molecular Biology", "PhD student") == "Research"
+    assert _inferred_supervision("Biostatistics", "Thesis Committee") == "Research"
+    # Only the research-degree words are read there: a state is not a degree.
+    assert _inferred_supervision("MPH Student", "Riverside Hospital, MA") == ""
+    assert _inferred_supervision("MPH Student", "Clinical Research Unit") == ""
+
+
 def test_the_template_goals_row_joins_the_project():
     # #829, YDSVDB: no field holds the revised template's goals row; all 5 were lost.
     entry = {"text": "Name | Jane Roe\nProject/Accomplishments** | Archive move\n"
