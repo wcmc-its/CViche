@@ -701,6 +701,13 @@ def _owner_anchor(targets: list[str], owner: Mapping) -> _OwnerAnchor:
     return _OwnerAnchor(frozenset(parts), frozenset(initials - {''}))
 
 
+def _owner_own_initials(anchor: _OwnerAnchor, targets: list[str]) -> frozenset[str]:
+    """`OwnerAlias.owner_initials` (#2060): the anchor's first initials and
+    every initial of the majority target, so an owner who goes by a middle
+    name ("Doe SG" printed "Doe G") still agrees with herself."""
+    return anchor.initials | frozenset(_target_initials(_majority_target(targets)))
+
+
 def _target_is_owner(target_name: str, alias: OwnerAlias) -> bool:
     """False for a `target_name` that is not the owner, once the bibliography
     has confirmed the owner (`alias.surnames`): its surname shares no part
@@ -743,7 +750,7 @@ def _infer_bibliography_owner_alias(publications: list[dict], cv_owner: Mapping 
     initials = [*anchor.initials, *(_name_initial(t) for t in owner_targets)]
     alias = infer_owner_alias(citations, surnames, initials)
     alias = replace(alias, known_parts=alias.parts | anchor.parts | name_parts(cv_owner_last_name),
-                    owner_initials=anchor.initials)
+                    owner_initials=_owner_own_initials(anchor, targets))
     if any(fold_name(s) != fold_name(cv_owner_last_name) for s in alias.surnames):
         logger.info("Owner surname read from the bibliography as %r (stage 4 last name %r)",
                     alias.surnames, cv_owner_last_name)

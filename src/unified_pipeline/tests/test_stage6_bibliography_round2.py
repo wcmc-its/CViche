@@ -1454,6 +1454,16 @@ def test_fill_bibliography_coauthor_target_on_the_owners_surname_bolds_the_owner
     assert bolds == [["Doe JK"]] * 4
 
 
+def test_fill_bibliography_owner_printed_by_middle_initial_agrees_with_herself():
+    # The majority target "Doe, SG" makes G an owner initial, so a target
+    # "Doe, G." beside a co-author "Doe J" bolds "Doe G", not nothing.
+    owner = [_citation_entry(f"Doe SG, Roe B. A study of mice {n}. J Med. 2020;1:1-2.", "Doe, SG", 2020)
+             for n in range(3)]
+    middle = _citation_entry("Roe A, Doe J, Doe G. A study of rats. J Med. 2020;1:1-2.", "Doe, G.", 2020)
+    bolds = _bold_texts([*owner, middle], {"last_name": "Doe", "first_name": "S."})
+    assert bolds == [["Doe SG"]] * 3 + [["Doe G"]]
+
+
 # --- #1436: an S8 abstract's event-status note survives into the citation ---
 
 
