@@ -638,6 +638,11 @@ LINT_COPY = {
         "A source heading clearly names one section, but every entry under it was filed in a "
         "different section, so that section is empty in the document.",
         "Check the quoted entries and move any that belong under their source heading's section."),
+    "cross_section_duplicate": LintCopy(
+        "Same entry shown twice",
+        "Your CV lists one item, such as a role, an award or a grant, under two of its headings, "
+        "and the document shows it twice.",
+        "Keep the copy in the section where it belongs and delete the other."),
 }
 
 # #1388: a rerun of the same CV helps only when the failure was a passing one,

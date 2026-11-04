@@ -14,6 +14,7 @@ Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 import copy
 import functools
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping
@@ -4652,6 +4653,265 @@ def lint_identical_rendered_rows(stage4: dict,
              + _fused_repeat_rows(stage4, table_rows))
     return [_finding("identical_rendered_rows", IDENTICAL_ROW_SEVERITY, message, evidence)
             for message, evidence in found]
+
+
+# Lint 14bd, cross_section_duplicate (#1435; MIX11 MJQYFH-04/05, MOCDRL-07/08,
+# OXCCQM-16, KGXMLK-17, ZDKMKD-12): one fact the CV states under two of its
+# own top-level headings, rendered twice. The owner decided (2026-10-30) that
+# such a fact renders once, in the template-correct section. Neither
+# duplicate lint sees it: `duplicate_records` pairs only citations and
+# grants, and `identical_rendered_rows` keeps quiet on identical rows whose
+# records agree, and compares no rows that read differently. Two stage-4
+# records (an entry, or each record of a split entry) are one fact when
+#   - their entries sit under different top-level source headings (the same
+#     heading twice is the CV's own list, #446's to judge),
+#   - they state the same years (first and last), and
+#   - they share a grant or award number, or the words of their fields other
+#     than place and funder that they share are most of each one's weight
+#     (`_one_fact`), each word weighted by how few of the CV's entries use
+#     it, and a role when either names one.
+# A pair fires only when the words they share render in two or three rows
+# (or record-shaped paragraphs) of the document outside the Appendix: a copy
+# stage 6's dedup dropped is not on the page. Precision: CSD-1 in
+# doctor/PRECISION.md (348 of 407 hand-labelled findings true). Publications, talks and the
+# Appendix are out (`CROSS_SECTION_SKIPPED_CODES`): a talk repeats by design,
+# and `duplicate_records` owns citations. A grant that is both a funding
+# table and an award row is in: the owner's ruling counts it as one fact.
+
+#: Codes never compared: personal data, employment status, effort, research
+#: activities and the summary, talks, publications, the Appendix.
+CROSS_SECTION_SKIPPED_CODES = ("A", "E", "J", "M1", "R", "S", "T")
+#: Fields that say where a record was, not what it was: two records sharing
+#: only these are two facts at one place (a degree and a teaching post at
+#: one university, OXCCQM 12/48).
+_CROSS_SECTION_PLACE_FIELDS = frozenset({
+    "institution", "location", "city", "state", "country", "address",
+    "department", "division_department", "division",
+    # Who gave an award or a grant: an award and a membership of one
+    # society are two facts (2068 47/1120 on the farm).
+    "granting_body", "agency", "funding_agency", "sponsor", "funder",
+})
+#: Words that name no fact on their own.
+_CROSS_SECTION_STOPWORDS = frozenset({
+    "and", "of", "the", "for", "in", "at", "to", "on", "with", "by", "an", "or",
+    "present", "current", "university", "department", "school", "college",
+    "medicine", "medical", "hospital", "center", "centre", "institute",
+})
+#: A number shorter than this (a volume, a count) is no word of a fact; a
+#: grant or award number is.
+CROSS_SECTION_MIN_NUMBER_DIGITS = 5
+#: Shared words a pair needs, at the least.
+CROSS_SECTION_MIN_SHARED = 2
+#: The weighted share of the shorter record's words the pair must share.
+CROSS_SECTION_MIN_OVERLAP = 0.6
+#: ... and of the longer one's: a residency beside a committee of that
+#: residency shares the residency's words, which are all of the residency
+#: and little of the committee (2071 11/171 on the farm).
+CROSS_SECTION_MIN_LARGER_OVERLAP = 0.5
+#: What someone was or did, by stem: two records that each name a role and
+#: share none are two facts at one place (a society's councilor and its
+#: finance committee member; a fellowship and a lectureship in its track),
+#: however many other words they share.
+_CROSS_SECTION_ROLE_PREFIXES = (
+    "direct", "codirect", "chair", "president", "member", "represent", "lectur",
+    "instruct", "coordinat", "committee", "council", "fellow", "residen", "chief",
+    "lead", "founder", "editor", "review", "faculty", "advis", "mentor", "particip",
+    "organiz", "course", "treasur", "secretar", "officer", "dean", "head", "manag",
+    "liaison", "award", "prize", "scholar", "professor", "trainee", "intern",
+    "student", "speaker", "moderat", "judge", "examin", "consult", "attending",
+    "physician", "associate", "assistant",
+)
+#: The weighted share of the shared words a rendered row must hold.
+CROSS_SECTION_RENDER_SHARE = 0.8
+#: More rows than this holding the shared words means they name a place or
+#: a programme many rows share, not one fact.
+CROSS_SECTION_MAX_COPIES = 3
+#: A paragraph longer than this is a summary or a narrative, not a record.
+CROSS_SECTION_MAX_PARAGRAPH_CHARS = 300
+CROSS_SECTION_SEVERITY = "WARN"
+#: Evidence quotes each copy, cut to this many characters.
+CROSS_SECTION_EVIDENCE_CHARS = 120
+
+
+class _CrossSectionRecord(NamedTuple):
+    """One stage-4 record as this lint compares it."""
+    element_idx: object
+    code: str
+    heading: str
+    years: tuple[str, str]
+    tokens: frozenset[str]
+    #: The words of its fields other than where it was (`_CROSS_SECTION_PLACE_FIELDS`).
+    fact_tokens: frozenset[str]
+
+
+def _fact_words(text: str) -> frozenset[str]:
+    return frozenset(token for token in _name_tokens(text)
+                     if token not in _CROSS_SECTION_STOPWORDS
+                     and (not token.isdigit() or len(token) >= CROSS_SECTION_MIN_NUMBER_DIGITS))
+
+
+def _cross_section_record(entry: _FieldsEntry, fields: Mapping) -> _CrossSectionRecord | None:
+    """`fields` as a record, or None when it states no year or no word."""
+    years, words, place = [], [], []
+    for key, value in fields.items():
+        if key in _IDENTICAL_ROW_IGNORED_FIELDS or not isinstance(value, (str, int)):
+            continue
+        if _fan_out_date_key(key):
+            years += _FOUR_DIGIT_YEAR_RE.findall(str(value))
+        else:
+            (place if key in _CROSS_SECTION_PLACE_FIELDS else words).append(str(value))
+    facts = _fact_words(" ".join(words))
+    if not years or not facts or not entry.hierarchy:
+        return None
+    return _CrossSectionRecord(entry.element_idx, entry.code, norm(entry.hierarchy[0]),
+                               (min(years), max(years)), facts | _fact_words(" ".join(place)),
+                               facts)
+
+
+def _cross_section_records(stage4: dict) -> list[_CrossSectionRecord]:
+    records = []
+    for entry in _fields_entries(stage4):
+        if not entry.code or entry.code.startswith(CROSS_SECTION_SKIPPED_CODES):
+            continue
+        for child in _split_records(entry.fields) or [entry.fields]:
+            record = _cross_section_record(entry, child)
+            if record is not None:
+                records.append(record)
+    return records
+
+
+def _role_keys(tokens: frozenset[str]) -> frozenset[str]:
+    """The role words among `tokens`, each as its `_CROSS_SECTION_ROLE_PREFIXES` stem."""
+    return frozenset(prefix for token in tokens for prefix in _CROSS_SECTION_ROLE_PREFIXES
+                     if token.startswith(prefix))
+
+
+def _token_weights(records: list[_CrossSectionRecord]) -> dict[str, float]:
+    """log(entries / entries using the word), per word."""
+    users: dict[str, set] = defaultdict(set)
+    for record in records:
+        for token in record.tokens:
+            users[token].add(record.element_idx)
+    total = len({record.element_idx for record in records})
+    return {token: math.log((total + 1) / len(idx)) for token, idx in users.items()}
+
+
+def _one_fact(first: _CrossSectionRecord, second: _CrossSectionRecord,
+              weights: Mapping[str, float]) -> bool:
+    """Whether two records of different headings and the same years state
+    one fact: a shared grant or award number (OXCCQM 33/85: an award row and
+    the grant's table, whose title shares nothing else), or most of each
+    one's weighted words and, when either names a role, a role."""
+    facts = first.fact_tokens & second.fact_tokens
+    if any(sum(char.isdigit() for char in token) >= CROSS_SECTION_MIN_NUMBER_DIGITS
+           for token in facts):
+        return True
+    if len(facts) < CROSS_SECTION_MIN_SHARED:
+        return False
+    weight = sum(weights[token] for token in facts)
+    smaller, larger = sorted(sum(weights[token] for token in record.fact_tokens)
+                             for record in (first, second))
+    roles = _role_keys(first.fact_tokens), _role_keys(second.fact_tokens)
+    return (weight >= CROSS_SECTION_MIN_OVERLAP * smaller
+            and weight >= CROSS_SECTION_MIN_LARGER_OVERLAP * larger
+            and bool(roles[0] & roles[1] or not roles[0] | roles[1]))
+
+
+def _cross_section_pairs(records: list[_CrossSectionRecord], weights: Mapping[str, float]
+                         ) -> list[tuple[_CrossSectionRecord, _CrossSectionRecord, frozenset]]:
+    """(first, second, the words they share) per pair stating one fact."""
+    return [(first, second, first.tokens & second.tokens)
+            for i, first in enumerate(records) for second in records[i + 1:]
+            if first.element_idx != second.element_idx and first.heading != second.heading
+            and first.years == second.years and _one_fact(first, second, weights)]
+
+
+class _RenderedUnit(NamedTuple):
+    """One rendered record: a table row, a label table (a grant's "Award
+    Source:" and "Project title:" rows are one record), or a short
+    paragraph that is no prose."""
+    section: str
+    text: str
+    tokens: frozenset[str]
+    years: frozenset[str]
+
+
+def _rendered_unit(section: str, text: str) -> _RenderedUnit:
+    return _RenderedUnit(section, text, frozenset(_name_tokens(text)),
+                         frozenset(_FOUR_DIGIT_YEAR_RE.findall(text)))
+
+
+def _is_label_table(rows: list[list[str]]) -> bool:
+    """Whether every filled row of a table opens on a label ("Award Source:")."""
+    firsts = [next((cell for cell in row if cell.strip()), "") for row in rows]
+    return bool(firsts) and all(cell.rstrip().endswith(":") for cell in firsts if cell)
+
+
+def _rendered_units(table_rows: list[list[list[str]]],
+                    blocks: list[tuple[str, str]] | None) -> list[_RenderedUnit]:
+    """The document's rendered records outside the Appendix, each under its
+    section (`blocks`' last section header before it; "" without blocks)."""
+    appendix = norm(_APPENDIX_HEADER[3:])
+    sections, units, section = [], [], ""
+    for kind, text in blocks or []:
+        text = str(text or "")
+        header = _output_section_header(text) if kind == "p" else None
+        if kind == "table":
+            sections.append(section)
+        elif header is not None:
+            section = header
+        elif (section != appendix and len(text) <= CROSS_SECTION_MAX_PARAGRAPH_CHARS
+              and not is_prose(text)):
+            units.append(_rendered_unit(section, text))
+    for table, rows in enumerate(table_rows):
+        section = sections[table] if table < len(sections) else ""
+        texts = [text for text in map(_table_row_text, rows) if text]
+        if section == appendix or not texts:
+            continue
+        units += ([_rendered_unit(section, " ".join(texts))] if _is_label_table(rows)
+                  else [_rendered_unit(section, text) for text in texts])
+    return units
+
+
+def _rendered_copies(shared: frozenset, years: tuple[str, str], weights: Mapping[str, float],
+                     units: list[_RenderedUnit]) -> list[_RenderedUnit]:
+    """The units printing both `years` (or no four-digit year at all: a
+    grant's "01/09-12/09") and at least CROSS_SECTION_RENDER_SHARE of the
+    weight of `shared` (a column stage 6 leaves out, often the institution,
+    is no missing copy)."""
+    total = sum(weights[token] for token in shared)
+    return [unit for unit in units if (not unit.years or set(years) <= unit.years)
+            and sum(weights[token] for token in shared & unit.tokens)
+            >= CROSS_SECTION_RENDER_SHARE * total]
+
+
+def lint_cross_section_duplicate(stage4: dict, table_rows: list[list[list[str]]],
+                                 blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """One fact the CV states under two top-level headings, rendered twice
+    (#1435). One finding per pair, quoting both rendered copies. Reads
+    stage 4 and the docx's table rows; its paragraphs, for the section names
+    and paragraph records, when present."""
+    units = _rendered_units(table_rows, blocks)
+    records = _cross_section_records(stage4)
+    weights = _token_weights(records)
+    findings, seen = [], set()
+    for first, second, shared in _cross_section_pairs(records, weights):
+        copies = _rendered_copies(shared, first.years, weights, units)
+        # Two pairs over the same rendered rows (each record listed twice,
+        # one copy of each dropped by stage 6's dedup) are one duplicate.
+        key = tuple(sorted(unit.text for unit in copies))
+        if not 2 <= len(copies) <= CROSS_SECTION_MAX_COPIES or key in seen:
+            continue
+        seen.add(key)
+        sections = sorted({unit.section for unit in copies if unit.section})
+        findings.append(_finding(
+            "cross_section_duplicate", CROSS_SECTION_SEVERITY,
+            f"entry {first.element_idx} ({first.code}) repeats as entry {second.element_idx} "
+            f"({second.code}): one fact the CV lists under two of its headings renders "
+            f"{len(copies)} times ({', '.join(sections) or 'no section named'}); keep one copy, "
+            f"in the section the template asks for",
+            [unit.text[:CROSS_SECTION_EVIDENCE_CHARS] for unit in copies]))
+    return findings
 
 
 # split_child_unsourced (EOAHMI recheck DUTAVD-03, WYMVGU-02): a record

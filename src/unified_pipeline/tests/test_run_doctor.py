@@ -27,6 +27,8 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
+    CROSS_SECTION_EVIDENCE_CHARS,
+    CROSS_SECTION_SEVERITY,
     DATE_ONLY_LINES_WARN_COUNT,
     GROUP_CREDIT_MAX_WORDS,
     IDENTICAL_ROW_EVIDENCE_RECORDS,
@@ -55,6 +57,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_bucket_status,
     lint_citation_field_dropped,
     lint_classified_unrendered,
+    lint_cross_section_duplicate,
     lint_date_cell_shape,
     lint_date_only_lines,
     lint_dead_sections,
@@ -6386,14 +6389,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (83), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (84), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 81
+    assert len(payload["findings"]) == 82
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -8849,6 +8852,229 @@ def test_identical_rendered_rows_prevalence_is_the_measured_fraction():
     renders of origin/dev 8b287ec2; a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["identical_rendered_rows"] == round(8 / 102, 3)
+
+
+# ----------------------------------- lint 14bd: cross_section_duplicate (#1435)
+# One fact the CV lists under two of its headings, rendered twice. Invented values.
+_CSD_LEAD = "INSTITUTIONAL LEADERSHIP ACTIVITIES"
+_CSD_TEACH = "EDUCATIONAL CONTRIBUTIONS"
+_CSD_ROLE = "Associate Director, Example Widget Fellowship"
+_CSD_ROW = [_CSD_ROLE, "Example University", "2020-Present"]
+
+
+def _csd_entry(idx, code, heading, fields, text="Example entry text"):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "hierarchy": [heading], "extracted_fields": fields}
+
+
+def _csd_role(idx, code, heading, role=_CSD_ROLE, start="2020"):
+    return _csd_entry(idx, code, heading, {"leadership_role": role,
+                                           "institution": "Example University",
+                                           "start_date": start, "end_date": "present"})
+
+
+def _csd_doc(*sections):
+    """(table_rows, blocks): one table per (heading, rows) under its heading."""
+    tables, blocks = [], []
+    for heading, rows in sections:
+        tables.append(rows)
+        blocks += [("p", heading), ("table", "\n".join(" | ".join(row) for row in rows))]
+    return tables, blocks
+
+
+def _csd(entries, *sections):
+    tables, blocks = _csd_doc(*sections)
+    return lint_cross_section_duplicate({"entries": entries}, tables, blocks)
+
+
+def test_cross_section_duplicate_warns_on_one_role_under_two_headings():
+    """MOCDRL-07's shape: a programme role listed under the CV's appointments
+    and again under its academic responsibilities, coded O and K3, renders
+    in both template sections."""
+    entries = [_csd_role(4, "O", "CURRENT APPOINTMENTS"),
+               _csd_role(36, "K3", "ACADEMIC RESPONSIBILITIES")]
+    teaching = ["2020-present - " + _CSD_ROLE + " (Example University)"]
+
+    assert _csd(entries, (_CSD_LEAD, [_CSD_ROW]), (_CSD_TEACH, [teaching])) == [{
+        "lint": "cross_section_duplicate", "severity": CROSS_SECTION_SEVERITY,
+        "message": "entry 4 (O) repeats as entry 36 (K3): one fact the CV lists under two "
+                   "of its headings renders 2 times (educational contributions, institutional "
+                   "leadership activities); keep one copy, in the section the template asks for",
+        "evidence": [" | ".join(_CSD_ROW), teaching[0]],
+        "status": "ran", "reason": ""}]
+
+
+def test_cross_section_duplicate_needs_two_headings_one_span_of_years_and_two_copies():
+    """The same heading twice is the CV's own list; other years are another
+    term; a copy stage 6's dedup dropped is not on the page."""
+    rows = (_CSD_LEAD, [_CSD_ROW, _CSD_ROW])
+    same_heading = [_csd_role(4, "O", "SERVICE"), _csd_role(36, "K3", "SERVICE")]
+    assert _csd(same_heading, rows) == []
+    other_years = [_csd_role(4, "O", "APPOINTMENTS"),
+                   _csd_role(36, "K3", "RESPONSIBILITIES", start="2021")]
+    assert _csd(other_years, rows) == []
+    pair = [_csd_role(4, "O", "APPOINTMENTS"), _csd_role(36, "K3", "RESPONSIBILITIES")]
+    assert len(_csd(pair, rows)) == 1
+    assert _csd(pair, (_CSD_LEAD, [_CSD_ROW])) == []
+    # A row of the same words that prints other years is another term, not a copy.
+    assert _csd(pair, (_CSD_LEAD, [_CSD_ROW, [_CSD_ROLE, "Example University", "2014-2016"]])) == []
+
+
+def test_cross_section_duplicate_reads_each_record_of_a_split_entry():
+    """MOCDRL-08's shape: a training line stage 4 split into two records, one
+    of which the CV restates under a second heading; both render as rows."""
+    fellow = {"training_type": "Example Widget Fellow", "start_date": "2018",
+              "end_date": "2019"}
+    split = _csd_entry(8, "C", "EDUCATION AND TRAINING", {**fellow, "stage4_records": [
+        {"training_type": "Example Gadget Fellowship", "start_date": "2016", "end_date": "2019"},
+        fellow]})
+    restated = _csd_entry(38, "C", "ACADEMIC RESPONSIBILITIES",
+                          {**fellow, "institution": "Example University"})
+    rows = [["Example Gadget Fellowship", "2016-2019"], ["Example Widget Fellow", "2018-2019"],
+            ["Example Widget Fellow", "Example University", "2018-2019"]]
+
+    [finding] = _csd([split, restated], ("POSTDOCTORAL TRAINING", rows))
+
+    assert finding["message"].startswith("entry 8 (C) repeats as entry 38 (C):")
+    assert finding["evidence"] == [" | ".join(rows[1]), " | ".join(rows[2])]
+
+
+def test_cross_section_duplicate_matches_an_award_to_its_grant_by_number():
+    """OXCCQM-16's shape: an award row and the grant's label table share
+    only the award number and the funder, which is where it came from."""
+    award = _csd_entry(33, "H", "AWARDS", {"award_name": "Example gadget prize (EX-12345)",
+                                           "granting_body": "Example Foundation",
+                                           "date": "2011"})
+    grant = _csd_entry(85, "M2B", "RESEARCH SUPPORT", {
+        "grant_number": "EX-12345", "title": "A study of widgets in gadgets",
+        "agency": "Example Foundation", "start_date": "2011-01-01", "end_date": "2011-12-31"})
+    grant_table = [["Award Source:", "Example Foundation (EX-12345)"],
+                   ["Project title:", "A study of widgets in gadgets"],
+                   ["Duration of support:", "01/11-12/11"]]
+
+    [finding] = _csd([award, grant],
+                     ("HONORS, AWARDS", [["Example gadget prize (EX-12345)", "Example Foundation",
+                                          "2011"]]),
+                     ("RESEARCH", grant_table))
+
+    assert finding["message"].startswith("entry 33 (H) repeats as entry 85 (M2B):")
+    # The label table is one record, quoted to CROSS_SECTION_EVIDENCE_CHARS.
+    assert finding["evidence"][1] == ("Award Source: | Example Foundation (EX-12345) Project "
+                                      "title: | A study of widgets in gadgets Duration of "
+                                      "support: | 01/11-12/11")[:CROSS_SECTION_EVIDENCE_CHARS]
+
+
+def test_cross_section_duplicate_is_silent_on_two_facts_at_one_place():
+    """A society's councilor and its finance committee member share the
+    society and the years but no role; a degree and a teaching post at one
+    university share only where they were."""
+    society = "Example Widget Society"
+    councilor = _csd_entry(23, "Q1", "HONORS", {"organization": society, "role": "Councilor",
+                                                "start_date": "2003", "end_date": "2006"})
+    member = _csd_entry(99, "Q2", "SERVICE", {"committee_name": society + " Finance Committee",
+                                              "role": "Member", "start_date": "2003",
+                                              "end_date": "2006"})
+    rows = [[society, "Councilor", "2003-2006"], [society + " Finance Committee", "Member",
+                                                  "2003-2006"]]
+    assert _csd([councilor, member], ("EXTRAMURAL", rows)) == []
+
+    place = {"institution": "Example University", "start_date": "1988"}
+    degree = _csd_entry(12, "B1", "EDUCATION", {**place, "degree": "B.S.", "field": "Chemistry"})
+    lab = _csd_entry(48, "K1", "TEACHING", {**place, "course_name": "Chemistry Lab",
+                                            "role": "TA"})
+    rows = [["B.S., Chemistry", "Example University", "1988"],
+            ["1988 - Chemistry Lab, TA (Example University)"]]
+    assert _csd([degree, lab], ("EDUCATION", rows[:1]), (_CSD_TEACH, rows[1:])) == []
+
+
+def test_cross_section_duplicate_weighs_what_a_record_was_not_where():
+    """Two records sharing only a long institution name are two facts, and a
+    role each names must be shared: a director and a member of one
+    programme are two people's worth of fact, however alike their words."""
+    place = "Alpha Gadget Gizmo Sprocket Lever"
+    first = _csd_entry(10, "K1", "TEACHING", {"title": "Widgets", "institution": place,
+                                              "date": "2001"})
+    second = _csd_entry(20, "D3", "POSITIONS", {"title": "Cogs", "institution": place,
+                                                "date": "2001"})
+    rows = [["Widgets", place, "2001"], ["Cogs", place, "2001"]]
+    assert _csd([first, second], ("TEACHING", rows[:1]), ("POSITIONS", rows[1:])) == []
+
+    program = "Example Widget Gadget Gizmo Program"
+    director = _csd_role(4, "O", "APPOINTMENTS", role="Director, " + program)
+    member = _csd_role(36, "K3", "RESPONSIBILITIES", role="Member, " + program)
+    rows = [["Director, " + program, "2020-Present"], ["Member, " + program, "2020-Present"]]
+    assert _csd([director, member], (_CSD_LEAD, rows[:1]), (_CSD_TEACH, rows[1:])) == []
+
+
+def test_cross_section_duplicate_needs_most_of_the_longer_record_too():
+    """A farm shape (2071 11/171): a residency and that residency's
+    selection committee share all of the residency's words and little of
+    the committee's."""
+    residency = _csd_entry(11, "C", "TRAINING", {"training_type": "Residency, Example Gadgetry",
+                                                 "start_date": "2001", "end_date": "2005"})
+    committee = _csd_entry(171, "P", "COMMITTEES", {
+        "committee_name": "Example Gadgetry Residency Selection Committee Board Panel",
+        "start_date": "2001", "end_date": "2005"})
+    rows = [["Residency, Example Gadgetry", "2001-2005"],
+            ["Example Gadgetry Residency Selection Committee Board Panel", "2001-2005"]]
+    assert _csd([residency, committee], ("EDUCATION", rows[:1]), ("INSTITUTIONAL", rows[1:])) == []
+
+
+def test_cross_section_duplicate_reads_only_record_rows_outside_the_appendix():
+    """A copy only in the Appendix, or in a summary's prose, is not a second
+    record on the page; a short paragraph that is a record is."""
+    entries = [_csd_role(4, "O", "APPOINTMENTS"), _csd_role(36, "K3", "RESPONSIBILITIES")]
+    line = "2020-present - " + _CSD_ROLE + " (Example University)"
+    tables = [[_CSD_ROW]]
+    for blocks, fires in (
+            ([("p", _CSD_LEAD), ("table", ""), ("p", "T. APPENDIX"), ("p", line)], False),
+            ([("p", _CSD_LEAD), ("table", ""), ("p", "RESEARCH"),
+              ("p", "In 2020 the owner became the " + _CSD_ROLE + " at Example University, "
+                    "where she leads the training of the fellows and runs the program.")], False),
+            ([("p", _CSD_LEAD), ("table", ""), ("p", _CSD_TEACH), ("p", line)], True)):
+        found = lint_cross_section_duplicate({"entries": entries}, tables, blocks)
+        assert bool(found) is fires
+
+
+def test_cross_section_duplicate_reports_one_pair_of_rows_once():
+    """Each record listed twice, and stage 6's dedup dropping one copy of
+    each, gives four record pairs over the same two rows: one finding."""
+    entries = [_csd_role(4, "O", "APPOINTMENTS"), _csd_role(5, "O", "APPOINTMENTS"),
+               _csd_role(36, "K3", "RESPONSIBILITIES"), _csd_role(37, "K3", "RESPONSIBILITIES")]
+    teaching = [_CSD_ROLE, "2020-Present"]
+    assert len(_csd(entries, (_CSD_LEAD, [_CSD_ROW]), (_CSD_TEACH, [teaching]))) == 1
+
+
+def test_run_doctor_wires_cross_section_duplicate_to_stage_4_and_the_docx(tmp_path):
+    """The LINT_REGISTRY row hands the lint stage 4, the docx's table rows
+    and its blocks. Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [_csd_role(940, "O", "APPOINTMENTS"),
+                        _csd_role(941, "K3", "RESPONSIBILITIES")]
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    for heading in (_CSD_LEAD, _CSD_TEACH):
+        output.add_paragraph(heading)
+        table = output.add_table(rows=1, cols=3)
+        for cell, text in zip(table.rows[0].cells, _CSD_ROW, strict=True):
+            cell.paragraphs[0].text = text
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "cross_section_duplicate"]
+    assert [f["message"].split(":")[0] for f in hits] == ["entry 940 (O) repeats as entry 941 (K3)"]
+    assert "(educational contributions, institutional leadership activities)" in hits[0]["message"]
+
+
+def test_cross_section_duplicate_prevalence_is_the_measured_farm_fraction():
+    """Measured 2026-11-04 (CSD-1 in doctor/PRECISION.md): 161 of the 460
+    w1243 farm runs, rendered fresh; a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["cross_section_duplicate"] == round(161 / 460, 2)
 
 
 # --------------------------------------- lint 14aa: split_child_unsourced
