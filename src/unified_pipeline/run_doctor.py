@@ -610,6 +610,14 @@ Lints, ranked by the severity of the failure class they catch:
                           degree: a high-school diploma, a minor, a
                           certificate, a training post or a school's name
                           (#1415; MIX11 HTGWYH-06, KGXMLK-09, LPPQAJ-16).
+14bf. licensure_row_not_licence a rendered row holding a credential its
+                          table is not for (#1577 shape 3): a Licensure row
+                          that states a certificate, a course or a
+                          certification and names no licence (MIX11
+                          HTGWYH-05, RUISZG-02), a Board Certification row
+                          the shared credential predicate homes in Other
+                          Educational Experiences, an Honors row that names
+                          a certification the owner earned (KGXMLK-05).
                           WARN, one per row. Reads the docx's table rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
@@ -802,6 +810,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_licensure_fallback_truncated,
+    lint_licensure_row_not_licence,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_owner_attribution,
@@ -1024,6 +1033,7 @@ KNOWN_LINTS = (
     "open_end_unsupported",
     "cross_section_duplicate",
     "degree_row_not_degree",
+    "licensure_row_not_licence",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1366,6 +1376,10 @@ LINT_PREVALENCE = {
     # degree_row_not_degree (#1415; DRN-1 in doctor/PRECISION.md): 64 of the
     # w1243 farm's 460 runs, fresh stage-6 renders, 2026-11-04.
     "degree_row_not_degree": 0.139,
+    # licensure_row_not_licence (#1577; LRNL-1 in doctor/PRECISION.md): 13 of 471
+    # fresh renders on origin/dev 03955964 (the #1243 census farm's 460 and
+    # the 11 MIX11 runs), 2026-11-04.
+    "licensure_row_not_licence": 0.028,
 }
 
 
@@ -2006,6 +2020,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("cross_section_duplicate", lint_cross_section_duplicate, ("stage_4", "table_rows"),
              optional=("blocks",)),
     LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
+    LintSpec("licensure_row_not_licence", lint_licensure_row_not_licence, ("table_rows",)),
 )
 
 #: The views read from the stage-6 docx.

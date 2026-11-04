@@ -74,6 +74,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_institution_cleaned_name,
     lint_junk_or_header_row,
     lint_licensure_fallback_truncated,
+    lint_licensure_row_not_licence,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
@@ -6390,14 +6391,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (86), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (87), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 84
+    assert len(payload["findings"]) == 85
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -10209,6 +10210,112 @@ def test_licensure_fallback_truncated_reads_only_f1_entries_without_state_or_num
     assert _lic_hits([_lic_entry(145, ""), _lic_entry(147, _LIC_TEXT, code="F2")], rows) == []
     assert _lic_hits([_lic_entry(145, _LIC_TEXT, license_number="123456")], rows) == []
     assert _lic_hits([_lic_entry(145, _LIC_TEXT, state_country="Example State")], rows) == []
+
+
+# licensure_row_not_licence (#1577 shape 3; MIX11 HTGWYH-05, RUISZG-02,
+# KGXMLK-05). Invented credentials: a certificate, a course or a
+# certification rendered as a Licensure, Board Certification or Honors row.
+_BOARD_HEADER = ["Full Name of Board", "Certificate # \n(indicate if board eligible)",
+                 "Dates of Certification \n(yyyy–yyyy)"]
+_HONORS_HEADER = ["Name of award", "Organization", "Date awarded (yyyy)"]
+
+
+def _lrnl_hits(header, *rows):
+    return lint_licensure_row_not_licence([[header, *[list(row) for row in rows]]])
+
+
+def test_licensure_row_not_licence_reports_a_certification_in_the_state_cell():
+    """HTGWYH-05's shape: a "Certified in <skill>" line coded F1 renders whole
+    in the State cell."""
+    cell = "Certified in Example Widget Handling - Example Widget Center, 2008"
+    assert _lrnl_hits(_LIC_HEADER, [cell, "", "", ""]) == [{
+        "lint": "licensure_row_not_licence", "severity": "WARN",
+        "message": "Licensure row holds a certification or certificate that names no licence: "
+                   "its home is not the Licensure table",
+        "evidence": [cell], "status": "ran", "reason": ""}]
+
+
+def test_licensure_row_not_licence_reads_a_first_assist_certification_past_its_rn():
+    """RUISZG-02's shape: the RN words name the prerequisite licence, the row
+    is the first-assistant certification."""
+    [hit] = _lrnl_hits(_LIC_HEADER, ["Registered Nurse First Assistant, 2001", "", "", ""])
+    assert hit["evidence"] == ["Registered Nurse First Assistant, 2001"]
+
+
+def test_licensure_row_not_licence_names_the_shared_predicates_home():
+    """A line `misfiled_credential_home` homes elsewhere (a life-support card
+    stage 6's guard did not reach) is reported with its kind and home."""
+    [hit] = _lrnl_hits(_LIC_HEADER, ["Advanced Cardiac Life Support, 2019", "", "", ""])
+    assert hit["message"].startswith("Licensure row holds life support, which belongs under B2")
+
+
+@pytest.mark.parametrize("cell", [
+    "Example State",
+    "Example State (Veterinary Medicine and Surgery)",
+    "Registered Nurse, Example State",
+    "Example State Physician's and Surgeon's Certificate",
+    "Example State Controlled Substance Registration certificate",
+    "Temporary certificate to practise medicine, Example State",
+    "N/A",
+])
+def test_licensure_row_not_licence_is_quiet_on_a_licence(cell):
+    """A state, a licence that names its profession, a certificate that IS the
+    licence, a controlled-substance registration and the empty-section cell
+    are licence rows."""
+    assert _lrnl_hits(_LIC_HEADER, [cell, "", "2010", ""]) == []
+
+
+def test_licensure_row_not_licence_reads_stage_6s_own_licensure_table(tmp_path):
+    """End to end through stage 6: a certification line with no state and no
+    number renders whole in the State cell, and the lint reads it there; a
+    real licence beside it is quiet."""
+    cert = "Certified in Example Gadget Assembly, 2012"
+    entries = [_lic_entry(151, cert),
+               _lic_entry(153, "Example State medical license 12345", state_country="Example State",
+                          license_number="12345")]
+    hits = lint_licensure_row_not_licence(_lic_render(tmp_path, entries))
+    assert [hit["evidence"] for hit in hits] == [[cert]]
+
+
+def test_licensure_row_not_licence_reports_an_exam_in_board_certification():
+    [hit] = _lrnl_hits(_BOARD_HEADER, ["USMLE Step 1 passed", "", "2004"])
+    assert hit["message"] == ("Board Certification row holds licensing exam, which belongs under B2: "
+                              "its home is not the Board Certification table")
+    assert hit["evidence"] == ["USMLE Step 1 passed 2004"]
+
+
+@pytest.mark.parametrize("row", [
+    ["American Board of Example Medicine", "12345", "2010-Present"],
+    ["Certified Nurse, Example Room (CNEX)", "", "2011-Present"],
+    ["N/A", "", ""],
+])
+def test_licensure_row_not_licence_is_quiet_on_a_board_certification(row):
+    assert _lrnl_hits(_BOARD_HEADER, row) == []
+
+
+def test_licensure_row_not_licence_reports_a_certification_in_honors():
+    """KGXMLK-05's shape: a certification of proficiency rendered as an award."""
+    [hit] = _lrnl_hits(_HONORS_HEADER, ["Certification of Proficiency Example Imaging",
+                                        "Example College of Imaging", "2015"])
+    assert hit["message"] == ("Honors row holds a certification the owner earned, not an award: "
+                              "its home is not the Honors table")
+    assert hit["evidence"] == ["Certification of Proficiency Example Imaging"]
+
+
+@pytest.mark.parametrize("name", [
+    "Certificate of Merit for Example Exhibit",
+    "Example Mentoring Certificate for Contributions",
+    "Example Teaching Award",
+])
+def test_licensure_row_not_licence_is_quiet_on_an_award_certificate(name):
+    """A certificate a body awards is an honor."""
+    assert _lrnl_hits(_HONORS_HEADER, [name, "Example Society", "2019"]) == []
+
+
+def test_licensure_row_not_licence_reads_no_other_table():
+    row = ["Certified in Example Widget Handling", "Example Institution", "2010"]
+    assert _lrnl_hits(["Description", "Institution, city and state", "Dates attended"], row) == []
+    assert lint_licensure_row_not_licence([[], [row]]) == []
 
 
 # glyph_field (#1584, SXPHOG-02 shape): a source list glyph rendered as a

@@ -653,6 +653,13 @@ LINT_COPY = {
         "A row of the Academic Degrees table, which lists Bachelor's degrees and higher, names no "
         "degree: a high-school diploma, a minor, a certificate, a training post or only a school.",
         "Check the quoted row: add the degree it led to, or move it to the section it belongs in."),
+    "licensure_row_not_licence": LintCopy(
+        "Certificate filed as a licence or award",
+        "A certificate, a course or another credential that is not a licence is shown as a "
+        "Licensure or Board Certification row, or a certification the faculty member earned is "
+        "shown as an award in Honors.",
+        "Move the row to Other Educational Experiences (certificates), or to Board "
+        "Certification when a certifying board grants it."),
 }
 
 # #1388: a rerun of the same CV helps only when the failure was a passing one,
