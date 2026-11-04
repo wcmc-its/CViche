@@ -939,7 +939,8 @@ LINT_FIX_MINUTES = {
         "stage2_unaccounted", "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
     ), FIX_MINUTES_RECORD_LOST),
     **dict.fromkeys((
-        "bucket_status", "grant_bucket", "group_header_context", "invented_records",
+        "bucket_status", "degree_row_not_degree", "grant_bucket", "group_header_context",
+        "invented_records",
         "missed_headers", "offschema_fields", "owner_attribution", "pinned_heading_empty", "section_consistency",
         "stage6_render_warnings", "taxonomy_code_coverage", "teaching_postcheck",
     ), FIX_MINUTES_MISPLACED),

@@ -605,6 +605,12 @@ Lints, ranked by the severity of the failure class they catch:
                           rendered pair. Reads stage 4 and the docx's table
                           rows; its paragraphs, for sections and paragraph
                           records, when present
+14be. degree_row_not_degree a row of the Academic Degree(s) table (Bachelor's
+                          and higher) whose degree cell names no academic
+                          degree: a high-school diploma, a minor, a
+                          certificate, a training post or a school's name
+                          (#1415; MIX11 HTGWYH-06, KGXMLK-09, LPPQAJ-16).
+                          WARN, one per row. Reads the docx's table rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -676,6 +682,7 @@ from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_degree_row_not_degree,
     lint_pinned_heading_empty,
     lint_section_consistency,
 )
@@ -1016,6 +1023,7 @@ KNOWN_LINTS = (
     "pinned_heading_empty",
     "open_end_unsupported",
     "cross_section_duplicate",
+    "degree_row_not_degree",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1355,6 +1363,9 @@ LINT_PREVALENCE = {
     # 460 w1243 farm runs rendered fresh from origin/dev 03955964, 2026-11-04.
     # The farm holds several uploads of some CVs (135 distinct owners flagged).
     "cross_section_duplicate": 0.35,
+    # degree_row_not_degree (#1415; DRN-1 in doctor/PRECISION.md): 64 of the
+    # w1243 farm's 460 runs, fresh stage-6 renders, 2026-11-04.
+    "degree_row_not_degree": 0.139,
 }
 
 
@@ -1994,6 +2005,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("cross_section_duplicate", lint_cross_section_duplicate, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
 )
 
 #: The views read from the stage-6 docx.

@@ -208,6 +208,8 @@ REVIEW_FLAGS = {
                              "Present with it."),
     "cross_section_duplicate": ("Your CV lists this under two headings, and it is shown twice: "
                                 "keep the copy in the section where it belongs and delete the other."),
+    "degree_row_not_degree": ("This row names no degree, but this table is for Bachelor's degrees "
+                              "and higher: add the degree, or move the row to where it belongs."),
     "stage2_unaccounted": "Part of your CV was never read: check this section against the CV.",
     "record_date_shift": ("Dates, places or titles in this list may belong to the entry before "
                           "or after: check each against your CV."),
