@@ -595,6 +595,16 @@ Lints, ranked by the severity of the failure class they catch:
                           "-present" does not spare it; leaves to 14p what
                           date_cell_shape already judges. WARN, one per
                           record. Reads stage 4 and the docx's blocks
+14bd. cross_section_duplicate one fact the CV states under two of its own
+                          top-level headings, rendered twice (#1435; MIX11
+                          MJQYFH-04/05, MOCDRL-07/08, OXCCQM-16, KGXMLK-17,
+                          ZDKMKD-12): two stage-4 records of different
+                          headings with the same years, sharing most of each
+                          one's rare words and a role, whose shared words
+                          render in two rows outside the Appendix. One per
+                          rendered pair. Reads stage 4 and the docx's table
+                          rows; its paragraphs, for sections and paragraph
+                          records, when present
 14be. degree_row_not_degree a row of the Academic Degree(s) table (Bachelor's
                           and higher) whose degree cell names no academic
                           degree: a high-school diploma, a minor, a
@@ -777,6 +787,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     appendix_entry_count,
     honors_table_totals,
     lint_citation_field_dropped,
+    lint_cross_section_duplicate,
     lint_date_cell_shape,
     lint_open_end_unsupported,
     lint_date_only_lines,
@@ -1011,6 +1022,7 @@ KNOWN_LINTS = (
     "mentee_field_incomplete",
     "pinned_heading_empty",
     "open_end_unsupported",
+    "cross_section_duplicate",
     "degree_row_not_degree",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -1347,6 +1359,10 @@ LINT_PREVALENCE = {
     # fresh renders (the #1243 census farm's 460 runs and the 11 MIX11 runs),
     # 2026-11-04.
     "open_end_unsupported": 0.002,
+    # cross_section_duplicate (#1435; CSD-1 in doctor/PRECISION.md): 161 of the
+    # 460 w1243 farm runs rendered fresh from origin/dev 03955964, 2026-11-04.
+    # The farm holds several uploads of some CVs (135 distinct owners flagged).
+    "cross_section_duplicate": 0.35,
     # degree_row_not_degree (#1415; DRN-1 in doctor/PRECISION.md): 64 of the
     # w1243 farm's 460 runs, fresh stage-6 renders, 2026-11-04.
     "degree_row_not_degree": 0.139,
@@ -1986,6 +2002,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks",)),
     LintSpec("pinned_heading_empty", lint_pinned_heading_empty, ("stage_3b", "stage_3a")),
     LintSpec("open_end_unsupported", lint_open_end_unsupported, ("stage_4", "blocks")),
+    # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
+    LintSpec("cross_section_duplicate", lint_cross_section_duplicate, ("stage_4", "table_rows"),
+             optional=("blocks",)),
     LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
 )
 
