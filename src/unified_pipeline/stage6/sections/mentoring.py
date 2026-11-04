@@ -149,6 +149,11 @@ _SUPERVISION_SOURCE_RES = (_SUPERVISION_ROW_RE, _SUPERVISION_SPLIT_LABEL_RE, _SU
 #: joins Project/Accomplishments; before, all 5 of YDSVDB's goals were lost.
 _GOALS_ROW_RE = re.compile(r'Goals/expected Outcomes[^|\t\n]*\| *([^|\t\n]+)', re.I)
 
+#: The template's "Current Position | <value>" row. Only the N3B schema has a
+#: `current_position` field, so a Current Mentees (N3A) table filled from the
+#: template rendered its Current Position row blank (MOZYFL: all 12 N3A rows).
+_CURRENT_POSITION_ROW_RE = re.compile(r'Current Position[^|\t\n]*\| *([^|\t\n]+)', re.I)
+
 #: An end_date value, whole, that means the mentorship is still running.
 #: Any end_date containing "present" ("2019-present") counts as well.
 _ONGOING_END_WORDS = frozenset({'ongoing', 'current', 'now'})
@@ -771,6 +776,15 @@ def _with_site_extras(site_position: str, fields: Mapping[str, Any]) -> str:
     return _SITE_PART_SEPARATOR.join(parts)
 
 
+def _source_row_value(pattern: re.Pattern[str], text: str) -> str:
+    """The value of a template "<label> | <value>" row in the entry's source
+    text, or '' when the row is absent or holds a non-value (N/A, a label)."""
+    match = pattern.search(text)
+    if match and not _NOT_A_SUPERVISION_VALUE_RE.search(match.group(1)):
+        return match.group(1).strip()
+    return ''
+
+
 def _source_supervision_type(text: str) -> str:
     """The Type of Supervision value the entry's own source text states, or ''."""
     for pattern in _SUPERVISION_SOURCE_RES:
@@ -898,7 +912,8 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
         mentoring_period=_format_mentee_duration(
             fields, ongoing=ongoing, source_text=_text(entry.get('text'))),
         project=project,
-        current_position=_text(fields.get('current_position')),
+        current_position=_text(fields.get('current_position'))
+        or _source_row_value(_CURRENT_POSITION_ROW_RE, _text(entry.get('text'))),
         supervision_type=supervision_type,
         source_entry=entry,
     )
