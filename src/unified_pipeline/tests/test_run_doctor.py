@@ -2224,6 +2224,38 @@ def test_section_lost_reads_c_under_education_and_k_under_educational_contributi
         _stage4(("C", postdoc), ("K1", course)), swapped)} == {"C:", "K1"}
 
 
+def test_section_lost_reads_a_credential_stage6_regroups_under_the_section_it_renders_in():
+    # #1577 measurement: stage 6's licensure guard renders permits and life-support cards coded
+    # F1 under Other Educational Experiences; read under F1 they made LICENSURE look lost.
+    permits = ["2031- Quillfeather State Fluoroscopy Operator and Supervisor (XX000000)",
+               "Marbleton Excimer Laser Photorefractive Keratectomy credential, Brambleton Systems 2032"]
+    stage4 = {"entries": [{"taxonomy_code": "F1", "text": t,
+                           "extracted_fields": {"state_country": None, "license_number": None}} for t in permits]}
+    blocks = _page(("EDUCATION", ["Other Educational Experiences", *permits]),
+                   ("LICENSURE, BOARD CERTIFICATION", ["Licensure: N/A"]))
+    assert lint_section_lost(stage4, blocks) == []
+    # the same records rendered in neither section are still lost, under the code they render in
+    lost = lint_section_lost(stage4, _page(("EDUCATION", []), ("LICENSURE, BOARD CERTIFICATION", [])))
+    assert [f["message"][:3] for f in lost] == ["B2:"]
+
+
+def test_section_lost_reads_a_licence_row_by_the_cells_it_prints():
+    # #1577 fix round: a licence renders "State | Number | dates", never its line's words, so
+    # real licences alone (the credentials listed beside them now render elsewhere) read as lost.
+    lines = ["Quillfeather State Medical License, Brambleton Board of Ostrander Examiners #12345, 2031",
+             "Marbleton State Medical License, Wexcombe Board of Pellgrave Registration #67890, 2032"]
+    states = ["Quillfeather", "Marbleton"]
+    stage4 = {"entries": [{"taxonomy_code": "F1", "text": t,
+                           "extracted_fields": {"state_country": st, "license_number": n, "issue_date": y}}
+                          for t, st, n, y in zip(lines, states, ("12345", "67890"), ("2031", "2032"), strict=True)]}
+    blocks = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION",
+                             ["Quillfeather | 12345 | 2031", "Marbleton | 67890 | 2032"]))
+    assert lint_section_lost(stage4, blocks) == []
+    # a licence with neither a state nor a number renders its line, and is read by it
+    raw = {"entries": [{"taxonomy_code": "F1", "text": t, "extracted_fields": {}} for t in lines]}
+    assert [f["message"][:3] for f in lint_section_lost(raw, blocks)] == ["F1:"]
+
+
 # -------------------------------------------------- lint 9: enrichment failures
 
 def _enriched_entry(text, status=None):

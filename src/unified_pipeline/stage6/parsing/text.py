@@ -20,6 +20,7 @@ import logging
 import re
 from typing import NamedTuple
 
+from unified_pipeline.core.honor_lines import YEAR_RE
 from unified_pipeline.core.run_id import is_run_id
 
 from .dates import (
@@ -124,6 +125,17 @@ def _strip_appended_initials(last_name: str) -> str:
     return last_name.title()
 
 
+#: What `_extract_year_from_text` reads as a year (#2054): a plausible one
+#: (`core.honor_lines.YEAR_RE`: 19xx or 20xx with no digit either side),
+#: never four digits cut out of a longer number.
+_TEXT_YEAR = YEAR_RE.pattern
+#: A US ZIP+4 code ("WI 53202-0970"): five digits, a hyphen, four digits. It
+#: is no year range and its tail no year, so `_extract_year_from_text` blanks
+#: it before reading the text. VTRKUF 65, an equivalency evaluation that
+#: gives the evaluator's address, rendered the date "970".
+_ZIP_PLUS_FOUR_RE = re.compile(r'(?<!\d)\d{5}-\d{4}(?!\d)')
+
+
 def _extract_year_from_text(text: str) -> str | None:
     """Extract year from raw text as fallback when not in extracted_fields.
 
@@ -133,22 +145,26 @@ def _extract_year_from_text(text: str) -> str | None:
     - "May 2015"
     - "(2021)"
     - "2019-2021"
+
+    Every pattern reads a plausible year only (`_TEXT_YEAR`), after any
+    ZIP+4 code is blanked (`_ZIP_PLUS_FOUR_RE`, #2054).
     """
     if not text:
         return None
+    text = _ZIP_PLUS_FOUR_RE.sub(' ', text)
 
     # Pattern 1: Month Year (e.g., "August 2021", "December 2017")
-    month_year = re.search(rf'({_MONTH_NAMES})\s+({YEAR})', text)
+    month_year = re.search(rf'({_MONTH_NAMES})\s+({_TEXT_YEAR})', text)
     if month_year:
         return month_year.group(2)
 
     # Pattern 2: Year in parentheses at end (e.g., "(2021)")
-    paren_year = re.search(rf'\(({YEAR})\)\s*$', text)
+    paren_year = re.search(rf'\(({_TEXT_YEAR})\)\s*$', text)
     if paren_year:
         return paren_year.group(1)
 
     # Pattern 3: Year range - take the end year (e.g., "2019-2021")
-    year_range = re.search(rf'({YEAR})\s*{DATE_DASH}\s*({YEAR})', text)
+    year_range = re.search(rf'({_TEXT_YEAR})\s*{DATE_DASH}\s*({_TEXT_YEAR})', text)
     if year_range:
         return year_range.group(2)
 

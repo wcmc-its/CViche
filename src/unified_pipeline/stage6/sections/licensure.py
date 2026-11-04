@@ -71,12 +71,23 @@ narrower is left alone rather than raising.
 `tests/test_stage6_import_surface.py`, and `tests/test_stage6_unrendered_recovery.py`
 calls it on an instance. The mixin keeps it resolving through the MRO, which is
 what that guard checks.
+
+#1577 shape 3: a credential that is no licence (a permit, an ECFMG
+certificate, an exam, a procedure credential, a technologist certificate)
+coded F1, or one that is no board certification coded F2, rendered as a
+nameless licence or board row. `credential_listed_as_licence` says which
+records stage 6 groups under their credential's own code instead (stage
+6's `_group_entries_by_code` moves them); the doctor's credential_misfiled
+lint reads it to leave out the records whose render is right. A state
+controlled-substance registration stays a licence row and names itself
+after its state (`_controlled_substance_qualifier`), where it used to read
+as a second licence in that state.
 """
 import logging
 import re
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, NamedTuple
 
 try:
     from docx.table import Table
@@ -85,10 +96,22 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
-from ..formatting import _set_font, format_date_for_section
-from ..normalization import CAT_DEA, WithheldItem
+from unified_pipeline.core.credential_lines import (
+    BOARD_CODE,
+    LICENCE_CODE,
+    CredentialHome,
+    is_credential_pin,
+    misfiled_credential_home,
+    names_state_controlled_substance,
+)
+from unified_pipeline.core.honor_lines import YEAR_RE
+from unified_pipeline.core.text_norm import date_clauses, record_date_anchors
+
+from ..fan_out import LAST_STAGE4_RECORD, fallback_text
+from ..formatting import EXPIRES_PREFIX, _set_font, format_date_for_section
+from ..normalization import CAT_DEA, WithheldItem, line_without_edge_dates
 from ..normalization.pii import _dea_check_digit_ok
-from ..parsing.dates import CURRENT_DATE_VALUES
+from ..parsing.dates import CURRENT_DATE_VALUES, EXPIRY_LABEL
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -200,12 +223,8 @@ _NOT_ACTIVE_RE = re.compile(
     r'\b(?:inactive|expired|lapsed|retired|relinquished|surrendered|revoked'
     r'|suspended)\b', re.IGNORECASE)
 _EXPIRY_LABEL_RE = re.compile(
-    r'\b(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))\.?'
-    r'(?:\s+date)?\s*:?\s*\d', re.IGNORECASE)
-_EXPIRES_PREFIX = 'Expires'
-_EXPIRY_COLUMN_LABEL_RE = re.compile(
-    r'\b(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))\b',
-    re.IGNORECASE)
+    rf'\b{EXPIRY_LABEL}\.?(?:\s+date)?\s*:?\s*\d', re.IGNORECASE)
+_EXPIRY_COLUMN_LABEL_RE = re.compile(rf'\b{EXPIRY_LABEL}\b', re.IGNORECASE)
 _NUMBER_COLUMN_LABEL_RE = re.compile(
     r'(?:\blicen[cs]e\b|\bnumber\b|\bno\b|#)', re.IGNORECASE)
 _DIGIT_RE = re.compile(r'\d')
@@ -223,6 +242,11 @@ class LicensureEntry:
     Built only by `_normalize_licensure_entry`. Nothing downstream reads
     `extracted_fields`, so there is one place -- and one place only -- where
     'state_country' vs 'state' vs 'jurisdiction' is decided.
+
+    `pinned_line` is the record's own line (`fan_out.fallback_text`) when
+    stage 3b's credential pin recoded it (`is_credential_pin`), '' for
+    every other record: what names a pinned row with no state and no
+    number (`_unstated_state_name`, #1577).
     """
 
     state: str = ''
@@ -233,6 +257,7 @@ class LicensureEntry:
     status: str = ''
     original_text: str = ''
     expiry_by_column_header: bool = False
+    pinned_line: str = ''
 
 
 @dataclass(frozen=True)
@@ -381,6 +406,7 @@ def _normalize_licensure_entry(entry: Mapping[str, Any]) -> LicensureEntry:
         license_type=_field_text(fields.get('license_type')),
         status=_field_text(fields.get('status')),
         original_text=str(entry.get('text') or ''),
+        pinned_line=fallback_text(entry) if is_credential_pin(entry) else '',
     )
 
 
@@ -422,7 +448,7 @@ def _last_registration_cell(entry: LicensureEntry) -> str:
     date = format_date_for_section(expiration, 'F1') if expiration else ''
     if date and (entry.expiry_by_column_header
                  or _EXPIRY_LABEL_RE.search(entry.original_text)):
-        date = f"{_EXPIRES_PREFIX} {date}"
+        date = f"{EXPIRES_PREFIX} {date}"
     return _with_qualifier(date, status, date)
 
 
@@ -492,9 +518,10 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     the fallback therefore proves neither label is present -- re-testing
     here would only duplicate the classifier's own answer (#573 review).
     """
-    if entry.state or entry.number:
+    state = entry.state or _unstated_state_name(entry)
+    if state or entry.number:
         return LicenseRecord(
-            state=_with_qualifier(entry.state, entry.license_type,
+            state=_with_qualifier(state, entry.license_type or _controlled_substance_qualifier(entry),
                                   f"{entry.state} {entry.number}"),
             number=entry.number,
             issue_date=(format_date_for_section(entry.issue_date, 'F1')
@@ -506,6 +533,61 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
         # dropped the tail of every long credential mid-word (#1576).
         return LicenseRecord(state=entry.original_text)
     return None
+
+
+#: A certificate or licence number's label before it ("certificate #", "No.").
+_NUMBER_LABEL = r'(?:\b(?:certificate|cert\.?|licen[cs]e|registration)\s*)?(?:#|\bno\.?|\bnumber)?\s*:?\s*'
+#: A word of a name: three letters or more.
+_NAME_WORD_RE = re.compile(r'[^\W\d_]{3,}')
+
+
+def line_without_number(line: str, number: str) -> str:
+    """`line` less `number` and its label, and any parentheses it leaves empty."""
+    if not number or number not in line:
+        return line
+    cut = re.sub(_NUMBER_LABEL + re.escape(number), '', line, count=1, flags=re.IGNORECASE)
+    cut = re.sub(r'\s{2,}', ' ', re.sub(r'\(\s*\)', '', cut)).strip(' ,;:\t')
+    return cut or line
+
+
+def _unstated_state_name(entry: LicensureEntry) -> str:
+    """The State cell of a licence row whose state stage 4 did not extract
+    (#1577): the line's own words less its number and the dates the row's
+    date cells show, so the row says what it licenses ("<Register> of
+    <profession> #00000 2010-2013" reads "<Register> of <profession>", not
+    " | 00000 | 2010 | 2013"); '' when the number is not on the line or no
+    word is left. A row with no number is named so only when stage 3b's
+    credential pin moved it (`pinned_line`: XUTTKJ 133, a prescribing
+    waiver pinned F2 -> F1, printed its whole line in the State cell and
+    its year in none); any other keeps its raw line, as on dev (the
+    owner's decision of 2026-11-03)."""
+    if not entry.number:
+        name = entry.pinned_line
+    elif entry.number not in entry.original_text:
+        return ''
+    else:
+        name = line_without_number(entry.original_text, entry.number)
+        if entry.number in name:
+            return ''
+    name = ' '.join(line_without_edge_dates(name, entry.issue_date, entry.expiration_date).split())
+    return name if _NAME_WORD_RE.search(name) else ''
+
+
+#: The State-cell qualifier of a state controlled-substance registration
+#: (#1577): the licence table has no column that names a row's kind, so the
+#: registration read as a second licence in its state.
+CONTROLLED_SUBSTANCE_QUALIFIER = 'Controlled Substance Registration'
+
+
+def _controlled_substance_qualifier(entry: LicensureEntry) -> str:
+    """CONTROLLED_SUBSTANCE_QUALIFIER for a row with a state whose line names
+    a state controlled-substance registration and no licence to practise
+    (`names_state_controlled_substance`), unless its state cell already
+    names one; '' otherwise."""
+    if (entry.state and names_state_controlled_substance(entry.original_text)
+            and not names_state_controlled_substance(entry.state)):
+        return CONTROLLED_SUBSTANCE_QUALIFIER
+    return ''
 
 
 def _strip_dea_lines(text: str) -> str:
@@ -674,6 +756,114 @@ def _resolve_licensure(
         identifiers=IdentifierSet(dea=None, npi=npi_number),
         dea_withheld=dea_withheld,
     )
+
+
+# --- #1577 shape 3: a credential listed as a licence or a board certification ---
+#
+# A record coded F1 that Licensure reads as a licence (not an NPI or DEA
+# record), or a record coded F2, is grouped under its credential's own code
+# when its line names a credential whose home is another code
+# (`core.credential_lines.misfiled_credential_home`, stage 3b's credential
+# pin's own test): a permit, an exam, the ECFMG, a procedure credential or a
+# course is B2, a registry certification coded F1 is F2, a
+# controlled-substance registration coded F2 is F1. A licence row with no
+# state and no number whose line names none of these stays in Licensure,
+# its whole line in the State cell (the owner's decision of 2026-11-03).
+# The line of the last record of a multi-record entry, whose text is the
+# parent's whole line, is its own (`record_line`): the dated clause of that
+# line whose years are its fields' years, else the record's own line
+# (`fan_out.fallback_text`). So a licence fused with an ECFMG certificate on
+# one paragraph stays a licence, and two life-support records of one line do
+# not both print the line. Any other record's line is its text.
+CREDENTIAL_REROUTE_CHECK = 'credential_listed_as_licence_reroute'
+#: The section a reroute warning names, by the code a record left (the
+#: `TAXONOMY_TO_SECTION` names of F1 and F2).
+_REROUTED_FROM_SECTION = {LICENCE_CODE: 'licensure', BOARD_CODE: 'board_certification'}
+#: What joins one clause of a paragraph to the next ("<certificate>, 2029;
+#: <licence>"): not part of either clause's line.
+_CLAUSE_EDGE_CHARS = ' \t;,'
+
+
+class CredentialReroute(NamedTuple):
+    """Where a licence or board record belongs, and the line that says so."""
+    home: CredentialHome
+    line: str
+
+
+def _field_years(entry: Mapping[str, Any]) -> frozenset[str]:
+    """The four-digit years the record's scalar stage-4 fields write."""
+    fields = entry.get('extracted_fields') or {}
+    return frozenset(year for value in fields.values() if isinstance(value, (str, int))
+                     for year in YEAR_RE.findall(str(value)))
+
+
+def _own_dated_clause(entry: Mapping[str, Any], parent_text: str) -> str:
+    """The one dated clause of `parent_text` whose years are the record's
+    fields' years, or '' when there is none, or two."""
+    years = _field_years(entry)
+    if not years or not parent_text:
+        return ''
+    clauses = [clause.text.strip(_CLAUSE_EDGE_CHARS)
+               for clause in date_clauses(parent_text, record_date_anchors(parent_text)) if clause.years == years]
+    return clauses[0] if len(clauses) == 1 else ''
+
+
+def is_last_stage4_record(entry: Mapping[str, Any]) -> bool:
+    """Whether `entry` is the last of stage 4's records of a multi-record
+    entry, whose text is the parent's whole line (`LAST_STAGE4_RECORD`)."""
+    return LAST_STAGE4_RECORD in entry
+
+
+def record_line(entry: Mapping[str, Any]) -> str:
+    """The line a record stands for: its text; for the last of stage 4's
+    records (whose text is the parent's whole line), its own dated clause
+    of that line (`_own_dated_clause`), else its own line (`fallback_text`:
+    the last record's own line, or the parent's whole line when stage 4's
+    records leave words of it unheld)."""
+    text = str(entry.get('text') or '')
+    if not is_last_stage4_record(entry):
+        return text
+    return _own_dated_clause(entry, text) or fallback_text(entry)
+
+
+def credential_listed_as_licence(entry: Mapping[str, Any], code: str) -> CredentialReroute | None:
+    """Where a record grouped under `code` (F1 or F2) belongs instead, and
+    the line read (`record_line`), or None (see the comment above)."""
+    line = record_line(entry)
+    if code == BOARD_CODE:
+        home = misfiled_credential_home(line, BOARD_CODE)
+        return CredentialReroute(home, line) if home else None
+    if code != LICENCE_CODE:
+        return None
+    licence = _normalize_licensure_entry(entry)
+    kind = _classify_licensure_entry(licence.state, licence.number, licence.license_type,
+                                     licence.original_text)
+    if kind != KIND_LICENSE:
+        return None
+    home = misfiled_credential_home(line, LICENCE_CODE)
+    return CredentialReroute(home, line) if home else None
+
+
+def credential_reroute_warnings(moved: list[tuple[object, str, str]]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record per code the records
+    `credential_listed_as_licence` regrouped left (F1, then F2), naming
+    that code's section and each record by element_idx_start and the move
+    only (never CV text); none when nothing moved."""
+    records = []
+    for source, section in _REROUTED_FROM_SECTION.items():
+        left = [(idx, target) for idx, from_code, target in moved if from_code == source]
+        if not left:
+            continue
+        records.append({
+            'check': CREDENTIAL_REROUTE_CHECK,
+            'code': source,
+            'section': section,
+            'message': (f"credential listed as a licence or board certification moved to its own "
+                        f"section: {len(left)} entr{'y' if len(left) == 1 else 'ies'}"),
+            'evidence': [f"element_idx_start {idx} ({source}->{target})" for idx, target in left],
+            'severity': 'INFO',
+        })
+    return records
 
 
 #: The section name the #821 Word comment names a withheld DEA number

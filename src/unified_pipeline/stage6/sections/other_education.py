@@ -26,9 +26,32 @@ things can be attributed:
 The date falls back in three steps -- a start/end range, then a single year
 field, then the recovered year -- and each is formatted for B2 (mm/yy).
 
+A record's one date that its line writes after an expiry or renewal label
+("Exp. 4/2027", "last renewal February 2021") is no date attended, and the
+column is "Dates attended": it is printed once, with its label. When the
+Description already writes it after its label, the Dates cell is left empty;
+otherwise the cell writes the label before the date, "Expires 04/27" (#1577:
+4SOTEA 37, web211 36/37 and web190 953/954 printed bare future dates, and
+VQFSDI 139 printed its renewal date twice). A label the Description ends on
+with no date moves to the Dates cell in the line's own words ("Date of
+Expiration 09/27"), so none of them is lost or left behind.
+
 An institution field of the literal string "none" is treated as absent; field
 extraction emits it. An entry with neither a program name nor an institution is
 skipped, since the remaining columns would say nothing.
+
+An institution the Description already writes whole is not printed again in
+the Institution cell, which keeps only the place the Description does not say
+(#1577: "Diplomate, <board> | <board> | <year>" on 45 of the real-record
+A/B's 215 rows). The Description keeps it, because there it is part of the
+credential's own name as the line writes it ("Certified by <commission>",
+"Candidate, <board> (<exam step>)", "<board>, #<number>"); cut out of it, the
+name would be left as "Certified by" or "Candidate, (<exam step>)".
+
+A program name that is only the label of the credential list the line sat in
+("Certifications", "Board Certification": stage 4 took the line's lead label
+for the name, CAOACN 40 and SVYSGY 44) names nothing; the record's own line,
+less the dates its Dates cell shows, is its Description instead (#1577).
 
 The heading has three names across template revisions ("OTHER EDUCATIONAL",
 "SPECIAL TRAINING", "ADDITIONAL TRAINING"). When none of them is present, or
@@ -40,16 +63,32 @@ RENDER_ROUTED_CODES, so `generate()` treats it as rendered, and
 warning is the record that content was dropped.
 """
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from unified_pipeline.core.credential_lines import is_credential_list_label
+from unified_pipeline.core.honor_lines import YEAR_RE
+from unified_pipeline.core.text_norm import MONTH_PATTERN, fold_quotes, norm
+from unified_pipeline.core.two_digit_year import expand_two_digit_year
+
+from ..fan_out import (
+    BUILT_TEXT_SEPARATOR,
+    FOLDED_DATES_KEY,
+    fallback_text,
+    has_built_text,
+)
 from ..formatting import (
+    DATE_SPAN_SEPARATOR,
+    EXPIRES_PREFIX,
+    RENEWED_PREFIX,
     format_date_for_section,
     format_date_range,
 )
-from ..normalization import _get_cleaned_institution_name
-from ..parsing import _extract_year_from_text
+from ..normalization import _get_cleaned_institution_name, line_without_edge_dates
+from ..parsing import _extract_year_from_text, _parse_date_components
+from ..parsing.dates import EXPIRY_LABEL, RENEWAL_LABEL
 from ..resolution import _get_institution_location, _location_remainder
 from ..sorting import sort_entries_reverse_chronological
 
@@ -76,6 +115,34 @@ MISSING_INSTITUTION_SENTINEL = 'none'
 # Track-change authors for the two attributable cell parts.
 INSTITUTION_ENRICHMENT_REASON = "Institution Enrichment"
 TEXT_EXTRACTION_REASON = "Text Extraction"
+
+# How many digits and separators may stand between a labelled date's label
+# (or month) and its year: "28, " before "2026", "8/09/" before "21".
+LABELLED_DATE_MAX_DIGIT_CHARS = 10
+# A date a line writes after an expiry or renewal label (`EXPIRY_LABEL`,
+# `RENEWAL_LABEL`), read up to its year: four digits, or the two after a
+# slash, dot or hyphen that end the date ("Exp. 4/2027", "Expires 8/09/21",
+# "(expires June 28, 2026)", "last renewal February 2021"). The label is a
+# whole word with nothing but a date after it, so "experience 2010" and
+# "Expiry Course 2010" name no expiry.
+_LABELLED_DATE_RE = re.compile(
+    rf"\b(?:(?P<expiry>{EXPIRY_LABEL})|{RENEWAL_LABEL})\b\.?(?:\s+date)?\s*:?\s*(?:on\s+)?"
+    rf"(?:{MONTH_PATTERN}\s*)?[\d\s,/.-]{{0,{LABELLED_DATE_MAX_DIGIT_CHARS}}}?"
+    rf"(?:(?P<year>{YEAR_RE.pattern})|(?<=[/.-])(?P<yy>\d{{2}})(?![\d/.-]))",
+    re.IGNORECASE)
+# The same label ending a Description with no date after it, with what joins
+# it to the name: "ACLS Expires", the name stage 6 carries from the line "ACLS
+# Expires July 2017" less its edge date (OIVMMV 108), or "ATLS Instructor |
+# Exp" from a table row's cells (4SOTEA 37 on the stored farm). `label` is
+# the label in the line's own words, with the words that belong to it:
+# "last renewal" (VQFSDI 139), "Date of Expiration" (KZHHFT 58).
+_DANGLING_LABEL_RE = re.compile(
+    rf"[\s,;:|(-]*\b(?P<label>(?:(?:last|date\s+of)\s+)?(?:{EXPIRY_LABEL}|{RENEWAL_LABEL})"
+    rf"(?:\s+date)?\b\.?):?\s*$", re.IGNORECASE)
+# Words naming how a course was given, not who gave it. A venue column that
+# reads "Online" is the row's place even when the title says "Online" too
+# ("Teaching Online: ..." | Online, HFAJCC 812), so the cell keeps it.
+_DELIVERY_VENUES = frozenset({'online', 'virtual', 'remote'})
 
 
 @dataclass(frozen=True)
@@ -105,7 +172,69 @@ class OtherEducationRecord:
         return bool(self.program or self.institution)
 
 
-def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bool]:
+def _date_label(text: object, year: int | None) -> str:
+    """The word a date cell writes before a date in `year` that `text`
+    writes after an expiry or renewal label (`_LABELLED_DATE_RE`):
+    `EXPIRES_PREFIX` or `RENEWED_PREFIX`; '' when it writes none, or is no
+    string (a program stage 4 wrote as a list)."""
+    if not isinstance(text, str):
+        return ''
+    for match in _LABELLED_DATE_RE.finditer(text):
+        found = int(match['year']) if match['year'] else expand_two_digit_year(int(match['yy']))
+        if found == year:
+            return EXPIRES_PREFIX if match['expiry'] else RENEWED_PREFIX
+    return ''
+
+
+def _labelled_dates(dates: str, lone_date: object, raw_text: str, program: str) -> str:
+    """`dates`, the Dates cell of a record whose one date is `lone_date`,
+    unless the line writes that date after an expiry or renewal label
+    (#1577): '' when the Description already writes it after its label, so
+    it is printed once; else the cell with the label before it ("Expires
+    04/27"), so it reads as no date attended. `dates` as it is for a date
+    the line labels no such way."""
+    year = _parse_date_components(str(lone_date or ''))[0]
+    if _date_label(program, year):
+        return ''
+    label = _date_label(raw_text, year)
+    return f"{label} {dates}" if label else dates
+
+
+def _field_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, object]:
+    """(formatted dates, the one date) of a record's date fields, by the
+    first two steps of `_resolve_b2_dates`'s precedence; the one date is ''
+    for a range, and both are '' for a record with no date field."""
+    start = fields.get('start_date', '')
+    end = fields.get('end_date', '')
+    attended = fields.get(B1_DATES_ATTENDED_KEY)
+    if not (start or end) and isinstance(attended, Mapping):
+        start = attended.get('start_date') or ''
+        end = attended.get('end_date') or ''
+    if start or end:
+        lone = '' if start and end and start != end else start or end
+        return format_date_range(start, end, B2_TAXONOMY_CODE, raw_text), lone
+    year = fields.get('year', '') or fields.get('year_awarded', '')
+    if year:
+        return format_date_for_section(year, B2_TAXONOMY_CODE), year
+    return '', ''
+
+
+def _folded_dates(folded: object) -> str:
+    """The Dates cell of a row fan-out folded several records of one entry
+    into (`fan_out.FOLDED_DATES_KEY`, #1577): each record's dates
+    (`_field_dates`) in order, repeats dropped, joined with
+    `DATE_SPAN_SEPARATOR`; '' when fewer than two records were folded.
+    Each is one occasion: the entry's line is not read for an open range,
+    since its "<year> - <name>" opens one record of several, not a range
+    (HXBPCT 138 read "1998-Present")."""
+    if not isinstance(folded, list) or len(folded) < 2:
+        return ''
+    shown = [_field_dates(fields, '')[0] for fields in folded]
+    return DATE_SPAN_SEPARATOR.join(dict.fromkeys(dates for dates in shown if dates))
+
+
+def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str, program: str,
+                      folded: object = None) -> tuple[str, bool]:
     """(formatted dates, came-from-raw-text) by the three-step precedence:
     a start/end range (B1's nested `dates_attended` when the flat keys are
     empty), then a single year field (year, then year_awarded),
@@ -114,23 +243,35 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bo
 
     A start with no end is one attended occasion, so it renders as the bare
     date; `raw_text` is passed so a source that writes the range open
-    ("2020-", "present") still renders "<start>-Present" (#1220).
+    ("2020-", "present") still renders "<start>-Present" (#1220). A record's
+    one date that its line labels an expiry or a renewal keeps its label,
+    or is left to the Description (`_labelled_dates`, #1577). A row folded
+    from several records lists all their dates (`_folded_dates`, #1577).
     """
-    start = fields.get('start_date', '')
-    end = fields.get('end_date', '')
-    attended = fields.get(B1_DATES_ATTENDED_KEY)
-    if not (start or end) and isinstance(attended, Mapping):
-        start = attended.get('start_date') or ''
-        end = attended.get('end_date') or ''
-    if start or end:
-        return format_date_range(start, end, B2_TAXONOMY_CODE, raw_text), False
-    year = fields.get('year', '') or fields.get('year_awarded', '')
-    if year:
-        return format_date_for_section(year, B2_TAXONOMY_CODE), False
+    folded_dates = _folded_dates(folded)
+    if folded_dates:
+        return folded_dates, False
+    dates, lone = _field_dates(fields, raw_text)
+    if dates:
+        return (_labelled_dates(dates, lone, raw_text, program) if lone else dates), False
     extracted_year = _extract_year_from_text(raw_text) if raw_text else ''
     if extracted_year:
-        return format_date_for_section(extracted_year, B2_TAXONOMY_CODE), True
+        dates = _labelled_dates(format_date_for_section(extracted_year, B2_TAXONOMY_CODE),
+                                extracted_year, raw_text, program)
+        return dates, bool(dates)
     return '', False
+
+
+def _line_as_program(entry: Mapping[str, Any], fields: Mapping[str, Any]) -> str:
+    """The record's own line (`fan_out.fallback_text`; a line built from a
+    split record's fields reads its values comma-joined) less the dates its
+    Dates cell shows, whitespace collapsed: the program of a record whose
+    name is only its list's label (#1577)."""
+    line = fallback_text(entry)
+    if has_built_text(entry):
+        line = line.replace(BUILT_TEXT_SEPARATOR, ', ')
+    start = fields.get('start_date') or fields.get('year') or fields.get('year_awarded')
+    return ' '.join(line_without_edge_dates(line, start, fields.get('end_date')).split())
 
 
 def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducationRecord:
@@ -146,6 +287,8 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
 
     program = (fields.get('program_name', '') or fields.get('program_type', '')
                or fields.get('title', ''))
+    if is_credential_list_label(program):
+        program = _line_as_program(entry, fields) or program
 
     # Institution: the stage-5b cleaned name wins over the raw field; the
     # literal "none" is an absent value.
@@ -155,7 +298,8 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
     institution = _get_cleaned_institution_name(entry) or institution
 
     location, location_is_enriched = _get_institution_location(entry)
-    dates, dates_from_text = _resolve_b2_dates(fields, raw_text)
+    dates, dates_from_text = _resolve_b2_dates(fields, raw_text, program, entry.get(FOLDED_DATES_KEY))
+    program, dates = _without_dangling_label(program, dates)
 
     return OtherEducationRecord(
         program=program,
@@ -168,23 +312,61 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
     )
 
 
+def _without_dangling_label(program: object, dates: str) -> tuple[object, str]:
+    """(program, dates) with an expiry or renewal label `program` ends on
+    (`_DANGLING_LABEL_RE`) moved, in the line's own words, to the front of a
+    Dates cell that writes a label before the date (`_labelled_dates`,
+    #1577). It is printed once, beside its date, and none of its words is
+    lost: "ACLS | | Expires 07/17", not "ACLS Expires | | Expires 07/17";
+    "<course> | | Date of Expiration 09/27", not "<course>, Date of | |
+    Expires 09/27". A name that is only the label stays as it is."""
+    prefix = next((label for label in (EXPIRES_PREFIX, RENEWED_PREFIX)
+                   if dates.startswith(f'{label} ')), '')
+    match = _DANGLING_LABEL_RE.search(program) if prefix and isinstance(program, str) else None
+    if not (match and match.start()):
+        return program, dates
+    label = match['label']
+    return program[:match.start()], f"{label[0].upper()}{label[1:]}{dates[len(prefix):]}"
+
+
+def _named_in_program(institution: str, program: object) -> bool:
+    """Whether the Description (`program`) writes the whole `institution`
+    as words of its own, case, accents, quotes and spacing aside (#1577)."""
+    if not (institution and isinstance(program, str)):
+        return False
+    name = re.escape(norm(fold_quotes(institution)))
+    return re.search(rf'(?<!\w){name}(?!\w)', norm(fold_quotes(program))) is not None
+
+
 def _b2_institution_content(record: OtherEducationRecord) -> list[tuple[str, bool, str]]:
     """The runs of the institution cell: (text, is_tracked_insertion, author).
     An enriched location is a tracked insertion after the institution; an
     extracted one is plain text joined onto it. Only the part of the location
     the institution does not already say is added (`_location_remainder`):
-    a row whose institution IS the place no longer repeats it (#1257)."""
-    location = _location_remainder(record.location, record.institution)
+    a row whose institution IS the place no longer repeats it (#1257). An
+    institution the Description already writes is left out
+    (`_named_in_program`, #1577), and the cell keeps its whole location
+    unless the Description writes that too: the part the institution said
+    is no longer said in the cell ("<course> at Example | Example, CA", not
+    "| CA"). A delivery venue ("Online") is the row's place, not an
+    organisation the Description repeats, so it is kept."""
+    if (norm(record.institution) not in _DELIVERY_VENUES
+            and _named_in_program(record.institution, record.program)):
+        institution = ''
+        location = '' if _named_in_program(record.location, record.program) else record.location
+    else:
+        institution = record.institution
+        location = _location_remainder(record.location, record.institution)
     if location and record.location_is_enriched:
-        if record.institution:
-            return [(record.institution, False, ""),
+        if institution:
+            return [(institution, False, ""),
                     (f", {location}", True, INSTITUTION_ENRICHMENT_REASON)]
         return [(location, True, INSTITUTION_ENRICHMENT_REASON)]
     if location:
-        institution_full = (f"{record.institution}, {location}"
-                            if record.institution else location)
+        institution_full = (f"{institution}, {location}"
+                            if institution else location)
         return [(institution_full, False, "")]
-    return [(record.institution, False, "")]
+    return [(institution, False, "")]
 
 
 class OtherEducationSection:

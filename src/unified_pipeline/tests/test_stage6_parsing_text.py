@@ -548,6 +548,32 @@ def test_year_from_text_reads_the_end_of_a_range_for_every_dash(dash):
     assert _extract_year_from_text(f"served 2019{dash}2021") == "2021"
 
 
+# --- #2054: a ZIP+4 code is no year range, and a year is a plausible one ----
+
+@pytest.mark.parametrize("text, year", [
+    ("Evaluated by Invented Evaluators, 12 Main St, Milwaukee, WI 53202-0970", None),
+    ("Invented Credential, 2004, Boston MA 02115-6110", "2004"),
+    ("Some Invented Board, Chicago IL 60611-2864 (2004)", "2004"),
+    ("Invented Course, Springfield 01105-1999", None),
+    ("Invented Course, Springfield 01105-1999, 2012", "2012"),
+], ids=["zip-only", "zip-after-a-year", "zip-before-a-paren-year",
+        "zip-tail-shaped-like-a-year", "zip-tail-and-a-real-year"])
+def test_year_from_text_reads_no_year_out_of_a_zip_plus_four(text, year):
+    assert _extract_year_from_text(text) == year
+
+
+@pytest.mark.parametrize("text, year", [
+    ("Invented Program, August 3021", None),
+    ("Invented Program (0970)", None),
+    ("Invented Program, Box 12970-1234 and then 1998", "1998"),
+    ("Invented Program 0970-0980", None),
+    ("Invented Program 2019982-2001", "2001"),
+], ids=["month-and-an-implausible-year", "implausible-paren-year",
+        "a-five-digit-run-is-no-year", "implausible-range", "range-start-inside-a-longer-number"])
+def test_year_from_text_reads_only_a_plausible_year(text, year):
+    assert _extract_year_from_text(text) == year
+
+
 # --- #665: orphaned dates pair only in a layout a table produces ------------
 
 @pytest.mark.parametrize("lines", [

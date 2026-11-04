@@ -15,6 +15,11 @@ continuing education taught or as the owner's abstracts (#1691). The YUYVIG
 autopsy added two (#1577): an award under an honors heading coded as a grant,
 which stage 6 renders as a one-year funding table, and an elected or honorific
 fellowship coded I, which renders as a membership and is missing from Honors.
+#1577 slice B added a third, `credential_misfiled`: a permit, an exam, a
+course or a technologist certificate coded F1 or F2, or a licence or board
+certification coded B2 or I, by `core.credential_lines`, the module stage
+3b's credential pin, the WCM table corrector and stage 6's licensure guard
+read too.
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -32,7 +37,9 @@ text. One finding per shape and heading path, naming up to three entries.
 `lint_section_consistency` also reads stage 4 when the run has it, for the one
 thing stage 3b cannot say: which grant records stage 6's research-support
 guard lists under Honors (#1577), whose honor_as_funding shape stage 6 has
-already put right.
+already put right, and which licence or board records stage 6's licensure
+guard regroups under their credential's own code, whose credential_misfiled
+and life_support_as_license shapes it has put right.
 
 `lint_pinned_heading_empty` (#1949) is the one lint here that also reads
 stage 3a: a heading 3a mapped to code X at the header-pin floor whose entries
@@ -43,8 +50,19 @@ N1 heading, #1938).
 import copy
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from typing import NamedTuple
 
+from unified_pipeline.core.credential_lines import (
+    BOARD_CODE,
+    LICENCE_CODE,
+    LIFE_SUPPORT,
+    OTHER_EDUCATION_CODE,
+    CredentialHome,
+    is_credential_pin,
+    misfiled_credential_home,
+    next_in_board_block,
+)
 from unified_pipeline.core.honor_lines import (
     GRANT_MARKER,
     MEMBERSHIP_CODE,
@@ -64,6 +82,7 @@ from unified_pipeline.stage6.parsing.text import (
     heading_names_teaching_role,
     names_teaching_or_authorship_role,
 )
+from unified_pipeline.stage6.sections.licensure import credential_listed_as_licence
 from unified_pipeline.stage6.sections.research_support import is_honor_listed_as_funding
 from unified_pipeline.stage_6_word_template import RENDER_ROUTED_CODES
 
@@ -82,7 +101,23 @@ SECTION_CONSISTENCY_SEVERITY = "WARN"
 #: stays INFO until its precision against that decision is measured on a
 #: fresh batch.
 FELLOWSHIP_AS_MEMBERSHIP_SHAPE = "fellowship_as_membership"
-SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO"}
+#: A credential coded as the wrong one of licence, board certification and
+#: other education (#1577 slice B). Stage 3b's credential pin recodes the
+#: model's answers by this shape's own test, so on a fresh run it reports
+#: what the pin does not reach: a stored run, or a code a later stage-3b
+#: step gave. INFO until its precision is measured on a fresh batch, as
+#: fellowship_as_membership started.
+CREDENTIAL_MISFILED_SHAPE = "credential_misfiled"
+#: The older WARN shapes that already report part of what credential_misfiled
+#: reads: an entry one of them reports is not reported twice.
+CREDENTIAL_WARN_SHAPES = frozenset({"board_certification_misfiled", "life_support_as_license"})
+SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO"}
+#: The home a credential_misfiled finding points to, by code.
+CREDENTIAL_HOME_EXPECTED = {
+    OTHER_EDUCATION_CODE: "B2 (other education: an exam, permit, course or certificate, not a licence or board)",
+    LICENCE_CODE: "F1 (licensure)",
+    BOARD_CODE: "F2 (board certification)",
+}
 
 #: Entries a finding names; the doctor's evidence cap elsewhere is the same 3.
 SECTION_CONSISTENCY_EVIDENCE_MAX = 3
@@ -169,6 +204,11 @@ class HeadingCodeRule(NamedTuple):
     text_excluded: re.Pattern[str] | None = None
     wrong_codes: frozenset[str] | None = None
     allowed_codes: frozenset[str] | None = None
+    #: A test of the line that keeps it out, when a pattern cannot say it.
+    line_excluded: Callable[[str], bool] | None = None
+    #: Whether a record stage 6's licensure guard regroups is left out: its
+    #: render is right (`credential_listed_as_licence`, #1577).
+    guarded_in_stage6: bool = False
 
 
 #: An entry whose text opens (after an optional date range) with a training
@@ -183,6 +223,15 @@ _TRAINING_PROGRAM_ROLE_RE = re.compile(r"director|coordinator|chair", re.IGNOREC
 
 #: Academic degrees: an entry the Education table renders as conferred.
 DEGREE_CODES = frozenset({"B1"})
+
+
+def _homed_in_other_education(text: str) -> bool:
+    """Whether the line, read as a board certification, is an exam, a course
+    or another B2 credential (`misfiled_credential_home`): "Diplomate,
+    National Board of Medical Examiners" is a licensing exam, not the
+    board certification board_certification_misfiled would point to."""
+    home = misfiled_credential_home(text, BOARD_CODE)
+    return home is not None and home.code == OTHER_EDUCATION_CODE
 
 HEADING_CODE_RULES: tuple[HeadingCodeRule, ...] = (
     # QITQWH-02, RNKYST-04: intern, resident and fellow rows filed as
@@ -208,12 +257,18 @@ HEADING_CODE_RULES: tuple[HeadingCodeRule, ...] = (
         # A board named as a funder, an award giver or a training program.
         text_excluded=re.compile(r"award|prize|foundation|fund|scholar|lecture|grant|residency|fellowship",
                                  re.IGNORECASE),
-        allowed_codes=LICENSURE_AND_CERTIFICATION_CODES),
+        allowed_codes=LICENSURE_AND_CERTIFICATION_CODES,
+        # #1577 slice B: an exam or a course naming a board is no board certification.
+        line_excluded=_homed_in_other_education),
     # MOFVYH-02: BLS/ACLS is a course certificate, not a licence or a board.
+    # The life-support pattern is `core.credential_lines.LIFE_SUPPORT`, stage
+    # 3b's credential pin's own (#1577 slice B: "Basic Cardiac Life Support"
+    # and "Neonatal Resuscitation Program" spelled out count too).
     HeadingCodeRule(
         "life_support_as_license", "B2 (non-degree education)",
-        text=re.compile(r"\b(?:BLS|ACLS|PALS|BCLS|NRP|ATLS)\b"),
-        wrong_codes=LICENSURE_AND_CERTIFICATION_CODES),
+        text=LIFE_SUPPORT,
+        wrong_codes=LICENSURE_AND_CERTIFICATION_CODES,
+        guarded_in_stage6=True),
     # GJXIWD-02, HFAJCC-10: rows under a grant-review heading are Q3.
     HeadingCodeRule(
         "grant_review_not_q3", "Q3 (grant review)",
@@ -253,6 +308,9 @@ class _ClassifiedEntry(NamedTuple):
     code: str
     heading_path: tuple[str, ...]
     text: str
+    #: The code's reasoning: a credential_misfiled row made F2 by stage 3b's
+    #: board-block rule opens no board block for the row after it.
+    reasoning: str = ""
 
 
 def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
@@ -262,6 +320,7 @@ def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
             code=str(entry.get("taxonomy_code") or ""),
             heading_path=tuple(str(h) for h in entry.get("hierarchy") or ()),
             text=str(entry.get("text") or ""),
+            reasoning=str(entry.get("classification_reasoning") or ""),
         )
         for entry in stage3b.get("entries", [])
     ]
@@ -276,6 +335,8 @@ def _matches(rule: HeadingCodeRule, entry: _ClassifiedEntry) -> bool:
     if rule.text_excluded is not None and rule.text_excluded.search(entry.text):
         return False
     if rule.wrong_codes is not None and entry.code not in rule.wrong_codes:
+        return False
+    if rule.line_excluded is not None and rule.line_excluded(entry.text):
         return False
     return rule.allowed_codes is None or entry.code not in rule.allowed_codes
 
@@ -365,6 +426,34 @@ def _rerouted_to_honors(stage4: dict | None) -> frozenset[object]:
                      if is_honor_listed_as_funding(raw, str(raw.get("taxonomy_code") or "")))
 
 
+def _regrouped_by_stage6(stage4: dict | None) -> frozenset[object]:
+    """The element_idx_start of every stage-4 record stage 6's licensure
+    guard groups under its credential's own code
+    (`credential_listed_as_licence`, #1577) or that stage 3b's credential
+    pin recoded: either renders where it belongs, so it is no
+    credential_misfiled or life_support_as_license finding. Empty without
+    stage 4."""
+    if not stage4:
+        return frozenset()
+    return frozenset(raw.get("element_idx_start") for raw in stage4.get("entries", [])
+                     if credential_listed_as_licence(raw, str(raw.get("taxonomy_code") or ""))
+                     or is_credential_pin(raw))
+
+
+def _misfiled_credentials(entries: list[_ClassifiedEntry]) -> list[CredentialHome | None]:
+    """Per entry, the home `misfiled_credential_home` gives it, the rows
+    before it under the same heading path telling it whether it follows a
+    board certification inside a board-certification block
+    (`next_in_board_block`), as stage 3b's credential pin reads its group."""
+    in_block: dict[tuple[str, ...], bool] = {}
+    homes = []
+    for entry in entries:
+        homes.append(misfiled_credential_home(entry.text, entry.code, in_block.get(entry.heading_path, False)))
+        in_block[entry.heading_path] = next_in_board_block(in_block.get(entry.heading_path, False), entry.code,
+                                                           entry.text, entry.reasoning, entry.heading_path)
+    return homes
+
+
 def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
     """An I entry for a fellowship that the 2026-10-30 decision on #1577
     makes an honor (`is_honorific_fellowship`, stage 3b's fellowship pin's
@@ -393,18 +482,23 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
     """Stage-3b codes that contradict the entry's own heading, text or
     siblings (EBYSBC E11/E30). One finding per shape and heading path.
     `stage4`, when the run has it, says which grant records stage 6 lists
-    under Honors (`_rerouted_to_honors`)."""
+    under Honors (`_rerouted_to_honors`) and which licence or board records
+    it regroups (`_regrouped_by_stage6`)."""
     entries = _classified_entries(stage3b)
-    rerouted = _rerouted_to_honors(stage4)
+    rerouted, regrouped = _rerouted_to_honors(stage4), _regrouped_by_stage6(stage4)
     siblings: dict[tuple[str, ...], Counter] = defaultdict(Counter)
     for entry in entries:
         siblings[entry.heading_path][entry.code] += 1
 
     groups: dict[tuple[str, str, tuple[str, ...]], list[_ClassifiedEntry]] = defaultdict(list)
-    for entry, in_attendance_context in zip(entries, _attendance_contexts(entries), strict=True):
+    for entry, in_attendance_context, credential_home in zip(
+            entries, _attendance_contexts(entries), _misfiled_credentials(entries), strict=True):
+        guarded = entry.idx in regrouped
+        reported = set()
         for rule in HEADING_CODE_RULES:
-            if _matches(rule, entry):
+            if _matches(rule, entry) and not (rule.guarded_in_stage6 and guarded):
                 groups[(rule.shape, rule.expected, entry.heading_path)].append(entry)
+                reported.add(rule.shape)
         if _is_misfiled_journal_article(entry, siblings[entry.heading_path]):
             groups[("journal_article_as_report", "S1/S2 (a journal article; #1344's decision)",
                     entry.heading_path)].append(entry)
@@ -419,6 +513,9 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
                     entry.heading_path)].append(entry)
         if _is_fellowship_as_membership(entry):
             groups[(FELLOWSHIP_AS_MEMBERSHIP_SHAPE, "H (an elected or honorific fellowship)",
+                    entry.heading_path)].append(entry)
+        if credential_home is not None and not guarded and not reported & CREDENTIAL_WARN_SHAPES:
+            groups[(CREDENTIAL_MISFILED_SHAPE, CREDENTIAL_HOME_EXPECTED[credential_home.code],
                     entry.heading_path)].append(entry)
     return [_finding("section_consistency", SHAPE_SEVERITY.get(shape, SECTION_CONSISTENCY_SEVERITY),
                      *_group_message(shape, expected, path, members))

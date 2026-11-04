@@ -30,6 +30,7 @@ from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY as _RECORDS  # no
 from unified_pipeline.stage6 import fan_out  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
+    FOLDED_DATES_KEY,
     LAST_STAGE4_RECORD,
     fan_out_multi_record_entries,
 )
@@ -1943,12 +1944,12 @@ class TestStage4RepeatedRows:
         records[1]['end_date'] = '2002-06'
         assert len(_fan4(_stage4_entry(records, code='C', text='Resident, Ashby Hospital'))) == 2
 
-    # #1556 (d), OIEPQD XAYKXA entry 134: Q4D's and B2's schema names no
-    # start/end, but their sections write the range, so two spans are two rows.
+    # #1556 (d), OIEPQD XAYKXA entry 134: Q4D's schema names no start/end, but
+    # its section writes the range, so two spans are two rows.
     # #1901, NECRGC EYTHNB entry 164: H's section writes the range too when
-    # no `date` is set.
-    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name'),
-                                               ('H', 'award_name')])
+    # no `date` is set. B2's two spans of one program are one row that lists
+    # both (#1577 D3, `TestStage4B2Folds`).
+    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('H', 'award_name')])
     def test_two_spans_the_date_column_shows_keep_both_records(self, code, name_key):
         records = [{name_key: 'Zqjournal of Lanterns', 'start_date': '2009', 'end_date': 'present'},
                    {name_key: 'Zqjournal of Lanterns', 'start_date': '2016', 'end_date': '2019'}]
@@ -1980,6 +1981,119 @@ class TestStage4RepeatedRows:
         children = _fan4(_stage4_entry(
             records, code='B1', text='Zqcertificate, Ashby College, 1990-1992 and 1995-1997'))
         assert len(children) == 2
+
+
+# --- #1577 D3: the records of one B2 entry that differ only in their dates ---
+# Invented values; the shapes are EQGGRB 48 (one course renewed three times),
+# HXBPCT 138 (one credential listed beside six years of an accreditation) and
+# ULHCAP 44 (one numbered board diploma's exam parts).
+
+
+def _b2_record(name, start, end=None, institution=None):
+    return {'program_name': name, 'institution': institution, 'start_date': start, 'end_date': end}
+
+
+def _b2_children(records, text='Example Life Support 2029, 2030, 2031'):
+    return _fan4(_stage4_entry(copy.deepcopy(records), code='B2', text=text))
+
+
+class TestStage4B2Folds:
+    def test_one_course_on_several_dates_is_one_row_with_every_date(self):
+        records = [_b2_record('Recertified, Example Life Support', year) for year in ('2029', '2030', '2031')]
+        [child] = _b2_children(records)
+        assert LAST_STAGE4_RECORD in child
+        assert child['extracted_fields']['program_name'] == 'Recertified, Example Life Support'
+        assert child[FOLDED_DATES_KEY] == [{'start_date': year, 'end_date': None}
+                                           for year in ('2029', '2030', '2031')]
+
+    def test_two_spans_of_one_program_are_one_row_with_both(self):
+        records = [_b2_record('Example Studies', '2001-08', '2002-05', 'Example College'),
+                   _b2_record('Example Studies', '2003-09', '2005-07', 'Example College')]
+        [child] = _b2_children(records, text='Example Studies, Example College 08/2001-05/2002, 09/2003-07/2005')
+        assert child[FOLDED_DATES_KEY] == [{'start_date': '2001-08', 'end_date': '2002-05'},
+                                           {'start_date': '2003-09', 'end_date': '2005-07'}]
+
+    def test_another_credential_beside_the_repeated_one_keeps_its_row(self):
+        records = [_b2_record('Example Consultant, Level II Certified', '2028', institution='Example Division'),
+                   *(_b2_record('Level II Accreditation', year, institution='Example Division')
+                     for year in ('2028', '2030', '2031'))]
+        first, kept = _b2_children(records, text='2028 Example Consultant\tLevel II Accreditation 2028, 2030, 2031')
+        assert FOLDED_DATES_KEY not in first
+        assert first['extracted_fields']['program_name'] == 'Example Consultant, Level II Certified'
+        assert [span['start_date'] for span in kept[FOLDED_DATES_KEY]] == ['2028', '2030', '2031']
+
+    def test_an_earlier_group_folds_into_its_own_last_record(self):
+        records = [_b2_record('Example Course', '2028'), _b2_record('Example Course', '2029'),
+                   _b2_record('Example Other Course', '2030')]
+        folded, last = _b2_children(records, text='Example Course 2028, 2029; Example Other Course 2030')
+        assert folded[FANNED_OUT_FROM]['index'] == 1
+        assert [span['start_date'] for span in folded[FOLDED_DATES_KEY]] == ['2028', '2029']
+        assert FOLDED_DATES_KEY not in last
+
+    def test_one_numbered_credentials_parts_are_one_row_naming_each_part(self):
+        records = [_b2_record(f'Diplomate, Example Board of Examiners, #000001 \u2013 {part}', date,
+                              date, 'Example Board of Examiners')
+                   for part, date in (('Part I', '2028-06-13'), ('Part II', '2029-04-09'),
+                                      ('Certificate date', '2030-07-01'))]
+        [child] = _b2_children(records, text='Diplomate, Example Board of Examiners, #000001\tPart I 2028')
+        assert child['extracted_fields']['program_name'] == (
+            'Diplomate, Example Board of Examiners, #000001 \u2013 Part I, Part II, Certificate date')
+        assert [span['start_date'] for span in child[FOLDED_DATES_KEY]] == ['2028-06-13', '2029-04-09',
+                                                                            '2030-07-01']
+
+    @pytest.mark.parametrize('names', [
+        # different exams of one series: no shared numbered credential
+        ('Example Exam Step I', 'Example Exam Step II'),
+        # parts set off from a body, not from a numbered credential
+        ('Example Association \u2013 Basic Life Support', 'Example Association \u2013 Advanced Life Support'),
+        # different credentials
+        ('Basic Example Support', 'Advanced Example Support'),
+    ], ids=['exam-steps', 'unnumbered-parts', 'different-names'])
+    def test_different_credentials_keep_their_own_rows(self, names):
+        records = [_b2_record(name, year) for name, year in zip(names, ('2029', '2031'), strict=True)]
+        children = _b2_children(records, text=f'{names[0]} 2029; {names[1]} 2031')
+        assert [c['extracted_fields']['program_name'] for c in children] == list(names)
+        assert not any(FOLDED_DATES_KEY in c for c in children)
+
+    def test_one_name_at_two_institutions_keeps_two_rows(self):
+        records = [_b2_record('Example Course', '2029', institution='Example College'),
+                   _b2_record('Example Course', '2031', institution='Example Institute')]
+        assert len(_b2_children(records, text='Example Course, Example College 2029; Example Institute 2031')) == 2
+
+    def test_a_numbered_name_with_no_part_after_it_is_no_part(self):
+        records = [_b2_record('Example Certificate #000001 \u2013', '2029'),
+                   _b2_record('Example Certificate #000002 \u2013 ', '2031')]
+        assert len(_b2_children(records, text='Example Certificate #000001, #000002')) == 2
+
+    def test_a_year_field_is_a_date_too(self):
+        records = [{'program_name': 'Example Course', 'institution': None, 'year': year} for year in ('2029', '2031')]
+        [child] = _b2_children(records, text='Example Course 2029, 2031')
+        assert child[FOLDED_DATES_KEY] == [{'year': '2029'}, {'year': '2031'}]
+
+    def test_records_that_name_nothing_are_not_folded(self):
+        records = [{'program_name': None, 'institution': None, 'year': year} for year in ('2029', '2031')]
+        assert len(_b2_children(records, text='2029; 2031')) == 2
+
+    def test_a_record_with_no_part_after_the_numbered_credential_keeps_its_row(self):
+        records = [_b2_record('Example Certificate #000001 \u2013 ', '2029'),
+                   _b2_record('Example Certificate #000001 \u2013 Part II', '2031')]
+        assert len(_b2_children(records, text='Example Certificate #000001 2029, Part II 2031')) == 2
+
+    def test_a_numbered_credentials_parts_at_two_institutions_keep_their_rows(self):
+        records = [_b2_record('Example Diploma #000001 \u2013 Part I', '2029', institution='Example Board'),
+                   _b2_record('Example Diploma #000001 \u2013 Part II', '2031', institution='Example Council')]
+        assert len(_b2_children(records, text='Example Diploma #000001 Part I 2029, Part II 2031')) == 2
+
+    def test_a_part_written_twice_is_named_once(self):
+        records = [_b2_record('Example Diploma #000001 \u2013 Part I', '2029'),
+                   _b2_record('Example Diploma #000001 - Part I', '2031')]
+        [child] = _b2_children(records, text='Example Diploma #000001 Part I 2029, 2031')
+        assert child['extracted_fields']['program_name'] == 'Example Diploma #000001 \u2013 Part I'
+
+    def test_records_of_other_codes_are_not_folded(self):
+        records = [{'award_name': 'Example Award', 'date': year} for year in ('2029', '2031')]
+        children = _fan4(_stage4_entry(records, code='H', text='Example Award 2029, 2031'))
+        assert len(children) == 2 and not any(FOLDED_DATES_KEY in c for c in children)
 
 
 # --- #1243: stage 5d's one citation on an entry stage 4 split into records ---
