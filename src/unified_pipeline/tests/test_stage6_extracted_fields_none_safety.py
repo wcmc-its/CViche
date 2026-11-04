@@ -798,6 +798,24 @@ def test_b2_institution_left_out_keeps_its_enriched_location():
     assert _insertions(cell) == [('Institution Enrichment', 'Durham, NC')]
 
 
+def test_b2_institution_left_out_keeps_the_part_of_its_location_it_said():
+    _, cell = _b2_institution_cell(
+        'Completed Example HRP 225: Design of Studies', 'Example',
+        institution_enrichment={'cleaned_name': 'Example', 'city': 'Example',
+                                'state': 'California', 'country_code': 'US'})
+    assert _insertions(cell) == [('Institution Enrichment', 'Example, CA')]
+
+
+def test_b2_institution_and_location_the_description_writes_leave_the_cell_empty():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Internship at the Example Center, Exampletown, PA.',
+         'extracted_fields': {'program_name': 'Internship at the Example Center, Exampletown, PA.',
+                              'institution': 'Example Center', 'location': 'Exampletown, PA'}}])
+
+    assert gen.doc.tables[0].rows[1].cells[1].text == ''
+
+
 def test_b2_institution_left_out_keeps_its_extracted_location():
     gen = _b2_doc()
     gen._fill_other_education([

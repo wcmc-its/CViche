@@ -327,10 +327,17 @@ def _b2_institution_content(record: OtherEducationRecord) -> list[tuple[str, boo
     extracted one is plain text joined onto it. Only the part of the location
     the institution does not already say is added (`_location_remainder`):
     a row whose institution IS the place no longer repeats it (#1257). An
-    institution the Description already writes is left out, its location
-    kept (`_named_in_program`, #1577)."""
-    location = _location_remainder(record.location, record.institution)
-    institution = '' if _named_in_program(record.institution, record.program) else record.institution
+    institution the Description already writes is left out
+    (`_named_in_program`, #1577), and the cell keeps its whole location
+    unless the Description writes that too: the part the institution said
+    is no longer said in the cell ("<course> at Example | Example, CA", not
+    "| CA")."""
+    if _named_in_program(record.institution, record.program):
+        institution = ''
+        location = '' if _named_in_program(record.location, record.program) else record.location
+    else:
+        institution = record.institution
+        location = _location_remainder(record.location, record.institution)
     if location and record.location_is_enriched:
         if institution:
             return [(institution, False, ""),
