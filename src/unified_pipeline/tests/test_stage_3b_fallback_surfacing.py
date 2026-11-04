@@ -936,6 +936,58 @@ def test_312_header_pin_runs_in_the_stage_3b_group_pass(monkeypatch, tmp_path):
     assert output["meta"]["classification_stats"]["llm_classified"] == 3
 
 
+def _r_node(title, children=()):
+    return {"title": title, "taxonomy_options": [{"code": "R", "confidence": 1.0}], "children": list(children)}
+
+
+_312_RESIDUAL_MAPPINGS = [
+    _r_node("INVITED PRESENTATIONS", [_r_node("National")]),
+    {"title": "PUBLICATIONS", "taxonomy_options": [{"code": "S1", "confidence": 0.6}],
+     "children": [_r_node("Invited Lectures"), _r_node("International")]},
+]
+
+
+def _run_312_residual(monkeypatch, tmp_path, entries, code):
+    """run_stage_3b over one-row groups the model answers `code`; the written entries by hierarchy."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code=code))
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, _312_RESIDUAL_MAPPINGS)
+    result = stage_3b.run_stage_3b("9999_Doe_Jane_CV", stage_2_path=str(stage_2),
+                                   stage_3a_path=str(stage_3a), output_dir=str(tmp_path / "out"))
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    return {" > ".join(e["hierarchy"]): e for e in output["entries"]}
+
+
+def test_312_session_role_q2_under_an_r_heading_comes_out_r(monkeypatch, tmp_path):
+    """#312 A2n: the model answers Q2 for a moderator row and for a whole
+    meeting's chair, both under agreeing R levels. Only the moderator row
+    reaches the artifact as R, with the model's Q2 kept."""
+    entries = [
+        {"element_type": "text", "hierarchy": ["INVITED PRESENTATIONS", "National"],
+         "text": "Moderator, Example Topic Session, Example Society Annual Meeting, 2031"},
+        {"element_type": "text", "hierarchy": ["INVITED PRESENTATIONS"],
+         "text": "Meeting Chair, Example Society Annual Meeting, 2031"},
+    ]
+    by_heading = _run_312_residual(monkeypatch, tmp_path, entries, "Q2")
+    moderator = by_heading["INVITED PRESENTATIONS > National"]
+    assert (moderator["taxonomy_code"], moderator["pre_pin_code"]) == ("R", "Q2")
+    meeting_chair = by_heading["INVITED PRESENTATIONS"]
+    assert meeting_chair["taxonomy_code"] == "Q2" and "pre_pin_code" not in meeting_chair
+
+
+def test_312_r_sub_heading_under_a_disagreeing_parent_pins_r(monkeypatch, tmp_path):
+    """#312 C1b: PUBLICATIONS maps S1 at 0.6 and its sub-headings R at 1.0. A
+    K4 under "Invited Lectures" reaches the artifact as R; the same row under
+    the bare scope word "International" keeps the model's K4."""
+    text = "Example Topic in Practice, Example University Hospital, Springfield, 2031"
+    entries = [{"element_type": "text", "hierarchy": ["PUBLICATIONS", leaf], "text": text}
+               for leaf in ("Invited Lectures", "International")]
+    by_heading = _run_312_residual(monkeypatch, tmp_path, entries, "K4")
+    lecture = by_heading["PUBLICATIONS > Invited Lectures"]
+    assert (lecture["taxonomy_code"], lecture["pre_pin_code"]) == ("R", "K4")
+    scope_word = by_heading["PUBLICATIONS > International"]
+    assert scope_word["taxonomy_code"] == "K4" and "pre_pin_code" not in scope_word
+
+
 # --- run_stage_3b: the per-CV prompt flag (#50) --------------------------------
 
 def _run_capturing_classification_calls(monkeypatch, tmp_path, flag):

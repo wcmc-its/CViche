@@ -3,6 +3,7 @@ model answer in a named set of confusions, and nothing else.
 
 Self-contained: no LLM, no network, synthetic text only.
 """
+import logging
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     is_note_not_record,
     is_reviewer_lead_in,
     leaf_header_code,
+    leaf_run_header_code,
     mentee_pin_code,
     non_seat_pin_code,
     pinned_header_code,
@@ -227,6 +229,211 @@ def test_author_less_s8_without_an_r_pin_stays():
     entry = _row("S8", '"Signals in an example tissue." Example Society Meeting, 2031.')
     (out,), n = apply_header_pin([entry], _ctx(meta=_node("ABSTRACTS", "S8")))
     assert n == 0 and out == entry
+
+
+# --- #312 A2n: a session-role Q2 under an R pin ----------------------------------
+
+_HEADER_PIN_LOGGER = "unified_pipeline.stage3b.header_pin"
+MODERATOR = "Moderator, Example Topic Session, Example Society Annual Meeting, Springfield, 2031"
+
+
+def _flips_logged(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Stage 3b header pin (#312")]
+
+
+@pytest.mark.parametrize("text", [
+    MODERATOR,
+    "Session Chair, Example Society Annual Meeting, 2031",
+    "Session Co-Chair, Example Topic, Example Congress, 2031",
+    "Co-Chair of Mini-Symposium on Example Signals, Example Congress, 2031",
+    "Chairperson, Postgraduate Course in Example Imaging, Example Society, 2031",
+    "Chair, Example Topic Workshop, Example Society Meeting, 2031",
+    "Co-Chair of the Example Topic Workshop, Example Society Meeting, 2031",
+    "Panel Chair, Example Topic, Example Society Meeting, 2031",
+    "Chair, Example Topic Symposium, Example Congress, 2031",
+    "Chair, Example Symposia on Example Topics, Example Congress, 2031",
+    "Co-Chair, Example Plenary, Example Congress, 2031",
+    "Chair, Example Roundtable, Example Society Meeting, 2031",
+    "Chair, Example Round Table, Example Society Meeting, 2031",
+    "Panelist, Example Topic Roundtable, Example Society Meeting, 2031",
+    "Discussant, Example Topic Plenary, Example Society Meeting, 2031",
+])
+def test_session_role_q2_under_r_is_recoded(text):
+    (out,), n = apply_header_pin([_row("Q2", text, confidence=0.9)], R_CTX)
+    assert n == 1
+    assert (out["taxonomy_code"], out["pre_pin_code"]) == ("R", "Q2")
+    assert out["classification_reasoning"].startswith("Kept in the section where the CV author listed it")
+
+
+@pytest.mark.parametrize("text", [
+    "Meeting Chair, Example Society Annual Meeting, Springfield, 2031",
+    "Chair, Example Society Annual Meeting, Springfield, 2031",
+    # A session word too far after the chair title names the meeting, not a session of it.
+    "Chair, Annual Meeting of the Example Course Directors Society, 2031",
+])
+def test_the_chair_of_a_whole_meeting_stays_q2(text):
+    entry = _row("Q2", text, confidence=0.9)
+    (out,), n = apply_header_pin([entry], R_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("text", [
+    "Moderator, Example Society Program Committee session, 2031",
+    "Session Chair, Example Workshop Subcommittee, 2031",
+    "Panelist, Example Board session, Example Society Meeting, 2031",
+    "Discussant, Example Council plenary, 2031",
+    "Moderator, Example Commission session, 2031",
+    "Panelist, Example Task Force session, 2031",
+    "Moderator, Example Working Group session, 2031",
+    "Moderator, Example Workgroup session, 2031",
+    "Panelist, Example Steering session, 2031",
+    "Moderator, Example Advisory session, 2031",
+    "Panelist, Example Study Section session, 2031",
+])
+def test_session_role_q2_naming_a_body_stays_q2(text):
+    entry = _row("Q2", text, confidence=0.9)
+    (out,), n = apply_header_pin([entry], R_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("text", [
+    "Panelist and testimony, Example Session on Example Policy, Example State Legislature, 2031",
+    "Moderator, Example Advocacy Day session, Example Society, 2031",
+    "Volunteer moderator, Example Community Workshop, 2031",
+    "Session chair and reviewer, Example Society Meeting, 2031",
+])
+def test_session_role_q2_the_1580_decision_keeps_stays_q2(text):
+    entry = _row("Q2", text, confidence=0.9)
+    (out,), n = apply_header_pin([entry], R_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("code", ["P", "D3", "S8"])
+def test_a_session_role_the_model_coded_other_than_q2_is_left_alone(code):
+    entry = _row(code, MODERATOR, confidence=0.9)
+    (out,), n = apply_header_pin([entry], R_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("ctx", [_ctx(meta=_node("PROFESSIONAL SERVICE", "Q2")), _ctx()])
+def test_session_role_q2_without_an_r_heading_stays(ctx):
+    entry = _row("Q2", MODERATOR, confidence=0.9)
+    (out,), n = apply_header_pin([entry], ctx)
+    assert n == 0 and out == entry
+
+
+def test_session_role_pin_logs_the_flip_without_the_text(caplog):
+    entry = {**_row("Q2", MODERATOR, confidence=0.9), "element_idx_start": 60}
+    with caplog.at_level(logging.INFO, logger=_HEADER_PIN_LOGGER):
+        apply_header_pin([entry], R_CTX)
+    assert _flips_logged(caplog) == [
+        "Stage 3b header pin (#312 session role under agreeing R levels): element 60 Q2 -> R"]
+
+
+def test_the_measured_set_under_agreeing_r_levels_logs_no_312_flip(caplog):
+    with caplog.at_level(logging.INFO, logger=_HEADER_PIN_LOGGER):
+        (out,), _ = apply_header_pin([_entry("K4")], R_CTX)
+    assert out["taxonomy_code"] == "R" and _flips_logged(caplog) == []
+
+
+# --- #312 C1b: an R pin from the leaf-side run of levels ------------------------
+
+R_LEAF_CTX = _ctx(meta=_node("PUBLICATIONS", "S1", 0.6), section=_node("Invited Lectures", "R"))
+R_RUN_CTX = _ctx(meta=_node("TEACHING", "K1"), section=_node("Invited presentations", "R"),
+                 subsection=_node("National", "R"))
+
+
+@pytest.mark.parametrize("ctx", [R_LEAF_CTX, R_RUN_CTX])
+def test_leaf_run_reads_an_r_sub_heading_under_a_disagreeing_parent(ctx):
+    assert pinned_header_code(ctx) is None
+    assert leaf_run_header_code(ctx) == "R"
+
+
+def test_leaf_run_is_the_pinned_code_where_every_level_agrees():
+    assert leaf_run_header_code(R_CTX) == pinned_header_code(R_CTX) == "R"
+
+
+def test_leaf_run_needs_its_most_specific_level_at_the_floor():
+    at_floor = _ctx(meta=_node("PUBLICATIONS", "S1", 0.6),
+                    section=_node("Invited Lectures", "R", HEADER_PIN_MIN_CONFIDENCE))
+    below = _ctx(meta=_node("PUBLICATIONS", "S1", 0.6),
+                 section=_node("Invited Lectures", "R", HEADER_PIN_MIN_CONFIDENCE - 0.01))
+    assert leaf_run_header_code(at_floor) == "R"
+    assert leaf_run_header_code(below) is None
+
+
+@pytest.mark.parametrize("ctx", [
+    # A bare scope word alone in its run, over a parent that maps another code.
+    _ctx(meta=_node("BIBLIOGRAPHY", "S1", 0.5), section=_node("International", "R")),
+    _ctx(meta=_node("TEACHING", "K1"), section=_node("Local", "R")),
+    # The run stops at the first level that maps another code: the R title above it is not in it.
+    _ctx(meta=_node("INVITED PRESENTATIONS", "R"), section=_node("Teaching", "K1"),
+         subsection=_node("National", "R")),
+    _ctx(),
+    _ctx(meta={"title": "X", "taxonomy_options": []}),
+])
+def test_leaf_run_does_not_pin(ctx):
+    assert leaf_run_header_code(ctx) is None
+
+
+@pytest.mark.parametrize("ctx", [R_LEAF_CTX, R_RUN_CTX])
+@pytest.mark.parametrize("wrong", ["K1", "K2", "K4", "H"])
+def test_r_leaf_run_recodes_the_measured_set(ctx, wrong):
+    (out,), n = apply_header_pin([_entry(wrong)], ctx)
+    assert n == 1
+    assert (out["taxonomy_code"], out["pre_pin_code"]) == ("R", wrong)
+
+
+def test_r_leaf_run_recodes_a_session_role_q2():
+    (out,), n = apply_header_pin([_row("Q2", MODERATOR, confidence=0.9)], R_LEAF_CTX)
+    assert n == 1
+    assert (out["taxonomy_code"], out["pre_pin_code"]) == ("R", "Q2")
+
+
+@pytest.mark.parametrize("entry", [
+    # The unsure author-less S8 branch stays an agreeing-levels call (#312 owner question 1).
+    _row("S8", '"Signals in an example tissue." Example Society Annual Meeting, Springfield, 2031.'),
+    _row("K3", "Course Director, Example Topic Course, Example University, 2031", confidence=0.9),
+    _row("K5", "Example Topic for Families, Example Public Library, 2031", confidence=0.9),
+    _row("Q2", "Member, Example Society Program Committee, 2031", confidence=0.9),
+    _row("Q2", "Meeting Chair, Example Society Annual Meeting, 2031", confidence=0.9),
+    _row("T", "2031", confidence=0.9),
+])
+def test_r_leaf_run_leaves_every_other_answer(entry):
+    (out,), n = apply_header_pin([entry], R_LEAF_CTX)
+    assert n == 0 and out == entry
+
+
+def test_a_bare_scope_leaf_over_a_disagreeing_parent_does_not_pin():
+    ctx = _ctx(meta=_node("TEACHING", "K1"), section=_node("Local", "R"))
+    entry = _entry("K4")
+    (out,), n = apply_header_pin([entry], ctx)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("agreeing, leaf_only, entry", [
+    (_ctx(meta=_node("INSTITUTIONAL LEADERSHIP ACTIVITIES", "O")),
+     _ctx(meta=_node("TEACHING", "K1", 0.5), section=_node("Course Leadership", "O")),
+     _entry("K4")),
+    (_ctx(meta=_node("Peer-reviewed articles", "S1")),
+     _ctx(meta=_node("PUBLICATIONS", "S2", 0.5), section=_node("Peer-reviewed articles", "S1")),
+     _row("S8", "Doe J, Roe K. Signals in an example tissue. Example J Med. 2031;12:340-52. PMID: 12345678")),
+    (_ctx(meta=_node("Awards and Honors", "H")),
+     _ctx(meta=_node("ACTIVITIES", "D3", 0.5), section=_node("Awards and Honors", "H")),
+     _row("M2A", "2031 Example Investigator Award, Example Foundation", confidence=0.55)),
+])
+def test_no_other_pinned_code_reads_the_leaf_run(agreeing, leaf_only, entry):
+    (control,), _ = apply_header_pin([entry], agreeing)
+    assert control["taxonomy_code"] != entry["taxonomy_code"]  # the code's own agreeing pin takes it
+    (out,), n = apply_header_pin([entry], leaf_only)
+    assert n == 0 and out == entry
+
+
+def test_r_leaf_run_logs_the_flip_without_the_text(caplog):
+    entry = {**_entry("K4"), "element_idx_start": 233}
+    with caplog.at_level(logging.INFO, logger=_HEADER_PIN_LOGGER):
+        apply_header_pin([entry], R_LEAF_CTX)
+    assert _flips_logged(caplog) == ["Stage 3b header pin (#312 R leaf-side run): element 233 K4 -> R"]
 
 
 # --- EBYSBC E11 (#312): Q2 under a Q3 sub-heading -------------------------------
