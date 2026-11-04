@@ -381,26 +381,48 @@ class _SurnameLookup:
     ambiguous: bool = False
 
 
-def _pick_by_initials(citation: str, spans: list[tuple[int, int]], owner_initials: str,
-                      first_initials: frozenset[str]) -> tuple[int, int] | None:
-    """The one span whose author carries all of `owner_initials`, else the
-    one whose first initial is an owner's; None when neither picks one."""
-    if owner_initials:
-        full = [s for s in spans if _author_initials(citation, *s) == owner_initials]
-        if len(full) == 1:
-            return full[0]
-    first = [s for s in spans if _author_initial(citation, *s) in first_initials]
-    return first[0] if len(first) == 1 else None
+@dataclass(frozen=True)
+class _OwnerInitials:
+    """What a surname step knows of the owner's initials (#2060): `full`,
+    the target's whole initials ("JK"), '' when it gives none the owner can
+    own; `first`, the first initials an owner author may open with."""
+    full: str = ''
+    first: frozenset[str] = frozenset()
 
 
-def _find_owner_surname_span(citation: str, surname: str, owner_initials: str,
-                             first_initials: frozenset[str],
+def _owner_initials(target_name: str | None, alias: OwnerAlias) -> _OwnerInitials:
+    """The target's initials, unless stage 4's own owner initials
+    (`alias.owner_initials`) disagree with them -- then the target is a
+    co-author's form ("Doe, B" on a CV whose owner is J), and the owner's
+    first initials are those stage-4 ones alone."""
+    full = _target_initials(target_name) if target_name else ''
+    if full and alias.owner_initials and full[0] not in alias.owner_initials:
+        full = ''
+    return _OwnerInitials(full, frozenset(full[:1]) if full else alias.owner_initials)
+
+
+def _pick_by_initials(authors: str, spans: list[tuple[int, int]],
+                      owner: _OwnerInitials) -> tuple[int, int] | None:
+    """The first span whose author carries all of `owner.full`, else the
+    first whose first initial is the owner's when every such author carries
+    the same initials (one person listed twice); None when neither holds."""
+    initials = [_author_initials(authors, *s) for s in spans]
+    if owner.full and owner.full in initials:
+        return spans[initials.index(owner.full)]
+    opening = [i for i, s in enumerate(spans) if _author_initial(authors, *s) in owner.first]
+    if opening and len({initials[i] for i in opening}) == 1:
+        return spans[opening[0]]
+    return None
+
+
+def _find_owner_surname_span(citation: str, surname: str, owner: _OwnerInitials,
                              owner_parts: frozenset[str]) -> _SurnameLookup:
     """`_find_surname_span` for the owner. When two or more authors in the
     author list carry `surname`, the owner's initials choose between them
     ("Doe A, Roe B, Doe JK" for "Doe J.K." bolds "Doe JK"), and with no one
     choice none is bolded: the first same-surname author is as likely a
-    co-author, and a bold co-author misstates the owner's authorship (#2060)."""
+    co-author, and a bold co-author misstates the owner's authorship (#2060).
+    With no owner initial known, the first is taken, as before."""
     pattern = _name_pattern(surname)
     if pattern is None:
         return _SurnameLookup()
@@ -409,9 +431,9 @@ def _find_owner_surname_span(citation: str, surname: str, owner_initials: str,
     authors = citation[:_author_list_end(citation)]
     spans = [_widen_over_owner_parts(authors, *m.span(), owner_parts)
              for m in re.finditer(pattern, authors, re.IGNORECASE)]
-    if len(spans) < 2:
+    if len(spans) < 2 or not owner.first:
         return _SurnameLookup(_find_surname_span(citation, surname, owner_parts))
-    picked = _pick_by_initials(authors, spans, owner_initials, first_initials)
+    picked = _pick_by_initials(authors, spans, owner)
     if picked is None:
         return _SurnameLookup(ambiguous=True)
     return _SurnameLookup(_surname_span_around(citation, *picked, owner_parts))
@@ -480,14 +502,17 @@ def _target_surname(target_name: str) -> str:
 
 def _target_initials(target_name: str) -> str:
     """The initials a stage-4 name gives after its surname, dots and spaces
-    dropped ("Doe J.K." -> "JK", "Testa, Michael E." -> "ME"); '' when it
-    gives none ("Michael E. Testa", "Testa")."""
+    dropped ("Doe J.K." -> "JK", "Doe, J. K." -> "JK"); '' when anything
+    else follows the surname ("Testa, Michael E.", "Doe, J; Roe, B", "Doe,
+    PhD") or nothing does ("Michael E. Testa", "Testa")."""
     surname = _target_surname(target_name)
     if surname == target_name:
         return ''
-    words = [w for w in re.split(r"[\s,.]+", target_name) if w]
-    given = words[len(surname.split()):]
-    return ''.join(w if _is_initials_word(w) else w[0].upper() for w in given)
+    given = target_name.strip()[len(surname):].strip(" ,").split()
+    if not given or not all(_is_initials_word(w) for w in given):
+        return ''
+    initials = ''.join(given).replace(".", "")
+    return initials if len(initials) <= _MAX_INITIALS else ''
 
 
 def _is_initials_word(word: str) -> bool:
@@ -520,16 +545,18 @@ def _looks_like_author_name(target_name: str | None) -> bool:
 def _owner_surname_steps(citation: str, target_name: str | None, cv_owner_last_name: str,
                          alias: OwnerAlias) -> _SurnameLookup:
     """The `target_name` surname step, then the `cv_owner_last_name` one,
-    each choosing among same-surname authors by the owner's initials (#2060):
-    the target's own, and the target's first initial plus `alias.initials`."""
-    owner_initials = _target_initials(target_name) if target_name else ''
-    first_initials = alias.initials | frozenset(owner_initials[:1])
-    surnames = (_target_surname(target_name) if target_name else '', cv_owner_last_name)
-    for surname in surnames:
+    each choosing among same-surname authors by the owner's initials
+    (`_owner_initials`, #2060). The target's initials count only on a
+    surname the target itself carries: "Jane Q. Doe, MD" says nothing
+    of the initials of the last-name step's "Doe"."""
+    target_surname = _target_surname(target_name) if target_name else ''
+    from_target = _owner_initials(target_name, alias)
+    for surname in (target_surname, cv_owner_last_name):
         if not surname:
             continue
-        lookup = _find_owner_surname_span(citation, surname, owner_initials,
-                                          first_initials, alias.parts)
+        owner = from_target if fold_name(surname) == fold_name(target_surname) \
+            else _OwnerInitials(first=alias.owner_initials)
+        lookup = _find_owner_surname_span(citation, surname, owner, alias.parts)
         if lookup.span is not None or lookup.ambiguous:
             return lookup
     return _SurnameLookup()
@@ -715,7 +742,8 @@ def _infer_bibliography_owner_alias(publications: list[dict], cv_owner: Mapping 
     surnames = [cv_owner_last_name] + [_target_surname(t) for t in owner_targets]
     initials = [*anchor.initials, *(_name_initial(t) for t in owner_targets)]
     alias = infer_owner_alias(citations, surnames, initials)
-    alias = replace(alias, known_parts=alias.parts | anchor.parts | name_parts(cv_owner_last_name))
+    alias = replace(alias, known_parts=alias.parts | anchor.parts | name_parts(cv_owner_last_name),
+                    owner_initials=anchor.initials)
     if any(fold_name(s) != fold_name(cv_owner_last_name) for s in alias.surnames):
         logger.info("Owner surname read from the bibliography as %r (stage 4 last name %r)",
                     alias.surnames, cv_owner_last_name)
