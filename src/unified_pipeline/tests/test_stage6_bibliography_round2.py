@@ -1371,6 +1371,61 @@ def test_fill_bibliography_bolds_a_compound_owner_in_pubmed_form():
     assert bolds == [["Varnoske Pellith I"]] * 3 + [["Pellith IA"], []]
 
 
+# --- #2060: a co-author sharing the owner's surname is never bolded first ---
+
+
+@pytest.mark.parametrize(
+    "citation, target_name, owner, alias, bolded",
+    [
+        # The issue's shape: a dotted target misses PubMed's "Doe JK", and an
+        # earlier "Doe A" must not take the bold.
+        ("Doe A, Roe B, Doe JK" + _TAIL, "Doe J.K.", "Doe", OwnerAlias(), "Doe JK"),
+        # Same first initial: the owner's full initials decide.
+        ("Lark Doe S, Roe B, Doe SK" + _TAIL, "Doe S.K.", "Doe", OwnerAlias(), "Doe SK"),
+        ("Doe SR, Roe B, Doe SK" + _TAIL, "Doe S.K.", "Doe", OwnerAlias(), "Doe SK"),
+        # Full initials differ, one first initial matches.
+        ("Doe Y, Roe B, Doe S" + _TAIL, "Doe S.K.", "Doe", OwnerAlias(), "Doe S"),
+        # The alias initials pick the owner on the last-name step.
+        ("Doe A, Doe M, Roe B" + _TAIL, None, "Doe", _alias("Doe"), "Doe M"),
+        # Nothing singles one out: bold none, never the first.
+        ("Doe A, Doe B" + _TAIL, None, "Doe", OwnerAlias(), ""),
+        ("Doe JA, Doe JB" + _TAIL, "Doe J.", "Doe", OwnerAlias(), ""),
+        ("Doe A, Roe B, Doe C" + _TAIL, "Doe J.K.", "Doe", OwnerAlias(), ""),
+        # Ambiguity stops the chain: the alias step does not take the first.
+        ("Doe MA, Doe MB" + _TAIL, None, "Doe", _alias("Doe"), ""),
+        # One same-surname author bolds as before, initials or not.
+        ("Doe A, Roe B" + _TAIL, "Doe J.K.", "Doe", OwnerAlias(), "Doe A"),
+        # A title word is not a second author.
+        ("Doe JK, Roe B. Doe A gene in mice. J Things. 2020;1:1-9.", "Doe J.K.", "Doe",
+         OwnerAlias(), "Doe JK"),
+    ],
+)
+def test_citation_author_split_same_surname_coauthor(citation, target_name, owner, alias, bolded):
+    before, bold, after = bibliography._citation_author_split(citation, target_name, owner, alias)
+    assert bold == bolded
+    assert before + bold + after == citation
+
+
+@pytest.mark.parametrize("target_name, initials", [
+    ("Doe J.K.", "JK"),
+    ("Doe J K", "JK"),
+    ("Doe JK", "JK"),
+    ("Testa, Michael E.", "ME"),
+    ("de la Cruz M", "M"),
+    ("Michael E. Testa", ""),
+    ("Testa", ""),
+])
+def test_target_initials(target_name, initials):
+    assert bibliography._target_initials(target_name) == initials
+
+
+def test_fill_bibliography_bolds_the_owner_not_an_earlier_same_surname_coauthor():
+    entries = [_citation_entry("Doe A, Roe B, Doe JK. A study of mice. J Med. 2020;1:1-2.",
+                               "Doe J.K.", 2020)]
+    # Both writers share `_citation_author_split` (#572); the plain one is read here.
+    assert _bold_texts(entries, {"last_name": "Doe", "first_name": "Jane"}) == [["Doe JK"]]
+
+
 # --- #1436: an S8 abstract's event-status note survives into the citation ---
 
 

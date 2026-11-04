@@ -357,6 +357,66 @@ def _author_initial(citation: str, start: int, end: int) -> str:
     return before.group(1)[0].upper() if before else ''
 
 
+def _author_initials(citation: str, start: int, end: int) -> str:
+    """Every initial of the author whose surname spans `start:end`, dots and
+    spaces dropped ("Ruiz M. J." -> "MJ"), else `_author_initial`."""
+    after = _INITIAL_AFTER.match(citation, end)
+    if after:
+        return re.sub(r"[^A-Z]", "", after.group(0))
+    return _author_initial(citation, start, end)
+
+
+def _author_list_end(citation: str) -> int:
+    """Where the citation's author list (`author_segment`) ends."""
+    segment = author_segment(citation)
+    return citation.find(segment) + len(segment)
+
+
+@dataclass(frozen=True)
+class _SurnameLookup:
+    """One surname step's answer (#2060): the owner's span, or None; and
+    `ambiguous` when several authors in the list carry the surname and the
+    owner's initials single out none of them, so no later step may bold one."""
+    span: tuple[int, int] | None = None
+    ambiguous: bool = False
+
+
+def _pick_by_initials(citation: str, spans: list[tuple[int, int]], owner_initials: str,
+                      first_initials: frozenset[str]) -> tuple[int, int] | None:
+    """The one span whose author carries all of `owner_initials`, else the
+    one whose first initial is an owner's; None when neither picks one."""
+    if owner_initials:
+        full = [s for s in spans if _author_initials(citation, *s) == owner_initials]
+        if len(full) == 1:
+            return full[0]
+    first = [s for s in spans if _author_initial(citation, *s) in first_initials]
+    return first[0] if len(first) == 1 else None
+
+
+def _find_owner_surname_span(citation: str, surname: str, owner_initials: str,
+                             first_initials: frozenset[str],
+                             owner_parts: frozenset[str]) -> _SurnameLookup:
+    """`_find_surname_span` for the owner. When two or more authors in the
+    author list carry `surname`, the owner's initials choose between them
+    ("Doe A, Roe B, Doe JK" for "Doe J.K." bolds "Doe JK"), and with no one
+    choice none is bolded: the first same-surname author is as likely a
+    co-author, and a bold co-author misstates the owner's authorship (#2060)."""
+    pattern = _name_pattern(surname)
+    if pattern is None:
+        return _SurnameLookup()
+    # Initials are read in the author list only, so a title opening with a
+    # capital ("Doe SK. A study") does not lend the last author an initial.
+    authors = citation[:_author_list_end(citation)]
+    spans = [_widen_over_owner_parts(authors, *m.span(), owner_parts)
+             for m in re.finditer(pattern, authors, re.IGNORECASE)]
+    if len(spans) < 2:
+        return _SurnameLookup(_find_surname_span(citation, surname, owner_parts))
+    picked = _pick_by_initials(authors, spans, owner_initials, first_initials)
+    if picked is None:
+        return _SurnameLookup(ambiguous=True)
+    return _SurnameLookup(_surname_span_around(citation, *picked, owner_parts))
+
+
 def _find_alias_span(citation: str, alias: OwnerAlias) -> tuple[int, int] | None:
     """Span of the first alias match, in the author list, on an author whose
     initial is the owner's: an alias never bolds a co-author who shares the
@@ -418,6 +478,18 @@ def _target_surname(target_name: str) -> str:
     return " ".join(parts[:cut]) if cut < len(parts) else target_name
 
 
+def _target_initials(target_name: str) -> str:
+    """The initials a stage-4 name gives after its surname, dots and spaces
+    dropped ("Doe J.K." -> "JK", "Testa, Michael E." -> "ME"); '' when it
+    gives none ("Michael E. Testa", "Testa")."""
+    surname = _target_surname(target_name)
+    if surname == target_name:
+        return ''
+    words = [w for w in re.split(r"[\s,.]+", target_name) if w]
+    given = words[len(surname.split()):]
+    return ''.join(w if _is_initials_word(w) else w[0].upper() for w in given)
+
+
 def _is_initials_word(word: str) -> bool:
     """One word of up to `_MAX_INITIALS` capitals, dotted or not ("ME",
     "M.", "M.E.") -- spaced initials ("I. I.") are several such words."""
@@ -445,6 +517,24 @@ def _looks_like_author_name(target_name: str | None) -> bool:
         and len(target_name.split()) <= _MAX_TARGET_NAME_TOKENS
 
 
+def _owner_surname_steps(citation: str, target_name: str | None, cv_owner_last_name: str,
+                         alias: OwnerAlias) -> _SurnameLookup:
+    """The `target_name` surname step, then the `cv_owner_last_name` one,
+    each choosing among same-surname authors by the owner's initials (#2060):
+    the target's own, and the target's first initial plus `alias.initials`."""
+    owner_initials = _target_initials(target_name) if target_name else ''
+    first_initials = alias.initials | frozenset(owner_initials[:1])
+    surnames = (_target_surname(target_name) if target_name else '', cv_owner_last_name)
+    for surname in surnames:
+        if not surname:
+            continue
+        lookup = _find_owner_surname_span(citation, surname, owner_initials,
+                                          first_initials, alias.parts)
+        if lookup.span is not None or lookup.ambiguous:
+            return lookup
+    return _SurnameLookup()
+
+
 def _citation_author_split(citation: str, target_name: str | None,
                            cv_owner_last_name: str,
                            owner_alias: OwnerAlias | None = None) -> tuple[str, str, str]:
@@ -467,7 +557,10 @@ def _citation_author_split(citation: str, target_name: str | None,
     spellings `_infer_bibliography_owner_alias` read from the whole
     bibliography (#1393) -- matched only in the author list and only on an
     author whose initial is the owner's, then to the one author carrying a
-    part of a compound owner surname with an owner initial (#1438). Every
+    part of a compound owner surname with an owner initial (#1438). When
+    several authors share the surname, the two surname steps take the one
+    the owner's initials single out, and bold nothing when none is (#2060,
+    `_find_owner_surname_span`). Every
     surname match is widened over
     adjacent owner name parts, so a spaced compound bolds whole. A
     `target_name` shaped like a title
@@ -486,10 +579,11 @@ def _citation_author_split(citation: str, target_name: str | None,
     span = _find_name_span(citation, target_name) if target_name else None
     if span is not None:
         span = _widen_over_owner_parts(citation, *span, alias.parts)
-    if span is None and target_name:
-        span = _find_surname_span(citation, _target_surname(target_name), alias.parts)
-    if span is None and cv_owner_last_name:
-        span = _find_surname_span(citation, cv_owner_last_name, alias.parts)
+    if span is None:
+        lookup = _owner_surname_steps(citation, target_name, cv_owner_last_name, alias)
+        if lookup.ambiguous:
+            return citation, '', ''
+        span = lookup.span
     if span is None:
         span = _find_alias_span(citation, alias)
     if span is None:
