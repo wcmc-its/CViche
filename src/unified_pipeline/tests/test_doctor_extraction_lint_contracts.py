@@ -54,6 +54,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     FOOTER_MIN_ENTRIES,
     GRANT_FACT_MISSING,
     GRANT_FACT_NOT_IN_SOURCE,
+    GRANT_FACT_WRONG_SLOT,
     GRANT_FACTS_MAX_LISTED,
     GRANT_ORPHAN_MIN_WORDS,
     GRANT_SOURCE_MIN_CHARS,
@@ -71,6 +72,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
+    WRONG_SLOT_TOTAL_AS_ANNUAL,
+    WRONG_SLOT_YEARLY_AS_TOTAL,
     _alphanumeric_tokens,
     _entry_rendered,
     _entry_status,
@@ -129,6 +132,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
     TOTAL_AWARD_LABEL,
+    TOTAL_REQUESTED_LABEL,
     YOUR_ROLE_LABEL,
 )
 
@@ -5516,10 +5520,11 @@ def _gf_entry(idx, text, title, code="M2B", **fields):
             "extracted_fields": {"title": title, **fields}}
 
 
-def _gf_table(title, source="", annual="", total="", duration="", goals=None):
+def _gf_table(title, source="", annual="", total="", duration="", goals=None, requested=""):
     """A rendered grant table's raw rows, as `docx_table_rows` reads them."""
     rows = [[AWARD_SOURCE_LABEL, source], [PROJECT_TITLE_LABEL, title],
             [ANNUAL_COSTS_LABEL, annual], *([[TOTAL_AWARD_LABEL, total]] if total else []),
+            *([[TOTAL_REQUESTED_LABEL, requested]] if requested else []),
             [DURATION_LABEL, duration], [PI_NAME_LABEL, ""], [YOUR_ROLE_LABEL, "PI"]]
     return rows + ([["Major project goals:", goals]] if goals else [])
 
@@ -5547,8 +5552,10 @@ def test_grant_facts_reports_the_1575_copy_in_both_directions():
     tables = [_gf_table("Glimmer repair", "NIH (R01 HL900001)", total="$27,000/year"),
               _gf_table("Widget trial", "Example Foundation", total="$27,000/year")]
     findings = lint_grant_facts({"entries": [own, other]}, tables)
+    # Entry 20's own per-year amount renders under "Total award:" (#1672).
     assert _gf_shapes(findings) == [("grant_facts", "INFO", GRANT_FACT_NOT_IN_SOURCE, "10"),
-                                    ("grant_facts", "INFO", GRANT_FACT_MISSING, "10")]
+                                    ("grant_facts", "INFO", GRANT_FACT_MISSING, "10"),
+                                    ("grant_facts", "INFO", GRANT_FACT_WRONG_SLOT, "20")]
     assert "$27,000" in findings[0]["message"] and "text of entry 20" in findings[0]["message"]
     assert "$318,500" in findings[1]["message"]
     assert findings[0]["evidence"] == ["Glimmer repair"]  # the review copy's anchor
@@ -5667,6 +5674,127 @@ def test_grant_facts_judges_an_unrendered_grant_against_the_rest_of_the_document
 ])
 def test_grant_facts_ignores_what_is_not_a_grant_entry(entry):
     assert lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")]) == []
+
+
+# grant_facts wrong_slot (#1672): an amount the entry states, on the costs row
+# of the other kind. Invented grants; a multi-year span unless the case is
+# about the span.
+
+_GF_SPAN = "07/18-06/23"
+
+
+def _wrong_slot(text, code="M2B", **table):
+    """The wrong_slot findings for one grant entry and its rendered table."""
+    entry = _gf_entry(10, text, "Glimmer repair", code=code)
+    table.setdefault("duration", _GF_SPAN)
+    findings = lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair", **table)])
+    return [f for f in findings if f": {GRANT_FACT_WRONG_SLOT}: " in f["message"]]
+
+
+@pytest.mark.parametrize("text, total", [
+    ("Glimmer repair, Annual Direct Costs: $250,000", "$250,000"),
+    ("Glimmer repair\tAnnual Direct Costs\t$250,000", "$250,000"),        # its label is the cell before
+    ("Glimmer repair, Funding by year (direct only): year 4-$250,000", "$250,000"),
+    ("Glimmer repair, Total funding per year: $250,000", "$250,000"),     # per year wins over total
+    ("Glimmer repair, yearly support, 2018-2023: $250,000", "$250,000"),
+    ("Glimmer repair, Annual award amount: $40,000", "$40,000"),
+    ("Glimmer repair, $250K annually", "$250,000"),                       # reformatted
+    ("Glimmer repair, award of $250,000", "$250,000/yr"),                 # the cell says per year
+])
+def test_grant_facts_reports_a_yearly_amount_under_total_award(text, total):
+    [finding] = _wrong_slot(text, total=total)
+    assert finding["severity"] == "INFO" and finding["lint"] == "grant_facts"
+    assert finding["message"].startswith(f"entry 10 (M2B): {GRANT_FACT_WRONG_SLOT}: $")
+    assert f'under "{TOTAL_AWARD_LABEL}", which is labelled per year ({WRONG_SLOT_YEARLY_AS_TOTAL})' \
+        in finding["message"]
+    assert finding["evidence"] == ["Glimmer repair"]
+
+
+def test_grant_facts_reports_a_yearly_amount_under_total_requested():
+    [finding] = _wrong_slot("Glimmer repair, $90,000 per year requested", code="M2C",
+                            requested="$90,000")
+    assert f'$90,000 under "{TOTAL_REQUESTED_LABEL}", which is labelled per year' in finding["message"]
+
+
+@pytest.mark.parametrize("text", [
+    "Glimmer repair, 2018-2023, Total direct costs: $1,250,000",
+    "Glimmer repair, $1,250,000 over 5 years",
+    "Glimmer repair, $1,250,000 for the project period",
+])
+def test_grant_facts_reports_a_whole_award_under_annual_direct_costs(text):
+    [finding] = _wrong_slot(text, annual="$1,250,000")
+    assert (f'$1,250,000 under "{ANNUAL_COSTS_LABEL}", which is labelled as the whole award '
+            f'({WRONG_SLOT_TOTAL_AS_ANNUAL})') in finding["message"]
+
+
+def test_grant_facts_reports_swapped_amounts_in_one_finding():
+    """A line that states both figures, rendered each in the other's row."""
+    [finding] = _wrong_slot("Glimmer repair, Annual direct costs: $250,000; Total: $1,250,000",
+                            annual="$1,250,000", total="$250,000")
+    assert WRONG_SLOT_TOTAL_AS_ANNUAL in finding["message"]
+    assert WRONG_SLOT_YEARLY_AS_TOTAL in finding["message"]
+
+
+@pytest.mark.parametrize("text, table", [
+    # a line that states both figures, each in its own row
+    ("Glimmer repair, Annual direct costs: $250,000; Total: $1,250,000",
+     {"annual": "$250,000", "total": "$1,250,000"}),
+    ("Glimmer repair, $1,250,000 over 5 years ($250,000 annually)",
+     {"annual": "$250,000", "total": "$1,250,000"}),
+    # an open parenthesis labels the amount inside it, not the one before it
+    ("Glimmer repair, Total: $1,250,000 (per year: $250,000)",
+     {"annual": "$250,000", "total": "$1,250,000"}),
+    # a total row that also shows the whole award
+    ("Glimmer repair, $1,250,000 total, $250,000/yr", {"total": "$1,250,000 ($250,000/yr)"}),
+    # a range of years is a span, not one numbered year
+    ("Glimmer repair, Years 1-5: $1,250,000", {"total": "$1,250,000"}),
+    ("Glimmer repair, Year 1-5 total $1,250,000", {"total": "$1,250,000"}),
+    # a bare date range beside an amount says neither
+    ("Glimmer repair, 2018-2023, $1,250,000", {"annual": "$1,250,000"}),
+    ("Glimmer repair, 2018-2023, $1,250,000", {"total": "$1,250,000"}),
+    # unlabelled, or labelled only "direct" (an open owner question, #1672)
+    ("Glimmer repair, $250,000", {"total": "$250,000"}),
+    ("Glimmer repair, Direct costs: $250,000", {"annual": "$250,000"}),
+    ("Glimmer repair, Direct costs: $250,000", {"total": "$250,000"}),
+    # an annual meeting is not a yearly figure; the label is in its own sentence
+    ("Travel award, Annual Meeting of the Invented Society, $1,500", {"total": "$1,500"}),
+    ("Glimmer repair, renewed annually for a decade. Overall: $90,000", {"total": "$90,000"}),
+    # the text labels the amount both ways
+    ("Glimmer repair, $250,000 per year; total of $250,000 to date", {"total": "$250,000"}),
+    # a fiscal year on a grant whose span is unknown
+    ("Glimmer repair, Direct costs FY 2022: $80,000", {"total": "$80,000", "duration": "07/21-Present"}),
+])
+def test_grant_facts_reads_no_wrong_slot_where_the_label_agrees_or_says_neither(text, table):
+    assert _wrong_slot(text, **table) == []
+
+
+@pytest.mark.parametrize("duration", ["07/19-06/20", "07/19-07/20", "2019", "2019-2020"])
+def test_grant_facts_reads_no_wrong_slot_on_a_one_year_grant(duration):
+    """A one-year grant's yearly figure is also its whole award; a span given
+    by years alone is read at its shortest, so 2019-2020 may be one year."""
+    assert _wrong_slot("Glimmer repair, $50,000 per year", total="$50,000", duration=duration) == []
+    assert _wrong_slot("Glimmer repair, total $50,000", annual="$50,000", duration=duration) == []
+
+
+@pytest.mark.parametrize("duration", ["07/19-07/21", "2018-2020", "07/19-Present", ""])
+def test_grant_facts_reports_a_yearly_amount_on_a_longer_or_open_grant(duration):
+    assert len(_wrong_slot("Glimmer repair, $50,000 per year", total="$50,000", duration=duration)) == 1
+
+
+@pytest.mark.parametrize("duration, hits", [("07/19-06/23", 1), ("07/21-06/22", 0), ("", 0)])
+def test_grant_facts_reads_a_fiscal_year_as_per_year_only_on_a_multi_year_grant(duration, hits):
+    found = _wrong_slot("Glimmer repair, Direct costs FY 2022: $80,000", total="$80,000",
+                        duration=duration)
+    assert len(found) == hits
+
+
+def test_grant_facts_leaves_a_foreign_amount_to_value_not_in_source():
+    """An amount the entry's text does not state is #1575's copy, not a slot."""
+    entry = _gf_entry(10, "Glimmer repair, $318,500 per year", "Glimmer repair")
+    findings = lint_grant_facts({"entries": [entry]},
+                                [_gf_table("Glimmer repair", total="$27,000/year", duration=_GF_SPAN)])
+    assert [shape for _, _, shape, _ in _gf_shapes(findings)] == [GRANT_FACT_NOT_IN_SOURCE,
+                                                                  GRANT_FACT_MISSING]
 
 
 # lint_footer_in_record (#1584, RLADNC-01 shape): a PDF running footer kept as

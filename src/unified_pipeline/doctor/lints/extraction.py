@@ -27,6 +27,7 @@ in `run_doctor.py`, so they move together and stop being module-global.
 `_funding_haystacks` have since been fixed in place (#537, #492) -- see their
 docstrings and comments for what changed.
 """
+import itertools
 import json
 import re
 from collections import Counter
@@ -4318,7 +4319,7 @@ def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) 
 # rendered with entry 603's amount and dates, its own amount nowhere in the
 # document). year_not_in_source flagged that entry only because the borrowed
 # values carried a year; a borrowed amount or grant number passes every other
-# lint. Two shapes, at most one finding of each per entry:
+# lint. Three shapes, at most one finding of each per entry:
 #
 #   value_not_in_source  a grant number or amount on the entry's rendered table
 #                        (its Award Source, title and costs rows, the rows stage
@@ -4329,16 +4330,29 @@ def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) 
 #                        is neither on its rendered table nor anywhere outside
 #                        the other grants' tables (the Appendix, a sub-point, a
 #                        note), so the reader never sees it.
+#   wrong_slot           an amount the entry's text states, on the costs row of
+#                        the other kind (#1672): under "Total award:" or "Total
+#                        requested:" though labelled per year (yearly_as_total,
+#                        CKDDEG 110, AOJEQD 429), or under "Annual direct
+#                        costs:" though labelled as the whole award
+#                        (total_as_annual, ASRNQM). The label is read beside
+#                        the amount in the rendered cell ("$250,000/yr") and in
+#                        the entry's text.
 #
 # A value matches through reformatting: an amount by its dollars ("$1.5M",
 # "$1,500,000", "1500000"), within half the last digit it states, and a grant
 # number by its identity (an NIH number by institute and serial, "5R01
 # CA012345-01A1" = "CA-12345"; another format by its letters and digits).
-# Report-only, INFO, and a review-copy comment only (doctor/PRECISION.md, GF-1).
+# Report-only, INFO, and a review-copy comment only (doctor/PRECISION.md, GF-1
+# and GF-2).
 
 #: The finding's shapes, named in its message (`precision.finding_precision`).
 GRANT_FACT_NOT_IN_SOURCE = "value_not_in_source"
 GRANT_FACT_MISSING = "value_missing"
+GRANT_FACT_WRONG_SLOT = "wrong_slot"
+#: wrong_slot's two cases, named in its message.
+WRONG_SLOT_YEARLY_AS_TOTAL = "yearly_as_total"
+WRONG_SLOT_TOTAL_AS_ANNUAL = "total_as_annual"
 #: Values a finding's message lists; it counts the rest.
 GRANT_FACTS_MAX_LISTED = 4
 #: The rendered rows value_not_in_source reads: the ones stage 4's fields
@@ -4347,6 +4361,9 @@ GRANT_FACTS_MAX_LISTED = 4
 _FACT_AMOUNT_ROWS = frozenset({ANNUAL_COSTS_LABEL, TOTAL_AWARD_LABEL,
                                TOTAL_REQUESTED_LABEL, SHARE_LABEL})
 _FACT_NUMBER_ROWS = frozenset({AWARD_SOURCE_LABEL, PROJECT_TITLE_LABEL})
+#: The costs rows that show a grant's whole award; wrong_slot reads them, and
+#: the yearly row, ANNUAL_COSTS_LABEL.
+_TOTAL_AMOUNT_ROWS = frozenset({TOTAL_AWARD_LABEL, TOTAL_REQUESTED_LABEL})
 #: The stage-4 fields that say which of several same-titled entries a rendered
 #: table came from: stage 6 renders them newest first, not in stage-4 order.
 _PRODUCER_AMOUNT_KEYS = ("annual_direct_costs", "annual_funding", "total_funding",
@@ -4426,26 +4443,27 @@ class _EntryFacts(NamedTuple):
     tables: list[dict[str, str]]
 
 
+def _amount_fact(match: re.Match[str]) -> GrantFact:
+    """One `_AMOUNT_RE` match as an amount. A number with three decimals and
+    no multiplier is read both ways, since a CV may write "$123.000" for
+    $123,000."""
+    frac = match["frac"] or ""
+    multiplier = Decimal(_AMOUNT_MULTIPLIERS[match["mult"].lower()] if match["mult"] else 1)
+    value = Decimal(re.sub(r"[,\s]", "", match["int"]) + (f".{frac}" if frac else "")) * multiplier
+    # "$1.5M" states the hundred thousands: anything within 50,000 is it.
+    tolerance = (Decimal(1).scaleb(-len(frac)) * multiplier / 2 if match["mult"]
+                 else AMOUNT_ROUNDING_DOLLARS)
+    dotted = len(frac) == THOUSANDS_DOT_DIGITS and not match["mult"]
+    return GrantFact(match.group(0).strip(),
+                     readings=(value, value * 1000) if dotted else (value,),
+                     tolerance=tolerance)
+
+
 def _amounts(text: str, *, marked_only: bool) -> list[GrantFact]:
     """The dollar amounts in ``text``; with ``marked_only``, only those
-    written with a currency mark, which is what makes a number an amount.
-    A number with three decimals and no multiplier is read both ways, since
-    a CV may write "$123.000" for $123,000."""
-    found = []
-    for match in _AMOUNT_RE.finditer(text):
-        if marked_only and not match["cur"]:
-            continue
-        frac = match["frac"] or ""
-        multiplier = Decimal(_AMOUNT_MULTIPLIERS[match["mult"].lower()] if match["mult"] else 1)
-        value = Decimal(re.sub(r"[,\s]", "", match["int"]) + (f".{frac}" if frac else "")) * multiplier
-        # "$1.5M" states the hundred thousands: anything within 50,000 is it.
-        tolerance = (Decimal(1).scaleb(-len(frac)) * multiplier / 2 if match["mult"]
-                     else AMOUNT_ROUNDING_DOLLARS)
-        dotted = len(frac) == THOUSANDS_DOT_DIGITS and not match["mult"]
-        found.append(GrantFact(match.group(0).strip(),
-                               readings=(value, value * 1000) if dotted else (value,),
-                               tolerance=tolerance))
-    return found
+    written with a currency mark, which is what makes a number an amount."""
+    return [_amount_fact(match) for match in _AMOUNT_RE.finditer(text)
+            if match["cur"] or not marked_only]
 
 
 def _grant_ids(text: str) -> list[GrantFact]:
@@ -4476,12 +4494,16 @@ def _fact_haystack(texts: Iterable[str]) -> FactHaystack:
                         _alnum(text))
 
 
+def _same_amount(one: GrantFact, other: GrantFact) -> bool:
+    """Whether two amounts are one, within the looser of their tolerances."""
+    return any(abs(mine - theirs) <= max(one.tolerance, other.tolerance)
+               for mine in one.readings for theirs in other.readings)
+
+
 def _holds_fact(haystack: FactHaystack, fact: GrantFact) -> bool:
     """Whether ``haystack`` holds ``fact``, however reformatted."""
     if fact.readings:
-        return any(abs(mine - theirs) <= max(fact.tolerance, amount.tolerance)
-                   for amount in haystack.amounts
-                   for mine in fact.readings for theirs in amount.readings)
+        return any(_same_amount(fact, amount) for amount in haystack.amounts)
     return fact.key in haystack.grant_keys or _alnum(fact.text) in haystack.alnum
 
 
@@ -4601,6 +4623,195 @@ def _grant_fact_entries(stage4: dict, table_rows: list[list[list[str]]]
              for idx, parts in texts.items()], unmatched)
 
 
+# wrong_slot (#1672). The words that label an amount: those before it, back
+# to the break after the amount before it (to the start of its cell for the
+# first), and those after it, up to the next break. An amount labelled only
+# "direct" on a multi-year grant (ZASOTV 898) is read neither way: whether it
+# is a yearly figure is an open owner question on #1672.
+
+#: An amount's label says per year: "per year", "/yr", "yearly", "per annum",
+#: "each year", "annual" or "annually" (but not an annual meeting, report or
+#: award, though an "annual award amount" is), or one numbered year, "Year
+#: 3" or "Yr 3" ("Year 1-5" is a span).
+_PER_YEAR_RE = re.compile(
+    r"\bper[\s-]+(?:year|yr|annum|budget\s+(?:year|period))\b|/\s*y(?:ea)?r\b|\byearly\b"
+    r"|\beach\s+year\b|\bannual(?:ly)?\b(?!\s+(?:meeting|conference|symposium|congress|session"
+    r"|review|report|award(?!\s+amount)))|\by(?:ea)?r\s*\d{1,2}\b(?!\s*(?:-|–|to)\s*\d)",
+    re.IGNORECASE)
+#: A fiscal year ("FY 2022", "FY22"): one year's figure on a grant longer
+#: than a budget year, the whole award on one that is not, so it reads as per
+#: year only on a rendered span longer than ONE_BUDGET_YEAR_MAX_MONTHS.
+_FISCAL_YEAR_RE = re.compile(r"\bFY\s*'?\d{2,4}\b|\bfiscal\s+year\b", re.IGNORECASE)
+#: An amount's label says the whole award: "total", "overall", "cumulative",
+#: "over 5 years", "for the project period". A date range beside an amount
+#: says neither: it is the grant's dates.
+_WHOLE_AWARD_RE = re.compile(
+    r"\btotal\b|\boverall\b|\bcumulative\b|\bproject\s+period\b|\bentire\s+(?:award|project|period)\b"
+    r"|\b(?:over|for)\s+(?:the\s+)?(?:\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\b",
+    re.IGNORECASE)
+#: Where the text between two amounts splits: what comes before the first
+#: break labels the amount before it, the rest the amount after it.
+_LABEL_BREAK_RE = re.compile(r"[,;\t\n]|\.(?=\s)|\)\s")
+_CELL_BREAK_RE = re.compile(r"[\t\n]")
+#: A sentence break: an amount's label is in its own sentence ("Renewed
+#: annually for a decade. Overall: $X" labels a whole award).
+_SENTENCE_BREAK_RE = re.compile(r"[.!?]\s+(?=[A-Z])")
+LABEL_LEAD_CHARS = 80
+LABEL_TRAIL_CHARS = 40
+#: An unmarked number this large, and not a year, is an amount to cut label
+#: windows around ("Total costs 1,250,000"); a smaller one is a day, a month
+#: or a year number.
+UNMARKED_AMOUNT_MIN_DOLLARS = Decimal(1000)
+_YEAR_NUMBER_RE = re.compile(r"(?:19|20)\d\d")
+#: A grant this long or shorter is one budget year (12 months, with a
+#: month's slack), whose yearly figure is also its whole award.
+ONE_BUDGET_YEAR_MAX_MONTHS = 13
+#: A rendered "Duration of support:" span: "08/17-07/21", "2017-2021".
+_DURATION_SPAN_RE = re.compile(
+    r"(?:(?P<m1>\d{1,2})/)?(?P<y1>\d{4}|\d{2})\s*[-–]\s*(?:(?P<m2>\d{1,2})/)?(?P<y2>\d{4}|\d{2})")
+_DURATION_YEAR_RE = re.compile(r"\d{4}")
+
+
+class _LabelledAmount(NamedTuple):
+    """An amount in a body of text, with the words that label it."""
+    fact: GrantFact
+    label: str
+
+
+class _AmountLabels(NamedTuple):
+    """What the labels of one rendered amount say, in its cell and in the
+    entry's text."""
+    per_year: bool
+    whole_award: bool
+    stated: bool        # the entry's text states the amount
+
+
+def _first_clause(text: str) -> str:
+    """``text`` up to its first break."""
+    cut = _LABEL_BREAK_RE.search(text)
+    return text[:cut.start()] if cut else text
+
+
+def _split_gap(gap: str) -> tuple[str, str]:
+    """The text between two amounts, as the words after the first and the
+    words before the second. An open parenthesis that the second amount sits
+    in labels the second ("$X (annual direct costs $Y)"); otherwise the gap
+    splits at its first break."""
+    opened = gap.rfind("(")
+    if opened >= 0 and ")" not in gap[opened:]:
+        return _first_clause(gap[:opened]), gap[opened + 1:]
+    cut = _LABEL_BREAK_RE.search(gap)
+    return (gap[:cut.start()], gap[cut.end():]) if cut else (gap, "")
+
+
+def _lead_label(lead: str) -> str:
+    """The words before an amount, within its cell (or the cell before, when
+    the amount opens its cell: "Annual Direct Costs<TAB>$X") and its sentence."""
+    cells = _CELL_BREAK_RE.split(lead)
+    lead = f"{cells[-2]} {cells[-1]}" if len(cells) > 1 and not cells[-1].strip() else cells[-1]
+    return _SENTENCE_BREAK_RE.split(lead)[-1][-LABEL_LEAD_CHARS:]
+
+
+def _labelled_amounts(text: str) -> list[_LabelledAmount]:
+    """The amounts in ``text``, each with its label: every currency-marked
+    amount, and every unmarked one of UNMARKED_AMOUNT_MIN_DOLLARS or more
+    that is not a year."""
+    found = [(match, _amount_fact(match)) for match in _AMOUNT_RE.finditer(text)]
+    found = [(match, fact) for match, fact in found
+             if match["cur"] or (min(fact.readings) >= UNMARKED_AMOUNT_MIN_DOLLARS
+                                 and not _YEAR_NUMBER_RE.fullmatch(fact.text))]
+    spans = [match.span() for match, _ in found]
+    gaps = [_split_gap(text[end:start]) for (_, end), (start, _) in itertools.pairwise(spans)]
+    labelled = []
+    for at, (_, fact) in enumerate(found):
+        lead = gaps[at - 1][1] if at else text[:spans[0][0]]
+        trail = gaps[at][0] if at < len(gaps) else _first_clause(text[spans[at][1]:])
+        labelled.append(_LabelledAmount(fact, f"{_lead_label(lead)} {trail[:LABEL_TRAIL_CHARS]}"))
+    return labelled
+
+
+def _shortest_span_months(duration: str) -> int | None:
+    """The fewest months a rendered "Duration of support:" can span: a year
+    with no month starts in December or ends in January ("2017-2018" is 2),
+    and a year alone is 1. None for an open or start-only duration."""
+    duration = duration.strip()
+    if _DURATION_YEAR_RE.fullmatch(duration):
+        return 1
+    span = _DURATION_SPAN_RE.fullmatch(duration)
+    if not span:
+        return None
+    start = int(span["y1"]) if len(span["y1"]) == 4 else expand_two_digit_year(int(span["y1"]))
+    end = int(span["y2"]) if len(span["y2"]) == 4 else year_at_or_after(span["y2"], start)
+    months = (end - start) * 12 + int(span["m2"] or 1) - int(span["m1"] or 12) + 1
+    return months if months > 0 else None
+
+
+def _reads_per_year(label: str, multi_year: bool) -> bool:
+    """Whether ``label`` gives its amount for one year; a fiscal year counts
+    only on a grant longer than a budget year."""
+    return bool(_PER_YEAR_RE.search(label) or (multi_year and _FISCAL_YEAR_RE.search(label)))
+
+
+def _amount_labels(shown: _LabelledAmount, stated: list[_LabelledAmount],
+                   multi_year: bool) -> _AmountLabels:
+    """What labels a rendered amount: its cell's words and those beside each
+    place the entry's text states it. A label with a per-year word is per
+    year even when it also says total ("Total Costs per Year")."""
+    in_text = [amount.label for amount in stated if _same_amount(amount.fact, shown.fact)]
+    labels = [shown.label, *in_text]
+    per_year = [_reads_per_year(label, multi_year) for label in labels]
+    whole_award = [bool(_WHOLE_AWARD_RE.search(label)) and not yearly
+                   for label, yearly in zip(labels, per_year, strict=True)]
+    return _AmountLabels(any(per_year), any(whole_award), stated=bool(in_text))
+
+
+def _wrong_slot_row(value: str, stated: list[_LabelledAmount], multi_year: bool, *,
+                    total_row: bool) -> list[GrantFact]:
+    """The amounts on one rendered costs row, when every one of them is
+    stated in the entry's text and labelled only for the other row: per year
+    on a total row, the whole award on the yearly row. A row that also shows
+    any other amount shows a figure of its own kind, and is left alone."""
+    shown = _labelled_amounts(value)
+    for amount in shown:
+        labels = _amount_labels(amount, stated, multi_year)
+        other_kind_only = (labels.per_year and not labels.whole_award if total_row
+                           else labels.whole_award and not labels.per_year)
+        if not (labels.stated and other_kind_only):
+            return []
+    return [amount.fact for amount in shown]
+
+
+def _wrong_slots(entry: _EntryFacts) -> dict[str, list[GrantFact]]:
+    """wrong_slot's amounts on ``entry``'s rendered tables, per costs row
+    label. A table whose duration is one budget year is skipped: its yearly
+    figure is also its whole award."""
+    stated = _labelled_amounts(entry.text)
+    found: dict[str, list[GrantFact]] = {}
+    for cells in entry.tables:
+        months = _shortest_span_months(cells.get(DURATION_LABEL, ""))
+        if months is not None and months <= ONE_BUDGET_YEAR_MAX_MONTHS:
+            continue
+        multi_year = months is not None and months > ONE_BUDGET_YEAR_MAX_MONTHS
+        for label, value in cells.items():
+            if label not in _TOTAL_AMOUNT_ROWS and label != ANNUAL_COSTS_LABEL:
+                continue
+            amounts = _wrong_slot_row(value, stated, multi_year, total_row=label in _TOTAL_AMOUNT_ROWS)
+            if amounts:
+                found.setdefault(label, []).extend(amounts)
+    return found
+
+
+def _wrong_slot_message(entry: _EntryFacts, rows: Mapping[str, list[GrantFact]]) -> str:
+    parts = []
+    for label, amounts in rows.items():
+        if label == ANNUAL_COSTS_LABEL:
+            kind = f"as the whole award ({WRONG_SLOT_TOTAL_AS_ANNUAL})"
+        else:
+            kind = f"per year ({WRONG_SLOT_YEARLY_AS_TOTAL})"
+        parts.append(f'{_listed(_distinct(amounts))} under "{label}", which is labelled {kind}')
+    return f"entry {entry.idx} ({entry.code}): {GRANT_FACT_WRONG_SLOT}: {'; '.join(parts)} (#1672)"
+
+
 def _not_in_source_message(entry: _EntryFacts, foreign: list[GrantFact],
                            sources: Mapping[object, FactHaystack]) -> str:
     """value_not_in_source for ``entry``, naming the grant entries whose own
@@ -4631,10 +4842,11 @@ def lint_grant_facts(stage4: dict, table_rows: list[list[list[str]]],
                      subpoints: SubpointText | None = None) -> list[dict]:
     """Grant numbers and dollar amounts, source against render (#1588): per
     grant entry, a value_not_in_source finding for the values its rendered
-    table shows that its text lacks, and a value_missing finding for the
-    values its text states that the reader sees nowhere (see the shapes
-    above). `blocks` and `subpoints` widen where a stated value may still
-    reach the reader; without them, only its table counts. INFO."""
+    table shows that its text lacks, a value_missing finding for the
+    values its text states that the reader sees nowhere, and a wrong_slot
+    finding for the amounts on the costs row of the other kind (#1672; see
+    the shapes above). `blocks` and `subpoints` widen where a stated value
+    may still reach the reader; without them, only its table counts. INFO."""
     entries, unmatched = _grant_fact_entries(stage4, table_rows)
     grant_tables = {at for at, _ in _grant_tables(table_rows)}
     outside = _fact_haystack([
@@ -4655,6 +4867,10 @@ def lint_grant_facts(stage4: dict, table_rows: list[list[list[str]]],
                    if not _holds_fact(shown, fact) and not _holds_fact(outside, fact)]
         if missing:
             findings.append(_finding("grant_facts", "INFO", _missing_message(entry, missing),
+                                     _fact_anchor(entry)))
+        wrong_slots = _wrong_slots(entry)
+        if wrong_slots:
+            findings.append(_finding("grant_facts", "INFO", _wrong_slot_message(entry, wrong_slots),
                                      _fact_anchor(entry)))
     return findings
 
