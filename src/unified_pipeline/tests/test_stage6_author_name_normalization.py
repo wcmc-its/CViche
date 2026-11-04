@@ -1080,3 +1080,32 @@ def test_carry_cv_suffixes_pairs_by_position_with_different_initials():
             == "Quorn AB, Brask A, Quorn JD 2nd")
     # Out of PubMed's order: the first CV Quorn is not PubMed's first.
     assert carry_cv_suffixes(pubmed, "Quorn JD 2nd, Brask A, Quorn AB.") == pubmed
+
+
+@pytest.mark.parametrize("pubmed, cv_text, expected", [
+    # A space-separated Roman numeral is the suffix, not more initials.
+    ("Quorn JD, Brask A, Quorn JD", "Quorn JD, Brask A, Quorn JD II.",
+     "Quorn JD, Brask A, Quorn JD II"),
+    ("Quorn JD, Brask A, Quorn JD", "Quorn JD, Brask A, Quorn JD IV.",
+     "Quorn JD, Brask A, Quorn JD IV"),
+    ("Quorn J, Brask A, Quorn J", "Quorn J, Brask A, Quorn J III.",
+     "Quorn J, Brask A, Quorn J III"),
+    ("Quorn J, Brask A, Quorn J", "Quorn J II, Brask A, Quorn J.",
+     "Quorn J II, Brask A, Quorn J"),
+    ("Quorn JD, Brask A, Quorn JD", "Quorn J. D., Brask A, Quorn J. D. III.",
+     "Quorn JD, Brask A, Quorn JD III"),
+    # Unspaced initials that only look like a numeral stay initials.
+    ("Quorn JII, Brask A, Quorn JII", "Quorn JII, Brask A, Quorn JII.",
+     "Quorn JII, Brask A, Quorn JII"),
+])
+def test_carry_cv_suffixes_pairs_roman_numeral_suffixes_by_position(pubmed, cv_text, expected):
+    assert carry_cv_suffixes(pubmed, cv_text) == expected
+
+
+@pytest.mark.parametrize("pubmed, cv_text, expected", [
+    ("Quorn JD, Brask A", "Quorn JD II, Brask A.", "Quorn JD II, Brask A"),
+    ("Quorn J, Brask A", "Quorn J III, Brask A.", "Quorn J III, Brask A"),
+    ("Quorn IV, Brask A", "Quorn IV, Brask A.", "Quorn IV, Brask A"),
+])
+def test_carry_cv_suffixes_reads_roman_numeral_after_a_lone_surname(pubmed, cv_text, expected):
+    assert carry_cv_suffixes(pubmed, cv_text) == expected

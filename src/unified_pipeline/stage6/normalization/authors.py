@@ -759,9 +759,14 @@ _PUBMED_INITIALS_RE = re.compile(r"^[A-Z]{1,4}$")
 #: What may follow a suffix: not more of a word or a name.
 _SUFFIX_END = r"\.?(?![\w'\-])"
 
+#: A Roman-numeral suffix next after a space ("Quorn JD II"): the initials
+#: stop before it, or their optional space would take its letters as more
+#: initials and leave the suffix unread.
+_NOT_ROMAN_SUFFIX_AHEAD = r"(?!\s(?:II|III|IV)\.?(?![\w'\-]))"
+
 #: A CV's initials for one author ("JD", "J.D.", "J. D.", "J-D"), the first
 #: one captured.
-_CV_INITIALS = r"(?P<initial>[A-Z])(?:\.?\s?-?[A-Z]){0,3}\.?"
+_CV_INITIALS = rf"(?P<initial>[A-Z])(?:\.?{_NOT_ROMAN_SUFFIX_AHEAD}\s?-?[A-Z]){{0,3}}\.?"
 
 
 def _cv_suffix_patterns(surname: str) -> tuple[re.Pattern[str], ...]:
