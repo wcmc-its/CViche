@@ -56,6 +56,20 @@ _CURRENCY_CENTS = Decimal('0.01')
 # guards cannot disagree about what an oversized value renders as.
 _CURRENCY_MAX_ADJUSTED_EXPONENT = 24
 
+# A title that already ends in one of these is a complete sentence: the
+# citation does not add its own "." after it. Appending one printed
+# "Is the Fern a Moss?." for a PubMed title that is a question (#2069).
+_TITLE_TERMINAL_PUNCTUATION = ('?', '!')
+
+
+def _terminated_title(title: str) -> str:
+    """`title` ending in exactly one terminal mark: its own "?"/"!" when it
+    has one, else a single "." (a trailing "." run collapses to one)."""
+    stripped = title.rstrip('.')
+    if stripped.endswith(_TITLE_TERMINAL_PUNCTUATION):
+        return stripped
+    return stripped + "."
+
 
 def _source_parts(pub: ResolvedPublication) -> list[str]:
     """The line saying where the work appeared, as zero or one part.
@@ -282,7 +296,7 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     if pub.authors:
         parts.append(pub.authors + ".")
     if pub.title:
-        parts.append(pub.title.rstrip('.') + ".")
+        parts.append(_terminated_title(pub.title))
     parts.extend(_source_parts(pub))
     if pub.series:
         parts.extend(_book_trailer_parts(pub))

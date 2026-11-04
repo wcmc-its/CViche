@@ -318,13 +318,15 @@ def test_fallback_title_ending_in_a_period_does_not_double_it():
     ('A Paper', '1. A Paper. NEJM.'),
     ('A Paper.', '1. A Paper. NEJM.'),
     ('A Paper...', '1. A Paper. NEJM.'),
-    ('Is it a paper?', '1. Is it a paper?. NEJM.'),
+    ('Is it a paper?', '1. Is it a paper? NEJM.'),
+    ('A paper!', '1. A paper! NEJM.'),
+    ('Is it a paper?.', '1. Is it a paper? NEJM.'),
     ('.', '1. . NEJM.'),
 ])
 def test_title_terminal_punctuation_table(title, expected):
-    """Only a period is stripped, and every trailing period is -- a question
-    mark keeps its own and gains the renderer's, which is what the farm
-    already renders."""
+    """Only a period is stripped, and every trailing period is. A title that
+    then ends in "?" or "!" keeps its own mark and gains no "." (#2069: the
+    renderer used to print "Is it a paper?.")."""
     citation, _, _ = _format_citation(
         _entry({'title': title, 'journal': 'NEJM'}), 1)
 
@@ -1680,3 +1682,15 @@ def test_with_event_status_leaves_text_without_a_note_unchanged():
 def test_with_event_status_on_empty_text_is_the_note_alone():
     from unified_pipeline.stage6.formatting.values import with_event_status
     assert with_event_status("", "Venue, 2020 (postponed)") == "(postponed)"
+
+
+def test_pubmed_title_question_keeps_its_mark_without_a_period():
+    """#2069 through the enrichment path: the PubMed title outranks the
+    extracted one, and its "?" is not followed by a "."."""
+    entry = _entry({'authors': 'Doe J', 'year': '2021', 'journal': 'Glade Rev',
+                    'title': 'Fern Habitats'},
+                   {'pubmed_title': 'Is the Fern a Moss?'})
+
+    citation, _, _ = _format_citation(entry, 1)
+
+    assert citation == '1. Doe J. Is the Fern a Moss? Glade Rev. 2021.'

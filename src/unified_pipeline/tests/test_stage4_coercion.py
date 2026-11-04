@@ -1303,3 +1303,45 @@ def test_two_column_row_needs_the_journal_alone_and_a_dated_second_cell(
     assert [record["journal_name"] for record in earlier] + [item["journal_name"]] == expected_journals
     assert "role" not in item
 
+
+# --- #2069: a title that is a question keeps its "?" ------------------------
+
+def test_title_question_mark_the_source_writes_is_kept():
+    text = "Doe J. Is the Fern a Moss? Annual Glade Meeting. Springfield. 2022."
+    updated, reformatted = apply_regex_post_processing(
+        text, {"title": "Is the Fern a Moss?"}, "R")
+    assert updated["title"] == "Is the Fern a Moss?"
+    assert "title" not in reformatted
+
+
+def test_title_question_mark_matches_across_respacing_and_case():
+    text = "Doe J. IS THE FERN\ta  Moss ? Annual Glade Meeting. 2022."
+    updated, _ = apply_regex_post_processing(text, {"title": "Is the Fern a Moss ?"}, "R")
+    assert updated["title"] == "Is the Fern a Moss?"
+
+
+def test_title_question_mark_matches_curly_quotes_and_a_closing_quote():
+    text = "Doe J. “What’s in a Fern”? Glade Rev. 2022."
+    updated, _ = apply_regex_post_processing(text, {"title": "What's in a Fern?"}, "S2")
+    assert updated["title"] == "What's in a Fern?"
+
+
+def test_title_question_mark_needs_the_title_to_end_at_a_word_boundary():
+    # "Fern" is not the source's "Ferns?": the mark follows another word.
+    text = "Doe J. Fern Habitats and Ferns? Glade Rev. 2022."
+    updated, _ = apply_regex_post_processing(text, {"title": "Fern Habitats and Fern?"}, "S2")
+    assert updated["title"] == "Fern Habitats and Fern"
+
+
+def test_title_question_mark_not_in_source_is_still_stripped():
+    # The source has no "?" after the title: the mark is stray and goes.
+    text = "Doe J. Fern Habitats. Annual Glade Meeting. 2022."
+    updated, reformatted = apply_regex_post_processing(text, {"title": "Fern Habitats?"}, "R")
+    assert updated["title"] == "Fern Habitats"
+    assert reformatted["title"]["original"] == "Fern Habitats?"
+
+
+def test_title_trailing_colon_and_leading_label_still_stripped():
+    text = "Submitted: Fern Habitats: a review. 2022."
+    updated, _ = apply_regex_post_processing(text, {"title": "Submitted: Fern Habitats:"}, "S1")
+    assert updated["title"] == "Fern Habitats"

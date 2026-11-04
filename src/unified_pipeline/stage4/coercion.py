@@ -1256,8 +1256,48 @@ def _normalize_authors_field(updated: ExtractedFields, reformatted: ReformattedF
         }
 
 
-def _clean_title_field(updated: ExtractedFields, reformatted: ReformattedFields) -> None:
-    """Strip leading status labels (e.g. "Featured:", "Submitted:") and stray punctuation from a title."""
+# The mark `_clean_title_field` strips from a title's end and puts back when
+# the source writes it there (#2069).
+_TITLE_QUESTION_MARK = '?'
+# How many of the title's closing words the source must write before its "?".
+# The tail, not the whole title: the LLM fixes a typo, rejoins a hyphenated
+# line break or drops a table cell (a date, a venue) that the source row
+# interleaves with the title's words. On the farm, a whole-title match left 45
+# of 2,374 question titles stripped, the last three words 12, the last word 7.
+# Six of those 7 sources write no "?" after the title at all; the seventh
+# breaks the title's last word across a hyphenated line.
+_QUESTION_TAIL_WORDS = 1
+
+
+def _source_asks_title(title: str, original_text: str) -> bool:
+    """True when the source writes the end of `title` followed by a "?" --
+    the title is a question, not a title with a stray mark (#2069).
+
+    The title's last `_QUESTION_TAIL_WORDS` words are matched, in order and
+    ignoring case: anything that is not a word character may sit between
+    them, and anything but a word character or another "?" between the last
+    word and the "?". The LLM re-spaces, straightens curly quotes and
+    apostrophes, and swaps dashes, and a quoted title closes its quote before
+    its "?" ('"Is X the answer"?'). The caller only asks when the LLM's own
+    title ended in "?", so the tail match confirms a mark, it never adds one.
+    """
+    words = re.findall(r'\w+', title)[-_QUESTION_TAIL_WORDS:]
+    if not words:
+        return False
+    pattern = (r'\b' + r'\W*'.join(map(re.escape, words))
+               + r'[^\w' + re.escape(_TITLE_QUESTION_MARK) + r']*'
+               + re.escape(_TITLE_QUESTION_MARK))
+    return re.search(pattern, original_text, flags=re.IGNORECASE) is not None
+
+
+def _clean_title_field(original_text: str, updated: ExtractedFields,
+                       reformatted: ReformattedFields) -> None:
+    """Strip leading status labels (e.g. "Featured:", "Submitted:") and stray punctuation from a title.
+
+    A trailing "?" the source itself writes after the title is the title's own
+    question mark and is put back (#2069: "Is X the answer?" printed as
+    "Is X the answer").
+    """
     if not updated.get('title'):
         return
     original_title = updated['title']
@@ -1267,6 +1307,9 @@ def _clean_title_field(updated: ExtractedFields, reformatted: ReformattedFields)
     )
     cleaned_title = re.sub(r'^[:\?\s]+', '', cleaned_title)
     cleaned_title = re.sub(r'[:\?\s]+$', '', cleaned_title)
+    if (original_title.rstrip().endswith(_TITLE_QUESTION_MARK)
+            and _source_asks_title(cleaned_title, original_text)):
+        cleaned_title += _TITLE_QUESTION_MARK
     if cleaned_title != original_title:
         updated['title'] = cleaned_title
         reformatted['title'] = {
@@ -1863,7 +1906,7 @@ def apply_regex_post_processing(
     _normalize_authors_field(updated, reformatted)
 
     # Clean title (remove leading labels like "Featured:", "Submitted:")
-    _clean_title_field(updated, reformatted)
+    _clean_title_field(original_text, updated, reformatted)
 
     # Extract percent effort/FTE for grant entries
     if taxonomy_code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
