@@ -1255,3 +1255,64 @@ def test_a_pinned_row_keeps_a_state_or_number_stage4_extracted_1577():
                                               state_country="Example State", license_number="00000",
                                               issue_date="2031")]).licenses
     assert (record.state, record.number, record.issue_date) == ("Example State", "00000", "2031")
+
+
+def test_534_each_licence_row_is_its_entrys_row_receipt():
+    """#534: Licensure wrote its rows without telling the row-receipt ledger,
+    so every licence read 'written 0' and lost although its row rendered
+    (MIX11: LPPQAJ, MJQYFH, MOCDRL, LQNORX). Each row now records its
+    entry; a DEA record (withheld with notice) and the NPI (shown in the
+    identifier table) write no licence row on purpose and are set aside."""
+    licences = [
+        {"taxonomy_code": "F1", "element_idx_start": 10,
+         "text": "2031-2033 Quillfeather Department of Example Licensing",
+         "extracted_fields": {"state_country": "Quillfeather", "issue_date": "2031",
+                              "expiration_date": "2033"}},
+        {"taxonomy_code": "F1", "element_idx_start": 11,
+         "text": "Marbleton Board of Example Examiners #00000",
+         "extracted_fields": {"state_country": "Marbleton", "license_number": "00000"}},
+    ]
+    npi = {"taxonomy_code": "F1", "element_idx_start": 12, "text": "NPI 0000000000",
+           "extracted_fields": {"license_type": "NPI", "license_number": "0000000000"}}
+    dea = {"taxonomy_code": "F1", "element_idx_start": 13, "text": "DEA XX0000000",
+           "extracted_fields": {"license_type": "DEA", "license_number": "XX0000000"}}
+    no_number = {"taxonomy_code": "F1", "element_idx_start": 14, "text": "NPI number: N/A",
+                 "extracted_fields": {}}
+    entries = [*licences, npi, dea, no_number]
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._row_receipts.begin_section("licensure")
+    gen._fill_licensure(entries)
+    gen._row_receipts.end_section()
+    receipt, = gen._row_receipts.receipts({"licensure": entries})
+    assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (5, 2, 3, ())
+
+
+def test_534_an_npi_the_identifier_table_never_shows_is_lost_on_the_receipt():
+    """A number the NPI slot never got (stage 4 left it in the text only),
+    or a second, different NPI, is shown nowhere: the receipt reports it."""
+    unclaimed = {"taxonomy_code": "F1", "element_idx_start": 20, "text": "NPI number: 1000000000",
+                 "extracted_fields": {}}
+    first = {"taxonomy_code": "F1", "element_idx_start": 21, "text": "NPI 2000000000",
+             "extracted_fields": {"license_type": "NPI", "license_number": "2000000000"}}
+    second = {"taxonomy_code": "F1", "element_idx_start": 22, "text": "NPI 3000000000",
+              "extracted_fields": {"license_type": "NPI", "license_number": "3000000000"}}
+    result = _resolve_licensure([unclaimed, first, second])
+    assert result.identifiers.npi == "2000000000"
+    assert [raw["element_idx_start"] for raw in result.no_row] == [21]
+
+
+def test_534_a_licence_whose_row_is_removed_is_lost_on_the_receipt():
+    """The receipt is the row itself: a licence row wiped after it was
+    written vouches for nothing, so the entry reads lost."""
+    entry = {"taxonomy_code": "F1", "element_idx_start": 10, "text": "Quillfeather licence 2031",
+             "extracted_fields": {"state_country": "Quillfeather", "issue_date": "2031"}}
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._row_receipts.begin_section("licensure")
+    gen._fill_licensure([entry])
+    gen._row_receipts.end_section()
+    row = next(r for t in gen.doc.tables for r in t.rows if r.cells[0].text == "Quillfeather")
+    row._tr.getparent().remove(row._tr)
+    receipt, = gen._row_receipts.receipts({"licensure": [entry]})
+    assert [lost.element_idx_start for lost in receipt.lost] == [10]

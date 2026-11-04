@@ -2261,6 +2261,57 @@ def test_section_lost_reads_a_licence_row_by_the_cells_it_prints():
     assert [f["message"][:3] for f in lint_section_lost(raw, blocks)] == ["F1:"]
 
 
+#: LQNORX's licence shape (#534): "<years> <state> <issuing body>", no number.
+#: The row prints only the state and the years, so the line's words never render.
+_BODY_LICENCES = (("2031-2033 Quillfeather Department of Ostrander Licensing", "Quillfeather", "2031", "2033"),
+                  ("2034-2036 Marbleton Commission of Pellgrave Examiners", "Marbleton", "2034", "2036"),
+                  ("2037 Wexcombe Bureau of Brambleton Permits", "Wexcombe", "2037", None))
+
+
+def _body_licence_stage4():
+    return {"entries": [{"taxonomy_code": "F1", "text": t,
+                         "extracted_fields": {"state_country": st, "issue_date": y0, "expiration_date": y1}}
+                        for t, st, y0, y1 in _BODY_LICENCES]}
+
+
+def test_section_lost_reads_a_licence_by_its_rendered_row_534():
+    # MIX11 LQNORX: all four licences rendered as "<state> | <years>" rows, and
+    # section_lost read their issuing bodies' words as absent.
+    blocks = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION", ["Licensure:"])) + [
+        ("table", "State\nNumber\nQuillfeather\n2031\n2033\nQuillfeather | 2031 | 2033\n"
+                  "Marbleton\n2034\n2036\nMarbleton | 2034 | 2036\nWexcombe\n2037\nWexcombe | 2037")]
+    assert lint_section_lost(_body_licence_stage4(), blocks) == []
+
+
+def test_section_lost_still_reads_an_empty_licence_table_as_lost_534():
+    # The rows print a word or two each (a state, often the CV's own), too few for
+    # the share test to judge; the rows are judged instead, so a table left at N/A
+    # is lost.
+    blocks = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION", ["Licensure: N/A"]))
+    assert [f["message"][:3] for f in lint_section_lost(_body_licence_stage4(), blocks)] == ["F1:"]
+    # the state alone, or the section's own words, are not the row
+    blocks = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION",
+                             ["Licensure: N/A", "Quillfeather",
+                              "Department of Ostrander Licensing medical license registration"]))
+    assert [f["message"][:3] for f in lint_section_lost(_body_licence_stage4(), blocks)] == ["F1:"]
+
+
+def test_section_lost_reads_a_licence_row_as_stage6_resolves_it_534():
+    # A licence under an expiry column header renders "Expires <date>" (#1698):
+    # the row is read as stage 6's `_resolve_licensure` writes it, not entry by entry.
+    def row(idx, text, **fields):
+        return {"taxonomy_code": "F1", "element_idx_start": idx, "element_idx_end": idx,
+                "element_type": "table_row", "text": text, "extracted_fields": fields}
+    stage4 = {"entries": [row(40, "Region   Licence #  Exp date"),
+                          row(41, "Wrenshire   77001  3/31/19", state_country="Wrenshire",
+                              license_number="77001", expiration_date="2019-03-31")]}
+    rendered = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION",
+                               ["Region Licence # Exp date", "Wrenshire | 77001 | Expires 03/31/2019"]))
+    assert lint_section_lost(stage4, rendered) == []
+    unlabelled = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION", ["Wrenshire | 77001 | 03/31/2019"]))
+    assert [f["message"][:3] for f in lint_section_lost(stage4, unlabelled)] == ["F1:"]
+
+
 # -------------------------------------------------- lint 9: enrichment failures
 
 def _enriched_entry(text, status=None):

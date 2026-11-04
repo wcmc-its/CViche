@@ -78,10 +78,9 @@ from unified_pipeline.stage6.sections.board_certification import (
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
-    KIND_LICENSE,
-    _classify_licensure_entry,
     _license_record,
     _normalize_licensure_entry,
+    _resolve_licensure,
     credential_listed_as_licence,
 )
 from unified_pipeline.stage6.supplementary import PRESENTATION_TITLE_FIELDS
@@ -866,23 +865,43 @@ def _rendered_code(entry: Mapping) -> str:
     return reroute.home.code if reroute else code
 
 
-def _section_lost_text(entry: Mapping, code: str) -> str:
-    """What section_lost looks for of a stage-4 entry: its text, except for a
-    licence stage 6 renders as a State / Number / dates row
-    (`_license_record`, a licence with a state or a number), whose line's
-    words that row never prints: the row's cells. #1577: once the
-    credentials listed as licences rendered elsewhere, real licence rows
-    alone read as lost (JUWDFE, VBNCOF on the #1243 farm)."""
-    text = str(entry.get("text") or "")
-    if code != LICENSURE_CODE:
-        return text
-    licence = _normalize_licensure_entry(entry)
-    if not (licence.state or licence.number) or _classify_licensure_entry(
-            licence.state, licence.number, licence.license_type, licence.original_text) != KIND_LICENSE:
-        return text
-    row = _license_record(licence)
-    return " ".join(str(cell) for cell in (row.state, row.number, row.issue_date, row.last_registration_date)
-                    if cell)
+def _section_lines(blocks: list[tuple[str, str]]) -> defaultdict[str | None, set[str]]:
+    """Whitespace-collapsed lines of each output section, keyed by letter
+    as `_section_tokens` keys them: each paragraph, and each line of a
+    table block (a cell, or a row's cells joined by `TABLE_ROW_JOINER`)."""
+    lines: dict[str | None, set[str]] = defaultdict(set)
+    letter = None
+    for kind, text in blocks:
+        if kind == "p" and _output_section_header(text):
+            letter = _section_letter(text) or letter
+        lines[letter] |= {" ".join(line.split()) for line in text.split("\n") if line.strip()}
+    for code_letter, host in _SECTION_SHARED_WITH.items():
+        lines[code_letter] = lines[host]
+    return lines
+
+
+def _licence_row_lines(entries: list[Mapping]) -> frozenset[str]:
+    """The lines stage 6's licence rows for these F1 entries read as in the
+    output (`_table_lines`' joined row of State / Number / dates cells),
+    resolved by stage 6's own `_resolve_licensure` (on copies: it strips a
+    DEA line from an entry's text), so a column-header expiry or a DEA
+    number cut from a fused cell reads as the row prints it. Only a licence
+    with a state or a number: a licence with neither renders its whole line
+    in the State cell, which its own words already find.
+
+    Such a row prints none of its line's words -- the issuing body is
+    reduced to its state (MIX11 LQNORX: four "<years> <state> Department of
+    ..." licences rendered "<state> | <years>") -- so only the row itself
+    can show the record is there, and the words left to match are the
+    section's own scaffolding ("medical", "license", "registration")."""
+    rows = _resolve_licensure(copy.deepcopy(list(entries))).licenses
+    return frozenset(
+        TABLE_ROW_JOINER.join(" ".join(str(cell).split())
+                              for cell in (row.state, row.number, row.issue_date, row.last_registration_date)
+                              if str(cell).strip())
+        for row in rows
+        if row.source is not None and (_normalize_licensure_entry(row.source).state
+                                       or _normalize_licensure_entry(row.source).number))
 
 
 def lint_section_lost(stage4: dict,
@@ -890,17 +909,30 @@ def lint_section_lost(stage4: dict,
     """One WARN per taxonomy code whose entries are absent from the code's
     own output section (see `_code_absent_from_section`): lost at render,
     or rendered in another section or the Appendix. A record stage 6
-    regroups is read under the code it renders in (`_rendered_code`)."""
-    texts: dict[str, list[str]] = defaultdict(list)
+    regroups is read under the code it renders in (`_rendered_code`).
+
+    Licensure with a licence row to write (`_licence_row_lines`) is judged
+    by those rows instead: lost exactly when none of them is a line of its
+    section. Its words cannot judge it either way -- a rendered row prints
+    too few for the share test, and a lost table's lines still match the
+    section's template words -- and the row is the record, as stage 6
+    writes it."""
+    entries: dict[str, list[Mapping]] = defaultdict(list)
     for e in stage4.get("entries", []):
         code = _rendered_code(e)
         if code and code not in _SECTION_LOST_SKIP_CODES and code[0] in _SECTION_LETTERS:
-            texts[code].append(_section_lost_text(e, code))
+            entries[code].append(e)
     sections = _section_tokens(blocks)
+    section_lines = _section_lines(blocks)
     ubiquitous = _rendered_lines(blocks).ubiquitous | _template_label_tokens()
     findings = []
-    for code, entry_texts in texts.items():
-        if not _code_absent_from_section(entry_texts, sections[code[0]], ubiquitous):
+    for code, code_entries in entries.items():
+        entry_texts = [str(e.get("text") or "") for e in code_entries]
+        rows = _licence_row_lines(code_entries) if code == LICENSURE_CODE else frozenset()
+        if rows:
+            if rows & section_lines[code[0]]:
+                continue
+        elif not _code_absent_from_section(entry_texts, sections[code[0]], ubiquitous):
             continue
         heading = _SECTION_HEADING_PREFIXES.get(
             _SECTION_SHARED_WITH.get(code[0], code[0]), code[0])
