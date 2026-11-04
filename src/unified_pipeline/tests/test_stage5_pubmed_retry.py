@@ -1283,6 +1283,26 @@ def test_same_pmid_elsewhere_is_a_duplicate_but_similar_title_other_year_is_not(
         assert result.get('in_press_superseded', False) is superseded, other
 
 
+def _epub_copy(idx, **fields):
+    return {'element_idx_start': idx, 'taxonomy_code': 'S1',
+            'text': f'Garcia M, Doe J. {INPRESS_TITLE}. Heart Journal. Epub ahead of print.',
+            'extracted_fields': {'title': INPRESS_TITLE, 'authors': 'Garcia M, Doe J', **fields}}
+
+
+def test_two_in_press_copies_of_one_paper_leave_exactly_one_live(tmp_path, monkeypatch):
+    # #2059: each copy found the other as the "published" one, so both were
+    # superseded and stage 6 deleted the paper. A superseded copy is not a
+    # published one: the last copy survives. Told by title and year (both
+    # title-searched), and by a PMID both copies give (one efetch).
+    for fields, responses in (({'year': '2025'}, _found() * 2),
+                              ({'pmid': PMID}, [FakeResponse(200, content=_published_xml())])):
+        results, _, enricher = _run_entries(
+            tmp_path, monkeypatch, [_epub_copy(10, **fields), _epub_copy(20, **fields)], responses)
+        assert [r.get('in_press_superseded', False) for r in results] == [True, False], fields
+        assert results[1]['in_press_note'].startswith(f'Found in PubMed as PMID {PMID}')
+        assert (enricher.stats['in_press_duplicates'], enricher.stats['in_press_resolved']) == (1, 1)
+
+
 # ------------------------- #1166: in press, but PubMed found nothing
 
 def _unmatched(text, code='S7', **fields):
