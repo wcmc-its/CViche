@@ -197,6 +197,18 @@ def grant_status_rebucket_target(
     return None, None
 
 
+def grant_status_says_running(status: str | None) -> bool:
+    """Whether a grant's own status field says it is still running
+    ("Ongoing", "Active", "Current") and names no other bucket (#2063). Such
+    a status is the CV's word against an end date that has passed, so the
+    end date alone does not move the grant to Completed."""
+    lowered = str(status or '').strip().lower()
+    if not _ACTIVE_HEADING_RE.search(lowered):
+        return False
+    return not (_COMPLETED_STATUS_RE.search(lowered) or _PENDING_STATUS_RE.search(lowered)
+                or _NOT_FUNDED_STATUS_RE.search(lowered))
+
+
 def grant_says_not_funded(text: str) -> bool:
     """Whether a grant's status, heading or own words say the application was
     not funded (#1439): the same vocabulary `grant_status_rebucket_target`

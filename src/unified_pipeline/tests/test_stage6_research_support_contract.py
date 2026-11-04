@@ -51,6 +51,7 @@ from unified_pipeline.stage6.normalization import (  # noqa: E402
     grant_heading_rebucket_target,
     grant_status_is_empty_section_label,
     grant_status_rebucket_target,
+    grant_status_says_running,
 )
 from unified_pipeline.stage6.parsing.dates import (  # noqa: E402
     grant_end_date,
@@ -68,7 +69,9 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     _is_cv_owner,
     _pi_name_from_label,
     apply_effort_to_grants,
+    ONGOING_PAST_END_NOTE,
     claim_goal_rows,
+    close_open_award_ends,
     divert_unfunded_grants,
     fill_major_goals_from_text,
     filter_role_effort_headers,
@@ -3965,3 +3968,125 @@ def test_the_honor_listed_as_funding_record_names_indexes_only():
         'severity': 'INFO',
     }
     assert honor_listed_as_funding_warnings([117])[0]['message'].endswith(': 1 entry')
+
+
+# --- #2063: a grant the CV marks ongoing stays Current past its end date -----
+
+@pytest.mark.parametrize('status, running', [
+    ('Ongoing', True),
+    ('Active', True),
+    ('current', True),
+    ('Completed', False),
+    ('Ongoing - pending renewal', False),
+    ('Not funded', False),
+    ('', False),
+    (None, False),
+])
+def test_grant_status_says_running(status, running):
+    assert grant_status_says_running(status) is running
+
+
+def test_a_grant_the_cv_marks_ongoing_stays_current_past_its_end_date():
+    """#2063: 'Dates and Status: 01/2010-06/30/2019 - Ongoing' was filed under
+    Past with 'Status: Ongoing' in its own table."""
+    ongoing = _entry('M2A', title='Example Study', start_date='2010-01',
+                     end_date='2019-06-30', status='Ongoing')
+    ended = _entry('M2A', title='Ended Study', start_date='2015-01', end_date='2019-06-30')
+
+    current, completed, messages = reclassify_past_m2a_grants([ongoing, ended], [], TEST_AS_OF)
+
+    assert (current, completed) == ([ongoing], [ended])
+    assert ongoing['reclassification_note'] == ONGOING_PAST_END_NOTE
+    assert len(messages) == 1
+
+
+def test_a_running_grant_marked_ongoing_carries_no_note():
+    running = _entry('M2A', title='Example Study', start_date='2024-01',
+                     end_date='2029-06', status='Ongoing')
+
+    assert reclassify_past_m2a_grants([running], [], TEST_AS_OF) == ([running], [], [])
+    assert 'reclassification_note' not in running
+
+
+def test_the_ongoing_past_end_note_reaches_the_document_under_current_funding():
+    gen = _sectioned_generator(emit_comments=True)
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title='Ongoing Example Study', agency='NIH',
+                        start_date='01/2011', end_date='04/2017', status='Ongoing')]},
+        as_of=TEST_AS_OF)
+
+    assert _titles_under(gen, CURRENT) == ['Ongoing Example Study']
+    assert _titles_under(gen, COMPLETED) == []
+    notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
+    assert notes == [ONGOING_PAST_END_NOTE]
+
+
+# --- MOCDRL-01 (#1634 reopened): an award's own closed dates beat a project's open end ---
+
+STAGE4_RECORDS = 'stage4_records'
+
+
+def _project_with_awards(code='M2A', first_end='present', text=None):
+    """A '9/2020-present' project holding two awards, each with its own closed
+    dates; stage 4 copied the project's open end onto the first award."""
+    first = {'title': 'Example Project', 'agency': 'Example Award', 'start_date': '2020-09',
+             'end_date': first_end, 'total_funding': '$7,500'}
+    second = {'title': 'Example Project', 'agency': 'Other Grant', 'start_date': '2023-01',
+              'end_date': '2023-12', 'total_funding': '$12,000'}
+    text = text or ('Example Project 9/2020-present\tExample Dept\t'
+                    'Example Award: $7,500 9/2020-8/2021\tOther Grant: $12,000 1/2023-12/2023')
+    return {'text': text, 'taxonomy_code': code,
+            'extracted_fields': {**second, STAGE4_RECORDS: [first, second]}}
+
+
+@pytest.mark.parametrize('code', ['M2A', 'M2B'])
+def test_an_award_record_given_the_projects_open_end_takes_its_own_closed_end(code):
+    entry = _project_with_awards(code)
+
+    [closed] = close_open_award_ends([entry], STAGE4_RECORDS)
+
+    first, second = closed['extracted_fields'][STAGE4_RECORDS]
+    assert first['end_date'] == '8/2021'
+    assert second['end_date'] == '2023-12'
+    # The caller's record is not written through.
+    assert entry['extracted_fields'][STAGE4_RECORDS][0]['end_date'] == 'present'
+
+
+@pytest.mark.parametrize('entry', [
+    # The award line is itself open: the open end is the award's own.
+    _project_with_awards(text='Example Project\tExample Award: $7,500 9/2020-present'
+                              '\tOther Grant: $12,000 1/2023-12/2023'),
+    # No line holds the record's amount.
+    _project_with_awards(text='Example Project 9/2020-present\tExample Award 9/2020-8/2021'),
+    # The amount's line starts in another year than the record.
+    _project_with_awards(text='Example Project 9/2020-present\tExample Award: $7,500 9/2018-8/2019'),
+    # Not awarded funding.
+    _project_with_awards(code='M2C'),
+    _project_with_awards(first_end='2021-08'),
+])
+def test_an_open_end_without_its_own_closed_award_line_is_left_alone(entry):
+    assert close_open_award_ends([entry], STAGE4_RECORDS) == [entry]
+
+
+def test_the_closed_award_renders_under_past_funding_with_its_own_dates():
+    """MOCDRL-01 end to end through fan-out and the section fill."""
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+
+    entries = close_open_award_ends([_project_with_awards()], STAGE4_RECORDS_KEY)
+    children = fan_out_multi_record_entries(entries, FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2A': children}, as_of=TEST_AS_OF)
+
+    assert _tables_under(gen, CURRENT) == []
+    durations = [_cells(t)['Duration of support:'] for t in _tables_under(gen, COMPLETED)]
+    assert sorted(durations) == ['01/23-12/23', '09/20-08/21']
+
+
+def test_stage6_grouping_closes_the_award_end_before_fan_out():
+    """The wire: `_group_entries_by_code` runs `close_open_award_ends` on the
+    whole entry, so the fanned-out award record carries its own end."""
+    grouped = WCMTemplateGenerator(verbose=False)._group_entries_by_code([_project_with_awards()])
+
+    ends = sorted(child['extracted_fields']['end_date'] for child in grouped['M2A'])
+    assert ends == ['2023-12', '8/2021']

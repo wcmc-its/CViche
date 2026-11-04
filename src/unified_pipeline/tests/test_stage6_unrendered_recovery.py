@@ -1338,6 +1338,36 @@ def test_a_reconsidered_k_or_l_segment_carries_no_bullet(code, bulleted):
         assert _plain_left(para, first_line=True) == plain_entry_left_twips(0)
 
 
+# Blank paragraphs one subsection's grant tables leave behind: more than the
+# ten-paragraph window the insert-point scan once stopped at (#2063 rework).
+_BLANKS_BETWEEN_GRANT_TABLES = 12
+
+
+def test_a_segment_anchors_in_its_subsection_past_many_blank_paragraphs():
+    gen = _generator()
+    header_idx = gen._find_subsection_header("Current Research Funding")
+    first_body = gen.doc.paragraphs[header_idx + 1]
+    for _ in range(_BLANKS_BETWEEN_GRANT_TABLES):
+        first_body.insert_paragraph_before()
+    segment = "Synthetic recovered grant line, Example Foundation, 2020-Ongoing"
+
+    assert gen._insert_reconsidered_segment(segment, "M2A") is True
+
+    assert _heading_above(gen, segment) == "Current Research Funding"
+
+
+def test_a_segment_past_the_last_blank_of_its_section_falls_to_the_section_end():
+    # Positive control for the scan bound: with nothing but blanks between
+    # a header and the next major section, the segment lands just before it.
+    gen = _generator()
+    header_idx = gen._find_subsection_header("Patents & Inventions")
+    section_end = gen._find_section_end_paragraph_idx(header_idx)
+    for para in gen.doc.paragraphs[header_idx + 1:section_end]:
+        para.text = ""
+
+    assert gen._find_subsection_insert_point(header_idx) == section_end
+
+
 def test_every_section_header_map_code_anchors_in_the_blank_template():
     codes = _section_header_map_codes()
     assert {"K3", "K4", "K5"} <= set(codes), "map harvest is vacuous"
