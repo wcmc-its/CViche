@@ -638,6 +638,11 @@ LINT_COPY = {
         "A source heading clearly names one section, but every entry under it was filed in a "
         "different section, so that section is empty in the document.",
         "Check the quoted entries and move any that belong under their source heading's section."),
+    "degree_row_not_degree": LintCopy(
+        "Not a degree",
+        "A row of the Academic Degrees table, which lists Bachelor's degrees and higher, names no "
+        "degree: a high-school diploma, a minor, a certificate, a training post or only a school.",
+        "Check the quoted row: add the degree it led to, or move it to the section it belongs in."),
 }
 
 # #1388: a rerun of the same CV helps only when the failure was a passing one,

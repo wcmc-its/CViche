@@ -16,10 +16,13 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.doctor.lints.classification import (  # noqa: E402
+    DEGREE_CELL_QUOTE_CHARS,
     S5_MIN_SIBLINGS,
     SECTION_CONSISTENCY_EVIDENCE_MAX,
+    lint_degree_row_not_degree,
     lint_pinned_heading_empty,
     lint_section_consistency,
+    names_academic_degree,
 )
 from unified_pipeline.stage3b.header_pin import HEADER_PIN_MIN_CONFIDENCE  # noqa: E402
 
@@ -902,3 +905,78 @@ def test_malformed_stage3a_options_are_dropped_not_raised_1949():
         "N1", {"confidence": 1.0}, {"code": "N1", "confidence": "high"}]}]}
     assert _pinned(stage3a, _entry(_DIRECTOR, "O", "MENTORING")) == []
     assert stage3a["mappings"][0]["taxonomy_options"][0] == "N1", "the loaded artifact is not mutated"
+
+
+# --- degree_row_not_degree (#1415) -----------------------------------------
+
+_DEGREE_HEADER = ["Degree, include field of study", "Institution, city and state",
+                  "Dates attended\n(mm/yyyy-mm/yyyy)", "Year Awarded"]
+
+
+def _degrees(*cells, other_tables=1):
+    """A document with ``other_tables`` non-degree tables, then the Academic
+    Degree(s) table holding one invented row per degree cell."""
+    other = [[["Name", "Value"], ["Invented", "Thing"]]] * other_tables
+    rows = [_DEGREE_HEADER] + [[cell, "Invented University, Springfield, ZZ", "", "2001"]
+                               for cell in cells]
+    return lint_degree_row_not_degree(other + [rows])
+
+
+@pytest.mark.parametrize("cell", [
+    "Diploma", "High School Diploma", "Minor: Invented Studies", "Medical School",
+    "Certificate in Invented Methods", "Graduate Cert. of Invented Studies", "Internship",
+    "Resident, Invented Surgery", "Clinical Fellowship", "Associate of Science, Invented Studies",
+    "A.A.", "A.A.S., Invented Studies", "Undergraduate, Invented Studies", "Pre-medical Invented Track",
+    "Medicine", "MRCP", "Fellow, Invented Royal College", "Medical Graduate, Invented Studies", "null",
+    "Pre-Med and Invented School",
+])
+def test_a_row_naming_no_degree_is_one_warn_finding_on_its_cell_1415(cell):
+    findings = _degrees("Ph.D., Invented Science", cell)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("degree_row_not_degree", "WARN")]
+    assert findings[0]["message"].startswith("B1: table 1, row 2:")
+    assert findings[0]["evidence"] == [cell]
+
+
+@pytest.mark.parametrize("cell", [
+    # US abbreviations, dotted, spaced and bare
+    "B.S. Invented Studies", "B. Sci, Invented Studies", "M.S., Invented Studies",
+    "Ph.D, Invented Chemistry", "MD", "M.D.", "D.O.", "MPH", "M.B.A.", "J.D.", "Pharm.D.", "D.D.S.",
+    "DNP", "Executive MBA", "MSCE, Invented Studies", "Ed.M., Invented Studies", "MSCS",
+    "B. MED.SC, Invented Studies", "Ph. D. in Invented Studies", "Ph. D.", "M. D.",
+    "B.P.H.E (Invented Studies)", "BM", "M.Math, Invented Studies", "Drs., Invented Studies",
+    # nursing
+    "BSN", "RN, Diploma in Invented Nursing", "Master of Science in Invented Nursing",
+    # spelled out
+    "Bachelor of Arts", "Bachelors of Invented Studies", "Doctorate of Invented Studies",
+    "Medical Degree, Invented Studies", "Master's in Invented Policy", "Doctor of Philosophy",
+    # international forms
+    "MBBS", "M.B., B.S.", "MBChB", "M.B.B.Ch.", "B.Med.Sci.", "MD (Dr. med.)", "Dr. med.",
+    "Dipl.-Ing.", "Diplom-Biologe", "MUDr.", "Licenciatura en Biologia", "Laurea in Medicina",
+    "Maitrise de Biologie", "Médico Cirujano", "Staatsexamen, Medicine", "MDCM", "BAO",
+    "Ingeniero Civil", "D.Phil., Invented Studies", "Habilitation, Medicine",
+])
+def test_a_row_naming_a_degree_is_quiet_1415(cell):
+    assert names_academic_degree(cell), cell
+    assert _degrees(cell) == []
+
+
+@pytest.mark.parametrize("cell", ["Diploma, do as one can", "Minor: ma be am", "Ms. Invented",
+                                  "Pre-med. Do Invented"])
+def test_words_in_lower_or_title_case_name_no_degree_1415(cell):
+    """"do", "be", "am", "ma", "Ms" and "med" are words, not DO, BE, AM, MA, MS, MEd."""
+    assert not names_academic_degree(cell)
+
+
+def test_empty_degree_cells_and_other_tables_are_quiet_1415():
+    other = [["Degree of involvement", "Role"], ["Invented", "Lead"]]  # not the degree table
+    assert lint_degree_row_not_degree([[["Name", "Value"], ["Diploma", "x"]]]) == []
+    assert _degrees("", "  ", "N/A") == []
+    assert lint_degree_row_not_degree([[_DEGREE_HEADER]]) == []
+    assert len(lint_degree_row_not_degree([other] + [[_DEGREE_HEADER, ["Diploma", "", "", ""]]])) == 1
+
+
+def test_every_non_degree_row_is_its_own_finding_and_a_long_cell_is_cut_1415():
+    long_cell = "Certificate " + "invented words " * 20
+    findings = _degrees("Diploma", "BA, Invented Studies", long_cell, other_tables=0)
+    assert [f["message"].split(":")[1].strip() for f in findings] == ["table 0, row 1", "table 0, row 3"]
+    assert findings[1]["evidence"] == [long_cell.strip()[:DEGREE_CELL_QUOTE_CHARS]]

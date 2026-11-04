@@ -204,6 +204,8 @@ REVIEW_FLAGS = {
     "glyph_field": "A bullet symbol is shown here instead of a value: fill it in from your CV.",
     "pinned_heading_empty": ("Filed in a different section than its heading in your CV, which "
                              "left that section empty: check where it belongs."),
+    "degree_row_not_degree": ("This row names no degree, but this table is for Bachelor's degrees "
+                              "and higher: add the degree, or move the row to where it belongs."),
     "stage2_unaccounted": "Part of your CV was never read: check this section against the CV.",
     "record_date_shift": ("Dates, places or titles in this list may belong to the entry before "
                           "or after: check each against your CV."),

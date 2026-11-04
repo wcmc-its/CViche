@@ -586,6 +586,12 @@ Lints, ranked by the severity of the failure class they catch:
                           the CV has the code, so its template slot renders
                           empty (XAXVYB's N1 heading, #1938/#1949). INFO, one
                           per heading. Reads stage 3b and stage 3a
+14be. degree_row_not_degree a row of the Academic Degree(s) table (Bachelor's
+                          and higher) whose degree cell names no academic
+                          degree: a high-school diploma, a minor, a
+                          certificate, a training post or a school's name
+                          (#1415; MIX11 HTGWYH-06, KGXMLK-09, LPPQAJ-16).
+                          WARN, one per row. Reads the docx's table rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -657,6 +663,7 @@ from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_degree_row_not_degree,
     lint_pinned_heading_empty,
     lint_section_consistency,
 )
@@ -993,6 +1000,7 @@ KNOWN_LINTS = (
     "renderer_row_missing",
     "mentee_field_incomplete",
     "pinned_heading_empty",
+    "degree_row_not_degree",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1324,6 +1332,9 @@ LINT_PREVALENCE = {
     # distinct uids with a stored stage-3b artifact and its stage-3a mapping,
     # 2026-10-19.
     "pinned_heading_empty": 0.077,
+    # degree_row_not_degree (#1415; DRN-1 in doctor/PRECISION.md): 64 of the
+    # w1243 farm's 460 runs, fresh stage-6 renders, 2026-11-04.
+    "degree_row_not_degree": 0.139,
 }
 
 
@@ -1959,6 +1970,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("mentee_field_incomplete", lint_mentee_field_incomplete, ("table_rows",),
              optional=("blocks",)),
     LintSpec("pinned_heading_empty", lint_pinned_heading_empty, ("stage_3b", "stage_3a")),
+    LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
 )
 
 #: The views read from the stage-6 docx.

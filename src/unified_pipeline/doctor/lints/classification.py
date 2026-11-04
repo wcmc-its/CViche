@@ -45,6 +45,12 @@ and life_support_as_license shapes it has put right.
 stage 3a: a heading 3a mapped to code X at the header-pin floor whose entries
 3b coded anything but X, so X's template slot gets none of them (XAXVYB's
 N1 heading, #1938).
+
+`lint_degree_row_not_degree` (#1415) reads the rendered document instead: a
+row of the Academic Degree(s) table whose degree cell names no academic
+degree, which is where a record wrongly coded B1 (a high-school diploma, a
+minor, a training post) or a B1 record that lost its degree shows (MIX11
+HTGWYH-06, KGXMLK-09, LPPQAJ-16).
 """
 
 import copy
@@ -77,6 +83,7 @@ from unified_pipeline.stage3b.header_pin import (
     HEADER_PIN_MIN_CONFIDENCE,
 )
 from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
+from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     heading_names_teaching_role,
@@ -597,4 +604,104 @@ def lint_pinned_heading_empty(stage3b: dict, stage3a: dict) -> list[dict]:
                                            path, entries)
         findings.append(_finding("pinned_heading_empty", PINNED_HEADING_EMPTY_SEVERITY,
                                  message, evidence))
+    return findings
+
+
+# --- degree_row_not_degree (#1415) ------------------------------------------
+
+#: WARN: 87 of 89 flags hand-checked true over 471 fresh renders (DRN-1 in
+#: doctor/PRECISION.md), above the 70% WARN bar.
+DEGREE_ROW_SEVERITY = "WARN"
+#: The Academic Degree(s) table, by the first cell of its header row: the WCM
+#: template's "Degree, include field of study" (`stage6/sections/education.py`).
+DEGREE_TABLE_HEADER_RE = re.compile(r"^\s*degree(?:\(s\))?\s*,", re.IGNORECASE)
+#: Academic-degree abbreviations, compared with their dots dropped, and
+#: again with the spaces after them closed up too ("Ph. D." -> "PhD"). A
+#: token counts written as listed or in capitals ("PHD"), never in lower or
+#: title case, so the words "do", "be", "am" and "med" (MEd) are no degree.
+#: It holds the international forms (MBBS, MBChB, Dr med, Dipl-Ing, MUDr, the
+#: Dutch Drs) so a degree written the way its country writes it is not
+#: flagged, and the nursing and physician-assistant credentials a nursing CV
+#: lists as its degree (RN, BSN, NP, PA-C): the cell names a credential, and
+#: whether it belongs here is the reader's call.
+DEGREE_ABBREVIATIONS = frozenset({
+    # bachelor's
+    "BA", "BS", "AB", "SB", "BSc", "ScB", "BSE", "BSEE", "BSME", "BSChE", "BE", "BEng",
+    "BTech", "BBA", "BFA", "BArch", "BPharm", "BPH", "BSPH", "BSN", "BN", "BScN",
+    "BMedSci", "BMedSc", "BMSc", "BPHE", "BM", "BMS", "BPhil", "BSW", "BMus", "BEd", "BAS",
+    "BHSc", "BHS", "BSci", "BCom", "BEc", "BVSc", "BDS", "LLB",
+    # master's
+    "MA", "MS", "AM", "SM", "MSc", "ScM", "MSCE", "MSCI", "MSCR", "MSPH", "MPH", "MBA",
+    "MPA", "MPP", "MHA", "MHS", "MHSc", "MSW", "MEd", "MEng", "MFA", "MPhil", "MRes",
+    "MSN", "MMath", "MSCS", "MSIS", "MSEd", "EdM", "MMSc", "MMS", "MSHP", "MSHS", "MCR", "MTR",
+    "MAS", "MBI", "MSE", "MSEE",
+    "MArch", "MLS", "MLIS", "MDiv", "MMed", "MMedSci", "MChir", "MCh", "MSt", "LLM",
+    "MAT", "MCP", "MSPT", "MPAS", "MSPAS", "MHPE", "MAEd", "EMBA", "MPharm",
+    # doctoral and professional
+    "MD", "DO", "PhD", "DPhil", "ScD", "DSc", "DrPH", "EdD", "JD", "PharmD", "DDS", "DMD",
+    "DVM", "VMD", "DNP", "DNSc", "DPT", "OD", "PsyD", "AuD", "OTD", "DMSc", "DHSc", "DSW",
+    "DMA", "DBA", "DPM", "DC", "ND", "MDCM", "MBBS", "MBChB", "MBBCh", "BMBS", "BMBCh",
+    "MB", "BCh", "ChB", "BChir", "BAO", "BChD", "DrMed", "MUDr", "DrPhil", "Dr", "Drs",
+    "Dipl", "LMS",
+    # nursing and physician-assistant credentials
+    "RN", "ADN", "CRNA", "NP", "PA",
+})
+_DEGREE_ABBREVIATIONS_UPPER = frozenset(token.upper() for token in DEGREE_ABBREVIATIONS)
+#: Spelled-out degrees, English and international: bachelor's, master's,
+#: doctorate, "Medical Degree", licenciatura/licence, laurea, maitrise,
+#: magister, Diplom, Staatsexamen, medico (cirujano), ingeniero, habilitation.
+DEGREE_WORDS_RE = re.compile(
+    r"bachelor|baccalaur|\bmasters?\b|\bmaster['’]s|\bmagist|doctor|\bdegree\b"
+    r"|licenciad|licenciatura|\blicen[cs]e\b|licentiat|\blaurea\b|ma[iî]trise"
+    r"|\bdiplom\b|\bdiplom-|staatsexamen|\bm[eé]dic[oa]\b|cirujan|ingenier|ing[eé]nieur"
+    r"|habilitation|\bdottor", re.IGNORECASE)
+#: A cell's tokens, once `_ABBREVIATION_DOTS_RE` has closed up its dots.
+_DEGREE_TOKEN_RE = re.compile(r"[A-Za-z]+")
+#: A dot and the space after it, between a piece of up to three letters and a
+#: capitalised one of up to four: the gap "M. Sc", "Ph. D." and "B. A." write
+#: inside one abbreviation, not the one before "Ph. D. in Invented Studies".
+_ABBREVIATION_DOTS_RE = re.compile(r"\b([A-Za-z]{1,3})\.\s+(?=[A-Z][A-Za-z]{0,3}\b)")
+#: Characters of the degree cell quoted in the evidence: one of the run
+#: page's `DOCTOR_EVIDENCE_CAPS`, so a cut quote shows its ellipsis.
+DEGREE_CELL_QUOTE_CHARS = 120
+
+
+def names_academic_degree(cell: str) -> bool:
+    """Whether a rendered degree cell names an academic degree: a word of
+    `DEGREE_WORDS_RE`, or a token of `DEGREE_ABBREVIATIONS`."""
+    if DEGREE_WORDS_RE.search(cell):
+        return True
+    # Two readings: dots dropped ("B.S. Invented" -> "BS Invented"), and dots
+    # closed up with the space after them ("M. Sc" -> "MSc").
+    readings = (cell.replace(".", ""), _ABBREVIATION_DOTS_RE.sub(r"\1", cell).replace(".", ""))
+    return any(token in DEGREE_ABBREVIATIONS
+               or (token.isupper() and token in _DEGREE_ABBREVIATIONS_UPPER)
+               for reading in readings for token in _DEGREE_TOKEN_RE.findall(reading))
+
+
+def _degree_tables(table_rows: list[list[list[str]]]) -> list[tuple[int, list[list[str]]]]:
+    """(index, rows) of every Academic Degree(s) table, by its header row."""
+    return [(at, rows) for at, rows in enumerate(table_rows)
+            if rows and rows[0] and DEGREE_TABLE_HEADER_RE.match(rows[0][0])]
+
+
+def lint_degree_row_not_degree(table_rows: list[list[list[str]]]) -> list[dict]:
+    """One WARN finding per Academic Degree(s) row whose degree cell names
+    no academic degree (#1415): a high-school diploma, a minor, a
+    certificate, a training post or a school's name, in a table the template
+    heads "Bachelor's and higher". A row whose degree cell is empty claims no
+    degree, and stage 6's "N/A" in a table nothing filled (`empty_slots`) is
+    no row; both are left out. The evidence is the degree cell, which the
+    review copy anchors its comment on."""
+    findings = []
+    for at, rows in _degree_tables(table_rows):
+        for number, row in enumerate(rows[1:], start=1):
+            degree = row[0].strip() if row else ""
+            if not degree or degree == NOT_APPLICABLE or names_academic_degree(degree):
+                continue
+            findings.append(_finding(  # the key as a literal: the registry test reads it by AST
+                "degree_row_not_degree", DEGREE_ROW_SEVERITY,
+                f"B1: table {at}, row {number}: the degree cell names no academic degree, "
+                f"in a table for Bachelor's and higher",
+                [degree[:DEGREE_CELL_QUOTE_CHARS]]))
     return findings
