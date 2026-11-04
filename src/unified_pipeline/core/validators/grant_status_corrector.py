@@ -14,6 +14,7 @@ application is not a completed award (EBYSBC E7).
 
 import re
 from datetime import datetime
+from typing import NamedTuple
 
 # Current year for comparison
 CURRENT_YEAR = datetime.now().year
@@ -62,6 +63,71 @@ _OPEN_RANGE_RE = re.compile(
     r'\b(19\d{2}|20\d{2})(?:\s*[-–—]|\s+(?:to|through|until))\s*'
     r'(?:present|date|current|ongoing)\b', re.IGNORECASE)
 
+# A dollar amount, its digits captured: "$7,500", "$ 12,000.00".
+_AMOUNT_RE = re.compile(r'\$\s*(\d[\d,]*)')
+# A closed span written with a year at each end, each end optionally a
+# month or a full date: "2021-2022", "9/2020-8/2021", "09/01/2020 - 08/31/2021".
+# `end` is the end as the CV wrote it.
+_AWARD_SPAN_RE = re.compile(
+    r'(?<![\d/])(?:\d{1,2}/){0,2}(?P<start_year>(?:19|20)\d{2})\s*[-–—]\s*'
+    r'(?P<end>(?:\d{1,2}/){0,2}(?P<end_year>(?:19|20)\d{2}))(?!\d)')
+# What splits an entry into the lines the CV wrote: a tab, a line break, or a
+# sentence end before a capital ("Project, 2021-present. Example Award, $7,500").
+_LINE_SPLIT_RE = re.compile(r'[\t\n]+|(?<=\.)\s+(?=[A-Z])')
+
+
+class AwardSpan(NamedTuple):
+    """One award line of a grant entry: a line holding a dollar amount and
+    the award's own dates (#1634 reopened, MOCDRL-01)."""
+    amounts: frozenset[str]
+    start_year: int
+    end_year: int | None  # None: the line's span is open ("9/2020-present")
+    end: str  # the end as the CV wrote it ("7/2022"), or '' when open
+
+
+def amount_digits(amount: object) -> str:
+    """The digits of an amount's whole-dollar part: '$7,500' -> '7500'."""
+    whole = str(amount or '').split('.', 1)[0]
+    return re.sub(r'\D', '', whole)
+
+
+def _award_span(line: str) -> AwardSpan | None:
+    """`line` as an award line: a dollar amount and exactly one span, closed
+    or open. None for any other line."""
+    amounts = frozenset(amount_digits(m.group(1)) for m in _AMOUNT_RE.finditer(line))
+    if not amounts:
+        return None
+    open_end = _OPEN_RANGE_RE.search(line)
+    closed = list(_AWARD_SPAN_RE.finditer(line))
+    if open_end and not closed:
+        return AwardSpan(amounts, int(open_end.group(1)), None, '')
+    if len(closed) != 1 or open_end:
+        return None
+    span = closed[0]
+    return AwardSpan(amounts, int(span.group('start_year')), int(span.group('end_year')),
+                     span.group('end'))
+
+
+def award_spans(text: str) -> list[AwardSpan]:
+    """Every award line of a grant entry's text (`_award_span`), in order.
+
+    An award written inside a longer project carries its own dates
+    ('Project, 9/2020-present', then 'Example Award: $7,500 9/2020-8/2021'):
+    those dates, not the project's, say whether that funding is running."""
+    spans = (_award_span(line) for line in _LINE_SPLIT_RE.split(text or ''))
+    return [span for span in spans if span is not None]
+
+
+def _closed_award_years(text: str) -> tuple[int, int] | None:
+    """The years every award line of `text` spans, when each of them is closed:
+    (earliest start, latest end). None when there is no award line, or one is
+    open -- an award still running keeps the entry running."""
+    spans = award_spans(text)
+    ends = [span.end_year for span in spans if span.end_year is not None]
+    if not spans or len(ends) != len(spans):
+        return None
+    return min(span.start_year for span in spans), max(ends)
+
 
 def _closed_range(text: str) -> tuple[int, tuple[int, int]] | None:
     """The first closed range in `text` and the offset it starts at, or None.
@@ -109,6 +175,12 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
     whose role sub-ranges ended were filed as completed). A closed range
     written first keeps winning, as before.
 
+    Except over the entry's award lines (`award_spans`): when the open end is
+    a project's and every line holding a dollar amount gives that award's own
+    closed dates, the awards' years win. The funding ended though the project
+    runs on (MOCDRL-01: an award of 9/2020-8/2021 inside a '9/2020-present'
+    project was flipped to current funding).
+
     Returns:
         (start_year, end_year) or None if no range found.
         For "present", end_year = CURRENT_YEAR + 1 (still active).
@@ -118,6 +190,9 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
     if closed and not (open_end and open_end.start() <= closed[0]):
         return closed[1]
     if open_end:
+        awards = _closed_award_years(text)
+        if awards is not None:
+            return awards
         return int(open_end.group(1)), CURRENT_YEAR + 1  # Still active
 
     # A year followed by a range dash is a range none of the patterns above

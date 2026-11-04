@@ -135,6 +135,53 @@ def test_an_ongoing_study_with_an_ended_role_sub_range_stays_current(code):
     assert ('status_correction' in corrected) == (code == 'M2B')
 
 
+@pytest.mark.parametrize('text, expected', [
+    # MOCDRL-01 shape: every award line inside an open project is closed.
+    ('Example Project 9/2020-present\tExample Dept\tExample Award: $7,500 9/2020-8/2021'
+     '\tOther Grant: $12,000 1/2023-12/2023\tRole: PI', (2020, 2023)),
+    ('Example Project, 9/2020-present. Example Award, $7,500, 9/2020-8/2021, completed',
+     (2020, 2021)),
+    # An award line still running keeps the entry running.
+    ('Example Project 2019-present\tAward A $7,500 2019-2020\tAward B $10,000 2023-present',
+     (2019, TEST_YEAR + 1)),
+    # An amount on the open line itself: that is the award's span.
+    ('Example R01 $500,000 2019-present\tCo-I (2017-2024)', (2019, TEST_YEAR + 1)),
+    # No amount anywhere: #1634's role sub-range rule is unchanged.
+    ('2017-present Example Study\tCo-I (2017-2024)', (2017, TEST_YEAR + 1)),
+])
+def test_closed_award_lines_inside_an_open_project_decide_its_years(text, expected):
+    assert extract_year_range(text) == expected
+
+
+def test_a_completed_award_inside_a_running_project_stays_completed():
+    """MOCDRL-01: the model's M2B was flipped to M2A on the project's '9/2020-present'
+    though the award line read '$7,500 9/2020-8/2021'."""
+    entry = _grant('M2B', 'Example Project 9/2020-present\tExample Award: $7,500 9/2020-8/2021',
+                   'Research Activities')
+
+    assert correct_grant_status(entry) is entry
+
+
+@pytest.mark.parametrize('line, expected', [
+    ('Example Award: $7,500 9/2020-8/2021',
+     grant_status_corrector.AwardSpan(frozenset({'7500'}), 2020, 2021, '8/2021')),
+    ('Example Award: $7,500.00 09/01/2020 - 08/31/2021',
+     grant_status_corrector.AwardSpan(frozenset({'7500'}), 2020, 2021, '08/31/2021')),
+    ('Example Award $7,500 2020-present', grant_status_corrector.AwardSpan(frozenset({'7500'}), 2020, None, '')),
+])
+def test_award_spans_reads_one_award_line(line, expected):
+    assert grant_status_corrector.award_spans(line) == [expected]
+
+
+@pytest.mark.parametrize('text', [
+    'Example Project 2019-2020 and 2021-2022',            # no amount
+    'Example Award $7,500 2019-2020 renewed 2021-2022',   # two spans on one line
+    'Example Award $7,500 2019-2020 through 2021-present',  # closed and open together
+])
+def test_award_spans_skips_lines_that_are_not_one_award(text):
+    assert grant_status_corrector.award_spans(text) == []
+
+
 def test_a_range_with_a_typo_is_not_read_as_its_start_year():
     """web46: "04/01/2022-03/312027" fell through to the single-year guess, 2022."""
     entry = _grant('M2A', '04/01/2022-03/312027 Example Grant $1,000,000',

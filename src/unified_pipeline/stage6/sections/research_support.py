@@ -39,6 +39,7 @@ constants only. The verbose `print` lines are the other channel and do quote
 titles; those are the stage's parsed stdout contract (CODING_STANDARDS.md 7.1)
 and are unchanged, word for word, from before this module was split out.
 """
+import copy
 import logging
 import re
 from datetime import date
@@ -59,6 +60,11 @@ from unified_pipeline.core.honor_lines import (
     heading_names_honors,
 )
 from unified_pipeline.core.text_norm import fold_quotes
+from unified_pipeline.core.validators.grant_status_corrector import (
+    AwardSpan,
+    amount_digits,
+    award_spans,
+)
 
 from ..formatting import (
     _format_currency,
@@ -76,6 +82,7 @@ from ..normalization import (
     grant_says_not_funded,
     grant_status_is_empty_section_label,
     grant_status_rebucket_target,
+    grant_status_says_running,
 )
 from ..parsing.dates import grant_end_date, grant_has_ended
 from ..resolution import _get_cv_owner_name
@@ -248,6 +255,17 @@ PERCENT_EFFORT_PRECISION = Decimal('0.01')
 # End-date text that means "still running", so an M2A grant carrying it is
 # never reclassified as completed however the year parses.
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
+
+# The comment on a grant the CV marks running whose end date has passed: it
+# stays under Current, and the faculty member is asked which is right (#2063).
+ONGOING_PAST_END_NOTE = (
+    'The CV lists this grant as ongoing, but its end date has passed. '
+    'Please confirm its status.')
+
+# The codes whose records `close_open_award_ends` reads: awarded funding.
+AWARDED_GRANT_CODES = frozenset({'M2A', 'M2B'})
+# A four-digit year inside a stage-4 date ("2019-03", "3/2019").
+_FOUR_DIGIT_YEAR_RE = re.compile(r'\b((?:19|20)\d{2})\b')
 
 # The goals phrase in a grant's own text or in a goals row of its own (#958),
 # and four measured wording variants (#829): the WCM label "(Optional - The
@@ -618,6 +636,14 @@ def reclassify_past_m2a_grants(
     and re-rendering an old document reproduces the buckets it had (review
     thread 3932312407 item 7). Returns (M2A, M2B, verbose lines); the inputs are
     left as they were.
+
+    A grant whose own status says it is running (`grant_status_says_running`:
+    "Ongoing", "Active") stays under Current however its end date reads, with
+    a comment asking the faculty member to confirm (#2063: three grants the
+    CV marks 'Ongoing' rendered under Past with 'Status: Ongoing' in their own
+    tables). Judgement call: only the status field counts, not an "Active"
+    heading. A heading over a list the CV stopped updating is the case this
+    rule exists for, and a grant's own status line is not.
     """
     current = list(m2a_entries)
     completed = list(m2b_entries)
@@ -632,9 +658,13 @@ def reclassify_past_m2a_grants(
         # Parse end date to check if it's in the past
         if end_date and end_date.lower() not in OPEN_ENDED_END_DATES:
             end = grant_end_date(end_date, as_of, fields.get('start_date'))
-            if end is not None and grant_has_ended(end, as_of):
-                # This grant has ended - reclassify to M2B
-                entries_to_move.append((entry, end_date, end.year))
+            if end is None or not grant_has_ended(end, as_of):
+                continue
+            if grant_status_says_running(fields.get('status')):
+                entry.setdefault('reclassification_note', ONGOING_PAST_END_NOTE)
+                continue
+            # This grant has ended - reclassify to M2B
+            entries_to_move.append((entry, end_date, end.year))
 
     # Move entries and add reclassification comments
     for entry, end_date, end_year in entries_to_move:
@@ -693,6 +723,70 @@ def promote_open_ended_m2b_grants(
         title = fields.get('title') or 'Unknown'
         messages.append(f"  Reclassified to M2A: '{title[:40]}...' (ends {end_date})")
     return current, completed, messages
+
+
+def _year_of(date_text: object) -> int | None:
+    """The four-digit year a stage-4 date names, or None."""
+    match = _FOUR_DIGIT_YEAR_RE.search(str(date_text or ''))
+    return int(match.group(1)) if match else None
+
+
+def own_award_end(record: GrantFields, spans: list[AwardSpan]) -> str | None:
+    """The end date the CV wrote on `record`'s own award line, when stage 4
+    gave the record an open end ('present') instead (MOCDRL-01).
+
+    The record's award line is the one `award_spans` line holding the
+    record's own amount, and starting in the record's start year when it has
+    one. Exactly one such line, and a closed one, or None: the record's open
+    end is left as stage 4 wrote it."""
+    end_date = str(record.get('end_date') or '').strip().lower()
+    digits = amount_digits(record.get('total_funding'))
+    if end_date not in OPEN_ENDED_END_DATES or not end_date or not digits:
+        return None
+    start_year = _year_of(record.get('start_date'))
+    lines = [span for span in spans if digits in span.amounts
+             and (start_year is None or span.start_year == start_year)]
+    if len(lines) != 1:
+        return None
+    return lines[0].end or None  # an open line's `end` is '': it closes nothing
+
+
+def close_open_award_ends(entries: list[dict], records_key: str) -> list[dict]:
+    """`entries` with every awarded grant record's open end replaced by the
+    closed end its own award line gives (`own_award_end`). Runs before
+    fan-out, while each entry still holds its whole text.
+
+    Stage 4 can copy a project's '9/2020-present' onto an award inside it
+    whose line reads '$7,500 9/2020-8/2021', and the award then renders as
+    current funding running to the present (MOCDRL-01, #1634 reopened). An
+    entry this changes is copied (the entry, its fields and its records list);
+    every other entry is passed through as it arrived."""
+    out: list[dict] = []
+    for entry in entries:
+        fields = entry.get('extracted_fields')
+        if entry.get('taxonomy_code') not in AWARDED_GRANT_CODES or not isinstance(fields, dict):
+            out.append(entry)
+            continue
+        spans = award_spans(str(entry.get('text') or ''))
+        ends = [own_award_end(cast(GrantFields, record), spans)
+                for record in _grant_and_stage4_records(fields, records_key)]
+        if not any(ends):
+            out.append(entry)
+            continue
+        clone = copy.deepcopy(entry)
+        targets = _grant_and_stage4_records(clone['extracted_fields'], records_key)
+        for record, end in zip(targets, ends, strict=True):
+            if end:
+                record['end_date'] = end
+        out.append(clone)
+    return out
+
+
+def _grant_and_stage4_records(fields: dict, records_key: str) -> list[dict]:
+    """A grant's own fields, then each record dict stage 4 listed under `records_key`."""
+    records = fields.get(records_key)
+    listed = records if isinstance(records, list) else []
+    return [fields, *(record for record in listed if isinstance(record, dict))]
 
 
 def parse_major_goals(text: str | None) -> str | None:

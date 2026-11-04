@@ -302,6 +302,7 @@ from unified_pipeline.stage6.sections.postdoc_training import POSTDOC_TRAINING_H
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS, _TALK_EVENT_KEYS
 from unified_pipeline.stage6.sections.research_summary import _SUMMARY_METHOD_VERBATIM_M1
 from unified_pipeline.stage6.sections.research_support import (
+    close_open_award_ends,
     honor_listed_as_funding_warnings,
     is_honor_listed_as_funding,
 )
@@ -2332,6 +2333,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         grant_reviews_moved: list[object] = []
         honors_moved: list[object] = []
         self._declined_lists = []
+        # MOCDRL-01: an award's own closed dates beat the project's open end
+        # stage 4 copied onto it; read before fan-out splits the entry's text.
+        entries = close_open_award_ends(entries, STAGE4_RECORDS_KEY)
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY, declined=self._declined_lists)
