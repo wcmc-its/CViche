@@ -2094,3 +2094,47 @@ def test_a_one_item_certificate_number_list_renders_as_its_number():
          "extracted_fields": {"certifying_board": "American Board of Pediatrics",
                               "certificate_number": ["12345"], "year_certified": "1998"}}])
     assert _rows_after_board(gen) == [("American Board of Pediatrics", "12345", "1998")]
+
+
+def test_534_each_board_row_is_its_entrys_row_receipt():
+    """#534: Board Certification wrote its rows without telling the
+    row-receipt ledger, so every certification read 'written 0' and lost
+    although its row rendered (MIX11: LPPQAJ, MJQYFH, MOCDRL, LQNORX). Each
+    row now records the entry it renders, every row of a reparsed fused
+    entry included; the source's header row and a bare year folded into the
+    row above write no row of their own and are set aside."""
+    header = {"taxonomy_code": "F2", "element_idx_start": 20,
+              "text": "Full Name of Board | Certificate # | Dates of Certification",
+              "extracted_fields": {"certifying_board": "Full Name of Board"}}
+    structured = {"taxonomy_code": "F2", "element_idx_start": 21,
+                  "text": "Sample Medicine",
+                  "extracted_fields": {"specialty": "Sample Medicine"}}
+    bare_year = {"taxonomy_code": "F2", "element_idx_start": 22, "text": "1998", "extracted_fields": {}}
+    reparsed = {"taxonomy_code": "F2", "element_idx_start": 23,
+                "text": "Example Surgery | 11111 | 2001\nExample Pediatrics | 22222 | 2004",
+                "extracted_fields": {}}
+    entries = [header, structured, bare_year, reparsed]
+    gen = _generator()
+    gen._row_receipts.begin_section("board_certification")
+    gen._fill_board_certification(entries)
+    gen._row_receipts.end_section()
+    assert len(_rows_after_board(gen)) == 3
+    receipt, = gen._row_receipts.receipts({"board_certification": entries})
+    assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (4, 2, 2, ())
+
+
+def test_534_a_board_row_written_after_the_loop_is_not_the_last_entrys():
+    """The board loop ends its receipt cursor: a row added after it is not
+    credited to the last entry, so when that entry's own row is removed the
+    entry is lost, not vouched for by a row that is not its own."""
+    entry = {"taxonomy_code": "F2", "element_idx_start": 5, "text": "Sample Medicine 1998",
+             "extracted_fields": {"certifying_board": "Sample Board", "year_certified": "1998"}}
+    gen = _generator()
+    gen._row_receipts.begin_section("board_certification")
+    gen._fill_board_certification([entry])
+    table = _board_table(gen)
+    gen._add_board_cert_row(table, "Later Row", "", "")
+    entry_row = table.rows[1]._tr
+    entry_row.getparent().remove(entry_row)
+    receipt, = gen._row_receipts.receipts({"board_certification": [entry]})
+    assert [lost.element_idx_start for lost in receipt.lost] == [5]

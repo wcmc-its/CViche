@@ -977,6 +977,13 @@ class BoardCertificationSection:
         # F2 alone, so no other section's order can shift), which is what
         # real board-certification entries actually carry -- a certification
         # issued in 2005 and recertified in 2020 sorts as 2020.
+        # Neither a source header row nor a bare year is a certification of
+        # its own: the year folds into the row above or is reported as a
+        # skipped row, so each is set aside for the row receipt (#534).
+        for entry in entries:
+            if (_is_header_record(entry.get('extracted_fields') or {}, entry.get('text', ''))
+                    or _bare_year(entry)):
+                self._row_receipts.set_aside(entry)
         entries = [e for e in entries
                    if not _is_header_record(e.get('extracted_fields') or {}, e.get('text', ''))]
         entries, unattached_years = _attach_bare_years(entries, current_year)
@@ -984,6 +991,7 @@ class BoardCertificationSection:
             self._warn_skipped_certification_row(year)
 
         for entry in sort_entries_reverse_chronological(entries):
+            self._row_receipts.begin_entry(entry)  # every row below is its receipt (#534)
             fields = entry.get('extracted_fields', {}) or {}
             original_text = entry.get('text', '')
 
@@ -998,6 +1006,7 @@ class BoardCertificationSection:
                 self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
             else:
                 self._parse_and_add_multiple_certifications(table, original_text, entry)
+        self._row_receipts.end_entry()  # a later row is not the last entry's (#534)
 
     def _parse_and_add_multiple_certifications(self, table, text: str, entry: dict):
         """Parse multiple board certifications from raw text and add rows.
@@ -1196,4 +1205,5 @@ class BoardCertificationSection:
             for para in cell.paragraphs:
                 for run in para.runs:
                     _set_font(run)
+        self._row_receipts.wrote(row._tr)  # the entry `begin_entry` marked (#534)
         self.stats['entries_inserted'] += 1
