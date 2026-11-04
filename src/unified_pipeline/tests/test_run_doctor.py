@@ -27,6 +27,8 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
+    CROSS_SECTION_EVIDENCE_CHARS,
+    CROSS_SECTION_SEVERITY,
     DATE_ONLY_LINES_WARN_COUNT,
     GROUP_CREDIT_MAX_WORDS,
     IDENTICAL_ROW_EVIDENCE_RECORDS,
@@ -55,6 +57,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_bucket_status,
     lint_citation_field_dropped,
     lint_classified_unrendered,
+    lint_cross_section_duplicate,
     lint_date_cell_shape,
     lint_date_only_lines,
     lint_dead_sections,
@@ -71,10 +74,12 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_institution_cleaned_name,
     lint_junk_or_header_row,
     lint_licensure_fallback_truncated,
+    lint_licensure_row_not_licence,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
+    lint_open_end_unsupported,
     lint_output_hygiene,
     lint_owner_attribution,
     lint_owner_contact_missing,
@@ -6437,14 +6442,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (83), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (87), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 81
+    assert len(payload["findings"]) == 85
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -8902,6 +8907,229 @@ def test_identical_rendered_rows_prevalence_is_the_measured_fraction():
     assert LINT_PREVALENCE["identical_rendered_rows"] == round(8 / 102, 3)
 
 
+# ----------------------------------- lint 14bd: cross_section_duplicate (#1435)
+# One fact the CV lists under two of its headings, rendered twice. Invented values.
+_CSD_LEAD = "INSTITUTIONAL LEADERSHIP ACTIVITIES"
+_CSD_TEACH = "EDUCATIONAL CONTRIBUTIONS"
+_CSD_ROLE = "Associate Director, Example Widget Fellowship"
+_CSD_ROW = [_CSD_ROLE, "Example University", "2020-Present"]
+
+
+def _csd_entry(idx, code, heading, fields, text="Example entry text"):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "hierarchy": [heading], "extracted_fields": fields}
+
+
+def _csd_role(idx, code, heading, role=_CSD_ROLE, start="2020"):
+    return _csd_entry(idx, code, heading, {"leadership_role": role,
+                                           "institution": "Example University",
+                                           "start_date": start, "end_date": "present"})
+
+
+def _csd_doc(*sections):
+    """(table_rows, blocks): one table per (heading, rows) under its heading."""
+    tables, blocks = [], []
+    for heading, rows in sections:
+        tables.append(rows)
+        blocks += [("p", heading), ("table", "\n".join(" | ".join(row) for row in rows))]
+    return tables, blocks
+
+
+def _csd(entries, *sections):
+    tables, blocks = _csd_doc(*sections)
+    return lint_cross_section_duplicate({"entries": entries}, tables, blocks)
+
+
+def test_cross_section_duplicate_warns_on_one_role_under_two_headings():
+    """MOCDRL-07's shape: a programme role listed under the CV's appointments
+    and again under its academic responsibilities, coded O and K3, renders
+    in both template sections."""
+    entries = [_csd_role(4, "O", "CURRENT APPOINTMENTS"),
+               _csd_role(36, "K3", "ACADEMIC RESPONSIBILITIES")]
+    teaching = ["2020-present - " + _CSD_ROLE + " (Example University)"]
+
+    assert _csd(entries, (_CSD_LEAD, [_CSD_ROW]), (_CSD_TEACH, [teaching])) == [{
+        "lint": "cross_section_duplicate", "severity": CROSS_SECTION_SEVERITY,
+        "message": "entry 4 (O) repeats as entry 36 (K3): one fact the CV lists under two "
+                   "of its headings renders 2 times (educational contributions, institutional "
+                   "leadership activities); keep one copy, in the section the template asks for",
+        "evidence": [" | ".join(_CSD_ROW), teaching[0]],
+        "status": "ran", "reason": ""}]
+
+
+def test_cross_section_duplicate_needs_two_headings_one_span_of_years_and_two_copies():
+    """The same heading twice is the CV's own list; other years are another
+    term; a copy stage 6's dedup dropped is not on the page."""
+    rows = (_CSD_LEAD, [_CSD_ROW, _CSD_ROW])
+    same_heading = [_csd_role(4, "O", "SERVICE"), _csd_role(36, "K3", "SERVICE")]
+    assert _csd(same_heading, rows) == []
+    other_years = [_csd_role(4, "O", "APPOINTMENTS"),
+                   _csd_role(36, "K3", "RESPONSIBILITIES", start="2021")]
+    assert _csd(other_years, rows) == []
+    pair = [_csd_role(4, "O", "APPOINTMENTS"), _csd_role(36, "K3", "RESPONSIBILITIES")]
+    assert len(_csd(pair, rows)) == 1
+    assert _csd(pair, (_CSD_LEAD, [_CSD_ROW])) == []
+    # A row of the same words that prints other years is another term, not a copy.
+    assert _csd(pair, (_CSD_LEAD, [_CSD_ROW, [_CSD_ROLE, "Example University", "2014-2016"]])) == []
+
+
+def test_cross_section_duplicate_reads_each_record_of_a_split_entry():
+    """MOCDRL-08's shape: a training line stage 4 split into two records, one
+    of which the CV restates under a second heading; both render as rows."""
+    fellow = {"training_type": "Example Widget Fellow", "start_date": "2018",
+              "end_date": "2019"}
+    split = _csd_entry(8, "C", "EDUCATION AND TRAINING", {**fellow, "stage4_records": [
+        {"training_type": "Example Gadget Fellowship", "start_date": "2016", "end_date": "2019"},
+        fellow]})
+    restated = _csd_entry(38, "C", "ACADEMIC RESPONSIBILITIES",
+                          {**fellow, "institution": "Example University"})
+    rows = [["Example Gadget Fellowship", "2016-2019"], ["Example Widget Fellow", "2018-2019"],
+            ["Example Widget Fellow", "Example University", "2018-2019"]]
+
+    [finding] = _csd([split, restated], ("POSTDOCTORAL TRAINING", rows))
+
+    assert finding["message"].startswith("entry 8 (C) repeats as entry 38 (C):")
+    assert finding["evidence"] == [" | ".join(rows[1]), " | ".join(rows[2])]
+
+
+def test_cross_section_duplicate_matches_an_award_to_its_grant_by_number():
+    """OXCCQM-16's shape: an award row and the grant's label table share
+    only the award number and the funder, which is where it came from."""
+    award = _csd_entry(33, "H", "AWARDS", {"award_name": "Example gadget prize (EX-12345)",
+                                           "granting_body": "Example Foundation",
+                                           "date": "2011"})
+    grant = _csd_entry(85, "M2B", "RESEARCH SUPPORT", {
+        "grant_number": "EX-12345", "title": "A study of widgets in gadgets",
+        "agency": "Example Foundation", "start_date": "2011-01-01", "end_date": "2011-12-31"})
+    grant_table = [["Award Source:", "Example Foundation (EX-12345)"],
+                   ["Project title:", "A study of widgets in gadgets"],
+                   ["Duration of support:", "01/11-12/11"]]
+
+    [finding] = _csd([award, grant],
+                     ("HONORS, AWARDS", [["Example gadget prize (EX-12345)", "Example Foundation",
+                                          "2011"]]),
+                     ("RESEARCH", grant_table))
+
+    assert finding["message"].startswith("entry 33 (H) repeats as entry 85 (M2B):")
+    # The label table is one record, quoted to CROSS_SECTION_EVIDENCE_CHARS.
+    assert finding["evidence"][1] == ("Award Source: | Example Foundation (EX-12345) Project "
+                                      "title: | A study of widgets in gadgets Duration of "
+                                      "support: | 01/11-12/11")[:CROSS_SECTION_EVIDENCE_CHARS]
+
+
+def test_cross_section_duplicate_is_silent_on_two_facts_at_one_place():
+    """A society's councilor and its finance committee member share the
+    society and the years but no role; a degree and a teaching post at one
+    university share only where they were."""
+    society = "Example Widget Society"
+    councilor = _csd_entry(23, "Q1", "HONORS", {"organization": society, "role": "Councilor",
+                                                "start_date": "2003", "end_date": "2006"})
+    member = _csd_entry(99, "Q2", "SERVICE", {"committee_name": society + " Finance Committee",
+                                              "role": "Member", "start_date": "2003",
+                                              "end_date": "2006"})
+    rows = [[society, "Councilor", "2003-2006"], [society + " Finance Committee", "Member",
+                                                  "2003-2006"]]
+    assert _csd([councilor, member], ("EXTRAMURAL", rows)) == []
+
+    place = {"institution": "Example University", "start_date": "1988"}
+    degree = _csd_entry(12, "B1", "EDUCATION", {**place, "degree": "B.S.", "field": "Chemistry"})
+    lab = _csd_entry(48, "K1", "TEACHING", {**place, "course_name": "Chemistry Lab",
+                                            "role": "TA"})
+    rows = [["B.S., Chemistry", "Example University", "1988"],
+            ["1988 - Chemistry Lab, TA (Example University)"]]
+    assert _csd([degree, lab], ("EDUCATION", rows[:1]), (_CSD_TEACH, rows[1:])) == []
+
+
+def test_cross_section_duplicate_weighs_what_a_record_was_not_where():
+    """Two records sharing only a long institution name are two facts, and a
+    role each names must be shared: a director and a member of one
+    programme are two people's worth of fact, however alike their words."""
+    place = "Alpha Gadget Gizmo Sprocket Lever"
+    first = _csd_entry(10, "K1", "TEACHING", {"title": "Widgets", "institution": place,
+                                              "date": "2001"})
+    second = _csd_entry(20, "D3", "POSITIONS", {"title": "Cogs", "institution": place,
+                                                "date": "2001"})
+    rows = [["Widgets", place, "2001"], ["Cogs", place, "2001"]]
+    assert _csd([first, second], ("TEACHING", rows[:1]), ("POSITIONS", rows[1:])) == []
+
+    program = "Example Widget Gadget Gizmo Program"
+    director = _csd_role(4, "O", "APPOINTMENTS", role="Director, " + program)
+    member = _csd_role(36, "K3", "RESPONSIBILITIES", role="Member, " + program)
+    rows = [["Director, " + program, "2020-Present"], ["Member, " + program, "2020-Present"]]
+    assert _csd([director, member], (_CSD_LEAD, rows[:1]), (_CSD_TEACH, rows[1:])) == []
+
+
+def test_cross_section_duplicate_needs_most_of_the_longer_record_too():
+    """A farm shape (2071 11/171): a residency and that residency's
+    selection committee share all of the residency's words and little of
+    the committee's."""
+    residency = _csd_entry(11, "C", "TRAINING", {"training_type": "Residency, Example Gadgetry",
+                                                 "start_date": "2001", "end_date": "2005"})
+    committee = _csd_entry(171, "P", "COMMITTEES", {
+        "committee_name": "Example Gadgetry Residency Selection Committee Board Panel",
+        "start_date": "2001", "end_date": "2005"})
+    rows = [["Residency, Example Gadgetry", "2001-2005"],
+            ["Example Gadgetry Residency Selection Committee Board Panel", "2001-2005"]]
+    assert _csd([residency, committee], ("EDUCATION", rows[:1]), ("INSTITUTIONAL", rows[1:])) == []
+
+
+def test_cross_section_duplicate_reads_only_record_rows_outside_the_appendix():
+    """A copy only in the Appendix, or in a summary's prose, is not a second
+    record on the page; a short paragraph that is a record is."""
+    entries = [_csd_role(4, "O", "APPOINTMENTS"), _csd_role(36, "K3", "RESPONSIBILITIES")]
+    line = "2020-present - " + _CSD_ROLE + " (Example University)"
+    tables = [[_CSD_ROW]]
+    for blocks, fires in (
+            ([("p", _CSD_LEAD), ("table", ""), ("p", "T. APPENDIX"), ("p", line)], False),
+            ([("p", _CSD_LEAD), ("table", ""), ("p", "RESEARCH"),
+              ("p", "In 2020 the owner became the " + _CSD_ROLE + " at Example University, "
+                    "where she leads the training of the fellows and runs the program.")], False),
+            ([("p", _CSD_LEAD), ("table", ""), ("p", _CSD_TEACH), ("p", line)], True)):
+        found = lint_cross_section_duplicate({"entries": entries}, tables, blocks)
+        assert bool(found) is fires
+
+
+def test_cross_section_duplicate_reports_one_pair_of_rows_once():
+    """Each record listed twice, and stage 6's dedup dropping one copy of
+    each, gives four record pairs over the same two rows: one finding."""
+    entries = [_csd_role(4, "O", "APPOINTMENTS"), _csd_role(5, "O", "APPOINTMENTS"),
+               _csd_role(36, "K3", "RESPONSIBILITIES"), _csd_role(37, "K3", "RESPONSIBILITIES")]
+    teaching = [_CSD_ROLE, "2020-Present"]
+    assert len(_csd(entries, (_CSD_LEAD, [_CSD_ROW]), (_CSD_TEACH, [teaching]))) == 1
+
+
+def test_run_doctor_wires_cross_section_duplicate_to_stage_4_and_the_docx(tmp_path):
+    """The LINT_REGISTRY row hands the lint stage 4, the docx's table rows
+    and its blocks. Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [_csd_role(940, "O", "APPOINTMENTS"),
+                        _csd_role(941, "K3", "RESPONSIBILITIES")]
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    for heading in (_CSD_LEAD, _CSD_TEACH):
+        output.add_paragraph(heading)
+        table = output.add_table(rows=1, cols=3)
+        for cell, text in zip(table.rows[0].cells, _CSD_ROW, strict=True):
+            cell.paragraphs[0].text = text
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "cross_section_duplicate"]
+    assert [f["message"].split(":")[0] for f in hits] == ["entry 940 (O) repeats as entry 941 (K3)"]
+    assert "(educational contributions, institutional leadership activities)" in hits[0]["message"]
+
+
+def test_cross_section_duplicate_prevalence_is_the_measured_farm_fraction():
+    """Measured 2026-11-04 (CSD-1 in doctor/PRECISION.md): 161 of the 460
+    w1243 farm runs, rendered fresh; a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["cross_section_duplicate"] == round(161 / 460, 2)
+
+
 # --------------------------------------- lint 14aa: split_child_unsourced
 # EOAHMI recheck DUTAVD-03 (a split record's blank institution filled from a
 # neighbouring entry) and WYMVGU-02 (an entry's leading range copied onto
@@ -10035,6 +10263,112 @@ def test_licensure_fallback_truncated_reads_only_f1_entries_without_state_or_num
     assert _lic_hits([_lic_entry(145, _LIC_TEXT, state_country="Example State")], rows) == []
 
 
+# licensure_row_not_licence (#1577 shape 3; MIX11 HTGWYH-05, RUISZG-02,
+# KGXMLK-05). Invented credentials: a certificate, a course or a
+# certification rendered as a Licensure, Board Certification or Honors row.
+_BOARD_HEADER = ["Full Name of Board", "Certificate # \n(indicate if board eligible)",
+                 "Dates of Certification \n(yyyy–yyyy)"]
+_HONORS_HEADER = ["Name of award", "Organization", "Date awarded (yyyy)"]
+
+
+def _lrnl_hits(header, *rows):
+    return lint_licensure_row_not_licence([[header, *[list(row) for row in rows]]])
+
+
+def test_licensure_row_not_licence_reports_a_certification_in_the_state_cell():
+    """HTGWYH-05's shape: a "Certified in <skill>" line coded F1 renders whole
+    in the State cell."""
+    cell = "Certified in Example Widget Handling - Example Widget Center, 2008"
+    assert _lrnl_hits(_LIC_HEADER, [cell, "", "", ""]) == [{
+        "lint": "licensure_row_not_licence", "severity": "WARN",
+        "message": "Licensure row holds a certification or certificate that names no licence: "
+                   "its home is not the Licensure table",
+        "evidence": [cell], "status": "ran", "reason": ""}]
+
+
+def test_licensure_row_not_licence_reads_a_first_assist_certification_past_its_rn():
+    """RUISZG-02's shape: the RN words name the prerequisite licence, the row
+    is the first-assistant certification."""
+    [hit] = _lrnl_hits(_LIC_HEADER, ["Registered Nurse First Assistant, 2001", "", "", ""])
+    assert hit["evidence"] == ["Registered Nurse First Assistant, 2001"]
+
+
+def test_licensure_row_not_licence_names_the_shared_predicates_home():
+    """A line `misfiled_credential_home` homes elsewhere (a life-support card
+    stage 6's guard did not reach) is reported with its kind and home."""
+    [hit] = _lrnl_hits(_LIC_HEADER, ["Advanced Cardiac Life Support, 2019", "", "", ""])
+    assert hit["message"].startswith("Licensure row holds life support, which belongs under B2")
+
+
+@pytest.mark.parametrize("cell", [
+    "Example State",
+    "Example State (Veterinary Medicine and Surgery)",
+    "Registered Nurse, Example State",
+    "Example State Physician's and Surgeon's Certificate",
+    "Example State Controlled Substance Registration certificate",
+    "Temporary certificate to practise medicine, Example State",
+    "N/A",
+])
+def test_licensure_row_not_licence_is_quiet_on_a_licence(cell):
+    """A state, a licence that names its profession, a certificate that IS the
+    licence, a controlled-substance registration and the empty-section cell
+    are licence rows."""
+    assert _lrnl_hits(_LIC_HEADER, [cell, "", "2010", ""]) == []
+
+
+def test_licensure_row_not_licence_reads_stage_6s_own_licensure_table(tmp_path):
+    """End to end through stage 6: a certification line with no state and no
+    number renders whole in the State cell, and the lint reads it there; a
+    real licence beside it is quiet."""
+    cert = "Certified in Example Gadget Assembly, 2012"
+    entries = [_lic_entry(151, cert),
+               _lic_entry(153, "Example State medical license 12345", state_country="Example State",
+                          license_number="12345")]
+    hits = lint_licensure_row_not_licence(_lic_render(tmp_path, entries))
+    assert [hit["evidence"] for hit in hits] == [[cert]]
+
+
+def test_licensure_row_not_licence_reports_an_exam_in_board_certification():
+    [hit] = _lrnl_hits(_BOARD_HEADER, ["USMLE Step 1 passed", "", "2004"])
+    assert hit["message"] == ("Board Certification row holds licensing exam, which belongs under B2: "
+                              "its home is not the Board Certification table")
+    assert hit["evidence"] == ["USMLE Step 1 passed 2004"]
+
+
+@pytest.mark.parametrize("row", [
+    ["American Board of Example Medicine", "12345", "2010-Present"],
+    ["Certified Nurse, Example Room (CNEX)", "", "2011-Present"],
+    ["N/A", "", ""],
+])
+def test_licensure_row_not_licence_is_quiet_on_a_board_certification(row):
+    assert _lrnl_hits(_BOARD_HEADER, row) == []
+
+
+def test_licensure_row_not_licence_reports_a_certification_in_honors():
+    """KGXMLK-05's shape: a certification of proficiency rendered as an award."""
+    [hit] = _lrnl_hits(_HONORS_HEADER, ["Certification of Proficiency Example Imaging",
+                                        "Example College of Imaging", "2015"])
+    assert hit["message"] == ("Honors row holds a certification the owner earned, not an award: "
+                              "its home is not the Honors table")
+    assert hit["evidence"] == ["Certification of Proficiency Example Imaging"]
+
+
+@pytest.mark.parametrize("name", [
+    "Certificate of Merit for Example Exhibit",
+    "Example Mentoring Certificate for Contributions",
+    "Example Teaching Award",
+])
+def test_licensure_row_not_licence_is_quiet_on_an_award_certificate(name):
+    """A certificate a body awards is an honor."""
+    assert _lrnl_hits(_HONORS_HEADER, [name, "Example Society", "2019"]) == []
+
+
+def test_licensure_row_not_licence_reads_no_other_table():
+    row = ["Certified in Example Widget Handling", "Example Institution", "2010"]
+    assert _lrnl_hits(["Description", "Institution, city and state", "Dates attended"], row) == []
+    assert lint_licensure_row_not_licence([[], [row]]) == []
+
+
 # glyph_field (#1584, SXPHOG-02 shape): a source list glyph rendered as a
 # field. Invented rows.
 
@@ -10248,3 +10582,214 @@ def test_journal_name_joined_prevalence_is_the_measured_rate():
     stored stage-4 outputs."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["journal_name_joined"] == round(72 / 292, 3)
+
+
+# ------------------------------------------- lint 14bc: open_end_unsupported
+#
+# Synthetic values only. The MIX11 shapes: MOCDRL-01 (a project line's open
+# span beside its award's closed one, the award shown "MM/YY-Present") and
+# RSRRUF-04 (a one-year cohort membership shown "<year>-Present").
+
+_OEU_PROJECT = ("Example Widget Curriculum        3/2031-present\t"
+                "Example Gadget Award: $4,000        3/2031-3/2032\t"
+                "Example Sprocket Grant: $9,000     3/2033-3/2034")
+
+
+def _oeu_grant_entry(text=_OEU_PROJECT, heading="RESEARCH ACTIVITIES"):
+    records = [{"title": "Example Widget Curriculum", "agency": "Example Gadget Award",
+                "start_date": "2031-03", "end_date": "present", "total_funding": "$4,000"},
+               {"title": "Example Widget Curriculum", "agency": "Example Sprocket Grant",
+                "start_date": "2033-03", "end_date": "2034-03", "total_funding": "$9,000"}]
+    return _entry(text, start=75, hierarchy=[heading], taxonomy_code="M2A",
+                  extracted_fields={**records[1], "stage4_records": records})
+
+
+def _oeu_grant_table(duration):
+    return ("table", "\n".join([
+        "Award Source:", "Example Gadget Award", "Award Source: | Example Gadget Award",
+        "Project title:", "Example Widget Curriculum",
+        "Project title: | Example Widget Curriculum",
+        "Duration of support:", duration, f"Duration of support: | {duration}"]))
+
+
+def test_open_end_unsupported_warns_on_an_award_whose_own_line_closes_it():
+    """MOCDRL-01: the project line's "-present" belongs to the project; the
+    award's own line closes at 3/2032, yet its table runs to Present."""
+    findings = lint_open_end_unsupported({"entries": [_oeu_grant_entry()]},
+                                         [_oeu_grant_table("03/31-Present")])
+    assert [(f["lint"], f["severity"]) for f in findings] == [("open_end_unsupported", "WARN")]
+    assert findings[0]["message"].startswith("entry 75 (M2A): renders '03/31-Present'")
+    assert findings[0]["evidence"][1] == "Example Gadget Award: $4,000        3/2031-3/2032"
+
+
+def test_open_end_unsupported_is_silent_when_the_award_line_is_open():
+    text = _OEU_PROJECT.replace("3/2031-3/2032", "3/2031-present")
+    assert lint_open_end_unsupported({"entries": [_oeu_grant_entry(text)]},
+                                     [_oeu_grant_table("03/31-Present")]) == []
+
+
+def test_open_end_unsupported_is_silent_when_the_document_shows_the_end():
+    assert lint_open_end_unsupported({"entries": [_oeu_grant_entry()]},
+                                     [_oeu_grant_table("03/31-03/32")]) == []
+
+
+def test_open_end_unsupported_skips_an_entry_under_a_current_heading():
+    """The source's own heading calls the record open."""
+    entry = _oeu_grant_entry(heading="Current Grants")
+    assert lint_open_end_unsupported({"entries": [entry]},
+                                     [_oeu_grant_table("03/31-Present")]) == []
+
+
+def _oeu_membership(text, record, siblings=()):
+    fields = dict(record)
+    if siblings:
+        fields["stage4_records"] = [*siblings, record]
+    return _entry(text, start=93, hierarchy=["MEMBERSHIPS"], taxonomy_code="I",
+                  extracted_fields=fields)
+
+
+_OEU_SOCIETY = {"organization": "Example Widget Society", "start_date": "2030",
+                "end_date": "present", "membership_type": "Member"}
+_OEU_COHORT = {"organization": "Example Widget Society Trainee Section",
+               "start_date": "2031", "end_date": "present",
+               "membership_type": "Class of 2031 Member"}
+_OEU_COHORT_ROW = ("table", "\n".join([
+    "Member, Example Widget Society | 2030-Present",
+    "Class of 2031 Member, Example Widget Society Trainee Section | 2031-Present"]))
+
+
+def test_open_end_unsupported_warns_on_a_one_year_cohort_shown_open():
+    """RSRRUF-04: the parent line's "since" is the society's, not the
+    cohort's; "Class of 2031" is one year, so "2031-Present" is invented."""
+    text = ("Member of Example Widget Society since 2030\t"
+            "Example Widget Society Trainee Section Class of 2031 member")
+    entry = _oeu_membership(text, _OEU_COHORT, siblings=[_OEU_SOCIETY])
+    findings = lint_open_end_unsupported({"entries": [entry]}, [_OEU_COHORT_ROW])
+    assert [f["message"] for f in findings] == [
+        "entry 93 (I): renders '2031-Present', but its source line closes the span "
+        "and has no open marker"]
+
+
+@pytest.mark.parametrize("text", [
+    "2031 Associate member, Example Widget Society Trainee Section",  # a bare start year
+    "Example Widget Society Trainee Section, member since 2031",
+    "Example Widget Society Trainee Section, member 2031-",
+])
+def test_open_end_unsupported_is_silent_without_a_stated_end(text):
+    """A bare start year is not a closed span: I rows keep "<start>-Present"
+    by the 2026-10-30 decision on #1342, and date_cell_shape covers a bare
+    year on the other codes."""
+    record = {**_OEU_COHORT, "membership_type": "Associate member", "end_date": None}
+    assert lint_open_end_unsupported({"entries": [_oeu_membership(text, record)]},
+                                     [_OEU_COHORT_ROW]) == []
+
+
+def _oeu_society(text, idx=40, code="I", **fields):
+    return _entry(text, start=idx, hierarchy=["SOCIETIES"], taxonomy_code=code,
+                  extracted_fields={"organization": "Example Widget Society",
+                                    "membership_type": "Member", "start_date": "2031",
+                                    "end_date": None, **fields})
+
+
+_OEU_SOCIETY_LINE = ("p", "Member, Example Widget Society | 2031-Present")
+
+
+def test_open_end_unsupported_warns_on_a_closed_membership_shown_open():
+    """An I row's start-only "-Present" is by decision; a stated end is not."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society")
+    findings = lint_open_end_unsupported({"entries": [entry]}, [_OEU_SOCIETY_LINE])
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 40 (I)"]
+
+
+def test_open_end_unsupported_leaves_a_whole_entry_four_digit_range_to_date_cell_shape():
+    """An unsplit P row shown "2031-Present" is date_cell_shape's open_range,
+    which reads the same whole text: reported once, there."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society", code="P")
+    assert lint_open_end_unsupported({"entries": [entry]}, [_OEU_SOCIETY_LINE]) == []
+
+
+def test_open_end_unsupported_reads_a_two_digit_start_date_cell_shape_cannot():
+    entry = _oeu_society("Member, Example Widget Society 3/2031-3/2033", code="P")
+    rows = [("table", "Example Widget Society | Member | 03/31-Present")]
+    findings = lint_open_end_unsupported({"entries": [entry]}, rows)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 40 (P)"]
+
+
+def test_open_end_unsupported_does_not_tie_a_date_to_a_record_by_two_shared_words():
+    """A rendered line is read as a record's only when it shows half of its
+    values' words, so another role at the same society is not it."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society Gadget Section Annex",
+                         organization="Example Widget Society Gadget Section Annex")
+    blocks = [("p", "2031-Present - Lecturer, Example Annex Seminar")]
+    assert lint_open_end_unsupported({"entries": [entry]}, blocks) == []
+
+
+def test_open_end_unsupported_skips_a_date_two_records_tie_for():
+    """Two records start in the year and show the same words: neither is named."""
+    entries = [_oeu_society("2031-2033 Member, Example Widget Society", idx=40 + n)
+               for n in (1, 2)]
+    assert lint_open_end_unsupported({"entries": entries}, [_OEU_SOCIETY_LINE]) == []
+
+
+def test_open_end_unsupported_skips_a_date_an_open_rival_could_own():
+    """VVRTUC 43's shape: a closed rank and an open later title start in the
+    same year; the row may be the open one, so nothing is reported."""
+    closed = _oeu_society("2031-2033 Member, Example Widget Society, Example City Annex")
+    rival = _oeu_society("Fellow, Example Widget Society (current) 2033 -", idx=41,
+                         membership_type="Fellow")
+    blocks = [("p", "Member, Example Widget Society, Example City Annex | 2031-Present")]
+    assert lint_open_end_unsupported({"entries": [closed, rival]}, blocks) == []
+    assert lint_open_end_unsupported({"entries": [closed]}, blocks) != []
+
+
+def test_run_doctor_reports_open_end_unsupported_from_stage_4_and_the_docx(tmp_path):
+    """The registry runs the lint on stage 4 and the docx's blocks."""
+    root = _build_clean_run(tmp_path)
+    fields_path = next((root / "stage_4_field_extraction").glob("*.json"))
+    fields = json.loads(fields_path.read_text())
+    fields["entries"].append(_oeu_grant_entry())
+    fields_path.write_text(json.dumps(fields))
+    docx_path = next((root / "stage_6_wcm_documents").glob(f"{_UID}*_wcm.docx"))
+    output = Document(docx_path)
+    table = output.add_table(rows=3, cols=2)
+    for row, (label, value) in zip(table.rows, [("Award Source:", "Example Gadget Award"),
+                                                ("Project title:", "Example Widget Curriculum"),
+                                                ("Duration of support:", "03/31-Present")],
+                                   strict=True):
+        row.cells[0].paragraphs[0].text = label
+        row.cells[1].paragraphs[0].text = value
+    output.save(docx_path)
+
+    findings = [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "open_end_unsupported"]
+
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
+        ("WARN", "entry 75 (M2A)")]
+
+
+@pytest.mark.parametrize("text", [
+    # An unsplit row's second period is open, on its own line.
+    "2031-2033\n2035- present | Member | Example Widget Society",
+    # BIITRL shape: "<year> - <words>" leaves the year open; the closed span
+    # in brackets is something else's.
+    "Example Widget Society 2031 - Member, on its board (2031-2033)",
+])
+def test_open_end_unsupported_reads_an_unsplit_records_whole_text(text):
+    entry = _oeu_society(text)
+    assert lint_open_end_unsupported({"entries": [entry]}, [_OEU_SOCIETY_LINE]) == []
+
+
+def test_open_end_unsupported_does_not_read_a_range_inside_running_text():
+    """A paragraph's date is its opening or closing one; "2031-present"
+    mid-sentence is the CV's own wording, not a rendered range."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society")
+    blocks = [("p", "Member, Example Widget Society (2031-present in its Annex), Example City")]
+    assert lint_open_end_unsupported({"entries": [entry]}, blocks) == []
+    assert lint_open_end_unsupported({"entries": [entry]}, [
+        ("p", "Member, Example Widget Society, Example City, 2031-Present")]) != []
+
+
+def test_open_end_unsupported_prevalence_is_the_measured_rate():
+    """Measured 2026-11-04 (OEU-1 in doctor/PRECISION.md): 1 of 471 fresh renders."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["open_end_unsupported"] == round(1 / 471, 3)

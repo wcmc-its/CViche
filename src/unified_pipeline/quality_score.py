@@ -939,8 +939,9 @@ LINT_FIX_MINUTES = {
         "stage2_unaccounted", "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
     ), FIX_MINUTES_RECORD_LOST),
     **dict.fromkeys((
-        "bucket_status", "grant_bucket", "group_header_context", "invented_records",
-        "missed_headers", "offschema_fields", "owner_attribution", "pinned_heading_empty", "section_consistency",
+        "bucket_status", "degree_row_not_degree", "grant_bucket", "group_header_context",
+        "invented_records", "licensure_row_not_licence", "missed_headers", "offschema_fields",
+        "owner_attribution", "pinned_heading_empty", "section_consistency",
         "stage6_render_warnings", "taxonomy_code_coverage", "teaching_postcheck",
     ), FIX_MINUTES_MISPLACED),
     **dict.fromkeys((
@@ -950,7 +951,7 @@ LINT_FIX_MINUTES = {
         "glyph_field", "grant_boundary", "grant_facts", "group_credit_dropped",
         "implausible_year", "institution_cleaned_name", "journal_name_joined",
         "licensure_fallback_truncated", "mentee_field_incomplete",
-        "owner_missing_from_citation",
+        "open_end_unsupported", "owner_missing_from_citation",
         "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
         "session_title_missing", "shattered_prose", "span_count",
         "split_child_unsourced", "record_cut_in_two", "stage4_group_failures",
@@ -958,8 +959,8 @@ LINT_FIX_MINUTES = {
         "wrong_start_date", "year_not_in_source",
     ), FIX_MINUTES_FIELD_WRONG),
     **dict.fromkeys((
-        "duplicate_passages", "duplicate_records", "identical_rendered_rows", "junk_or_header_row",
-        "stage2_span_overlap",
+        "cross_section_duplicate", "duplicate_passages", "duplicate_records",
+        "identical_rendered_rows", "junk_or_header_row", "stage2_span_overlap",
     ), FIX_MINUTES_DUPLICATE),
     **dict.fromkeys((
         "date_only_lines", "llm_refusal_in_output", "output_hygiene", "pipe_leaks",

@@ -638,6 +638,28 @@ LINT_COPY = {
         "A source heading clearly names one section, but every entry under it was filed in a "
         "different section, so that section is empty in the document.",
         "Check the quoted entries and move any that belong under their source heading's section."),
+    "open_end_unsupported": LintCopy(
+        "Shown as ongoing, but it ended",
+        "A record prints as running to Present, but the line for it in the CV gives an end date "
+        "(or a one-year cohort, such as a class year) and never says it is ongoing.",
+        "Replace Present with the end date from the source CV."),
+    "cross_section_duplicate": LintCopy(
+        "Same entry shown twice",
+        "Your CV lists one item, such as a role, an award or a grant, under two of its headings, "
+        "and the document shows it twice.",
+        "Keep the copy in the section where it belongs and delete the other."),
+    "degree_row_not_degree": LintCopy(
+        "Not a degree",
+        "A row of the Academic Degrees table, which lists Bachelor's degrees and higher, names no "
+        "degree: a high-school diploma, a minor, a certificate, a training post or only a school.",
+        "Check the quoted row: add the degree it led to, or move it to the section it belongs in."),
+    "licensure_row_not_licence": LintCopy(
+        "Certificate filed as a licence or award",
+        "A certificate, a course or another credential that is not a licence is shown as a "
+        "Licensure or Board Certification row, or a certification the faculty member earned is "
+        "shown as an award in Honors.",
+        "Move the row to Other Educational Experiences (certificates), or to Board "
+        "Certification when a certifying board grants it."),
 }
 
 # #1388: a rerun of the same CV helps only when the failure was a passing one,
@@ -928,6 +950,7 @@ LINT_EFFORT: dict[str, FixEffort] = {
     **dict.fromkeys((
         "junk_or_header_row", "duplicate_records", "duplicate_passages", "date_only_lines",
         "output_hygiene", "pipe_leaks", "wrong_start_date", "date_cell_shape",
+        "open_end_unsupported",
         "implausible_year", "year_not_in_source", "span_count", "fanout_cell_residue",
         "identical_rendered_rows", "python_repr_in_output", "table_shape", "contact_slot_lost",
         "bucket_status", "grant_bucket", "pubmed_title_truncated", "invented_records",

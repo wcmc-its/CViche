@@ -14,6 +14,7 @@ Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 import copy
 import functools
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping
@@ -21,6 +22,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple
 
+from unified_pipeline.core.credential_lines import (
+    BOARD_CODE,
+    LICENCE_CODE,
+    OTHER_EDUCATION_CODE,
+    misfiled_credential_home,
+    names_identifier,
+    names_licence,
+)
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -63,6 +72,9 @@ from unified_pipeline.stage6.sections.appendix import (
     t_line_is_scaffolding,
 )
 from unified_pipeline.stage6.sections.bibliography import SOURCE_HEADING_NOTE_RE
+from unified_pipeline.stage6.sections.board_certification import (
+    _is_certification_header_line,
+)
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
@@ -4686,6 +4698,265 @@ def lint_identical_rendered_rows(stage4: dict,
             for message, evidence in found]
 
 
+# Lint 14bd, cross_section_duplicate (#1435; MIX11 MJQYFH-04/05, MOCDRL-07/08,
+# OXCCQM-16, KGXMLK-17, ZDKMKD-12): one fact the CV states under two of its
+# own top-level headings, rendered twice. The owner decided (2026-10-30) that
+# such a fact renders once, in the template-correct section. Neither
+# duplicate lint sees it: `duplicate_records` pairs only citations and
+# grants, and `identical_rendered_rows` keeps quiet on identical rows whose
+# records agree, and compares no rows that read differently. Two stage-4
+# records (an entry, or each record of a split entry) are one fact when
+#   - their entries sit under different top-level source headings (the same
+#     heading twice is the CV's own list, #446's to judge),
+#   - they state the same years (first and last), and
+#   - they share a grant or award number, or the words of their fields other
+#     than place and funder that they share are most of each one's weight
+#     (`_one_fact`), each word weighted by how few of the CV's entries use
+#     it, and a role when either names one.
+# A pair fires only when the words they share render in two or three rows
+# (or record-shaped paragraphs) of the document outside the Appendix: a copy
+# stage 6's dedup dropped is not on the page. Precision: CSD-1 in
+# doctor/PRECISION.md (348 of 407 hand-labelled findings true). Publications, talks and the
+# Appendix are out (`CROSS_SECTION_SKIPPED_CODES`): a talk repeats by design,
+# and `duplicate_records` owns citations. A grant that is both a funding
+# table and an award row is in: the owner's ruling counts it as one fact.
+
+#: Codes never compared: personal data, employment status, effort, research
+#: activities and the summary, talks, publications, the Appendix.
+CROSS_SECTION_SKIPPED_CODES = ("A", "E", "J", "M1", "R", "S", "T")
+#: Fields that say where a record was, not what it was: two records sharing
+#: only these are two facts at one place (a degree and a teaching post at
+#: one university, OXCCQM 12/48).
+_CROSS_SECTION_PLACE_FIELDS = frozenset({
+    "institution", "location", "city", "state", "country", "address",
+    "department", "division_department", "division",
+    # Who gave an award or a grant: an award and a membership of one
+    # society are two facts (2068 47/1120 on the farm).
+    "granting_body", "agency", "funding_agency", "sponsor", "funder",
+})
+#: Words that name no fact on their own.
+_CROSS_SECTION_STOPWORDS = frozenset({
+    "and", "of", "the", "for", "in", "at", "to", "on", "with", "by", "an", "or",
+    "present", "current", "university", "department", "school", "college",
+    "medicine", "medical", "hospital", "center", "centre", "institute",
+})
+#: A number shorter than this (a volume, a count) is no word of a fact; a
+#: grant or award number is.
+CROSS_SECTION_MIN_NUMBER_DIGITS = 5
+#: Shared words a pair needs, at the least.
+CROSS_SECTION_MIN_SHARED = 2
+#: The weighted share of the shorter record's words the pair must share.
+CROSS_SECTION_MIN_OVERLAP = 0.6
+#: ... and of the longer one's: a residency beside a committee of that
+#: residency shares the residency's words, which are all of the residency
+#: and little of the committee (2071 11/171 on the farm).
+CROSS_SECTION_MIN_LARGER_OVERLAP = 0.5
+#: What someone was or did, by stem: two records that each name a role and
+#: share none are two facts at one place (a society's councilor and its
+#: finance committee member; a fellowship and a lectureship in its track),
+#: however many other words they share.
+_CROSS_SECTION_ROLE_PREFIXES = (
+    "direct", "codirect", "chair", "president", "member", "represent", "lectur",
+    "instruct", "coordinat", "committee", "council", "fellow", "residen", "chief",
+    "lead", "founder", "editor", "review", "faculty", "advis", "mentor", "particip",
+    "organiz", "course", "treasur", "secretar", "officer", "dean", "head", "manag",
+    "liaison", "award", "prize", "scholar", "professor", "trainee", "intern",
+    "student", "speaker", "moderat", "judge", "examin", "consult", "attending",
+    "physician", "associate", "assistant",
+)
+#: The weighted share of the shared words a rendered row must hold.
+CROSS_SECTION_RENDER_SHARE = 0.8
+#: More rows than this holding the shared words means they name a place or
+#: a programme many rows share, not one fact.
+CROSS_SECTION_MAX_COPIES = 3
+#: A paragraph longer than this is a summary or a narrative, not a record.
+CROSS_SECTION_MAX_PARAGRAPH_CHARS = 300
+CROSS_SECTION_SEVERITY = "WARN"
+#: Evidence quotes each copy, cut to this many characters.
+CROSS_SECTION_EVIDENCE_CHARS = 120
+
+
+class _CrossSectionRecord(NamedTuple):
+    """One stage-4 record as this lint compares it."""
+    element_idx: object
+    code: str
+    heading: str
+    years: tuple[str, str]
+    tokens: frozenset[str]
+    #: The words of its fields other than where it was (`_CROSS_SECTION_PLACE_FIELDS`).
+    fact_tokens: frozenset[str]
+
+
+def _fact_words(text: str) -> frozenset[str]:
+    return frozenset(token for token in _name_tokens(text)
+                     if token not in _CROSS_SECTION_STOPWORDS
+                     and (not token.isdigit() or len(token) >= CROSS_SECTION_MIN_NUMBER_DIGITS))
+
+
+def _cross_section_record(entry: _FieldsEntry, fields: Mapping) -> _CrossSectionRecord | None:
+    """`fields` as a record, or None when it states no year or no word."""
+    years, words, place = [], [], []
+    for key, value in fields.items():
+        if key in _IDENTICAL_ROW_IGNORED_FIELDS or not isinstance(value, (str, int)):
+            continue
+        if _fan_out_date_key(key):
+            years += _FOUR_DIGIT_YEAR_RE.findall(str(value))
+        else:
+            (place if key in _CROSS_SECTION_PLACE_FIELDS else words).append(str(value))
+    facts = _fact_words(" ".join(words))
+    if not years or not facts or not entry.hierarchy:
+        return None
+    return _CrossSectionRecord(entry.element_idx, entry.code, norm(entry.hierarchy[0]),
+                               (min(years), max(years)), facts | _fact_words(" ".join(place)),
+                               facts)
+
+
+def _cross_section_records(stage4: dict) -> list[_CrossSectionRecord]:
+    records = []
+    for entry in _fields_entries(stage4):
+        if not entry.code or entry.code.startswith(CROSS_SECTION_SKIPPED_CODES):
+            continue
+        for child in _split_records(entry.fields) or [entry.fields]:
+            record = _cross_section_record(entry, child)
+            if record is not None:
+                records.append(record)
+    return records
+
+
+def _role_keys(tokens: frozenset[str]) -> frozenset[str]:
+    """The role words among `tokens`, each as its `_CROSS_SECTION_ROLE_PREFIXES` stem."""
+    return frozenset(prefix for token in tokens for prefix in _CROSS_SECTION_ROLE_PREFIXES
+                     if token.startswith(prefix))
+
+
+def _token_weights(records: list[_CrossSectionRecord]) -> dict[str, float]:
+    """log(entries / entries using the word), per word."""
+    users: dict[str, set] = defaultdict(set)
+    for record in records:
+        for token in record.tokens:
+            users[token].add(record.element_idx)
+    total = len({record.element_idx for record in records})
+    return {token: math.log((total + 1) / len(idx)) for token, idx in users.items()}
+
+
+def _one_fact(first: _CrossSectionRecord, second: _CrossSectionRecord,
+              weights: Mapping[str, float]) -> bool:
+    """Whether two records of different headings and the same years state
+    one fact: a shared grant or award number (OXCCQM 33/85: an award row and
+    the grant's table, whose title shares nothing else), or most of each
+    one's weighted words and, when either names a role, a role."""
+    facts = first.fact_tokens & second.fact_tokens
+    if any(sum(char.isdigit() for char in token) >= CROSS_SECTION_MIN_NUMBER_DIGITS
+           for token in facts):
+        return True
+    if len(facts) < CROSS_SECTION_MIN_SHARED:
+        return False
+    weight = sum(weights[token] for token in facts)
+    smaller, larger = sorted(sum(weights[token] for token in record.fact_tokens)
+                             for record in (first, second))
+    roles = _role_keys(first.fact_tokens), _role_keys(second.fact_tokens)
+    return (weight >= CROSS_SECTION_MIN_OVERLAP * smaller
+            and weight >= CROSS_SECTION_MIN_LARGER_OVERLAP * larger
+            and bool(roles[0] & roles[1] or not roles[0] | roles[1]))
+
+
+def _cross_section_pairs(records: list[_CrossSectionRecord], weights: Mapping[str, float]
+                         ) -> list[tuple[_CrossSectionRecord, _CrossSectionRecord, frozenset]]:
+    """(first, second, the words they share) per pair stating one fact."""
+    return [(first, second, first.tokens & second.tokens)
+            for i, first in enumerate(records) for second in records[i + 1:]
+            if first.element_idx != second.element_idx and first.heading != second.heading
+            and first.years == second.years and _one_fact(first, second, weights)]
+
+
+class _RenderedUnit(NamedTuple):
+    """One rendered record: a table row, a label table (a grant's "Award
+    Source:" and "Project title:" rows are one record), or a short
+    paragraph that is no prose."""
+    section: str
+    text: str
+    tokens: frozenset[str]
+    years: frozenset[str]
+
+
+def _rendered_unit(section: str, text: str) -> _RenderedUnit:
+    return _RenderedUnit(section, text, frozenset(_name_tokens(text)),
+                         frozenset(_FOUR_DIGIT_YEAR_RE.findall(text)))
+
+
+def _duplicate_is_label_table(rows: list[list[str]]) -> bool:
+    """Whether every filled row of a table opens on a label ("Award Source:")."""
+    firsts = [next((cell for cell in row if cell.strip()), "") for row in rows]
+    return bool(firsts) and all(cell.rstrip().endswith(":") for cell in firsts if cell)
+
+
+def _duplicate_rendered_units(table_rows: list[list[list[str]]],
+                              blocks: list[tuple[str, str]] | None) -> list[_RenderedUnit]:
+    """The document's rendered records outside the Appendix, each under its
+    section (`blocks`' last section header before it; "" without blocks)."""
+    appendix = norm(_APPENDIX_HEADER[3:])
+    sections, units, section = [], [], ""
+    for kind, text in blocks or []:
+        text = str(text or "")
+        header = _output_section_header(text) if kind == "p" else None
+        if kind == "table":
+            sections.append(section)
+        elif header is not None:
+            section = header
+        elif (section != appendix and len(text) <= CROSS_SECTION_MAX_PARAGRAPH_CHARS
+              and not is_prose(text)):
+            units.append(_rendered_unit(section, text))
+    for table, rows in enumerate(table_rows):
+        section = sections[table] if table < len(sections) else ""
+        texts = [text for text in map(_table_row_text, rows) if text]
+        if section == appendix or not texts:
+            continue
+        units += ([_rendered_unit(section, " ".join(texts))] if _duplicate_is_label_table(rows)
+                  else [_rendered_unit(section, text) for text in texts])
+    return units
+
+
+def _rendered_copies(shared: frozenset, years: tuple[str, str], weights: Mapping[str, float],
+                     units: list[_RenderedUnit]) -> list[_RenderedUnit]:
+    """The units printing both `years` (or no four-digit year at all: a
+    grant's "01/09-12/09") and at least CROSS_SECTION_RENDER_SHARE of the
+    weight of `shared` (a column stage 6 leaves out, often the institution,
+    is no missing copy)."""
+    total = sum(weights[token] for token in shared)
+    return [unit for unit in units if (not unit.years or set(years) <= unit.years)
+            and sum(weights[token] for token in shared & unit.tokens)
+            >= CROSS_SECTION_RENDER_SHARE * total]
+
+
+def lint_cross_section_duplicate(stage4: dict, table_rows: list[list[list[str]]],
+                                 blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """One fact the CV states under two top-level headings, rendered twice
+    (#1435). One finding per pair, quoting both rendered copies. Reads
+    stage 4 and the docx's table rows; its paragraphs, for the section names
+    and paragraph records, when present."""
+    units = _duplicate_rendered_units(table_rows, blocks)
+    records = _cross_section_records(stage4)
+    weights = _token_weights(records)
+    findings, seen = [], set()
+    for first, second, shared in _cross_section_pairs(records, weights):
+        copies = _rendered_copies(shared, first.years, weights, units)
+        # Two pairs over the same rendered rows (each record listed twice,
+        # one copy of each dropped by stage 6's dedup) are one duplicate.
+        key = tuple(sorted(unit.text for unit in copies))
+        if not 2 <= len(copies) <= CROSS_SECTION_MAX_COPIES or key in seen:
+            continue
+        seen.add(key)
+        sections = sorted({unit.section for unit in copies if unit.section})
+        findings.append(_finding(
+            "cross_section_duplicate", CROSS_SECTION_SEVERITY,
+            f"entry {first.element_idx} ({first.code}) repeats as entry {second.element_idx} "
+            f"({second.code}): one fact the CV lists under two of its headings renders "
+            f"{len(copies)} times ({', '.join(sections) or 'no section named'}); keep one copy, "
+            f"in the section the template asks for",
+            [unit.text[:CROSS_SECTION_EVIDENCE_CHARS] for unit in copies]))
+    return findings
+
+
 # split_child_unsourced (EOAHMI recheck DUTAVD-03, WYMVGU-02): a record
 # stage 4 split out of an entry (`stage4_records`, #1406) shows a place or a
 # date range that does not come from its own text. Two shapes:
@@ -4961,6 +5232,138 @@ def lint_licensure_fallback_truncated(stage4: dict,
     return findings
 
 
+# --- licensure_row_not_licence (#1577 shape 3, lint 14bf) ---------------------
+#
+# A certificate, a course or a credential that is no licence, rendered as a
+# Licensure row; one rendered as a Board Certification row that the shared
+# predicate homes in Other Educational Experiences; and a certification
+# rendered as an award in Honors. Stage 6's licensure guard moves what
+# `core.credential_lines` names out of both credential tables, so this reads
+# what it leaves: a raw-text Licensure row that states a certification and
+# names no licence (MIX11 HTGWYH-05, "Certified in <skill>"), a nursing
+# first-assistant certification beside its "Registered Nurse" (RUISZG-02),
+# and an Honors row that names a certification of proficiency (KGXMLK-05).
+#: WARN: 24 / 24 hand-checked true over fresh renders (LRNL-1 in
+#: doctor/PRECISION.md).
+LICENSURE_ROW_NOT_LICENCE_SEVERITY = "WARN"
+#: A cell that states a certification, a certificate, a credential or a
+#: course: no licence wording. Read only once `names_licence` and
+#: `names_identifier` have said the cell names no licence.
+_CERTIFICATION_WORDING_RE = re.compile(
+    r"\bcertified\b|\bcertificat(?:e|es|ion|ions)\b|\bcredential(?:ed|s)?\b"
+    r"|\bcourse\b|\bpermit\b", re.IGNORECASE)
+#: A nursing certification written after the licence it builds on
+#: ("Registered Nurse, First Assist (RNFA)"): the RN words name the
+#: prerequisite, not the row's own credential.
+_NURSING_CERTIFICATION_RE = re.compile(r"\bfirst\s+assist(?:ant)?\b|\bC?RNFA\b", re.IGNORECASE)
+_REGISTERED_NURSE_RE = re.compile(r"\bregistered\s+nurse\b", re.IGNORECASE)
+#: An Honors name cell that states a certification the owner earned, not an
+#: award a body gave: a certificate of competency, completion or training,
+#: a certification of proficiency, a line opening "Certified". A certificate
+#: of merit, appreciation, recognition or excellence is an award.
+_HONORS_CERTIFICATION_RE = re.compile(
+    r"\bcertification\s+(?:of\s+proficiency|in)\b|\bcertified\s+(?:in|as)\b|^\W*certified\b"
+    r"|\bboard[\s-]+certif"
+    r"|\bcertificate\s+(?:of\s+(?:competency|completion|proficiency|attendance|training)|in)\b",
+    re.IGNORECASE)
+#: A Board Certification row that names a certificate (not the board's own
+#: "Board Certificate"), or a life-support course spelled with stops
+#: ("A.C.L.S."), which the shared predicate reads only undotted.
+_BOARD_ROW_CERTIFICATE_RE = re.compile(
+    r"(?<!board\s)\bcertificate\b|\b(?:A\.?C|B|P\.?A)\.L\.S\.?", re.IGNORECASE)
+#: The cell a table prints when its section has nothing.
+_EMPTY_SECTION_CELL = "N/A"
+
+
+class _MisplacedCredential(NamedTuple):
+    """One rendered row that holds a credential its table is not for."""
+    table: str
+    reason: str
+    cell: str
+
+
+def _licensure_row_credential(state_cell: str) -> str | None:
+    """Why a Licensure row's State cell is a credential and no licence, or
+    None: the shared predicate homes it elsewhere
+    (`misfiled_credential_home`), or it states a certification
+    (`_CERTIFICATION_WORDING_RE`) and names no licence and no identifier.
+    A nursing first-assistant certification's "Registered Nurse" names no
+    licence of the row's own."""
+    home = misfiled_credential_home(state_cell, LICENCE_CODE)
+    if home is not None:
+        return f"{home.kind.replace('_', ' ')}, which belongs under {home.code}"
+    if names_identifier(state_cell):
+        return None
+    licence_text = (_REGISTERED_NURSE_RE.sub(" ", state_cell)
+                    if _NURSING_CERTIFICATION_RE.search(state_cell) else state_cell)
+    if names_licence(licence_text):
+        return None
+    if _NURSING_CERTIFICATION_RE.search(state_cell) or _CERTIFICATION_WORDING_RE.search(state_cell):
+        return "a certification or certificate that names no licence"
+    return None
+
+
+def _board_row_credential(row_text: str) -> str | None:
+    """Why a Board Certification row is no board certification, or None:
+    the shared predicate homes it in Other Educational Experiences, or it
+    names a certificate or a dotted life-support course
+    (`_BOARD_ROW_CERTIFICATE_RE`)."""
+    home = misfiled_credential_home(row_text, BOARD_CODE)
+    if home is not None and home.code == OTHER_EDUCATION_CODE:
+        return f"{home.kind.replace('_', ' ')}, which belongs under {home.code}"
+    if _BOARD_ROW_CERTIFICATE_RE.search(row_text):
+        return f"a certificate or course, which belongs under {OTHER_EDUCATION_CODE}"
+    return None
+
+
+def _is_board_certification_table(header: list[str]) -> bool:
+    """Whether a table's header row is the Board Certification table's
+    (`_is_certification_header_line`, the renderer's own header test)."""
+    return bool(header) and _is_certification_header_line(" | ".join(header))
+
+
+def _misplaced_credentials(table_rows: list[list[list[str]]]) -> list[_MisplacedCredential]:
+    """Every Licensure, Board Certification and Honors row the lint reports,
+    in document order."""
+    found = []
+    for table in table_rows:
+        if not table or not table[0]:
+            continue
+        data = [row for row in table[1:] if any(cell.strip() for cell in row)]
+        if _licensure_rows([table]):
+            for row in data:
+                cell = " ".join(row[0].split())
+                reason = cell and cell != _EMPTY_SECTION_CELL and _licensure_row_credential(cell)
+                if reason:
+                    found.append(_MisplacedCredential("Licensure", reason, cell))
+        elif _is_board_certification_table(table[0]):
+            for row in data:
+                text = " ".join(" ".join(cell.split()) for cell in row if cell.strip())
+                reason = text and text != _EMPTY_SECTION_CELL and _board_row_credential(text)
+                if reason:
+                    found.append(_MisplacedCredential("Board Certification", reason, text))
+        else:
+            header = _honors_header(table)
+            name_i = _alias_col(header, _AWARD_NAME_ALIASES) if header else None
+            for row in data if name_i is not None else ():
+                name = " ".join(row[name_i].split()) if name_i < len(row) else ""
+                if _HONORS_CERTIFICATION_RE.search(name):
+                    found.append(_MisplacedCredential(
+                        "Honors", "a certification the owner earned, not an award", name))
+    return found
+
+
+def lint_licensure_row_not_licence(table_rows: list[list[list[str]]]) -> list[dict]:
+    """A rendered row holding a credential its table is not for (#1577
+    shape 3): a certificate, a course or another credential in Licensure, an
+    exam, course or certificate in Board Certification, a certification in
+    Honors. WARN, one finding per row. Reads the docx's table rows."""
+    return [_finding(
+        "licensure_row_not_licence", LICENSURE_ROW_NOT_LICENCE_SEVERITY,
+        f"{found.table} row holds {found.reason}: its home is not the {found.table} table",
+        [found.cell]) for found in _misplaced_credentials(table_rows)]
+
+
 # --- glyph_field -------------------------------------------------------------
 #
 # A list glyph the source used as a bullet, read as text and rendered as a
@@ -5178,3 +5581,269 @@ def lint_session_title_missing(stage4: dict,
         problems += _r_raw_line_problems(stage4, table_rows)
     return [_finding("session_title_missing", SESSION_TITLE_SEVERITY, message, evidence)
             for message, evidence in problems]
+
+
+# --------------------------------------------------------------------------
+# Lint 14bc open_end_unsupported (#1342 residual; MIX11 MOCDRL-01, RSRRUF-04):
+# a record the document shows as open-ended ("2031-Present", "03/31-Present")
+# whose own source line closes it: a span with an end ("3/2031-3/2032",
+# "2031 to 2033") or a one-year cohort ("Class of 2031"), and no open marker.
+#
+# date_cell_shape's open_range reads the WHOLE entry's text for an open
+# marker, skips I rows, and reads only four-digit years, so it is silent when
+# the marker belongs to a sibling record of the same entry (a project line's
+# "-present" beside its award's closed span), on an I record stage 4 gave an
+# invented "present" end, and on a grant's "MM/YY-Present". This lint reads
+# each record of a split entry against the source line that holds its start
+# year and its own words; an unsplit record owns the entry's whole text, as
+# in date_cell_shape, and a range date_cell_shape already judges is left to
+# it. A bare start year ("2031 Member") is not a closed span: I rows keep
+# "<start>-Present" by Paul's 2026-10-30 decision on #1342, and
+# date_cell_shape covers a bare year on every other code.
+OPEN_END_SEVERITY = "WARN"
+#: Characters of the rendered unit and of the source line quoted per finding.
+OPEN_END_EVIDENCE_CHARS = 200
+
+#: What splits an entry's text into the lines its records sit on: a tab, a
+#: line break, a bullet glyph, or a " | " cell joiner.
+_OPEN_END_LINE_SPLIT_RE = re.compile(r"[\t\n\u2022\u25e6\u25aa\u2023\u00b7]|\s\|\s")
+_OPEN_END_DASH = r"(?:[-\u2013\u2014]|\bto\b|\bthrough\b|\buntil\b)"
+_OPEN_END_WORDS = r"(?:present|current|ongoing)\b"
+#: A start year, a spaced dash, and words ("2031 - Mentor on ..."): read as
+#: open, as `_OPEN_MARKER_DASH_RE` reads a line that opens so.
+_OPEN_END_SPACED_DASH_RE = re.compile(r"(?<!\d)\d{4}\s+[-\u2013\u2014]\s+[A-Za-z]")
+#: A label/value table holds one record when at least this many of its rows,
+#: and at least half, open with a label cell ("Duration of support:").
+OPEN_END_MIN_LABEL_ROWS = 2
+
+
+class _OpenEndRecord(NamedTuple):
+    """One stage-4 record read for this lint (§8.1)."""
+    element_idx: object
+    code: str
+    start_year: str
+    tokens: frozenset[str]
+    own_tokens: frozenset[str]
+    has_siblings: bool
+    value_tokens: frozenset[str]
+
+
+def _record_value_tokens(record: Mapping) -> frozenset[str]:
+    """The words of a record's string values, its dates left out."""
+    return _attribution_tokens(" ".join(
+        value for key, value in record.items()
+        if key not in _JUNK_DATE_FIELDS and isinstance(value, str)))
+
+
+def _open_end_records(raw: dict) -> list[_OpenEndRecord]:
+    """The entry's records (its stage-4 split, else its own fields) that have
+    a four-digit start year: their `start_date`'s, or for an unsplit entry
+    with none the first year of its text, as `_dated_entry` reads it, so a
+    row stage 4 gave no date can still claim its own rendered range. An
+    unsplit record's words are its values' and its text's (a mentee's name
+    may be in neither field), a split record's its own values'; its
+    `value_tokens`, the words of its values alone, are what a rendered row
+    must show a share of, so a long description does not hide its row.
+    `own_tokens` are the words no sibling record carries, so a record can be
+    told from the siblings it shares a title with."""
+    fields = raw.get("extracted_fields")
+    if not isinstance(fields, Mapping):
+        return []
+    records = _split_child_records(raw) or [fields]
+    values = [_record_value_tokens(record) for record in records]
+    tokens = values
+    if len(records) == 1:
+        tokens = [values[0] | _attribution_tokens(str(raw.get("text") or ""))]
+    found = []
+    for place, record in enumerate(records):
+        start = _FOUR_DIGIT_YEAR_RE.search(str(record.get("start_date") or ""))
+        if start is None and len(records) == 1:
+            start = _FOUR_DIGIT_YEAR_RE.search(str(raw.get("text") or ""))
+        if start is None:
+            continue
+        others = frozenset().union(*(t for i, t in enumerate(tokens) if i != place))
+        found.append(_OpenEndRecord(raw.get("element_idx_start"),
+                                    str(raw.get("taxonomy_code") or ""),
+                                    start.group(0), tokens[place],
+                                    tokens[place] - others, len(records) > 1,
+                                    values[place] or tokens[place]))
+    return found
+
+
+def _closed_span_re(year: str) -> re.Pattern:
+    """A span that opens in `year` and states an end ("3/2031-3/2032",
+    "2031 to June 2033", "2031-33"), or a one-year cohort ("Class of 2031")."""
+    return re.compile(
+        rf"(?<!\d)(?:\d{{1,2}}[/.])?{year}\s*{_OPEN_END_DASH}\s*"
+        rf"(?:{_MONTH_WORD}\s+)?(?:\d{{1,2}}[/.])?(?:(?:19|20)\d{{2}}|\d{{2}})(?!\d)"
+        rf"|\bclass\s+of\s+'?{year}\b", re.IGNORECASE)
+
+
+#: A rendered open range: its start (a year, or a month and a two-digit
+#: year, "03/31") and an open word.
+_RENDERED_OPEN = (rf"(?<![\d/])(?:\d{{1,2}}/)?(?P<year>(?:19|20)\d{{2}}|\d{{2}})\s*"
+                  rf"[-\u2013\u2014]\s*{_OPEN_END_WORDS}")
+#: A table cell that is wholly an open range ("2031-Present").
+_RENDERED_OPEN_CELL_RE = re.compile(rf"\s*{_RENDERED_OPEN}\s*", re.IGNORECASE)
+#: A paragraph that opens with an open range ("2031-Present - Example Role, ..."),
+#: or closes with one ("Director, Example Center, 2031-Present").
+_RENDERED_OPEN_LEAD_RE = re.compile(
+    rf"\s*{_RENDERED_OPEN}(?=\s*(?:[-\u2013\u2014:,|]|\t)\s*\S)", re.IGNORECASE)
+_RENDERED_OPEN_TAIL_RE = re.compile(rf"(?:,|\|)\s*{_RENDERED_OPEN}\s*\.?\s*$",
+                                    re.IGNORECASE)
+
+#: Share of a record's words a rendered unit must show for the open range in
+#: it to be read as that record's.
+OPEN_END_MIN_TOKEN_SHARE = 0.5
+#: Share of the top record's shared words at which a rival record whose
+#: source is open could be the one shown, so the range is not read. A
+#: rival with fewer is a neighbour sharing an institution's name (MOCDRL 75:
+#: the award table shows 30 of its 30 words, an open curriculum row 7).
+OPEN_END_RIVAL_SHARE = 0.5
+
+
+def _line_is_open(line: str) -> bool:
+    return bool(_OPEN_MARKER_WORD_RE.search(line) or _OPEN_MARKER_DASH_RE.search(line)
+                or _OPEN_END_SPACED_DASH_RE.search(line))
+
+
+def _source_closes(record: _OpenEndRecord, text: str) -> str | None:
+    """The source line that holds the record's start year and its own words,
+    when that line closes the record's span and has no open marker; None when
+    it leaves the span open, no line holds the year, or two lines tie for it
+    and one of them is open. A tie between closed lines still names one. A
+    record with no sibling owns the entry's whole text, so an open marker
+    anywhere in it spares the record."""
+    year_re = re.compile(rf"(?<!\d){record.start_year}(?!\d)")
+    text = normalise_hyphens(text)
+    lines = ([line.strip() for line in _OPEN_END_LINE_SPLIT_RE.split(text)]
+             if record.has_siblings else [text.strip()])
+    lines = [line for line in lines if year_re.search(line)]
+    if not lines:
+        return None
+    words = record.own_tokens or record.tokens
+    scores = [len(words & _attribution_tokens(line)) for line in lines]
+    best = [line for line, score in zip(lines, scores, strict=True) if score == max(scores)]
+    closed = _closed_span_re(record.start_year)
+    if all(closed.search(line) and not _line_is_open(line) for line in best):
+        return best[0]
+    return None
+
+
+def _is_label_table(text: str) -> bool:
+    """Whether a table's joined rows mostly open with a label cell."""
+    rows = [line for line in text.split("\n") if TABLE_ROW_JOINER in line]
+    labelled = sum(line.split(TABLE_ROW_JOINER, 1)[0].rstrip().endswith(":") for line in rows)
+    return labelled >= max(OPEN_END_MIN_LABEL_ROWS, len(rows) / 2)
+
+
+def _rendered_units(blocks: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """(kind, text) of what one record renders as: a paragraph ("p"), a
+    table line, a cell or a joined row ("table"), or a whole label/value
+    table, which holds one record (a grant: its "Duration of support:" row
+    and its "Award Source:" row)."""
+    units = []
+    for kind, text in blocks:
+        text = str(text or "")
+        if kind != "table":
+            units.append(("p", text))
+        elif _is_label_table(text):
+            units.append(("table", text))
+        else:
+            units.extend(("table", line) for line in text.split("\n"))
+    return units
+
+
+def _rendered_open_dates(kind: str, unit: str) -> list[re.Match]:
+    """The open ranges a unit renders as a date of its own: a table cell that
+    is wholly one, or a paragraph's opening or closing date. A range inside
+    running text, such as a name cell that quotes the CV's own
+    "..., 2031-present", is the CV's wording, not a rendered date."""
+    if kind != "p":
+        return [match for cell in re.split(r"\n| \| ", unit)
+                if (match := _RENDERED_OPEN_CELL_RE.fullmatch(cell))]
+    return [match for match in (_RENDERED_OPEN_LEAD_RE.match(unit),
+                                _RENDERED_OPEN_TAIL_RE.search(unit)) if match]
+
+
+def _matching_records(year: str, words: frozenset[str],
+                      records: list[_OpenEndRecord]) -> list[tuple[int, int]]:
+    """(shared words, place in `records`) of every record that starts in
+    `year` (four digits, or its last two) and shares with `words` at least
+    DATE_CELL_MIN_SHARED_TOKENS, and as many as OPEN_END_MIN_TOKEN_SHARE of
+    its values' words, most shared first."""
+    matches = []
+    for place, record in enumerate(records):
+        if year not in (record.start_year, record.start_year[2:]):
+            continue
+        shared = len(record.tokens & words)
+        if shared >= max(DATE_CELL_MIN_SHARED_TOKENS,
+                         OPEN_END_MIN_TOKEN_SHARE * len(record.value_tokens)):
+            matches.append((shared, place))
+    return sorted(matches, reverse=True)
+
+
+def _closed_owner(matches: list[tuple[int, int]],
+                  lines: Mapping[int, str | None]) -> int | None:
+    """The place of the record an open range is read as: the one match that
+    shares the most words, strictly. None on a tie, and None when a rival
+    match with an open source shares OPEN_END_RIVAL_SHARE of the top match's
+    words, since that record may be the one on the page (VVRTUC 43: a later
+    title, open in its source, beside the closed rank it began with)."""
+    if not matches or (len(matches) > 1 and matches[1][0] == matches[0][0]):
+        return None
+    top_shared, top = matches[0]
+    if lines.get(top) is None or any(
+            lines.get(place) is None and shared >= OPEN_END_RIVAL_SHARE * top_shared
+            for shared, place in matches[1:]):
+        return None
+    return top
+
+
+def _date_cell_shape_reads(record: _OpenEndRecord, year: str) -> bool:
+    """Whether date_cell_shape's open_range already judges this range: an
+    unsplit record, of a code outside its by-decision exemption, shown with a
+    four-digit start year. There both lints read the entry's whole text, so
+    one rendered row is reported once."""
+    return (not record.has_siblings and len(year) == 4
+            and record.code not in DATE_CELL_OPEN_BY_DECISION_CODES)
+
+
+def lint_open_end_unsupported(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """A record the document shows open-ended ("-Present") whose own source
+    line states a closed span and no open marker (14bc; #1342, MIX11
+    MOCDRL-01 and RSRRUF-04). WARN, one per record. Each open range on the
+    page is tied to the one stage-4 record that starts in its year and shows
+    the most of its words, and is not read when another record that could be
+    the one shown is open in its source. An entry whose headings carry an
+    open marker ("Current Grants") is not read: there the source itself
+    calls the record open. A range date_cell_shape already judges
+    (`_date_cell_shape_reads`) is left to it."""
+    records, lines = [], {}
+    for raw in stage4.get("entries", []):
+        hierarchy = raw.get("hierarchy")
+        headings = " ".join(map(str, hierarchy)) if isinstance(hierarchy, list) else ""
+        heading_open = bool(_OPEN_MARKER_WORD_RE.search(
+            f"{headings} {raw.get('context_heading') or ''}"))
+        for record in _open_end_records(raw):
+            records.append(record)
+            if not heading_open:
+                lines[len(records) - 1] = _source_closes(record, str(raw.get("text") or ""))
+    shown: dict[int, tuple[str, str]] = {}
+    for kind, unit in _rendered_units(blocks):
+        words = _attribution_tokens(unit)
+        for match in _rendered_open_dates(kind, unit):
+            place = _closed_owner(_matching_records(match["year"], words, records), lines)
+            if place is not None and not _date_cell_shape_reads(records[place], match["year"]):
+                shown.setdefault(place, (match.group(0).strip(" ,|.\t"), unit))
+    findings = []
+    for place, (rendered, unit) in shown.items():
+        line = lines[place]
+        record = records[place]
+        findings.append(_finding(
+            "open_end_unsupported", OPEN_END_SEVERITY,
+            f"entry {record.element_idx} ({record.code}): renders "
+            f"'{rendered}', but its source line closes the span and has "
+            f"no open marker",
+            [unit[:OPEN_END_EVIDENCE_CHARS], line[:OPEN_END_EVIDENCE_CHARS]]))
+    return findings
