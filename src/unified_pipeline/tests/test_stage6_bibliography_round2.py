@@ -1371,6 +1371,99 @@ def test_fill_bibliography_bolds_a_compound_owner_in_pubmed_form():
     assert bolds == [["Varnoske Pellith I"]] * 3 + [["Pellith IA"], []]
 
 
+# --- #2060: a co-author sharing the owner's surname is never bolded first ---
+
+
+def _owner_is(*initials):
+    """An alias that knows only stage 4's own owner initials."""
+    return OwnerAlias(owner_initials=frozenset(initials))
+
+
+@pytest.mark.parametrize(
+    "citation, target_name, owner, alias, bolded",
+    [
+        # The issue's shape: a dotted target misses PubMed's "Doe JK", and an
+        # earlier "Doe A" must not take the bold.
+        ("Doe A, Roe B, Doe JK" + _TAIL, "Doe J.K.", "Doe", OwnerAlias(), "Doe JK"),
+        # Same first initial: the owner's full initials decide.
+        ("Lark Doe S, Roe B, Doe SK" + _TAIL, "Doe S.K.", "Doe", OwnerAlias(), "Doe SK"),
+        ("Doe SR, Roe B, Doe SK" + _TAIL, "Doe, S. K.", "Doe", OwnerAlias(), "Doe SK"),
+        # Full initials differ, one first initial matches.
+        ("Doe Y, Roe B, Doe S" + _TAIL, "Doe S.K.", "Doe", OwnerAlias(), "Doe S"),
+        # The owner listed twice is one person: the first is bolded.
+        ("Doe JK, Roe B, Doe JK" + _TAIL, "Doe J.", "Doe", OwnerAlias(), "Doe JK"),
+        # Nothing singles one out: bold none, never the first.
+        ("Doe JA, Doe JB" + _TAIL, "Doe J.", "Doe", OwnerAlias(), ""),
+        ("Doe A, Roe B, Doe C" + _TAIL, "Doe J.K.", "Doe", OwnerAlias(), ""),
+        # A co-author's target ("Doe, A." on a J owner's CV) yields to stage
+        # 4's own owner initials.
+        ("Doe A, Doe JK" + _TAIL, "Doe, A.", "Doe", _owner_is("J"), "Doe JK"),
+        # Stage 4's owner initials decide on the last-name step too, and a
+        # target on another surname lends that step nothing.
+        ("Doe A, Doe M, Roe B" + _TAIL, None, "Doe", _owner_is("M"), "Doe M"),
+        ("Doe A, Doe J" + _TAIL, "Jane Doe, PhD", "Doe", _owner_is("A"), "Doe A"),
+        # Ambiguity stops the chain: the alias step does not take the first.
+        ("Doe MA, Doe MB" + _TAIL, None, "Doe",
+         OwnerAlias(("Doe",), frozenset("M"), frozenset({"doe"}), owner_initials=frozenset("M")), ""),
+        # No owner initial known at all: the first, as before.
+        ("Doe A, Doe B" + _TAIL, None, "Doe", OwnerAlias(), "Doe A"),
+        ("Doe A, Doe B" + _TAIL, "Doe, A; Doe, B", "Doe", OwnerAlias(), "Doe A"),
+        # One same-surname author bolds as before, initials or not.
+        ("Doe A, Roe B" + _TAIL, "Doe J.K.", "Doe", OwnerAlias(), "Doe A"),
+        # A title word is not a second author.
+        ("Doe JK, Roe B. Doe A gene in mice. J Things. 2020;1:1-9.", "Doe J.K.", "Doe",
+         OwnerAlias(), "Doe JK"),
+    ],
+)
+def test_citation_author_split_same_surname_coauthor(citation, target_name, owner, alias, bolded):
+    before, bold, after = bibliography._citation_author_split(citation, target_name, owner, alias)
+    assert bold == bolded
+    assert before + bold + after == citation
+
+
+@pytest.mark.parametrize("target_name, initials", [
+    ("Doe J.K.", "JK"),
+    ("Doe J K", "JK"),
+    ("Doe JK", "JK"),
+    ("Doe, J. K.", "JK"),
+    ("de la Cruz M", "M"),
+    ("Testa, Michael E.", ""),
+    ("Doe, J; Roe, B", ""),
+    ("Doe, PhD", ""),
+    ("Michael E. Testa", ""),
+    ("Testa", ""),
+])
+def test_target_initials(target_name, initials):
+    assert bibliography._target_initials(target_name) == initials
+
+
+def test_fill_bibliography_bolds_the_owner_not_an_earlier_same_surname_coauthor():
+    entries = [_citation_entry("Doe A, Roe B, Doe JK. A study of mice. J Med. 2020;1:1-2.",
+                               "Doe J.K.", 2020)]
+    # Both writers share `_citation_author_split` (#572); the plain one is read here.
+    assert _bold_texts(entries, {"last_name": "Doe", "first_name": "Jane"}) == [["Doe JK"]]
+
+
+def test_fill_bibliography_coauthor_target_on_the_owners_surname_bolds_the_owner():
+    # Stage 4 set one citation's target to the co-author "Doe, A."; the
+    # owner's own initials (cv_owner, majority target) reach the split.
+    owner = [_citation_entry(f"Doe JK, Roe B. A study of mice {n}. J Med. 2020;1:1-2.", "Doe, JK", 2020)
+             for n in range(3)]
+    coauthor = _citation_entry("Doe A, Doe JK, Roe B. A study of rats. J Med. 2020;1:1-2.", "Doe, A.", 2020)
+    bolds = _bold_texts([*owner, coauthor], {"last_name": "Doe", "first_name": "Jane"})
+    assert bolds == [["Doe JK"]] * 4
+
+
+def test_fill_bibliography_owner_printed_by_middle_initial_agrees_with_herself():
+    # The majority target "Doe, SG" makes G an owner initial, so a target
+    # "Doe, G." beside a co-author "Doe J" bolds "Doe G", not nothing.
+    owner = [_citation_entry(f"Doe SG, Roe B. A study of mice {n}. J Med. 2020;1:1-2.", "Doe, SG", 2020)
+             for n in range(3)]
+    middle = _citation_entry("Roe A, Doe J, Doe G. A study of rats. J Med. 2020;1:1-2.", "Doe, G.", 2020)
+    bolds = _bold_texts([*owner, middle], {"last_name": "Doe", "first_name": "S."})
+    assert bolds == [["Doe SG"]] * 3 + [["Doe G"]]
+
+
 # --- #1436: an S8 abstract's event-status note survives into the citation ---
 
 

@@ -111,11 +111,15 @@ class OwnerAlias:
     first, the initials an alias match must carry, every folded name part
     of those spellings (for widening a half-matched compound), and
     `known_parts`: every name part known to be the owner's -- those parts
-    here; the caller adds the stage-4 names it trusts."""
+    here; the caller adds the stage-4 names it trusts. `owner_initials` are
+    the first initials stage 4 gives the owner alone (cv_owner names, the
+    majority target); `initials` also takes every target naming the owner,
+    a co-author who shares the surname among them (#2060)."""
     surnames: tuple[str, ...] = ()
     initials: frozenset[str] = frozenset()
     parts: frozenset[str] = field(default_factory=frozenset)
     known_parts: frozenset[str] = field(default_factory=frozenset)
+    owner_initials: frozenset[str] = field(default_factory=frozenset)
 
 
 def author_segment(citation: str) -> str:
