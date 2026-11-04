@@ -86,7 +86,7 @@ as a second licence in that state.
 import logging
 import re
 from collections.abc import Mapping, MutableMapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
 try:
@@ -274,6 +274,9 @@ class LicenseRecord:
     number: str = ''
     issue_date: str = ''
     last_registration_date: str = ''
+    #: The raw stage-4 entry this row renders, for the row receipt (#534);
+    #: not part of the row, so two equal rows compare equal.
+    source: Mapping[str, Any] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -306,6 +309,9 @@ class LicensureResult:
     licenses: tuple[LicenseRecord, ...]
     identifiers: IdentifierSet
     dea_withheld: bool = False
+    #: Raw entries that write no licence row on purpose (#534): a DEA record
+    #: (withheld with notice) and the NPI the identifier table shows.
+    no_row: tuple[Mapping[str, Any], ...] = ()
 
 
 def _classify_licensure_entry(state: str, license_number: str,
@@ -677,6 +683,11 @@ def _withhold_fused_dea(raw: MutableMapping[str, Any], entry: LicensureEntry,
     return replace(entry, number=number), True
 
 
+def _has_npi_shaped_token(text: str) -> bool:
+    """Whether `text` holds a run of digits shaped like an NPI (`_NPI_SHAPE_RE`)."""
+    return any(_NPI_SHAPE_RE.match(run) for run in re.findall(r'\d+', text))
+
+
 def _resolve_licensure(
         entries: Sequence[MutableMapping[str, Any]]) -> LicensureResult:
     """Decide the whole of section F1 without touching a document.
@@ -718,6 +729,7 @@ def _resolve_licensure(
     npi_number: str | None = None
     dea_withheld = False
     licenses: list[LicenseRecord] = []
+    no_row: list[Mapping[str, Any]] = []
     under_expiry_header = _rows_under_expiry_header(entries)
 
     for raw in sort_entries_reverse_chronological(entries):
@@ -732,6 +744,7 @@ def _resolve_licensure(
         if kind == KIND_DEA:
             dea_withheld = True
             raw['text'] = _strip_dea_lines(entry.original_text)
+            no_row.append(raw)
             continue
 
         # A DEA number fused into this NPI's or licence's number cell
@@ -745,16 +758,24 @@ def _resolve_licensure(
         if kind == KIND_NPI:
             npi_number = _claim_identifier_slot(
                 'NPI', npi_number, entry.number, entry.original_text)
+            # The identifier table shows the claimed NPI; a label with no
+            # number anywhere ("NPI number: N/A") has nothing to show. A
+            # second, different NPI, or a number the slot never got, is
+            # dropped: no receipt, so the ledger reports it lost.
+            if (entry.number and npi_number == entry.number) or not _has_npi_shaped_token(
+                    entry.original_text):
+                no_row.append(raw)
             continue
 
         record = _license_record(entry)
         if record is not None:
-            licenses.append(record)
+            licenses.append(replace(record, source=raw))
 
     return LicensureResult(
         licenses=tuple(licenses),
         identifiers=IdentifierSet(dea=None, npi=npi_number),
         dea_withheld=dea_withheld,
+        no_row=tuple(no_row),
     )
 
 
@@ -954,6 +975,8 @@ class LicensureSection:
         for record in result.licenses:
             if self._write_license_row(table, record):
                 self.stats['entries_inserted'] += 1
+        for raw in result.no_row:
+            self._row_receipts.set_aside(raw)
 
         # #821: a DEA number is withheld with notice, never written --
         # `result.identifiers.dea` is already None (`_resolve_licensure`
@@ -987,6 +1010,7 @@ class LicensureSection:
             return False
 
         row = table.add_row()
+        self._row_receipts.wrote(row._tr, record.source)  # its entry's receipt (#534)
         if num_cols >= 4:
             row.cells[0].text = record.state or ''
             row.cells[1].text = record.number or ''

@@ -18,11 +18,11 @@ does not count.
 
 Recording happens in two places. `_add_entry_comments` is the shared hook
 that most renderers already call with the entry for the row they just wrote,
-so it records with the entry in hand, as the presentations writer does
-itself (`wrote` with its entry). Renderers that write rows without that
-hook (honors, the Q service tables, leadership, administrative activities)
-mark the entry they are on with `begin_entry`, and their row writers record
-against it. Each such renderer calls `end_entry` when its loop ends, and the
+so it records with the entry in hand, as the presentations and licensure
+writers do themselves (`wrote` with its entry). Renderers that write rows
+without that hook (honors, the Q service tables, leadership, administrative
+activities, board certification) mark the entry they are on with
+`begin_entry`, and their row writers record against it. Each such renderer calls `end_entry` when its loop ends, and the
 generator also ends the cursor after every section, so a row written outside
 an entry loop is never attributed to a stale entry.
 
