@@ -439,6 +439,18 @@ GRANT_NOTES_DESCRIPTION = (
 # direct costs reached no field and its "Annual direct costs:" row rendered
 # empty (#1672). M2A's wording, shared so the three buckets ask alike.
 GRANT_ANNUAL_FUNDING_DESCRIPTION = "Annual/yearly direct costs"
+# Which slot a grant's figure takes (#1672). A figure the CV labels per year,
+# kept as total_funding, rendered as "Total award:" (CKDDEG 110, AOJEQD 429,
+# RBPXCD 645); a total kept as annual_funding rendered as "Annual direct
+# costs:" (ASRNQM, M2A). Cited once per M2 code, by its total-amount field, so
+# the batch and recovery prompts and the three buckets split figures alike. A
+# figure whose label says neither is left to the guidance it had.
+GRANT_AMOUNT_SLOT_RULE = (
+    "A figure the entry labels per year ('/yr'), yearly, annual or for one numbered year "
+    "('Year 3') goes in annual_funding, not here. A figure stated for the whole award or for "
+    "a span of years ('total', 'over 5 years') with no per-year word goes here, not in "
+    "annual_funding. An entry that states both fills both"
+)
 
 FIELD_DESCRIPTIONS = {
     # A role held during the training ("Chief Resident") survived only in entry
@@ -592,7 +604,7 @@ FIELD_DESCRIPTIONS = {
         "agency": "Funding agency (e.g., 'NIH/NCI', 'NSF')",
         "start_date": "Funding period start",
         "end_date": "Funding period end",
-        "total_funding": "Total award amount in dollars",
+        "total_funding": f"Total award amount in dollars. {GRANT_AMOUNT_SLOT_RULE}",
         "annual_funding": GRANT_ANNUAL_FUNDING_DESCRIPTION,
         "percent_effort": "FTE/effort percentage (convert '.08FTE' to '8%'); effort in calendar/person months stays as written ('0.24 Cal Months')",
         "status": GRANT_STATUS_DESCRIPTION,
@@ -606,13 +618,14 @@ FIELD_DESCRIPTIONS = {
         "agency": "Funding agency",
         "start_date": "Funding period start",
         "end_date": "Funding period end",
-        "total_funding": "Total award amount",
+        "total_funding": f"Total award amount. {GRANT_AMOUNT_SLOT_RULE}",
         "annual_funding": GRANT_ANNUAL_FUNDING_DESCRIPTION,
         "percent_effort": "FTE/effort (extract '.08FTE' as '8%'); effort in calendar/person months stays as written ('0.24 Cal Months')",
         "status": GRANT_STATUS_DESCRIPTION,
         "notes": GRANT_NOTES_DESCRIPTION,
     },
     "M2C": {
+        "total_funding_requested": f"Total amount requested. {GRANT_AMOUNT_SLOT_RULE}",
         "annual_funding": GRANT_ANNUAL_FUNDING_DESCRIPTION,
         "status": GRANT_STATUS_DESCRIPTION,
         "notes": GRANT_NOTES_DESCRIPTION,

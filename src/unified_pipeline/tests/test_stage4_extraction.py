@@ -47,6 +47,9 @@ from unified_pipeline.tests.test_stage4_owner_side_channel import (  # noqa: E40
     LETTERHEAD,
     letterhead_docx,
 )
+from unified_pipeline.tests.test_stage4_schemas import (  # noqa: E402
+    GRANT_AMOUNT_SLOT_CLAUSES,
+)
 
 _NO_OWNER = {
     "first_name": "", "middle_name": "", "last_name": "",
@@ -1123,9 +1126,11 @@ def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule
 #: two added pi_name lines are the only difference: dropping them gives
 #: 108969062c... back. M2A re-measured for #1659, whose added effort-in-months
 #: rule line and two field-guide clauses are the only difference: dropping them
-#: gives d69c439d... back.
+#: gives d69c439d... back. M2A re-measured for #1672, whose amount-slot rule
+#: on the total_funding guide line is the only difference: dropping it gives
+#: bcf4fb95... back.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "bcf4fb95ce94fdcc5ee2b24f1a5cd4a820f05f6d14f616734e0ad65e61f7be53",
+    "M2A": "4cd3a7ba6fa56af43d17e1b5571a12b5793e5cc57e237f365985da7204fc9985",
     "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
@@ -1165,6 +1170,23 @@ def test_grant_instructions_map_clinical_trial_fields_onto_grant_fields():
     assert "agency = its sponsor" in prompt
     for code in ("M2C", "M2D"):  # a pending application or a patent is never a trial
         assert "CLINICAL TRIAL" not in _prompt(code, [{"text": "Invented entry"}])
+
+
+@pytest.mark.parametrize("code, total_field", [
+    ("M2A", "total_funding"), ("M2B", "total_funding"), ("M2C", "total_funding_requested"),
+])
+def test_grant_batch_and_recovery_prompts_carry_the_amount_slot_rule_once(code, total_field):
+    """#1672: which slot a per-year or a whole-award figure takes. Both prompts
+    print FIELD_DESCRIPTIONS, so the rule reaches the batch prompt and the
+    recovery prompt alike, on the guide line of the code's total-amount field,
+    and once: no second copy in rule 9."""
+    prompt = _prompt(code, [{"text": "Invented grant, $250,000/yr, 2019-2024"}])
+    recovery = extraction._get_field_descriptions(code)
+    for text in (prompt, recovery):
+        [line] = [line for line in text.splitlines() if line.startswith(f"- {total_field}: ")]
+        for clause in GRANT_AMOUNT_SLOT_CLAUSES:
+            assert clause in line
+        assert text.count(GRANT_AMOUNT_SLOT_CLAUSES[0]) == 1
 
 
 # --- #1403 (EBYSBC E32): stage-4 field rules --------------------------------
