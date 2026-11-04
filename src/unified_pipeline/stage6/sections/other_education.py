@@ -203,14 +203,17 @@ def _field_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, object]
     return '', ''
 
 
-def _folded_dates(folded: object, raw_text: str) -> str:
+def _folded_dates(folded: object) -> str:
     """The Dates cell of a row fan-out folded several records of one entry
     into (`fan_out.FOLDED_DATES_KEY`, #1577): each record's dates
     (`_field_dates`) in order, repeats dropped, joined with
-    `DATE_SPAN_SEPARATOR`; '' when fewer than two records were folded."""
+    `DATE_SPAN_SEPARATOR`; '' when fewer than two records were folded.
+    Each is one occasion: the entry's line is not read for an open range,
+    since its "<year> - <name>" opens one record of several, not a range
+    (HXBPCT 138 read "1998-Present")."""
     if not isinstance(folded, list) or len(folded) < 2:
         return ''
-    shown = [_field_dates(fields, raw_text)[0] for fields in folded]
+    shown = [_field_dates(fields, '')[0] for fields in folded]
     return DATE_SPAN_SEPARATOR.join(dict.fromkeys(dates for dates in shown if dates))
 
 
@@ -229,7 +232,7 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str, program: str,
     or is left to the Description (`_labelled_dates`, #1577). A row folded
     from several records lists all their dates (`_folded_dates`, #1577).
     """
-    folded_dates = _folded_dates(folded, raw_text)
+    folded_dates = _folded_dates(folded)
     if folded_dates:
         return folded_dates, False
     dates, lone = _field_dates(fields, raw_text)

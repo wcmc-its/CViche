@@ -889,6 +889,14 @@ def test_b2_folded_row_lists_each_records_dates(folded, dates):
     assert (record.dates, record.dates_from_text) == (dates, False)
 
 
+def test_b2_folded_row_reads_no_open_range_from_the_entrys_line():
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': '2029 \u2013 Example Consultant\tExample Accreditation 2029, 2031',
+         FOLDED_DATES_KEY: [{'start_date': '2029'}, {'start_date': '2031'}],
+         'extracted_fields': {'program_name': 'Example Accreditation', 'start_date': '2031'}})
+    assert record.dates == '2029, 2031'
+
+
 def test_b2_records_of_one_course_on_three_dates_render_one_row():
     records = [{'program_name': 'Recertified, Example Life Support', 'institution': None,
                 'start_date': year, 'end_date': None} for year in ('2029', '2030', '2031')]
