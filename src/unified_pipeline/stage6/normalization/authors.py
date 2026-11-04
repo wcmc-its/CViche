@@ -759,9 +759,14 @@ _PUBMED_INITIALS_RE = re.compile(r"^[A-Z]{1,4}$")
 #: What may follow a suffix: not more of a word or a name.
 _SUFFIX_END = r"\.?(?![\w'\-])"
 
+#: A Roman-numeral suffix next after a space ("Quorn JD II"): the initials
+#: stop before it, or their optional space would take its letters as more
+#: initials and leave the suffix unread.
+_NOT_ROMAN_SUFFIX_AHEAD = r"(?!\s(?:II|III|IV)\.?(?![\w'\-]))"
+
 #: A CV's initials for one author ("JD", "J.D.", "J. D.", "J-D"), the first
 #: one captured.
-_CV_INITIALS = r"(?P<initial>[A-Z])(?:\.?\s?-?[A-Z]){0,3}\.?"
+_CV_INITIALS = rf"(?P<initial>[A-Z])(?:\.?{_NOT_ROMAN_SUFFIX_AHEAD}\s?-?[A-Z]){{0,3}}\.?"
 
 
 def _cv_suffix_patterns(surname: str) -> tuple[re.Pattern[str], ...]:
@@ -794,21 +799,56 @@ def _cv_suffix(surname: str, initials: str, cv_text: str) -> str:
     return suffixes.pop() if len(suffixes) == 1 else ''
 
 
+def _cv_occurrence_pattern(surname: str) -> re.Pattern[str]:
+    """`surname` as a whole word with its initials and, when the CV prints
+    one, a generational suffix after them ("Quorn JD", "Quorn JD 2nd",
+    "Quorn, J.D., Jr.")."""
+    return re.compile(rf"(?<![\w'\-]){re.escape(surname)},?\s+{_CV_INITIALS}"
+                      rf"(?:,?\s+{_GENERATIONAL_SUFFIX})?{_SUFFIX_END}")
+
+
+def _positional_cv_suffixes(surname: str, initials: list[str], cv_text: str) -> list[str]:
+    """The suffix for each of PubMed's authors named `surname`, in list
+    order, read off the CV's own authors of that surname in the same order
+    (#1438: "Quorn JD, Brask A, Quorn JD 2nd"). Only when the CV prints
+    exactly as many of them as PubMed lists, each starting with the PubMed
+    author's first initial; anything else cannot be paired and carries
+    nothing."""
+    found = list(_cv_occurrence_pattern(surname).finditer(cv_text))
+    if len(found) != len(initials) or any(
+            m['initial'] != own[0] for m, own in zip(found, initials, strict=True)):
+        return [''] * len(initials)
+    return [m['suffix'] or '' for m in found]
+
+
+def _surname_suffixes(surname: str, initials: list[str], cv_text: str) -> list[str]:
+    """The suffix for each of PubMed's authors named `surname` (initials
+    given in list order): an author alone with the surname takes the one
+    suffix the CV prints after it; two or more are paired with the CV's
+    authors of that surname by position."""
+    if not surname or not all(_PUBMED_INITIALS_RE.match(own) for own in initials):
+        return [''] * len(initials)
+    if len(initials) == 1:
+        return [_cv_suffix(surname, initials[0], cv_text)]
+    return _positional_cv_suffixes(surname, initials, cv_text)
+
+
 def carry_cv_suffixes(pubmed_authors: str, cv_text: str) -> str:
     """PubMed's "Surname Initials" list with each author's generational
     suffix the CV prints put back (#1438): stage 5 builds the list from
     LastName and Initials only, so a CV's "Quorn JD 4th" renders as "Quorn
-    JD". Only an author whose surname is unique in the list takes a suffix,
-    since the CV's line cannot say which of two same-surname authors it
-    belongs to. An author already carrying something after the initials is
-    left as written."""
+    JD". Authors sharing a surname take suffixes only by position against
+    the CV's own list (`_positional_cv_suffixes`), so a "Quorn JD, ...,
+    Quorn JD 2nd" byline does not print one name twice. An author already
+    carrying something after the initials is left as written."""
     authors = pubmed_authors.split(', ')
     surnames = [a.rpartition(' ')[0] for a in authors]
-    carried = []
-    for author, surname in zip(authors, surnames, strict=True):
-        initials = author.rpartition(' ')[2]
-        suffix = ''
-        if surname and _PUBMED_INITIALS_RE.match(initials) and surnames.count(surname) == 1:
-            suffix = _cv_suffix(surname, initials, cv_text)
-        carried.append(f"{author} {suffix}" if suffix else author)
-    return ', '.join(carried)
+    initials = [a.rpartition(' ')[2] for a in authors]
+    suffixes = [''] * len(authors)
+    for surname in dict.fromkeys(surnames):
+        positions = [i for i, name in enumerate(surnames) if name == surname]
+        found = _surname_suffixes(surname, [initials[i] for i in positions], cv_text)
+        for i, suffix in zip(positions, found, strict=True):
+            suffixes[i] = suffix
+    return ', '.join(f"{author} {suffix}" if suffix else author
+                     for author, suffix in zip(authors, suffixes, strict=True))
