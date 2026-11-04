@@ -1502,11 +1502,17 @@ class PubMedEnricher:
         same year. Both guards are corpus incidents (2026-10-02): 7 of 8
         title-only candidates were same-group papers in another year, and
         web228's 2018 Sci Rep meta-analysis has a short title nested inside
-        the in-press paper's, which a shorter-title overlap scores as a match."""
+        the in-press paper's, which a shorter-title overlap scores as a match.
+
+        An entry already superseded is not a published copy: stage 6 deletes
+        it. Two in-press copies of one paper each found the other, and both
+        were deleted (LQNORX, #2059). Skipping a superseded one keeps the
+        last of them; the earlier ones are superseded by it."""
         enrichment = entry.get('enrichment_data') or {}
         pmid, year = enrichment.get('pubmed_pmid'), enrichment.get('pubmed_year')
         for other in pub_entries:
-            if other is entry or other.get('taxonomy_code') not in PUBLISHED_ARTICLE_CODES:
+            if (other is entry or other.get('in_press_superseded')
+                    or other.get('taxonomy_code') not in PUBLISHED_ARTICLE_CODES):
                 continue
             fields = other.get('extracted_fields') or {}
             if pmid and str(fields.get('pmid')) == str(pmid):
