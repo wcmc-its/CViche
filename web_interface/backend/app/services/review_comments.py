@@ -208,6 +208,8 @@ REVIEW_FLAGS = {
                              "Present with it."),
     "cross_section_duplicate": ("Your CV lists this under two headings, and it is shown twice: "
                                 "keep the copy in the section where it belongs and delete the other."),
+    "degree_row_not_degree": ("This row names no degree, but this table is for Bachelor's degrees "
+                              "and higher: add the degree, or move the row to where it belongs."),
     "licensure_row_not_licence": ("This is a certificate or course, not a licence, board "
                                   "certification or award: move it to Other Educational "
                                   "Experiences, or to Board Certification if a board grants it."),

@@ -648,6 +648,11 @@ LINT_COPY = {
         "Your CV lists one item, such as a role, an award or a grant, under two of its headings, "
         "and the document shows it twice.",
         "Keep the copy in the section where it belongs and delete the other."),
+    "degree_row_not_degree": LintCopy(
+        "Not a degree",
+        "A row of the Academic Degrees table, which lists Bachelor's degrees and higher, names no "
+        "degree: a high-school diploma, a minor, a certificate, a training post or only a school.",
+        "Check the quoted row: add the degree it led to, or move it to the section it belongs in."),
     "licensure_row_not_licence": LintCopy(
         "Certificate filed as a licence or award",
         "A certificate, a course or another credential that is not a licence is shown as a "

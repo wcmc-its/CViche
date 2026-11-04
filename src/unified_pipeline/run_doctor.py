@@ -605,6 +605,11 @@ Lints, ranked by the severity of the failure class they catch:
                           rendered pair. Reads stage 4 and the docx's table
                           rows; its paragraphs, for sections and paragraph
                           records, when present
+14be. degree_row_not_degree a row of the Academic Degree(s) table (Bachelor's
+                          and higher) whose degree cell names no academic
+                          degree: a high-school diploma, a minor, a
+                          certificate, a training post or a school's name
+                          (#1415; MIX11 HTGWYH-06, KGXMLK-09, LPPQAJ-16).
 14bf. licensure_row_not_licence a rendered row holding a credential its
                           table is not for (#1577 shape 3): a Licensure row
                           that states a certificate, a course or a
@@ -685,6 +690,7 @@ from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_degree_row_not_degree,
     lint_pinned_heading_empty,
     lint_section_consistency,
 )
@@ -1026,6 +1032,7 @@ KNOWN_LINTS = (
     "pinned_heading_empty",
     "open_end_unsupported",
     "cross_section_duplicate",
+    "degree_row_not_degree",
     "licensure_row_not_licence",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -1366,6 +1373,9 @@ LINT_PREVALENCE = {
     # 460 w1243 farm runs rendered fresh from origin/dev 03955964, 2026-11-04.
     # The farm holds several uploads of some CVs (135 distinct owners flagged).
     "cross_section_duplicate": 0.35,
+    # degree_row_not_degree (#1415; DRN-1 in doctor/PRECISION.md): 64 of the
+    # w1243 farm's 460 runs, fresh stage-6 renders, 2026-11-04.
+    "degree_row_not_degree": 0.139,
     # licensure_row_not_licence (#1577; LRNL-1 in doctor/PRECISION.md): 13 of 471
     # fresh renders on origin/dev 03955964 (the #1243 census farm's 460 and
     # the 11 MIX11 runs), 2026-11-04.
@@ -2009,6 +2019,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("cross_section_duplicate", lint_cross_section_duplicate, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
     LintSpec("licensure_row_not_licence", lint_licensure_row_not_licence, ("table_rows",)),
 )
 
