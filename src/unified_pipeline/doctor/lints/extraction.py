@@ -4343,7 +4343,8 @@ def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) 
 # "$1,500,000", "1500000"), within half the last digit it states, and a grant
 # number by its identity (an NIH number by institute and serial, "5R01
 # CA012345-01A1" = "CA-12345"; another format by its letters and digits).
-# Report-only, INFO, and a review-copy comment only (doctor/PRECISION.md, GF-1).
+# Report-only, INFO, and a review-copy comment only (doctor/PRECISION.md, GF-1
+# and GF-2).
 
 #: The finding's shapes, named in its message (`precision.finding_precision`).
 GRANT_FACT_NOT_IN_SOURCE = "value_not_in_source"

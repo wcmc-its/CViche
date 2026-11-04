@@ -10,6 +10,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.doctor import precision  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    GRANT_FACT_MISSING,
+    GRANT_FACT_NOT_IN_SOURCE,
+    GRANT_FACT_WRONG_SLOT,
+)
 from unified_pipeline.doctor.precision import (  # noqa: E402
     HELD_OUT_CHANGED,
     IN_PLACE_MIN_PRECISION,
@@ -442,6 +447,16 @@ def test_a_findings_shape_is_its_stage6_shape_or_the_row_its_message_names():
                          rows) == "owner_pi_role_empty"
     assert finding_shape("low_lint", "x", rows) is None
     assert finding_shape("absent_lint", "x", rows) is None
+
+
+def test_the_committed_ledger_reads_each_grant_facts_shape_by_its_own_row():
+    """GF-1 and GF-2: a grant_facts message names its shape, so each shape
+    reads its own row of the real ledger, never the lint's rows pooled."""
+    load_shape_ledger.cache_clear()
+    rows = load_shape_ledger()
+    for shape in (GRANT_FACT_MISSING, GRANT_FACT_NOT_IN_SOURCE, GRANT_FACT_WRONG_SLOT):
+        assert finding_shape("grant_facts", f"entry 20 (M2B): {shape}: $27,000 ... (#1672)", rows) == shape
+    assert rows[("grant_facts", GRANT_FACT_WRONG_SLOT)].measured == "GF-2"
 
 
 def test_review_verdicts_fold_one_for_one_and_unknown_is_not_judged():
