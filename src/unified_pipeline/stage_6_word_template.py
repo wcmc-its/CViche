@@ -4387,11 +4387,20 @@ Now analyze the text above:"""
         Scans forward from header_idx, skipping instructional text (paragraphs
         starting with 'Please', 'Include', etc.), and returns the index of the
         next subsection header or major section header to insert before.
+
+        The scan runs to the next major section header, not a fixed number of
+        paragraphs: tables are not paragraphs, but each one leaves blank
+        paragraphs between it and the next, so a subsection holding six grant
+        tables pushed its next heading past a ten-paragraph window and the
+        segment fell to the end of the whole section, under a later
+        subsection (#2063 rework).
         """
         # Instructional text patterns to skip
         instruction_starts = ('please', 'include', 'list', 'describe', 'use', 'note:')
 
-        for i in range(header_idx + 1, min(header_idx + 10, len(self.doc.paragraphs))):
+        section_end = self._find_section_end_paragraph_idx(header_idx)
+        scan_end = len(self.doc.paragraphs) if section_end is None else section_end
+        for i in range(header_idx + 1, scan_end):
             para = self.doc.paragraphs[i]
             text = para.text.strip().lower()
 
@@ -4412,7 +4421,7 @@ Now analyze the text above:"""
             return i
 
         # Fallback to end of section
-        return self._find_section_end_paragraph_idx(header_idx)
+        return section_end
 
     def _place_unrendered_prose(self, entries_by_code: dict[str, list[dict]]) -> None:
         """#1205: tracked-deleted sub-points first, then the content-overflow
