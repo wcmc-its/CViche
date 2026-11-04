@@ -223,6 +223,24 @@ def _line_without_shown_role_and_dates(text: object, role: object, start_date: o
     return line
 
 
+def line_without_edge_dates(text: object, start_date: object, end_date: object) -> str:
+    """The entry text less a date at its start or end whose years the Dates
+    cell shows (`start_date`/`end_date`): the name of a credential row stage 6
+    regroups under its own section (#1577). Unlike
+    `_line_without_shown_role_and_dates` it keeps a line that still holds
+    four digits: a credential's number ("(RHC000000)", "certificate
+    #X000000") is no other record's date. Text with nothing left once its
+    dates are gone is returned as given."""
+    text = _cell_text(text)
+    known_years = set(_YEAR_RE.findall(f'{_cell_text(start_date)} {_cell_text(end_date)}'))
+    line = text.strip(_LINE_EDGE_CHARS)
+    previous = None
+    while line != previous:
+        previous = line
+        line = _strip_edge_date(line, known_years).strip(_LINE_EDGE_CHARS)
+    return line or text
+
+
 # --- #1580: the Role cell of a row that is not a committee or board seat ---
 #
 # Stage 3b codes consulting, testimony, volunteering, advocacy, attending,

@@ -95,6 +95,13 @@ YEAR_LIST = rf'{YEAR_OR_SPAN}(?:\s*,\s*{YEAR_OR_SPAN})*'
 # "3/2010", "03/2010-present", "3/2010-6/2012".
 MONTH_YEAR_DATE = r'\d{1,2}/?\d{0,4}'
 MONTH_YEAR_SPAN = rf'{MONTH_YEAR_DATE}\s*{DATE_DASH}\s*(?:{OPEN_END}|{MONTH_YEAR_DATE})'
+# The words a CV writes before the date a credential runs out ("Exp. 4/2027",
+# "expires 6/30/2023", "valid through 2024") or was last renewed ("last
+# renewal February 2021"): neither is a date the credential was held from or
+# attended. Licensure's "Date of last registration" cell (#1698) and Other
+# Educational Experiences' Dates cell (#1577) read the same words.
+EXPIRY_LABEL = r'(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))'
+RENEWAL_LABEL = r'(?:renew(?:al|ed))'
 
 
 def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int | None]:

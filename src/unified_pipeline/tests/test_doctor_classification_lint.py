@@ -661,6 +661,152 @@ def test_the_lint_reports_exactly_what_the_stage3b_fellowship_pin_recodes_1577(t
     assert (_shapes(_run(entry)) == ["fellowship_as_membership"]) is honor
 
 
+# --- #1577 slice B: credential_misfiled, and the two older credential shapes ---
+
+def _f1_stage4(text, idx=10, **extra):
+    return {"entries": [{"element_idx_start": idx, "taxonomy_code": "F1", "text": text,
+                         "extracted_fields": {"state_country": None, "license_number": None,
+                                              "issue_date": "2031"}, **extra}]}
+
+
+@pytest.mark.parametrize("text,code,headings,expected", [
+    ("2031- Invented State Fluoroscopy Operator (XX000000)", "F1", ("Licensure",), "B2"),
+    ("Invented Board of Surgery Part I written exam, passed 2031", "F2", ("Board Certification",), "B2"),
+    ("1980   M(ASCP), Technologist in Invented Science, certificate #X000000", "F1", ("Personal Data",), "F2"),
+    ("June 2031 Licensed to practice Invented Medicine in the state of Invented", "B2", ("Education",), "F1"),
+    ("Invented State Controlled Substance Registration, 2031", "F2", ("Board Certification",), "F1"),
+])
+def test_a_misfiled_credential_is_reported_as_info_1577(text, code, headings, expected):
+    findings = _run(_entry(text, code, *headings))
+    assert _shapes(findings) == ["credential_misfiled"]
+    assert findings[0]["severity"] == "INFO"
+    assert f"the source points to {expected} (" in findings[0]["message"]
+
+
+def test_a_licence_statement_coded_h_is_no_credential_finding_1577():
+    # The owner's decision of 2026-11-03: stage 3b's pin leaves an honors line that states a
+    # licence, so the lint does not point it to F1; coded I, it does.
+    text = "Invented State Medical License with Distinction, 2031"
+    assert _run(_entry(text, "H", "Honors and Awards")) == []
+    assert _shapes(_run(_entry(text, "I", "Memberships"))) == ["credential_misfiled"]
+
+
+def test_a_credential_finding_names_the_home_it_points_to_1577():
+    [finding] = _run(_entry("2031- Invented State Fluoroscopy Operator (XX000000)", "F1", "Licensure"))
+    assert finding["message"].endswith(
+        "the source points to B2 (other education: an exam, permit, course or certificate, "
+        "not a licence or board)")
+    [finding] = _run(_entry("Licensed to practice in Invented State #XX 00000", "B2", "Education"))
+    assert finding["message"].endswith("the source points to F1 (licensure)")
+    [finding] = _run(_entry("1980 M(ASCP), Technologist in Invented Science", "F1", "Licensure"))
+    assert finding["message"].endswith("the source points to F2 (board certification)")
+
+
+def test_a_record_stage6_regroups_still_gets_every_other_shape_1577():
+    # stage 6 regroups the F1 line (a life-support course), but only the
+    # credential shapes read that: the cross-reference shape still reports it
+    text = "ACLS 2031, see Section 4"
+    findings = lint_section_consistency({"entries": [_entry(text, "F1", "Licensure")]}, _f1_stage4(text))
+    assert _shapes(findings) == ["cross_reference_as_record"]
+
+
+def test_an_unworded_line_after_a_board_row_is_reported_as_the_pin_reads_it_1577():
+    # FCAAUV 13-15's shape: an inline Board Certification label opens the block.
+    lead = _entry("Board CertificationDiplomate, Invented Board of Invented Medicine 2029", "F2",
+                  "Personal Data", idx=13)
+    board = _entry("Board Certified Invented Medicine 2031, recertified 2041", "F2", "Personal Data", idx=14)
+    line = _entry("Invented Academy Invented Medicine 2033", "I", "Personal Data", idx=15)
+    findings = _run(lead, board, line)
+    assert _shapes(findings) == ["credential_misfiled"] and "entry 15 (I)" in findings[0]["evidence"][0]
+    # under another heading, with no block opened before it, or with no board row before it, it is quiet
+    assert _run(lead, board, {**line, "hierarchy": ["Memberships"]}) == []
+    assert _run(board, line) == []
+    assert _run(line) == []
+
+
+def test_a_row_the_board_block_rule_made_f2_opens_no_block_for_the_next_1577():
+    # #1577 review M1: the lint reads a block as the pin does, so it does not report the pin's
+    # own output on a fresh run.
+    from unified_pipeline.core.credential_lines import BOARD_BLOCK_WHY
+    lead = _entry("Board Certification: Invented Board of Invented Medicine 2029", "F2", "Personal Data", idx=13)
+    pinned = {**_entry("Invented Academy Invented Medicine 2033", "F2", "Personal Data", idx=14),
+              "pre_pin_code": "I", "classification_reasoning": f"{BOARD_BLOCK_WHY} (category F2); x"}
+    after = _entry("Invented Academy Invented Surgery 2034", "I", "Personal Data", idx=15)
+    assert _run(lead, pinned, after) == []
+    model_f2 = _entry("Invented Academy Invented Medicine 2033", "F2", "Personal Data", idx=14)
+    assert _shapes(_run(lead, model_f2, after)) == ["credential_misfiled"]
+
+
+def test_a_record_stage6_regroups_or_stage3b_pinned_is_not_reported_1577():
+    permit = "2031- Invented State Fluoroscopy Operator (XX000000)"
+    assert _shapes(_run(_entry(permit, "F1", "Licensure"))) == ["credential_misfiled"]
+    assert lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, _f1_stage4(permit)) == []
+    # a stage-4 record stage 3b's credential pin recoded renders where it belongs
+    from unified_pipeline.core.credential_lines import CREDENTIAL_PIN_WHY
+    pinned = {"entries": [{"element_idx_start": 10, "taxonomy_code": "B2", "pre_pin_code": "F1", "text": permit,
+                           "classification_reasoning": f"{CREDENTIAL_PIN_WHY['B2']} (category B2)",
+                           "extracted_fields": {}}]}
+    assert lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, pinned) == []
+    # another step's recode that kept an earlier pin's pre_pin_code is no credential pin (review M10)
+    other_step = {"entries": [{**pinned["entries"][0], "classification_reasoning": "[WCM-table corrected]"}]}
+    assert _shapes(lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, other_step)) == [
+        "credential_misfiled"]
+    # a stage-4 record stage 6 keeps as a licence leaves the finding
+    other = _f1_stage4("Invented State Medical License 12345", idx=11)
+    assert _shapes(lint_section_consistency({"entries": [_entry(permit, "F1", "Licensure")]}, other)) == [
+        "credential_misfiled"]
+
+
+@pytest.mark.parametrize("text", [
+    "Basic Cardiac Life Support, 2031",
+    "Neonatal Resuscitation Program, 2031",
+    "ACLS 2031",
+])
+def test_a_life_support_course_spelled_out_is_flagged_and_skipped_once_regrouped_1577(text):
+    findings = _run(_entry(text, "F1", "Licensure"))
+    assert _shapes(findings) == ["life_support_as_license"] and findings[0]["severity"] == "WARN"
+    assert lint_section_consistency({"entries": [_entry(text, "F1", "Licensure")]}, _f1_stage4(text)) == []
+
+
+def test_a_life_support_mention_on_a_licence_line_is_still_a_warn_1577():
+    text = "Invented State Medical License #12345; BLS current"
+    findings = lint_section_consistency({"entries": [_entry(text, "F1", "Licensure")]}, _f1_stage4(text))
+    assert _shapes(findings) == ["life_support_as_license"]
+
+
+def test_a_licensing_exam_naming_a_board_is_no_board_certification_1577():
+    assert _run(_entry("Diplomate, National Board of Medical Examiners, 2031", "I", "Education")) == []
+    assert _shapes(_run(_entry("Diplomate, National Board of Invented Specialists, 2031", "I",
+                               "Education"))) == ["board_certification_misfiled"]
+
+
+@pytest.mark.parametrize("text,code,headings", [
+    ("2031- Invented State Fluoroscopy Operator (XX000000)", "F1", ("Licensure",)),
+    ("Invented Board of Surgery Part I written exam, passed 2031", "F2", ("Board Certification",)),
+    ("June 2031 Licensed to practice Invented Medicine in the state of Invented", "B2", ("Education",)),
+    ("2031 Invented Society, Fellow", "I", ("CERTIFICATION",)),
+    ("Invented State Medical License #12345, 2031", "F1", ("Licensure",)),
+    ("American Board of Invented Surgery, oral examination passed 2031", "F2", ("Board Certification",)),
+    ("Licensed to practice in Invented State", "T", ("Licensure",)),
+    # the fix round's classes (#1577 review B1, B3, B4, B5, M5)
+    ("USMLE Steps 1-3, 2029; Invented State Medical License #123456, 2031", "F1", ("Licensure",)),
+    ("ABXY - Invented Brachytherapy Society, 2031-present", "I", ("Professional Memberships",)),
+    ("Board Certified, American Board of Invented Medicine 2031; ACLS current", "F2", ("Board Certification",)),
+    ("Limited Training Permit, Invented State, 2029-2031", "F1", ("Licensure",)),
+    ("Invented State Board of Medicine, 2031-present", "I", ("Memberships",)),
+    # the owner's decision of 2026-11-03: a licence statement coded H stays an honor, coded I it moves
+    ("Invented State Medical License with Distinction, 2031", "H", ("Honors and Awards",)),
+    ("Invented State Medical License with Distinction, 2031", "I", ("Memberships",)),
+])
+def test_the_lint_reports_exactly_what_the_stage3b_credential_pin_recodes_1577(text, code, headings):
+    """One test, two readers (CODING_STANDARDS.md §1.5): credential_misfiled
+    reports a line exactly when stage 3b's credential pin recodes it."""
+    from unified_pipeline.stage3b.header_pin import credential_pin_code
+    entry = _entry(text, code, *headings)
+    pinned = credential_pin_code(entry, False) is not None
+    assert (_shapes(_run(entry)) == ["credential_misfiled"]) is pinned
+
+
 # --- pinned_heading_empty (#1949) ------------------------------------------
 
 def _node(title, code, confidence, *children, alternative=None):

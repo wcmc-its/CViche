@@ -135,6 +135,7 @@ from .rendering import (  # noqa: F401
 from .residue import (  # noqa: F401
     _line_without_shown_role_and_dates,
     _organization_left_in_text,
+    line_without_edge_dates,
     name_without_unstated_body,
     names_non_seat_activity,
     own_activity_role,

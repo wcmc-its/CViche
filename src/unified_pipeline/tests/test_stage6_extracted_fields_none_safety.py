@@ -755,6 +755,286 @@ def test_b2_location_already_trailing_the_institution_is_not_appended():
     assert gen.doc.tables[0].rows[1].cells[1].text == 'Some College, Riverton, OR'
 
 
+# --- other education: an institution the Description writes is printed once (#1577 D1)
+# Invented values; the shape is "Diplomate, <board> | <board> | <year>".
+
+def _b2_institution_cell(program, institution, **extra):
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': f'{program} 2031',
+         'extracted_fields': {'program_name': program, 'institution': institution, 'year': '2031'}, **extra}])
+    row = gen.doc.tables[0].rows[1]
+    return row.cells[0].text, row.cells[1]
+
+
+@pytest.mark.parametrize("program, institution, shown", [
+    ('Diplomate, Example Board of Examiners', 'Example Board of Examiners', ''),
+    ('Certified by Example Commission for Graduates (ECG)', 'Example Commission for Graduates (ECG)', ''),
+    ('Certified, ECG course IS-000, Example Incident Course', 'ECG', ''),
+    ('Example Worker\u2019s Board Level II', "Example Worker's Board", ''),
+    ('diplomate, example board of examiners', 'Example Board  of Examiners', ''),
+    # not the whole institution, or not as words of their own: the cell keeps it
+    ('Diplomate, Example Board', 'Example Board of Examiners', 'Example Board of Examiners'),
+    ('ECGX Example Course', 'ECG', 'ECG'),
+    ('Example Course', 'Example College', 'Example College'),
+    # a delivery venue is the row's place, not an organisation repeated
+    ('Teaching Online: Example Course', 'Online', 'Online'),
+], ids=['diplomate', 'whole-name-with-acronym', 'acronym-as-a-word', 'typographic-apostrophe',
+        'case-and-spacing', 'part-of-the-institution', 'inside-a-longer-word', 'not-in-the-description',
+        'delivery-venue'])
+def test_b2_institution_the_description_writes_is_printed_once(program, institution, shown):
+    description, cell = _b2_institution_cell(program, institution)
+    assert (description, cell.text) == (program, shown)
+
+
+def test_b2_institution_beside_a_program_written_as_a_list_is_kept():
+    _, cell = _b2_institution_cell(['Example College Course', 'Example Other Course'], 'Example College')
+    assert cell.text == 'Example College'
+
+
+def test_b2_institution_left_out_keeps_its_enriched_location():
+    _, cell = _b2_institution_cell(
+        'Example Course of Duke University', 'Duke University, Durham',
+        institution_enrichment={'cleaned_name': 'Duke University', 'city': 'Durham',
+                                'state': 'North Carolina', 'country_code': 'US'})
+    assert cell.text == ''  # python-docx text skips w:ins
+    assert _insertions(cell) == [('Institution Enrichment', 'Durham, NC')]
+
+
+def test_b2_institution_left_out_keeps_the_part_of_its_location_it_said():
+    _, cell = _b2_institution_cell(
+        'Completed Example HRP 225: Design of Studies', 'Example',
+        institution_enrichment={'cleaned_name': 'Example', 'city': 'Example',
+                                'state': 'California', 'country_code': 'US'})
+    assert _insertions(cell) == [('Institution Enrichment', 'Example, CA')]
+
+
+def test_b2_institution_and_location_the_description_writes_leave_the_cell_empty():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Internship at the Example Center, Exampletown, PA.',
+         'extracted_fields': {'program_name': 'Internship at the Example Center, Exampletown, PA.',
+                              'institution': 'Example Center', 'location': 'Exampletown, PA'}}])
+
+    assert gen.doc.tables[0].rows[1].cells[1].text == ''
+
+
+def test_b2_institution_left_out_keeps_its_extracted_location():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Example College Course, Example College',
+         'extracted_fields': {'program_name': 'Example College Course', 'institution': 'Example College',
+                              'location': 'Boston, MA'}}])
+
+    assert gen.doc.tables[0].rows[1].cells[1].text == 'Boston, MA'
+
+
+# --- other education: an expiry or renewal date is no date attended (#1577 D2) --
+# Invented values; the shapes are 4SOTEA 37, web211 36, web190 953, web068 48 and
+# VQFSDI 139.
+
+@pytest.mark.parametrize("text, fields, dates, from_text", [
+    ("Example Basic Certificate | Exp. 4/2031", {'end_date': '2031-04'}, 'Expires 04/31', False),
+    ("Example Life Support        Expires 8/09/29", {'end_date': '2029-08-09'}, 'Expires 08/29', False),
+    ("Example Course, Expiration date: 2031", {'year': '2031'}, 'Expires 2031', False),
+    ("Example Course, valid through 2031", {'start_date': '2031'}, 'Expires 2031', False),
+    ("Example Course (expires June 28, 2031)", {'start_date': '2031-06', 'end_date': '2031-06'},
+     'Expires 06/31', False),
+    ("Example Life Support, last renewal February 2029", {'end_date': '2029-02'}, 'Renewed 02/29', False),
+    ("Example Life Support, expires on 6/30/2031", {'end_date': '2031-06-30'}, 'Expires 06/31', False),
+    # the Description already writes the date after its label: printed once, there
+    ("Example Life Support, last renewal February 2029",
+     {'program_name': 'Example Life Support, last renewal February 2029', 'end_date': '2029-02'}, '', False),
+    ("Example Life Support, Example Association. Expiration 7/31/2031.",
+     {'program_name': 'Example Life Support. Expiration 7/31/2031.'}, '', False),
+    # a year read from the text keeps its label, as an inferred value
+    ("Example Life Support, Expiration 7/31/2031", {}, 'Expires 2031', True),
+    # no label, a label on another year, a label word inside another word, a range
+    ("Example Course | 4/2031", {'end_date': '2031-04'}, '04/31', False),
+    ("Example Course 2029, expires 2031", {'start_date': '2029'}, '2029', False),
+    ("Example research experience 2010", {'start_date': '2010'}, '2010', False),
+    ("Example Course 2029, expires 2031", {'start_date': '2029', 'end_date': '2031'}, '2029-2031', False),
+    ("Example Course, renewed 2029, held 2029-2031", {'start_date': '2029', 'end_date': '2031'}, '2029-2031',
+     False),
+], ids=['exp-dot-month-year', 'expires-two-digit-year', 'expiration-date-year-field', 'valid-through-start',
+        'expires-month-name-same-start-and-end', 'renewal', 'expires-on', 'description-holds-the-renewal',
+        'description-holds-the-expiry', 'text-year-labelled', 'unlabelled', 'label-on-another-year',
+        'label-inside-a-word', 'range', 'range-with-a-labelled-start'])
+def test_b2_expiry_or_renewal_date_keeps_its_label(text, fields, dates, from_text):
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': text,
+         'extracted_fields': {'program_name': 'Example Course', **fields}})
+    assert (record.dates, record.dates_from_text) == (dates, from_text)
+
+
+@pytest.mark.parametrize("text, program, fields, expected", [
+    ("Example Life Support           Expires July 2031", 'Example Life Support Expires', {'end_date': '2031-07'},
+     ('Example Life Support', 'Expires 07/31')),
+    ("Example Life Support, Exp. 4/2031", 'Example Life Support, Exp.', {'end_date': '2031-04'},
+     ('Example Life Support', 'Exp. 04/31')),
+    # the label's own words move with it, so none is lost or left behind
+    ("Example Life Support, last renewal 2031", 'Example Life Support, last renewal', {'year': '2031'},
+     ('Example Life Support', 'Last renewal 2031')),
+    ("Example Course, Date of Expiration: 09/30/2031", 'Example Course, Date of Expiration',
+     {'end_date': '2031-09-30'}, ('Example Course', 'Date of Expiration 09/31')),
+    ("Example Course, Expiration date 9/2031", 'Example Course, Expiration date', {'end_date': '2031-09'},
+     ('Example Course', 'Expiration date 09/31')),
+    ("Example Instructor | Exp. 5/2031", 'Example Instructor | Exp', {'end_date': '2031-05'},
+     ('Example Instructor', 'Exp 05/31')),
+    # a label that is the whole name stays; a cell with no label leaves the name alone
+    ("Expires 2031", 'Expires', {'year': '2031'}, ('Expires', 'Expires 2031')),
+    ("Example Expiry Course 2031", 'Example Course Expires', {'start_date': '2031'},
+     ('Example Course Expires', '2031')),
+], ids=['expires', 'exp-dot', 'last-renewal', 'date-of-expiration', 'expiration-date', 'table-cell-label', 'label-only-name',
+        'unlabelled-date'])
+def test_b2_description_drops_the_label_the_dates_cell_writes(text, program, fields, expected):
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': text, 'extracted_fields': {'program_name': program, **fields}})
+    assert (record.program, record.dates) == expected
+
+
+def test_b2_labelled_expiry_reaches_the_dates_cell():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Example Basic Certificate | Exp. 4/2031',
+         'extracted_fields': {'program_name': 'Example Basic Certificate', 'end_date': '2031-04'}},
+        {'taxonomy_code': 'B2', 'text': 'Example Life Support, Expiration 7/31/2030',
+         'extracted_fields': {'program_name': 'Example Life Support'}}])
+
+    rows = {row.cells[0].text: row.cells[2] for row in gen.doc.tables[0].rows[1:]}
+    assert rows['Example Basic Certificate'].text == 'Expires 04/31'
+    assert _insertions(rows['Example Basic Certificate']) == []
+    assert _insertions(rows['Example Life Support']) == [('Text Extraction', 'Expires 2030')]
+
+
+# --- other education: one row for the records fan-out folded (#1577 D3) --------
+# Invented values; the shapes are EQGGRB 48 and ULHCAP 44.
+
+from unified_pipeline.stage4.schemas import (  # noqa: E402
+    FIELD_SCHEMAS,
+    STAGE4_RECORDS_KEY,
+)
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    FOLDED_DATES_KEY,
+    fan_out_multi_record_entries,
+)
+
+
+@pytest.mark.parametrize("folded, dates", [
+    ([{'start_date': '2029'}, {'start_date': '2030'}, {'start_date': '2031'}], '2029, 2030, 2031'),
+    ([{'start_date': '2001-08', 'end_date': '2002-05'}, {'start_date': '2003-09', 'end_date': '2005-07'}],
+     '08/01-05/02, 09/03-07/05'),
+    ([{'year': '2029'}, {'start_date': '2031-06-13', 'end_date': '2031-06-13'}], '2029, 06/31'),
+    ([{'start_date': '2031'}, {'start_date': '2031'}], '2031'),
+    ([{'start_date': '2029'}, {}], '2029'),
+    # one record is no fold: the row's own fields
+    ([{'start_date': '2029'}], '2028'),
+], ids=['years', 'ranges', 'year-field-and-a-day', 'a-repeat', 'an-undated-record', 'one-record'])
+def test_b2_folded_row_lists_each_records_dates(folded, dates):
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': 'Example Life Support', FOLDED_DATES_KEY: folded,
+         'extracted_fields': {'program_name': 'Example Life Support', 'start_date': '2028'}})
+    assert (record.dates, record.dates_from_text) == (dates, False)
+
+
+def test_b2_folded_row_reads_no_open_range_from_the_entrys_line():
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': '2029 \u2013 Example Consultant\tExample Accreditation 2029, 2031',
+         FOLDED_DATES_KEY: [{'start_date': '2029'}, {'start_date': '2031'}],
+         'extracted_fields': {'program_name': 'Example Accreditation', 'start_date': '2031'}})
+    assert record.dates == '2029, 2031'
+
+
+def test_b2_records_of_one_course_on_three_dates_render_one_row():
+    records = [{'program_name': 'Recertified, Example Life Support', 'institution': None,
+                'start_date': year, 'end_date': None} for year in ('2029', '2030', '2031')]
+    entry = {'taxonomy_code': 'B2', 'element_idx_start': 48,
+             'text': '2029, 2030, 2031 Recertified, Example Life Support',
+             'extracted_fields': {**records[-1], STAGE4_RECORDS_KEY: records}}
+    gen = _b2_doc()
+    gen._fill_other_education(fan_out_multi_record_entries([entry], FIELD_SCHEMAS,
+                                                           records_key=STAGE4_RECORDS_KEY))
+
+    assert [[cell.text for cell in row.cells] for row in gen.doc.tables[0].rows[1:]] == [
+        ['Recertified, Example Life Support', '', '2029, 2030, 2031']]
+
+
+def test_b2_parts_of_one_numbered_diploma_render_one_row():
+    records = [{'program_name': f'Diplomate, Example Board of Examiners, #000001 \u2013 {part}',
+                'institution': 'Example Board of Examiners', 'start_date': date, 'end_date': date}
+               for part, date in (('Part I', '2028-06-13'), ('Part II', '2029-04-09'),
+                                  ('Certificate date', '2030-07-01'))]
+    entry = {'taxonomy_code': 'B2', 'element_idx_start': 44,
+             'text': '2030 Diplomate, Example Board of Examiners, #000001\tPart I \u2013 6/13/2028\t'
+                     'Part II \u2013 4/9/2029\tCertificate date \u2013 7/1/2030',
+             'extracted_fields': {**records[-1], STAGE4_RECORDS_KEY: records}}
+    gen = _b2_doc()
+    gen._fill_other_education(fan_out_multi_record_entries([entry], FIELD_SCHEMAS,
+                                                           records_key=STAGE4_RECORDS_KEY))
+
+    assert [[cell.text for cell in row.cells] for row in gen.doc.tables[0].rows[1:]] == [
+        ['Diplomate, Example Board of Examiners, #000001 \u2013 Part I, Part II, Certificate date', '',
+         '06/28, 04/29, 07/30']]
+
+
+# --- other education: a program that is only its list's label (#1577 D4) -------
+# Invented values; the shapes are CAOACN 40 and SVYSGY 44.
+
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    BUILT_TEXT_KEY,
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+)
+
+
+@pytest.mark.parametrize("text, fields, program", [
+    ("Certifications:   Example Board of Examiners  2031",
+     {'program_name': 'Certifications', 'institution': 'Example Board of Examiners', 'start_date': '2031'},
+     'Certifications: Example Board of Examiners'),
+    ("Board Certification:\nExample Board of Examiners, 2031",
+     {'program_name': 'Board Certification', 'institution': 'Example Board of Examiners', 'year': '2031'},
+     'Board Certification: Example Board of Examiners'),
+    ("Certifications: Example Board of Examiners 2029-2031",
+     {'program_name': 'Certifications', 'start_date': '2029', 'end_date': '2031'},
+     'Certifications: Example Board of Examiners'),
+    # a line that says no more than the label keeps the name stage 4 gave
+    ("Certifications: 2031", {'program_name': 'Certifications', 'start_date': '2031'}, 'Certifications'),
+    # no line to read: the name stage 4 gave
+    ("", {'program_name': 'Certifications', 'institution': 'Example Board of Examiners'}, 'Certifications'),
+    # a name that says more than the label is kept
+    ("Certifications: Example Coach Certification 2031",
+     {'program_name': 'Example Coach Certification', 'start_date': '2031'}, 'Example Coach Certification'),
+], ids=['lead-label-and-colon', 'label-on-its-own-line', 'range', 'label-only-line', 'no-line',
+        'named-program'])
+def test_b2_program_that_is_only_its_list_label_takes_the_line(text, fields, program):
+    record = _normalize_other_education_entry({'taxonomy_code': 'B2', 'text': text, 'extracted_fields': fields})
+    assert record.program == program
+
+
+def test_b2_program_written_as_a_list_is_kept_as_it_was():
+    names = ['Example Writing Course', 'Example Statistics Course']
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': 'Example Writing Course\tExample Statistics Course',
+         'extracted_fields': {'program_name': names, 'start_date': '2031'}})
+    assert (record.program, record.dates) == (names, '2031')
+
+
+def test_b2_split_record_named_by_its_list_label_reads_its_own_line():
+    entry = {'taxonomy_code': 'B2', 'text': 'Certifications | Example Board of Examiners | 2031',
+             BUILT_TEXT_KEY: True,
+             'extracted_fields': {'program_name': 'Certifications',
+                                  'institution': 'Example Board of Examiners', 'start_date': '2031'}}
+    assert _normalize_other_education_entry(entry).program == 'Certifications, Example Board of Examiners'
+
+
+def test_b2_last_split_record_named_by_its_list_label_reads_its_own_line_not_the_parents():
+    entry = {'taxonomy_code': 'B2', 'text': 'Example Course 2029\tCertifications: Example Board 2031',
+             LAST_STAGE4_RECORD: {'key': 'stage4_records', 'index': 1, 'count': 2,
+                                  OWN_TEXT_KEY: 'Certifications: Example Board 2031'},
+             'extracted_fields': {'program_name': 'Certifications', 'start_date': '2031'}}
+    assert _normalize_other_education_entry(entry).program == 'Certifications: Example Board'
+
+
 # --- patents: row counts, ordering, instruction removal --------------------------
 
 def _patent(text: str, **fields) -> dict:

@@ -971,3 +971,287 @@ def test_a_row_with_only_a_state_or_only_a_number_is_under_the_header(fields):
              if r.last_registration_date]   # the header renders with no date
     assert dates == ["Expires 03/31/2019"]
 
+
+
+# --- #1577 shape 3: a credential listed as a licence or a board certification ---
+# Invented values. The shapes are ZDOAZO 62 (a permit with a state), VTRKUF 28 (an
+# ECFMG line with no state), ECXGAT 48 (a technologist certificate with a number)
+# and PPMTJH 28 (an early exam step coded F2).
+
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    BUILT_TEXT_KEY,
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+)
+from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
+    CONTROLLED_SUBSTANCE_QUALIFIER,
+    CREDENTIAL_REROUTE_CHECK,
+    credential_listed_as_licence,
+    credential_reroute_warnings,
+    record_line,
+)
+
+
+def _f1(text, **fields):
+    return {"taxonomy_code": "F1", "element_idx_start": 62, "text": text,
+            "extracted_fields": {"state_country": None, "license_number": None,
+                                 "issue_date": None, "expiration_date": None, **fields}}
+
+
+def _home_of(entry, code="F1"):
+    reroute = credential_listed_as_licence(entry, code)
+    return (reroute.home.code, reroute.home.kind) if reroute else None
+
+
+@pytest.mark.parametrize("entry,home", [
+    (_f1("2031- Example State Fluoroscopy Operator and Supervisor (XX000000)", state_country="Example State",
+         license_number="XX000000", issue_date="2031", expiration_date="present"), ("B2", "radiation_permit")),
+    (_f1("2031 Certified by Educational Commission for Foreign Medical Graduates (ECFMG)", issue_date="2031"),
+     ("B2", "ecfmg")),
+    (_f1("1980   M(ASCP), Technologist in Example Science, certificate #X000000", license_number="X000000",
+         issue_date="1980"), ("F2", "tech_registry")),
+])
+def test_a_credential_read_as_a_licence_is_regrouped_1577(entry, home):
+    assert _home_of(entry) == home
+
+
+@pytest.mark.parametrize("entry", [
+    _f1("Example State Medical License 12345, 2031", state_country="Example State", license_number="12345"),
+    # a licence word with no state stays a licence (#1346's raw-line class is out of slice)
+    _f1("Licensure and Certification"),
+    # an NPI and a DEA record are Licensure's own slots
+    _f1("NPI 0000000000", license_number="0000000000"),
+    _f1("DEA registration XX0000000", license_number="XX0000000"),
+    # an NPI or DEA number by its shape alone, the line naming neither
+    _f1("0000000000", license_number="0000000000"),
+    _f1("XX0000000", license_number="XX0000000"),
+    # a line with no licence word but a state is a licence row
+    _f1("Example State 12345, 2031", state_country="Example State", license_number="12345"),
+    # a line that names no credential, with no state and no number (the owner's decision of
+    # 2026-11-03), or with a number: a licence whose state stage 4 missed (#1577 review B2)
+    _f1("2031 - Present    Certified Example Coach by the Example Registry", issue_date="2031"),
+    _f1("Example State Physician's and Surgeon's Certificate A12345, 2031", license_number="A12345",
+        issue_date="2031"),
+    _f1("Certificate of Registration #123456, 2031", license_number="123456", issue_date="2031"),
+    _f1("MD 123456 (2031-present)", license_number="123456", issue_date="2031"),
+    _f1("Nurse Practitioner, State of Example, #F12345", license_number="F12345"),
+    # a training licence named a permit or a registration (#1577 review B5)
+    _f1("Limited Training Permit, Example State, 2029-2031", state_country="Example State",
+        license_number="LT000", issue_date="2029"),
+    _f1("Physician-in-Training Permit, 2029-2031", issue_date="2029"),
+    _f1("Postgraduate Training Registration, Example State, 2031", issue_date="2031"),
+    # a licence fused with an exam or the ECFMG certificate (#1577 review B1)
+    _f1("USMLE Steps 1-3, 2029; Example State Medical License #123456, 2031", state_country="Example State",
+        license_number="123456", issue_date="2031"),
+    _f1("ECFMG Certificate #0-000-000-0, 2029; Example State Medical License #123456, 2031",
+        state_country="Example State", license_number="123456", issue_date="2031"),
+    # a failed extraction says nothing about the record
+    {**_f1("Example State 12345, 2031"), "extraction_success": False},
+    _f1(""),
+])
+def test_a_licence_and_what_licensure_cannot_read_stay_1577(entry):
+    assert _home_of(entry) is None
+
+
+def test_a_failed_extraction_still_moves_a_named_credential_1577():
+    entry = {**_f1("2031 Certified by Educational Commission for Foreign Medical Graduates (ECFMG)"),
+             "extraction_success": False}
+    assert _home_of(entry) == ("B2", "ecfmg")
+
+
+@pytest.mark.parametrize("text,home", [
+    ("American Board of Example Surgery Part I written exam, passed 2031", ("B2", "board_exam_early")),
+    ("Example State DEA registration, 2031", ("F1", "controlled_substance")),
+    ("American Board of Example Medicine, 2031", None),
+])
+def test_a_board_record_whose_line_names_another_credential_is_regrouped_1577(text, home):
+    entry = {"taxonomy_code": "F2", "element_idx_start": 28, "text": text,
+             "extracted_fields": {"certifying_board": None, "year_certified": "2031"}}
+    assert _home_of(entry, "F2") == home
+
+
+def test_other_codes_are_never_regrouped_1577():
+    assert _home_of(_f1("2031 Certified by ECFMG"), "B2") is None
+    assert _home_of(_f1("2031 Certified by ECFMG"), "I") is None
+
+
+def test_a_licence_row_with_no_state_number_or_credential_name_renders_its_line_1577():
+    # The owner's decision of 2026-11-03 removed the guard rule that moved such a row to B2:
+    # it stays in Licensure as on dev, its whole line in the State cell.
+    text = "2031 - Present    Certified Example Coach by the Example Registry"
+    entry = _f1(text, issue_date="2031", expiration_date="present")
+    assert _home_of(entry) is None
+    assert _resolve_licensure([entry]).licenses == (LicenseRecord(state=text),)
+
+
+def _last_record(text, own_text, **fields):
+    return {**_f1(text, **fields), LAST_STAGE4_RECORD: {"key": "stage4_records", "index": 1, "count": 2,
+                                                         OWN_TEXT_KEY: own_text}}
+
+
+_FUSED = "ECFMG Certificate #0-000-000-0, 2029; Example State Medical License #123456, 2031"
+
+
+@pytest.mark.parametrize("entry,line", [
+    # the last of stage 4's records: its own dated clause of its (the parent's) line
+    (_last_record(_FUSED, None, issue_date="2031"), "Example State Medical License #123456, 2031"),
+    # no clause of its own: its own line, else the parent's whole line
+    (_last_record("Example Provider: BLS, ACLS", "Example Provider | ACLS"), "Example Provider | ACLS"),
+    (_last_record("Example Provider: BLS, ACLS", None), "Example Provider: BLS, ACLS"),
+])
+def test_the_last_record_reads_its_own_line_not_the_parents_1577(entry, line):
+    assert record_line(entry) == line
+
+
+@pytest.mark.parametrize("entry", [
+    # not a last record: its text, whatever its fields say
+    _f1("2031 | 2033", issue_date="2031", expiration_date="2033"),
+    # a record whose text stage 6 built from its fields reads that text, no clause of its
+    # parent's line (the owner's decision of 2026-11-03)
+    {**_f1("2031 | 2033", issue_date="2031", expiration_date="2033"), BUILT_TEXT_KEY: True},
+    # a last record with no clause of its fields' years, with no years, or with two such clauses
+    _last_record(_FUSED, None, issue_date="2040"),
+    _last_record(_FUSED, None),
+    _last_record("2031-2033 Example Method certificate 2031-2033 Example Other certificate", None,
+                 issue_date="2031", expiration_date="2033"),
+])
+def test_a_record_line_is_its_text_unless_one_clause_is_its_own_1577(entry):
+    assert record_line(entry) == entry["text"]
+
+
+def test_a_last_record_licence_of_a_fused_ecfmg_paragraph_stays_a_licence_1577():
+    entry = _last_record(_FUSED, None, state_country="Example State", license_number="123456", issue_date="2031")
+    assert _home_of(entry) is None
+
+
+def test_a_last_records_field_years_ignore_non_scalar_values_1577():
+    entry = _last_record(_FUSED, None, issue_date="2031", notes=["2029"], extra={"year": "2029"})
+    assert record_line(entry) == "Example State Medical License #123456, 2031"
+
+
+def test_the_reroute_warning_names_indexes_and_moves_only_1577():
+    assert credential_reroute_warnings([]) == []
+    [record] = credential_reroute_warnings([(62, "F1", "B2"), (48, "F1", "F2")])
+    assert record["check"] == CREDENTIAL_REROUTE_CHECK and record["severity"] == "INFO"
+    assert (record["code"], record["section"]) == ("F1", "licensure")
+    assert record["evidence"] == ["element_idx_start 62 (F1->B2)", "element_idx_start 48 (F1->F2)"]
+    assert "2 entries" in record["message"]
+    assert "1 entry" in credential_reroute_warnings([(62, "F1", "B2")])[0]["message"]
+
+
+def test_the_reroute_warning_names_the_section_each_record_left_1577():
+    records = credential_reroute_warnings([(28, "F2", "B2"), (62, "F1", "B2"), (29, "F2", "F1")])
+    assert [(r["code"], r["section"], r["evidence"]) for r in records] == [
+        ("F1", "licensure", ["element_idx_start 62 (F1->B2)"]),
+        ("F2", "board_certification", ["element_idx_start 28 (F2->B2)", "element_idx_start 29 (F2->F1)"])]
+
+
+# b4: a state controlled-substance registration names itself in the State cell.
+
+def _licence_row(text, **fields):
+    [record] = _resolve_licensure([{"text": text, "extracted_fields": fields}]).licenses
+    return record
+
+
+def test_a_controlled_substance_registration_names_itself_after_its_state_1577():
+    record = _licence_row("Example State Controlled Substance Registration #00000000B 2031- current",
+                          state_country="Example State", license_number="00000000B", issue_date="2031")
+    assert record.state == "Example State (Controlled Substance Registration)"
+    assert CONTROLLED_SUBSTANCE_QUALIFIER in record.state
+
+
+@pytest.mark.parametrize("text,state,expected", [
+    # the line also names a licence to practise: the medical licence's own row
+    ("Example State Medical/Controlled Substance License #00000 2031", "Example State", "Example State"),
+    # the State cell already says it
+    ("Example (Controlled Substance) | 00000 | 2031", "Example (Controlled Substance)",
+     "Example (Controlled Substance)"),
+    # an ordinary licence
+    ("Example State Medical License #00000 2031", "Example State", "Example State"),
+    # a licence fused with the registration is the licence's row (#1577 review M3)
+    ("Example State License #00000 and Controlled Substance Registration XX00000", "Example State",
+     "Example State"),
+])
+def test_other_rows_get_no_controlled_substance_qualifier_1577(text, state, expected):
+    assert _licence_row(text, state_country=state, license_number="00000").state == expected
+
+
+@pytest.mark.parametrize("text,fields,state", [
+    # #1577 fix round: a numbered licence row stage 4 gave no state says what it licenses
+    ("Example National Register of Health Service\tProviders in Example Psychology  #00000 2031-2033",
+     {"license_number": "00000", "issue_date": "2031", "expiration_date": "2033"},
+     "Example National Register of Health Service Providers in Example Psychology"),
+    ("2031 - present | Example Dental Association\nDentistry, 00000",
+     {"license_number": "00000", "issue_date": "2031", "expiration_date": "present"},
+     "Example Dental Association Dentistry"),
+    ("Example State Board of Social Work Examiners Registered Supervisor, 2031 to current, #00000",
+     {"license_number": "#00000", "issue_date": "2031", "expiration_date": "current"},
+     "Example State Board of Social Work Examiners Registered Supervisor"),
+    ("Example State Physician's and Surgeon's Certificate A00000, 2031",
+     {"license_number": "A00000", "issue_date": "2031"}, "Example State Physician's and Surgeon's"),
+    # a line holding only a label and the number names nothing
+    ("Certificate #00000", {"license_number": "00000"}, ""),
+    # nothing but the number, a short label and dates: the row stays as it was
+    ("MD 00000 (2031-present)", {"license_number": "00000", "issue_date": "2031"}, ""),
+    ("#00000, 2031", {"license_number": "00000", "issue_date": "2031"}, ""),
+    # the number is not on the line: the name cannot be told from it
+    ("Example Register of Example Providers", {"license_number": "99999", "issue_date": "2031"}, ""),
+    # a state stage 4 extracted is the cell, as before
+    ("Example Register #00000, 2031", {"state_country": "Example State", "license_number": "00000"},
+     "Example State"),
+])
+def test_a_numbered_licence_with_no_state_is_named_by_its_line_1577(text, fields, state):
+    assert _licence_row(text, **fields).state == state
+
+
+def test_a_stage4_licence_type_outranks_the_controlled_substance_qualifier_1577():
+    record = _licence_row("Example State Controlled Substance Registration 2031", state_country="Example State",
+                          license_number="00000", license_type="Pharmacy")
+    assert record.state == "Example State (Pharmacy)"
+
+
+# --- #1577 D5: a row the credential pin moved into Licensure, with no state and no number ---
+# Invented values. The shape is XUTTKJ 133, a prescribing waiver pinned F2 -> F1: its
+# whole line printed in the State cell and its year in no date cell.
+
+from unified_pipeline.core.credential_lines import CREDENTIAL_PIN_WHY  # noqa: E402
+
+
+def _pinned_f1(text, pre_pin_code="F2", **fields):
+    return {**_f1(text, **fields), "pre_pin_code": pre_pin_code,
+            "classification_reasoning": f"{CREDENTIAL_PIN_WHY['F1']} (category F1)"}
+
+
+def test_a_pinned_licence_row_with_no_state_or_number_is_named_by_its_line_1577():
+    [record] = _resolve_licensure([_pinned_f1("Example Prescribing Certification (active)\t2031",
+                                              issue_date="2031")]).licenses
+    assert record == LicenseRecord(state="Example Prescribing Certification (active)", issue_date="2031")
+
+
+def test_a_pinned_split_record_is_named_by_its_own_line_not_the_parents_1577():
+    entry = {**_pinned_f1("Example Prescribing Certification 2031; Example Other Permit 2033",
+                          issue_date="2031"),
+             LAST_STAGE4_RECORD: {"key": "stage4_records", "index": 1, "count": 2,
+                                  OWN_TEXT_KEY: "Example Prescribing Certification 2031"}}
+    [record] = _resolve_licensure([entry]).licenses
+    assert (record.state, record.issue_date) == ("Example Prescribing Certification", "2031")
+
+
+@pytest.mark.parametrize("entry", [
+    # not moved by the pin: the raw line, as on dev (rule b2 stays removed)
+    _f1("Example Prescribing Certification (active)\t2031", issue_date="2031"),
+    # another step's recode that kept a pin code: not the pin's own reasoning
+    {**_f1("Example Prescribing Certification (active)\t2031", issue_date="2031"), "pre_pin_code": "F2",
+     "classification_reasoning": "Recoded by another step"},
+    # a pinned line with no word of a name left once its dates are gone
+    _pinned_f1("2031", issue_date="2031"),
+])
+def test_other_rows_with_no_state_or_number_keep_their_raw_line_1577(entry):
+    assert _resolve_licensure([entry]).licenses == (LicenseRecord(state=entry["text"]),)
+
+
+def test_a_pinned_row_keeps_a_state_or_number_stage4_extracted_1577():
+    [record] = _resolve_licensure([_pinned_f1("Example State Prescribing Registration #00000 2031",
+                                              state_country="Example State", license_number="00000",
+                                              issue_date="2031")]).licenses
+    assert (record.state, record.number, record.issue_date) == ("Example State", "00000", "2031")

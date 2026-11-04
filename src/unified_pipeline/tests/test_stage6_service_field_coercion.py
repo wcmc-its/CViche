@@ -90,6 +90,7 @@ from unified_pipeline.stage6.normalization.residue import (  # noqa: E402
     _line_without_shown_role_and_dates,
     _organization_left_in_text,
     line_states_role,
+    line_without_edge_dates,
     name_without_unstated_body,
     names_non_seat_activity,
     own_activity_role,
@@ -1344,6 +1345,25 @@ def test_line_without_shown_role_and_dates(text, role, start, end, expected):
     """#1346: what a P or Q2 row's fallback line holds beyond the role and
     dates at its ends."""
     assert _line_without_shown_role_and_dates(text, role, start, end) == expected
+
+
+@pytest.mark.parametrize("text, start, end, expected", [
+    # #1577: a credential's number is no other record's date, so the line keeps it.
+    ("2031- Example State Fluoroscopy Operator (XX000000)", "2031", "present",
+     "Example State Fluoroscopy Operator (XX000000)"),
+    ("1980   M(ASCP), Example Technologist, certificate #X000000", "1980", None,
+     "M(ASCP), Example Technologist, certificate #X000000"),
+    ("Example Coach certificate, 2031-2033", "2031", "2033", "Example Coach certificate"),
+    # A date the Dates cell does not show stays.
+    ("2030 Example Coach certificate", "2031", None, "2030 Example Coach certificate"),
+    # A line that is only its dates is kept whole.
+    ("2031 | 2033", "2031", "2033", "2031 | 2033"),
+    ("Example Coach certificate", None, None, "Example Coach certificate"),
+    # A missing text is an empty cell, as `_cell_text` reads it.
+    (None, "2031", None, ""),
+])
+def test_line_without_edge_dates(text, start, end, expected):
+    assert line_without_edge_dates(text, start, end) == expected
 
 
 @pytest.mark.parametrize("text, headings", [
