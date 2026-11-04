@@ -638,6 +638,11 @@ LINT_COPY = {
         "A source heading clearly names one section, but every entry under it was filed in a "
         "different section, so that section is empty in the document.",
         "Check the quoted entries and move any that belong under their source heading's section."),
+    "open_end_unsupported": LintCopy(
+        "Shown as ongoing, but it ended",
+        "A record prints as running to Present, but the line for it in the CV gives an end date "
+        "(or a one-year cohort, such as a class year) and never says it is ongoing.",
+        "Replace Present with the end date from the source CV."),
     "degree_row_not_degree": LintCopy(
         "Not a degree",
         "A row of the Academic Degrees table, which lists Bachelor's degrees and higher, names no "
@@ -933,6 +938,7 @@ LINT_EFFORT: dict[str, FixEffort] = {
     **dict.fromkeys((
         "junk_or_header_row", "duplicate_records", "duplicate_passages", "date_only_lines",
         "output_hygiene", "pipe_leaks", "wrong_start_date", "date_cell_shape",
+        "open_end_unsupported",
         "implausible_year", "year_not_in_source", "span_count", "fanout_cell_residue",
         "identical_rendered_rows", "python_repr_in_output", "table_shape", "contact_slot_lost",
         "bucket_status", "grant_bucket", "pubmed_title_truncated", "invented_records",

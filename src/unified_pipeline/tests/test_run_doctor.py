@@ -75,6 +75,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
+    lint_open_end_unsupported,
     lint_output_hygiene,
     lint_owner_attribution,
     lint_owner_contact_missing,
@@ -10197,3 +10198,214 @@ def test_journal_name_joined_prevalence_is_the_measured_rate():
     stored stage-4 outputs."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["journal_name_joined"] == round(72 / 292, 3)
+
+
+# ------------------------------------------- lint 14bc: open_end_unsupported
+#
+# Synthetic values only. The MIX11 shapes: MOCDRL-01 (a project line's open
+# span beside its award's closed one, the award shown "MM/YY-Present") and
+# RSRRUF-04 (a one-year cohort membership shown "<year>-Present").
+
+_OEU_PROJECT = ("Example Widget Curriculum        3/2031-present\t"
+                "Example Gadget Award: $4,000        3/2031-3/2032\t"
+                "Example Sprocket Grant: $9,000     3/2033-3/2034")
+
+
+def _oeu_grant_entry(text=_OEU_PROJECT, heading="RESEARCH ACTIVITIES"):
+    records = [{"title": "Example Widget Curriculum", "agency": "Example Gadget Award",
+                "start_date": "2031-03", "end_date": "present", "total_funding": "$4,000"},
+               {"title": "Example Widget Curriculum", "agency": "Example Sprocket Grant",
+                "start_date": "2033-03", "end_date": "2034-03", "total_funding": "$9,000"}]
+    return _entry(text, start=75, hierarchy=[heading], taxonomy_code="M2A",
+                  extracted_fields={**records[1], "stage4_records": records})
+
+
+def _oeu_grant_table(duration):
+    return ("table", "\n".join([
+        "Award Source:", "Example Gadget Award", "Award Source: | Example Gadget Award",
+        "Project title:", "Example Widget Curriculum",
+        "Project title: | Example Widget Curriculum",
+        "Duration of support:", duration, f"Duration of support: | {duration}"]))
+
+
+def test_open_end_unsupported_warns_on_an_award_whose_own_line_closes_it():
+    """MOCDRL-01: the project line's "-present" belongs to the project; the
+    award's own line closes at 3/2032, yet its table runs to Present."""
+    findings = lint_open_end_unsupported({"entries": [_oeu_grant_entry()]},
+                                         [_oeu_grant_table("03/31-Present")])
+    assert [(f["lint"], f["severity"]) for f in findings] == [("open_end_unsupported", "WARN")]
+    assert findings[0]["message"].startswith("entry 75 (M2A): renders '03/31-Present'")
+    assert findings[0]["evidence"][1] == "Example Gadget Award: $4,000        3/2031-3/2032"
+
+
+def test_open_end_unsupported_is_silent_when_the_award_line_is_open():
+    text = _OEU_PROJECT.replace("3/2031-3/2032", "3/2031-present")
+    assert lint_open_end_unsupported({"entries": [_oeu_grant_entry(text)]},
+                                     [_oeu_grant_table("03/31-Present")]) == []
+
+
+def test_open_end_unsupported_is_silent_when_the_document_shows_the_end():
+    assert lint_open_end_unsupported({"entries": [_oeu_grant_entry()]},
+                                     [_oeu_grant_table("03/31-03/32")]) == []
+
+
+def test_open_end_unsupported_skips_an_entry_under_a_current_heading():
+    """The source's own heading calls the record open."""
+    entry = _oeu_grant_entry(heading="Current Grants")
+    assert lint_open_end_unsupported({"entries": [entry]},
+                                     [_oeu_grant_table("03/31-Present")]) == []
+
+
+def _oeu_membership(text, record, siblings=()):
+    fields = dict(record)
+    if siblings:
+        fields["stage4_records"] = [*siblings, record]
+    return _entry(text, start=93, hierarchy=["MEMBERSHIPS"], taxonomy_code="I",
+                  extracted_fields=fields)
+
+
+_OEU_SOCIETY = {"organization": "Example Widget Society", "start_date": "2030",
+                "end_date": "present", "membership_type": "Member"}
+_OEU_COHORT = {"organization": "Example Widget Society Trainee Section",
+               "start_date": "2031", "end_date": "present",
+               "membership_type": "Class of 2031 Member"}
+_OEU_COHORT_ROW = ("table", "\n".join([
+    "Member, Example Widget Society | 2030-Present",
+    "Class of 2031 Member, Example Widget Society Trainee Section | 2031-Present"]))
+
+
+def test_open_end_unsupported_warns_on_a_one_year_cohort_shown_open():
+    """RSRRUF-04: the parent line's "since" is the society's, not the
+    cohort's; "Class of 2031" is one year, so "2031-Present" is invented."""
+    text = ("Member of Example Widget Society since 2030\t"
+            "Example Widget Society Trainee Section Class of 2031 member")
+    entry = _oeu_membership(text, _OEU_COHORT, siblings=[_OEU_SOCIETY])
+    findings = lint_open_end_unsupported({"entries": [entry]}, [_OEU_COHORT_ROW])
+    assert [f["message"] for f in findings] == [
+        "entry 93 (I): renders '2031-Present', but its source line closes the span "
+        "and has no open marker"]
+
+
+@pytest.mark.parametrize("text", [
+    "2031 Associate member, Example Widget Society Trainee Section",  # a bare start year
+    "Example Widget Society Trainee Section, member since 2031",
+    "Example Widget Society Trainee Section, member 2031-",
+])
+def test_open_end_unsupported_is_silent_without_a_stated_end(text):
+    """A bare start year is not a closed span: I rows keep "<start>-Present"
+    by the 2026-10-30 decision on #1342, and date_cell_shape covers a bare
+    year on the other codes."""
+    record = {**_OEU_COHORT, "membership_type": "Associate member", "end_date": None}
+    assert lint_open_end_unsupported({"entries": [_oeu_membership(text, record)]},
+                                     [_OEU_COHORT_ROW]) == []
+
+
+def _oeu_society(text, idx=40, code="I", **fields):
+    return _entry(text, start=idx, hierarchy=["SOCIETIES"], taxonomy_code=code,
+                  extracted_fields={"organization": "Example Widget Society",
+                                    "membership_type": "Member", "start_date": "2031",
+                                    "end_date": None, **fields})
+
+
+_OEU_SOCIETY_LINE = ("p", "Member, Example Widget Society | 2031-Present")
+
+
+def test_open_end_unsupported_warns_on_a_closed_membership_shown_open():
+    """An I row's start-only "-Present" is by decision; a stated end is not."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society")
+    findings = lint_open_end_unsupported({"entries": [entry]}, [_OEU_SOCIETY_LINE])
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 40 (I)"]
+
+
+def test_open_end_unsupported_leaves_a_whole_entry_four_digit_range_to_date_cell_shape():
+    """An unsplit P row shown "2031-Present" is date_cell_shape's open_range,
+    which reads the same whole text: reported once, there."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society", code="P")
+    assert lint_open_end_unsupported({"entries": [entry]}, [_OEU_SOCIETY_LINE]) == []
+
+
+def test_open_end_unsupported_reads_a_two_digit_start_date_cell_shape_cannot():
+    entry = _oeu_society("Member, Example Widget Society 3/2031-3/2033", code="P")
+    rows = [("table", "Example Widget Society | Member | 03/31-Present")]
+    findings = lint_open_end_unsupported({"entries": [entry]}, rows)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 40 (P)"]
+
+
+def test_open_end_unsupported_does_not_tie_a_date_to_a_record_by_two_shared_words():
+    """A rendered line is read as a record's only when it shows half of its
+    values' words, so another role at the same society is not it."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society Gadget Section Annex",
+                         organization="Example Widget Society Gadget Section Annex")
+    blocks = [("p", "2031-Present - Lecturer, Example Annex Seminar")]
+    assert lint_open_end_unsupported({"entries": [entry]}, blocks) == []
+
+
+def test_open_end_unsupported_skips_a_date_two_records_tie_for():
+    """Two records start in the year and show the same words: neither is named."""
+    entries = [_oeu_society("2031-2033 Member, Example Widget Society", idx=40 + n)
+               for n in (1, 2)]
+    assert lint_open_end_unsupported({"entries": entries}, [_OEU_SOCIETY_LINE]) == []
+
+
+def test_open_end_unsupported_skips_a_date_an_open_rival_could_own():
+    """VVRTUC 43's shape: a closed rank and an open later title start in the
+    same year; the row may be the open one, so nothing is reported."""
+    closed = _oeu_society("2031-2033 Member, Example Widget Society, Example City Annex")
+    rival = _oeu_society("Fellow, Example Widget Society (current) 2033 -", idx=41,
+                         membership_type="Fellow")
+    blocks = [("p", "Member, Example Widget Society, Example City Annex | 2031-Present")]
+    assert lint_open_end_unsupported({"entries": [closed, rival]}, blocks) == []
+    assert lint_open_end_unsupported({"entries": [closed]}, blocks) != []
+
+
+def test_run_doctor_reports_open_end_unsupported_from_stage_4_and_the_docx(tmp_path):
+    """The registry runs the lint on stage 4 and the docx's blocks."""
+    root = _build_clean_run(tmp_path)
+    fields_path = next((root / "stage_4_field_extraction").glob("*.json"))
+    fields = json.loads(fields_path.read_text())
+    fields["entries"].append(_oeu_grant_entry())
+    fields_path.write_text(json.dumps(fields))
+    docx_path = next((root / "stage_6_wcm_documents").glob(f"{_UID}*_wcm.docx"))
+    output = Document(docx_path)
+    table = output.add_table(rows=3, cols=2)
+    for row, (label, value) in zip(table.rows, [("Award Source:", "Example Gadget Award"),
+                                                ("Project title:", "Example Widget Curriculum"),
+                                                ("Duration of support:", "03/31-Present")],
+                                   strict=True):
+        row.cells[0].paragraphs[0].text = label
+        row.cells[1].paragraphs[0].text = value
+    output.save(docx_path)
+
+    findings = [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "open_end_unsupported"]
+
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
+        ("WARN", "entry 75 (M2A)")]
+
+
+@pytest.mark.parametrize("text", [
+    # An unsplit row's second period is open, on its own line.
+    "2031-2033\n2035- present | Member | Example Widget Society",
+    # BIITRL shape: "<year> - <words>" leaves the year open; the closed span
+    # in brackets is something else's.
+    "Example Widget Society 2031 - Member, on its board (2031-2033)",
+])
+def test_open_end_unsupported_reads_an_unsplit_records_whole_text(text):
+    entry = _oeu_society(text)
+    assert lint_open_end_unsupported({"entries": [entry]}, [_OEU_SOCIETY_LINE]) == []
+
+
+def test_open_end_unsupported_does_not_read_a_range_inside_running_text():
+    """A paragraph's date is its opening or closing one; "2031-present"
+    mid-sentence is the CV's own wording, not a rendered range."""
+    entry = _oeu_society("2031-2033 Member, Example Widget Society")
+    blocks = [("p", "Member, Example Widget Society (2031-present in its Annex), Example City")]
+    assert lint_open_end_unsupported({"entries": [entry]}, blocks) == []
+    assert lint_open_end_unsupported({"entries": [entry]}, [
+        ("p", "Member, Example Widget Society, Example City, 2031-Present")]) != []
+
+
+def test_open_end_unsupported_prevalence_is_the_measured_rate():
+    """Measured 2026-11-04 (OEU-1 in doctor/PRECISION.md): 1 of 471 fresh renders."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["open_end_unsupported"] == round(1 / 471, 3)

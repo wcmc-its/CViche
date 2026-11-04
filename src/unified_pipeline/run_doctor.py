@@ -586,6 +586,15 @@ Lints, ranked by the severity of the failure class they catch:
                           the CV has the code, so its template slot renders
                           empty (XAXVYB's N1 heading, #1938/#1949). INFO, one
                           per heading. Reads stage 3b and stage 3a
+14bc. open_end_unsupported a record the document shows open-ended
+                          ("2031-Present", "03/31-Present") whose own source
+                          line states a closed span or a one-year cohort
+                          ("Class of 2031") and no open marker (#1342; MIX11
+                          MOCDRL-01, RSRRUF-04). Reads each record of a split
+                          entry against its own line, so a sibling's
+                          "-present" does not spare it; leaves to 14p what
+                          date_cell_shape already judges. WARN, one per
+                          record. Reads stage 4 and the docx's blocks
 14be. degree_row_not_degree a row of the Academic Degree(s) table (Bachelor's
                           and higher) whose degree cell names no academic
                           degree: a high-school diploma, a minor, a
@@ -769,6 +778,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     honors_table_totals,
     lint_citation_field_dropped,
     lint_date_cell_shape,
+    lint_open_end_unsupported,
     lint_date_only_lines,
     lint_dead_sections,
     lint_duplicate_passages,
@@ -1000,6 +1010,7 @@ KNOWN_LINTS = (
     "renderer_row_missing",
     "mentee_field_incomplete",
     "pinned_heading_empty",
+    "open_end_unsupported",
     "degree_row_not_degree",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -1332,6 +1343,10 @@ LINT_PREVALENCE = {
     # distinct uids with a stored stage-3b artifact and its stage-3a mapping,
     # 2026-10-19.
     "pinned_heading_empty": 0.077,
+    # open_end_unsupported (#1342; OEU-1 in doctor/PRECISION.md): 1 of 471
+    # fresh renders (the #1243 census farm's 460 runs and the 11 MIX11 runs),
+    # 2026-11-04.
+    "open_end_unsupported": 0.002,
     # degree_row_not_degree (#1415; DRN-1 in doctor/PRECISION.md): 64 of the
     # w1243 farm's 460 runs, fresh stage-6 renders, 2026-11-04.
     "degree_row_not_degree": 0.139,
@@ -1970,6 +1985,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("mentee_field_incomplete", lint_mentee_field_incomplete, ("table_rows",),
              optional=("blocks",)),
     LintSpec("pinned_heading_empty", lint_pinned_heading_empty, ("stage_3b", "stage_3a")),
+    LintSpec("open_end_unsupported", lint_open_end_unsupported, ("stage_4", "blocks")),
     LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
 )
 
