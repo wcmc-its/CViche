@@ -235,6 +235,38 @@ class TestRequestIDMiddleware:
         r2 = client.get("/health")
         assert r1.headers["x-request-id"] != r2.headers["x-request-id"]
 
+    @pytest.mark.parametrize("bogus", [
+        "has space", 'quote"injected', "semi;colon", "x" * 129,
+        "fake\tline",
+    ])
+    def test_malformed_incoming_x_request_id_is_replaced(self, client, bogus):
+        response = client.get("/health", headers={"X-Request-ID": bogus})
+        assert response.headers["x-request-id"] != bogus
+        assert len(response.headers["x-request-id"]) == 32
+
+    @pytest.mark.parametrize("ok", ["Root=1-abc.def_ghi:jkl", "x" * 128])
+    def test_wellformed_incoming_x_request_id_is_honored(self, client, ok):
+        response = client.get("/health", headers={"X-Request-ID": ok})
+        assert response.headers["x-request-id"] == ok
+
+    def test_unhandled_500_carries_request_id_on_response_and_log(self, client, caplog):
+        """#2078: the catch-all handler runs outside RequestIDMiddleware, after
+        the ContextVar is reset; the id must still reach the 500 and its log."""
+        from app.main import app
+
+        @app.get("/test-500-request-id")
+        async def trigger():
+            raise RuntimeError("boom")
+
+        with caplog.at_level(logging.ERROR):
+            response = client.get(
+                "/test-500-request-id", headers={"X-Request-ID": "trace-500"}
+            )
+        assert response.status_code == 500
+        assert response.headers.get("x-request-id") == "trace-500"
+        logged = [r for r in caplog.records if "Unhandled exception" in r.getMessage()]
+        assert logged and logged[0].request_id == "trace-500"
+
 
 class TestNewRequestId:
     def test_new_request_id_is_unique(self):
