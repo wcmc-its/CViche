@@ -871,11 +871,13 @@ def test_b2_expiry_or_renewal_date_keeps_its_label(text, fields, dates, from_tex
      ('Example Life Support', 'Expires 04/31')),
     ("Example Life Support, last renewal 2031", 'Example Life Support, last renewal', {'year': '2031'},
      ('Example Life Support', 'Renewed 2031')),
+    ("Example Instructor | Exp. 5/2031", 'Example Instructor | Exp', {'end_date': '2031-05'},
+     ('Example Instructor', 'Expires 05/31')),
     # a label that is the whole name stays; a cell with no label leaves the name alone
     ("Expires 2031", 'Expires', {'year': '2031'}, ('Expires', 'Expires 2031')),
     ("Example Expiry Course 2031", 'Example Course Expires', {'start_date': '2031'},
      ('Example Course Expires', '2031')),
-], ids=['expires', 'exp-dot', 'last-renewal', 'label-only-name', 'unlabelled-date'])
+], ids=['expires', 'exp-dot', 'last-renewal', 'table-cell-label', 'label-only-name', 'unlabelled-date'])
 def test_b2_description_drops_the_label_the_dates_cell_writes(text, program, fields, expected):
     record = _normalize_other_education_entry(
         {'taxonomy_code': 'B2', 'text': text, 'extracted_fields': {'program_name': program, **fields}})

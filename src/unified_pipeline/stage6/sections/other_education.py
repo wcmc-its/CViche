@@ -128,11 +128,12 @@ _LABELLED_DATE_RE = re.compile(
     rf"(?:{MONTH_PATTERN}\s*)?[\d\s,/.-]{{0,{LABELLED_DATE_MAX_DIGIT_CHARS}}}?"
     rf"(?:(?P<year>{YEAR_RE.pattern})|(?<=[/.-])(?P<yy>\d{{2}})(?![\d/.-]))",
     re.IGNORECASE)
-# The same label ending a Description with no date after it: "ACLS Expires",
-# the name stage 6 carries from the line "ACLS   Expires July 2017" less its
-# edge date (OIVMMV 108).
+# The same label ending a Description with no date after it, with what joins
+# it to the name: "ACLS Expires", the name stage 6 carries from the line "ACLS
+# Expires July 2017" less its edge date (OIVMMV 108), or "ATLS Instructor |
+# Exp" from a table row's cells (4SOTEA 37 on the stored farm).
 _DANGLING_LABEL_RE = re.compile(
-    rf"[\s,;:(-]*\b(?:{EXPIRY_LABEL}|(?:last\s+)?{RENEWAL_LABEL})\b[.:]?\s*$", re.IGNORECASE)
+    rf"[\s,;:|(-]*\b(?:{EXPIRY_LABEL}|(?:last\s+)?{RENEWAL_LABEL})\b[.:]?\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
