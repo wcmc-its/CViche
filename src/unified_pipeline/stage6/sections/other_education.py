@@ -32,7 +32,9 @@ column is "Dates attended": it is printed once, with its label. When the
 Description already writes it after its label, the Dates cell is left empty;
 otherwise the cell writes the label before the date, "Expires 04/27" (#1577:
 4SOTEA 37, web211 36/37 and web190 953/954 printed bare future dates, and
-VQFSDI 139 printed its renewal date twice).
+VQFSDI 139 printed its renewal date twice). A label the Description ends on
+with no date moves to the Dates cell in the line's own words ("Date of
+Expiration 09/27"), so none of them is lost or left behind.
 
 An institution field of the literal string "none" is treated as absent; field
 extraction emits it. An entry with neither a program name nor an institution is
@@ -131,9 +133,16 @@ _LABELLED_DATE_RE = re.compile(
 # The same label ending a Description with no date after it, with what joins
 # it to the name: "ACLS Expires", the name stage 6 carries from the line "ACLS
 # Expires July 2017" less its edge date (OIVMMV 108), or "ATLS Instructor |
-# Exp" from a table row's cells (4SOTEA 37 on the stored farm).
+# Exp" from a table row's cells (4SOTEA 37 on the stored farm). `label` is
+# the label in the line's own words, with the words that belong to it:
+# "last renewal" (VQFSDI 139), "Date of Expiration" (KZHHFT 58).
 _DANGLING_LABEL_RE = re.compile(
-    rf"[\s,;:|(-]*\b(?:{EXPIRY_LABEL}|(?:last\s+)?{RENEWAL_LABEL})\b[.:]?\s*$", re.IGNORECASE)
+    rf"[\s,;:|(-]*\b(?P<label>(?:(?:last|date\s+of)\s+)?(?:{EXPIRY_LABEL}|{RENEWAL_LABEL})"
+    rf"(?:\s+date)?\b\.?):?\s*$", re.IGNORECASE)
+# Words naming how a course was given, not who gave it. A venue column that
+# reads "Online" is the row's place even when the title says "Online" too
+# ("Teaching Online: ..." | Online, HFAJCC 812), so the cell keeps it.
+_DELIVERY_VENUES = frozenset({'online', 'virtual', 'remote'})
 
 
 @dataclass(frozen=True)
@@ -290,7 +299,7 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
 
     location, location_is_enriched = _get_institution_location(entry)
     dates, dates_from_text = _resolve_b2_dates(fields, raw_text, program, entry.get(FOLDED_DATES_KEY))
-    program = _without_dangling_label(program, dates)
+    program, dates = _without_dangling_label(program, dates)
 
     return OtherEducationRecord(
         program=program,
@@ -303,14 +312,21 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
     )
 
 
-def _without_dangling_label(program: object, dates: str) -> object:
-    """`program` less an expiry or renewal label it ends on
-    (`_DANGLING_LABEL_RE`) when the Dates cell writes that label before the
-    date (`_labelled_dates`, #1577), so it is printed once, beside its date:
-    "ACLS | | Expires 07/17", not "ACLS Expires | | Expires 07/17"."""
-    if not (isinstance(program, str) and dates.startswith((f'{EXPIRES_PREFIX} ', f'{RENEWED_PREFIX} '))):
-        return program
-    return _DANGLING_LABEL_RE.sub('', program) or program
+def _without_dangling_label(program: object, dates: str) -> tuple[object, str]:
+    """(program, dates) with an expiry or renewal label `program` ends on
+    (`_DANGLING_LABEL_RE`) moved, in the line's own words, to the front of a
+    Dates cell that writes a label before the date (`_labelled_dates`,
+    #1577). It is printed once, beside its date, and none of its words is
+    lost: "ACLS | | Expires 07/17", not "ACLS Expires | | Expires 07/17";
+    "<course> | | Date of Expiration 09/27", not "<course>, Date of | |
+    Expires 09/27". A name that is only the label stays as it is."""
+    prefix = next((label for label in (EXPIRES_PREFIX, RENEWED_PREFIX)
+                   if dates.startswith(f'{label} ')), '')
+    match = _DANGLING_LABEL_RE.search(program) if prefix and isinstance(program, str) else None
+    if not (match and match.start()):
+        return program, dates
+    label = match['label']
+    return program[:match.start()], f"{label[0].upper()}{label[1:]}{dates[len(prefix):]}"
 
 
 def _named_in_program(institution: str, program: object) -> bool:
@@ -332,8 +348,10 @@ def _b2_institution_content(record: OtherEducationRecord) -> list[tuple[str, boo
     (`_named_in_program`, #1577), and the cell keeps its whole location
     unless the Description writes that too: the part the institution said
     is no longer said in the cell ("<course> at Example | Example, CA", not
-    "| CA")."""
-    if _named_in_program(record.institution, record.program):
+    "| CA"). A delivery venue ("Online") is the row's place, not an
+    organisation the Description repeats, so it is kept."""
+    if (norm(record.institution) not in _DELIVERY_VENUES
+            and _named_in_program(record.institution, record.program)):
         institution = ''
         location = '' if _named_in_program(record.location, record.program) else record.location
     else:

@@ -777,8 +777,11 @@ def _b2_institution_cell(program, institution, **extra):
     ('Diplomate, Example Board', 'Example Board of Examiners', 'Example Board of Examiners'),
     ('ECGX Example Course', 'ECG', 'ECG'),
     ('Example Course', 'Example College', 'Example College'),
+    # a delivery venue is the row's place, not an organisation repeated
+    ('Teaching Online: Example Course', 'Online', 'Online'),
 ], ids=['diplomate', 'whole-name-with-acronym', 'acronym-as-a-word', 'typographic-apostrophe',
-        'case-and-spacing', 'part-of-the-institution', 'inside-a-longer-word', 'not-in-the-description'])
+        'case-and-spacing', 'part-of-the-institution', 'inside-a-longer-word', 'not-in-the-description',
+        'delivery-venue'])
 def test_b2_institution_the_description_writes_is_printed_once(program, institution, shown):
     description, cell = _b2_institution_cell(program, institution)
     assert (description, cell.text) == (program, shown)
@@ -868,16 +871,22 @@ def test_b2_expiry_or_renewal_date_keeps_its_label(text, fields, dates, from_tex
     ("Example Life Support           Expires July 2031", 'Example Life Support Expires', {'end_date': '2031-07'},
      ('Example Life Support', 'Expires 07/31')),
     ("Example Life Support, Exp. 4/2031", 'Example Life Support, Exp.', {'end_date': '2031-04'},
-     ('Example Life Support', 'Expires 04/31')),
+     ('Example Life Support', 'Exp. 04/31')),
+    # the label's own words move with it, so none is lost or left behind
     ("Example Life Support, last renewal 2031", 'Example Life Support, last renewal', {'year': '2031'},
-     ('Example Life Support', 'Renewed 2031')),
+     ('Example Life Support', 'Last renewal 2031')),
+    ("Example Course, Date of Expiration: 09/30/2031", 'Example Course, Date of Expiration',
+     {'end_date': '2031-09-30'}, ('Example Course', 'Date of Expiration 09/31')),
+    ("Example Course, Expiration date 9/2031", 'Example Course, Expiration date', {'end_date': '2031-09'},
+     ('Example Course', 'Expiration date 09/31')),
     ("Example Instructor | Exp. 5/2031", 'Example Instructor | Exp', {'end_date': '2031-05'},
-     ('Example Instructor', 'Expires 05/31')),
+     ('Example Instructor', 'Exp 05/31')),
     # a label that is the whole name stays; a cell with no label leaves the name alone
     ("Expires 2031", 'Expires', {'year': '2031'}, ('Expires', 'Expires 2031')),
     ("Example Expiry Course 2031", 'Example Course Expires', {'start_date': '2031'},
      ('Example Course Expires', '2031')),
-], ids=['expires', 'exp-dot', 'last-renewal', 'table-cell-label', 'label-only-name', 'unlabelled-date'])
+], ids=['expires', 'exp-dot', 'last-renewal', 'date-of-expiration', 'expiration-date', 'table-cell-label', 'label-only-name',
+        'unlabelled-date'])
 def test_b2_description_drops_the_label_the_dates_cell_writes(text, program, fields, expected):
     record = _normalize_other_education_entry(
         {'taxonomy_code': 'B2', 'text': text, 'extracted_fields': {'program_name': program, **fields}})
