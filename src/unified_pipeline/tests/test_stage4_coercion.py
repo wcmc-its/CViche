@@ -1320,6 +1320,19 @@ def test_title_question_mark_matches_across_respacing_and_case():
     assert updated["title"] == "Is the Fern a Moss?"
 
 
+def test_title_question_mark_matches_curly_quotes_and_a_closing_quote():
+    text = "Doe J. “What’s in a Fern”? Glade Rev. 2022."
+    updated, _ = apply_regex_post_processing(text, {"title": "What's in a Fern?"}, "S2")
+    assert updated["title"] == "What's in a Fern?"
+
+
+def test_title_question_mark_needs_the_title_to_end_at_a_word_boundary():
+    # "Fern" is not the source's "Ferns?": the mark follows another word.
+    text = "Doe J. Fern Habitats and Ferns? Glade Rev. 2022."
+    updated, _ = apply_regex_post_processing(text, {"title": "Fern Habitats and Fern?"}, "S2")
+    assert updated["title"] == "Fern Habitats and Fern"
+
+
 def test_title_question_mark_not_in_source_is_still_stripped():
     # The source has no "?" after the title: the mark is stray and goes.
     text = "Doe J. Fern Habitats. Annual Glade Meeting. 2022."
