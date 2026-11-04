@@ -21,6 +21,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple
 
+from unified_pipeline.core.credential_lines import (
+    BOARD_CODE,
+    LICENCE_CODE,
+    OTHER_EDUCATION_CODE,
+    misfiled_credential_home,
+    names_identifier,
+    names_licence,
+)
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -63,6 +71,9 @@ from unified_pipeline.stage6.sections.appendix import (
     t_line_is_scaffolding,
 )
 from unified_pipeline.stage6.sections.bibliography import SOURCE_HEADING_NOTE_RE
+from unified_pipeline.stage6.sections.board_certification import (
+    _is_certification_header_line,
+)
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
@@ -4927,6 +4938,138 @@ def lint_licensure_fallback_truncated(stage4: dict,
             f"rest is in no licence row: '{tail[:LICENSURE_TAIL_EXCERPT_CHARS]}'",
             truncated))
     return findings
+
+
+# --- licensure_row_not_licence (#1577 shape 3, lint 14bf) ---------------------
+#
+# A certificate, a course or a credential that is no licence, rendered as a
+# Licensure row; one rendered as a Board Certification row that the shared
+# predicate homes in Other Educational Experiences; and a certification
+# rendered as an award in Honors. Stage 6's licensure guard moves what
+# `core.credential_lines` names out of both credential tables, so this reads
+# what it leaves: a raw-text Licensure row that states a certification and
+# names no licence (MIX11 HTGWYH-05, "Certified in <skill>"), a nursing
+# first-assistant certification beside its "Registered Nurse" (RUISZG-02),
+# and an Honors row that names a certification of proficiency (KGXMLK-05).
+#: WARN: 24 / 24 hand-checked true over fresh renders (LRNL-1 in
+#: doctor/PRECISION.md).
+LICENSURE_ROW_NOT_LICENCE_SEVERITY = "WARN"
+#: A cell that states a certification, a certificate, a credential or a
+#: course: no licence wording. Read only once `names_licence` and
+#: `names_identifier` have said the cell names no licence.
+_CERTIFICATION_WORDING_RE = re.compile(
+    r"\bcertified\b|\bcertificat(?:e|es|ion|ions)\b|\bcredential(?:ed|s)?\b"
+    r"|\bcourse\b|\bpermit\b", re.IGNORECASE)
+#: A nursing certification written after the licence it builds on
+#: ("Registered Nurse, First Assist (RNFA)"): the RN words name the
+#: prerequisite, not the row's own credential.
+_NURSING_CERTIFICATION_RE = re.compile(r"\bfirst\s+assist(?:ant)?\b|\bC?RNFA\b", re.IGNORECASE)
+_REGISTERED_NURSE_RE = re.compile(r"\bregistered\s+nurse\b", re.IGNORECASE)
+#: An Honors name cell that states a certification the owner earned, not an
+#: award a body gave: a certificate of competency, completion or training,
+#: a certification of proficiency, a line opening "Certified". A certificate
+#: of merit, appreciation, recognition or excellence is an award.
+_HONORS_CERTIFICATION_RE = re.compile(
+    r"\bcertification\s+(?:of\s+proficiency|in)\b|\bcertified\s+(?:in|as)\b|^\W*certified\b"
+    r"|\bboard[\s-]+certif"
+    r"|\bcertificate\s+(?:of\s+(?:competency|completion|proficiency|attendance|training)|in)\b",
+    re.IGNORECASE)
+#: A Board Certification row that names a certificate (not the board's own
+#: "Board Certificate"), or a life-support course spelled with stops
+#: ("A.C.L.S."), which the shared predicate reads only undotted.
+_BOARD_ROW_CERTIFICATE_RE = re.compile(
+    r"(?<!board\s)\bcertificate\b|\b(?:A\.?C|B|P\.?A)\.L\.S\.?", re.IGNORECASE)
+#: The cell a table prints when its section has nothing.
+_EMPTY_SECTION_CELL = "N/A"
+
+
+class _MisplacedCredential(NamedTuple):
+    """One rendered row that holds a credential its table is not for."""
+    table: str
+    reason: str
+    cell: str
+
+
+def _licensure_row_credential(state_cell: str) -> str | None:
+    """Why a Licensure row's State cell is a credential and no licence, or
+    None: the shared predicate homes it elsewhere
+    (`misfiled_credential_home`), or it states a certification
+    (`_CERTIFICATION_WORDING_RE`) and names no licence and no identifier.
+    A nursing first-assistant certification's "Registered Nurse" names no
+    licence of the row's own."""
+    home = misfiled_credential_home(state_cell, LICENCE_CODE)
+    if home is not None:
+        return f"{home.kind.replace('_', ' ')}, which belongs under {home.code}"
+    if names_identifier(state_cell):
+        return None
+    licence_text = (_REGISTERED_NURSE_RE.sub(" ", state_cell)
+                    if _NURSING_CERTIFICATION_RE.search(state_cell) else state_cell)
+    if names_licence(licence_text):
+        return None
+    if _NURSING_CERTIFICATION_RE.search(state_cell) or _CERTIFICATION_WORDING_RE.search(state_cell):
+        return "a certification or certificate that names no licence"
+    return None
+
+
+def _board_row_credential(row_text: str) -> str | None:
+    """Why a Board Certification row is no board certification, or None:
+    the shared predicate homes it in Other Educational Experiences, or it
+    names a certificate or a dotted life-support course
+    (`_BOARD_ROW_CERTIFICATE_RE`)."""
+    home = misfiled_credential_home(row_text, BOARD_CODE)
+    if home is not None and home.code == OTHER_EDUCATION_CODE:
+        return f"{home.kind.replace('_', ' ')}, which belongs under {home.code}"
+    if _BOARD_ROW_CERTIFICATE_RE.search(row_text):
+        return f"a certificate or course, which belongs under {OTHER_EDUCATION_CODE}"
+    return None
+
+
+def _is_board_certification_table(header: list[str]) -> bool:
+    """Whether a table's header row is the Board Certification table's
+    (`_is_certification_header_line`, the renderer's own header test)."""
+    return bool(header) and _is_certification_header_line(" | ".join(header))
+
+
+def _misplaced_credentials(table_rows: list[list[list[str]]]) -> list[_MisplacedCredential]:
+    """Every Licensure, Board Certification and Honors row the lint reports,
+    in document order."""
+    found = []
+    for table in table_rows:
+        if not table or not table[0]:
+            continue
+        data = [row for row in table[1:] if any(cell.strip() for cell in row)]
+        if _licensure_rows([table]):
+            for row in data:
+                cell = " ".join(row[0].split())
+                reason = cell and cell != _EMPTY_SECTION_CELL and _licensure_row_credential(cell)
+                if reason:
+                    found.append(_MisplacedCredential("Licensure", reason, cell))
+        elif _is_board_certification_table(table[0]):
+            for row in data:
+                text = " ".join(" ".join(cell.split()) for cell in row if cell.strip())
+                reason = text and text != _EMPTY_SECTION_CELL and _board_row_credential(text)
+                if reason:
+                    found.append(_MisplacedCredential("Board Certification", reason, text))
+        else:
+            header = _honors_header(table)
+            name_i = _alias_col(header, _AWARD_NAME_ALIASES) if header else None
+            for row in data if name_i is not None else ():
+                name = " ".join(row[name_i].split()) if name_i < len(row) else ""
+                if _HONORS_CERTIFICATION_RE.search(name):
+                    found.append(_MisplacedCredential(
+                        "Honors", "a certification the owner earned, not an award", name))
+    return found
+
+
+def lint_licensure_row_not_licence(table_rows: list[list[list[str]]]) -> list[dict]:
+    """A rendered row holding a credential its table is not for (#1577
+    shape 3): a certificate, a course or another credential in Licensure, an
+    exam, course or certificate in Board Certification, a certification in
+    Honors. WARN, one finding per row. Reads the docx's table rows."""
+    return [_finding(
+        "licensure_row_not_licence", LICENSURE_ROW_NOT_LICENCE_SEVERITY,
+        f"{found.table} row holds {found.reason}: its home is not the {found.table} table",
+        [found.cell]) for found in _misplaced_credentials(table_rows)]
 
 
 # --- glyph_field -------------------------------------------------------------

@@ -638,6 +638,13 @@ LINT_COPY = {
         "A source heading clearly names one section, but every entry under it was filed in a "
         "different section, so that section is empty in the document.",
         "Check the quoted entries and move any that belong under their source heading's section."),
+    "licensure_row_not_licence": LintCopy(
+        "Certificate filed as a licence or award",
+        "A certificate, a course or another credential that is not a licence is shown as a "
+        "Licensure or Board Certification row, or a certification the faculty member earned is "
+        "shown as an award in Honors.",
+        "Move the row to Other Educational Experiences (certificates), or to Board "
+        "Certification when a certifying board grants it."),
 }
 
 # #1388: a rerun of the same CV helps only when the failure was a passing one,

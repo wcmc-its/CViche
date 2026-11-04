@@ -586,6 +586,15 @@ Lints, ranked by the severity of the failure class they catch:
                           the CV has the code, so its template slot renders
                           empty (XAXVYB's N1 heading, #1938/#1949). INFO, one
                           per heading. Reads stage 3b and stage 3a
+14bf. licensure_row_not_licence a rendered row holding a credential its
+                          table is not for (#1577 shape 3): a Licensure row
+                          that states a certificate, a course or a
+                          certification and names no licence (MIX11
+                          HTGWYH-05, RUISZG-02), a Board Certification row
+                          the shared credential predicate homes in Other
+                          Educational Experiences, an Honors row that names
+                          a certification the owner earned (KGXMLK-05).
+                          WARN, one per row. Reads the docx's table rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -774,6 +783,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_licensure_fallback_truncated,
+    lint_licensure_row_not_licence,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_owner_attribution,
@@ -993,6 +1003,7 @@ KNOWN_LINTS = (
     "renderer_row_missing",
     "mentee_field_incomplete",
     "pinned_heading_empty",
+    "licensure_row_not_licence",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1324,6 +1335,10 @@ LINT_PREVALENCE = {
     # distinct uids with a stored stage-3b artifact and its stage-3a mapping,
     # 2026-10-19.
     "pinned_heading_empty": 0.077,
+    # licensure_row_not_licence (#1577; LRNL-1 in doctor/PRECISION.md): 13 of 471
+    # fresh renders on origin/dev 03955964 (the #1243 census farm's 460 and
+    # the 11 MIX11 runs), 2026-11-04.
+    "licensure_row_not_licence": 0.028,
 }
 
 
@@ -1959,6 +1974,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("mentee_field_incomplete", lint_mentee_field_incomplete, ("table_rows",),
              optional=("blocks",)),
     LintSpec("pinned_heading_empty", lint_pinned_heading_empty, ("stage_3b", "stage_3a")),
+    LintSpec("licensure_row_not_licence", lint_licensure_row_not_licence, ("table_rows",)),
 )
 
 #: The views read from the stage-6 docx.
