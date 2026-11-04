@@ -194,6 +194,8 @@ GRANT_AMOUNT_SLOT_CLAUSES = (
     "('Year 3') goes in annual_funding, not here.",
     "A figure stated for the whole award or for a span of years ('total', 'over 5 years') "
     "with no per-year word goes here, not in annual_funding.",
+    "A figure labelled only 'direct' or 'direct costs', with no per-year word, on a grant "
+    "of more than one year is the whole award's direct costs and goes here.",
     "An entry that states both fills both",
 )
 
@@ -211,6 +213,16 @@ def test_grant_total_field_guide_carries_the_amount_slot_rule(code, total_field,
     guide = schemas_mod.FIELD_DESCRIPTIONS[code][total_field]
     assert clause in guide
     assert guide.endswith(schemas_mod.GRANT_AMOUNT_SLOT_RULE)
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_annual_field_guide_takes_only_a_per_year_figure(code):
+    """#1672, paid A/B 2026-11-04: the annual guide's "direct" drew a
+    multi-year "Direct costs: $X" into annual_funding (ZASOTV 898, web205
+    805), rendered as "Annual direct costs:". The owner ruled it a total."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS[code]["annual_funding"]
+    assert "only a figure the entry labels per year" in guide
+    assert "(a figure labelled only 'direct' is a total)" in guide
 
 
 @pytest.mark.parametrize("field", ["status", "filing_date", "issue_date"])

@@ -1128,9 +1128,11 @@ def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule
 #: rule line and two field-guide clauses are the only difference: dropping them
 #: gives d69c439d... back. M2A re-measured for #1672, whose amount-slot rule
 #: on the total_funding guide line is the only difference: dropping it gives
-#: bcf4fb95... back.
+#: bcf4fb95... back. M2A re-measured for #1672's direct-costs clause and the
+#: annual_funding guide's per-year wording (paid A/B 2026-11-04), the only
+#: difference: dropping them gives 4cd3a7ba... back.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "4cd3a7ba6fa56af43d17e1b5571a12b5793e5cc57e237f365985da7204fc9985",
+    "M2A": "f4f7baf9e11ed2f226d721f54edb771611598fd02d0d5dd8393e34480d3d37ac",
     "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
