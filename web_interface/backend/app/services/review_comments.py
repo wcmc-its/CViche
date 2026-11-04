@@ -204,6 +204,8 @@ REVIEW_FLAGS = {
     "glyph_field": "A bullet symbol is shown here instead of a value: fill it in from your CV.",
     "pinned_heading_empty": ("Filed in a different section than its heading in your CV, which "
                              "left that section empty: check where it belongs."),
+    "open_end_unsupported": ("Shown as ongoing, but your CV gives this an end date: replace "
+                             "Present with it."),
     "cross_section_duplicate": ("Your CV lists this under two headings, and it is shown twice: "
                                 "keep the copy in the section where it belongs and delete the other."),
     "stage2_unaccounted": "Part of your CV was never read: check this section against the CV.",

@@ -4841,14 +4841,14 @@ def _rendered_unit(section: str, text: str) -> _RenderedUnit:
                          frozenset(_FOUR_DIGIT_YEAR_RE.findall(text)))
 
 
-def _is_label_table(rows: list[list[str]]) -> bool:
+def _duplicate_is_label_table(rows: list[list[str]]) -> bool:
     """Whether every filled row of a table opens on a label ("Award Source:")."""
     firsts = [next((cell for cell in row if cell.strip()), "") for row in rows]
     return bool(firsts) and all(cell.rstrip().endswith(":") for cell in firsts if cell)
 
 
-def _rendered_units(table_rows: list[list[list[str]]],
-                    blocks: list[tuple[str, str]] | None) -> list[_RenderedUnit]:
+def _duplicate_rendered_units(table_rows: list[list[list[str]]],
+                              blocks: list[tuple[str, str]] | None) -> list[_RenderedUnit]:
     """The document's rendered records outside the Appendix, each under its
     section (`blocks`' last section header before it; "" without blocks)."""
     appendix = norm(_APPENDIX_HEADER[3:])
@@ -4868,7 +4868,7 @@ def _rendered_units(table_rows: list[list[list[str]]],
         texts = [text for text in map(_table_row_text, rows) if text]
         if section == appendix or not texts:
             continue
-        units += ([_rendered_unit(section, " ".join(texts))] if _is_label_table(rows)
+        units += ([_rendered_unit(section, " ".join(texts))] if _duplicate_is_label_table(rows)
                   else [_rendered_unit(section, text) for text in texts])
     return units
 
@@ -4891,7 +4891,7 @@ def lint_cross_section_duplicate(stage4: dict, table_rows: list[list[list[str]]]
     (#1435). One finding per pair, quoting both rendered copies. Reads
     stage 4 and the docx's table rows; its paragraphs, for the section names
     and paragraph records, when present."""
-    units = _rendered_units(table_rows, blocks)
+    units = _duplicate_rendered_units(table_rows, blocks)
     records = _cross_section_records(stage4)
     weights = _token_weights(records)
     findings, seen = [], set()
@@ -5406,3 +5406,269 @@ def lint_session_title_missing(stage4: dict,
         problems += _r_raw_line_problems(stage4, table_rows)
     return [_finding("session_title_missing", SESSION_TITLE_SEVERITY, message, evidence)
             for message, evidence in problems]
+
+
+# --------------------------------------------------------------------------
+# Lint 14bc open_end_unsupported (#1342 residual; MIX11 MOCDRL-01, RSRRUF-04):
+# a record the document shows as open-ended ("2031-Present", "03/31-Present")
+# whose own source line closes it: a span with an end ("3/2031-3/2032",
+# "2031 to 2033") or a one-year cohort ("Class of 2031"), and no open marker.
+#
+# date_cell_shape's open_range reads the WHOLE entry's text for an open
+# marker, skips I rows, and reads only four-digit years, so it is silent when
+# the marker belongs to a sibling record of the same entry (a project line's
+# "-present" beside its award's closed span), on an I record stage 4 gave an
+# invented "present" end, and on a grant's "MM/YY-Present". This lint reads
+# each record of a split entry against the source line that holds its start
+# year and its own words; an unsplit record owns the entry's whole text, as
+# in date_cell_shape, and a range date_cell_shape already judges is left to
+# it. A bare start year ("2031 Member") is not a closed span: I rows keep
+# "<start>-Present" by Paul's 2026-10-30 decision on #1342, and
+# date_cell_shape covers a bare year on every other code.
+OPEN_END_SEVERITY = "WARN"
+#: Characters of the rendered unit and of the source line quoted per finding.
+OPEN_END_EVIDENCE_CHARS = 200
+
+#: What splits an entry's text into the lines its records sit on: a tab, a
+#: line break, a bullet glyph, or a " | " cell joiner.
+_OPEN_END_LINE_SPLIT_RE = re.compile(r"[\t\n\u2022\u25e6\u25aa\u2023\u00b7]|\s\|\s")
+_OPEN_END_DASH = r"(?:[-\u2013\u2014]|\bto\b|\bthrough\b|\buntil\b)"
+_OPEN_END_WORDS = r"(?:present|current|ongoing)\b"
+#: A start year, a spaced dash, and words ("2031 - Mentor on ..."): read as
+#: open, as `_OPEN_MARKER_DASH_RE` reads a line that opens so.
+_OPEN_END_SPACED_DASH_RE = re.compile(r"(?<!\d)\d{4}\s+[-\u2013\u2014]\s+[A-Za-z]")
+#: A label/value table holds one record when at least this many of its rows,
+#: and at least half, open with a label cell ("Duration of support:").
+OPEN_END_MIN_LABEL_ROWS = 2
+
+
+class _OpenEndRecord(NamedTuple):
+    """One stage-4 record read for this lint (§8.1)."""
+    element_idx: object
+    code: str
+    start_year: str
+    tokens: frozenset[str]
+    own_tokens: frozenset[str]
+    has_siblings: bool
+    value_tokens: frozenset[str]
+
+
+def _record_value_tokens(record: Mapping) -> frozenset[str]:
+    """The words of a record's string values, its dates left out."""
+    return _attribution_tokens(" ".join(
+        value for key, value in record.items()
+        if key not in _JUNK_DATE_FIELDS and isinstance(value, str)))
+
+
+def _open_end_records(raw: dict) -> list[_OpenEndRecord]:
+    """The entry's records (its stage-4 split, else its own fields) that have
+    a four-digit start year: their `start_date`'s, or for an unsplit entry
+    with none the first year of its text, as `_dated_entry` reads it, so a
+    row stage 4 gave no date can still claim its own rendered range. An
+    unsplit record's words are its values' and its text's (a mentee's name
+    may be in neither field), a split record's its own values'; its
+    `value_tokens`, the words of its values alone, are what a rendered row
+    must show a share of, so a long description does not hide its row.
+    `own_tokens` are the words no sibling record carries, so a record can be
+    told from the siblings it shares a title with."""
+    fields = raw.get("extracted_fields")
+    if not isinstance(fields, Mapping):
+        return []
+    records = _split_child_records(raw) or [fields]
+    values = [_record_value_tokens(record) for record in records]
+    tokens = values
+    if len(records) == 1:
+        tokens = [values[0] | _attribution_tokens(str(raw.get("text") or ""))]
+    found = []
+    for place, record in enumerate(records):
+        start = _FOUR_DIGIT_YEAR_RE.search(str(record.get("start_date") or ""))
+        if start is None and len(records) == 1:
+            start = _FOUR_DIGIT_YEAR_RE.search(str(raw.get("text") or ""))
+        if start is None:
+            continue
+        others = frozenset().union(*(t for i, t in enumerate(tokens) if i != place))
+        found.append(_OpenEndRecord(raw.get("element_idx_start"),
+                                    str(raw.get("taxonomy_code") or ""),
+                                    start.group(0), tokens[place],
+                                    tokens[place] - others, len(records) > 1,
+                                    values[place] or tokens[place]))
+    return found
+
+
+def _closed_span_re(year: str) -> re.Pattern:
+    """A span that opens in `year` and states an end ("3/2031-3/2032",
+    "2031 to June 2033", "2031-33"), or a one-year cohort ("Class of 2031")."""
+    return re.compile(
+        rf"(?<!\d)(?:\d{{1,2}}[/.])?{year}\s*{_OPEN_END_DASH}\s*"
+        rf"(?:{_MONTH_WORD}\s+)?(?:\d{{1,2}}[/.])?(?:(?:19|20)\d{{2}}|\d{{2}})(?!\d)"
+        rf"|\bclass\s+of\s+'?{year}\b", re.IGNORECASE)
+
+
+#: A rendered open range: its start (a year, or a month and a two-digit
+#: year, "03/31") and an open word.
+_RENDERED_OPEN = (rf"(?<![\d/])(?:\d{{1,2}}/)?(?P<year>(?:19|20)\d{{2}}|\d{{2}})\s*"
+                  rf"[-\u2013\u2014]\s*{_OPEN_END_WORDS}")
+#: A table cell that is wholly an open range ("2031-Present").
+_RENDERED_OPEN_CELL_RE = re.compile(rf"\s*{_RENDERED_OPEN}\s*", re.IGNORECASE)
+#: A paragraph that opens with an open range ("2031-Present - Example Role, ..."),
+#: or closes with one ("Director, Example Center, 2031-Present").
+_RENDERED_OPEN_LEAD_RE = re.compile(
+    rf"\s*{_RENDERED_OPEN}(?=\s*(?:[-\u2013\u2014:,|]|\t)\s*\S)", re.IGNORECASE)
+_RENDERED_OPEN_TAIL_RE = re.compile(rf"(?:,|\|)\s*{_RENDERED_OPEN}\s*\.?\s*$",
+                                    re.IGNORECASE)
+
+#: Share of a record's words a rendered unit must show for the open range in
+#: it to be read as that record's.
+OPEN_END_MIN_TOKEN_SHARE = 0.5
+#: Share of the top record's shared words at which a rival record whose
+#: source is open could be the one shown, so the range is not read. A
+#: rival with fewer is a neighbour sharing an institution's name (MOCDRL 75:
+#: the award table shows 30 of its 30 words, an open curriculum row 7).
+OPEN_END_RIVAL_SHARE = 0.5
+
+
+def _line_is_open(line: str) -> bool:
+    return bool(_OPEN_MARKER_WORD_RE.search(line) or _OPEN_MARKER_DASH_RE.search(line)
+                or _OPEN_END_SPACED_DASH_RE.search(line))
+
+
+def _source_closes(record: _OpenEndRecord, text: str) -> str | None:
+    """The source line that holds the record's start year and its own words,
+    when that line closes the record's span and has no open marker; None when
+    it leaves the span open, no line holds the year, or two lines tie for it
+    and one of them is open. A tie between closed lines still names one. A
+    record with no sibling owns the entry's whole text, so an open marker
+    anywhere in it spares the record."""
+    year_re = re.compile(rf"(?<!\d){record.start_year}(?!\d)")
+    text = normalise_hyphens(text)
+    lines = ([line.strip() for line in _OPEN_END_LINE_SPLIT_RE.split(text)]
+             if record.has_siblings else [text.strip()])
+    lines = [line for line in lines if year_re.search(line)]
+    if not lines:
+        return None
+    words = record.own_tokens or record.tokens
+    scores = [len(words & _attribution_tokens(line)) for line in lines]
+    best = [line for line, score in zip(lines, scores, strict=True) if score == max(scores)]
+    closed = _closed_span_re(record.start_year)
+    if all(closed.search(line) and not _line_is_open(line) for line in best):
+        return best[0]
+    return None
+
+
+def _is_label_table(text: str) -> bool:
+    """Whether a table's joined rows mostly open with a label cell."""
+    rows = [line for line in text.split("\n") if TABLE_ROW_JOINER in line]
+    labelled = sum(line.split(TABLE_ROW_JOINER, 1)[0].rstrip().endswith(":") for line in rows)
+    return labelled >= max(OPEN_END_MIN_LABEL_ROWS, len(rows) / 2)
+
+
+def _rendered_units(blocks: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """(kind, text) of what one record renders as: a paragraph ("p"), a
+    table line, a cell or a joined row ("table"), or a whole label/value
+    table, which holds one record (a grant: its "Duration of support:" row
+    and its "Award Source:" row)."""
+    units = []
+    for kind, text in blocks:
+        text = str(text or "")
+        if kind != "table":
+            units.append(("p", text))
+        elif _is_label_table(text):
+            units.append(("table", text))
+        else:
+            units.extend(("table", line) for line in text.split("\n"))
+    return units
+
+
+def _rendered_open_dates(kind: str, unit: str) -> list[re.Match]:
+    """The open ranges a unit renders as a date of its own: a table cell that
+    is wholly one, or a paragraph's opening or closing date. A range inside
+    running text, such as a name cell that quotes the CV's own
+    "..., 2031-present", is the CV's wording, not a rendered date."""
+    if kind != "p":
+        return [match for cell in re.split(r"\n| \| ", unit)
+                if (match := _RENDERED_OPEN_CELL_RE.fullmatch(cell))]
+    return [match for match in (_RENDERED_OPEN_LEAD_RE.match(unit),
+                                _RENDERED_OPEN_TAIL_RE.search(unit)) if match]
+
+
+def _matching_records(year: str, words: frozenset[str],
+                      records: list[_OpenEndRecord]) -> list[tuple[int, int]]:
+    """(shared words, place in `records`) of every record that starts in
+    `year` (four digits, or its last two) and shares with `words` at least
+    DATE_CELL_MIN_SHARED_TOKENS, and as many as OPEN_END_MIN_TOKEN_SHARE of
+    its values' words, most shared first."""
+    matches = []
+    for place, record in enumerate(records):
+        if year not in (record.start_year, record.start_year[2:]):
+            continue
+        shared = len(record.tokens & words)
+        if shared >= max(DATE_CELL_MIN_SHARED_TOKENS,
+                         OPEN_END_MIN_TOKEN_SHARE * len(record.value_tokens)):
+            matches.append((shared, place))
+    return sorted(matches, reverse=True)
+
+
+def _closed_owner(matches: list[tuple[int, int]],
+                  lines: Mapping[int, str | None]) -> int | None:
+    """The place of the record an open range is read as: the one match that
+    shares the most words, strictly. None on a tie, and None when a rival
+    match with an open source shares OPEN_END_RIVAL_SHARE of the top match's
+    words, since that record may be the one on the page (VVRTUC 43: a later
+    title, open in its source, beside the closed rank it began with)."""
+    if not matches or (len(matches) > 1 and matches[1][0] == matches[0][0]):
+        return None
+    top_shared, top = matches[0]
+    if lines.get(top) is None or any(
+            lines.get(place) is None and shared >= OPEN_END_RIVAL_SHARE * top_shared
+            for shared, place in matches[1:]):
+        return None
+    return top
+
+
+def _date_cell_shape_reads(record: _OpenEndRecord, year: str) -> bool:
+    """Whether date_cell_shape's open_range already judges this range: an
+    unsplit record, of a code outside its by-decision exemption, shown with a
+    four-digit start year. There both lints read the entry's whole text, so
+    one rendered row is reported once."""
+    return (not record.has_siblings and len(year) == 4
+            and record.code not in DATE_CELL_OPEN_BY_DECISION_CODES)
+
+
+def lint_open_end_unsupported(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """A record the document shows open-ended ("-Present") whose own source
+    line states a closed span and no open marker (14bc; #1342, MIX11
+    MOCDRL-01 and RSRRUF-04). WARN, one per record. Each open range on the
+    page is tied to the one stage-4 record that starts in its year and shows
+    the most of its words, and is not read when another record that could be
+    the one shown is open in its source. An entry whose headings carry an
+    open marker ("Current Grants") is not read: there the source itself
+    calls the record open. A range date_cell_shape already judges
+    (`_date_cell_shape_reads`) is left to it."""
+    records, lines = [], {}
+    for raw in stage4.get("entries", []):
+        hierarchy = raw.get("hierarchy")
+        headings = " ".join(map(str, hierarchy)) if isinstance(hierarchy, list) else ""
+        heading_open = bool(_OPEN_MARKER_WORD_RE.search(
+            f"{headings} {raw.get('context_heading') or ''}"))
+        for record in _open_end_records(raw):
+            records.append(record)
+            if not heading_open:
+                lines[len(records) - 1] = _source_closes(record, str(raw.get("text") or ""))
+    shown: dict[int, tuple[str, str]] = {}
+    for kind, unit in _rendered_units(blocks):
+        words = _attribution_tokens(unit)
+        for match in _rendered_open_dates(kind, unit):
+            place = _closed_owner(_matching_records(match["year"], words, records), lines)
+            if place is not None and not _date_cell_shape_reads(records[place], match["year"]):
+                shown.setdefault(place, (match.group(0).strip(" ,|.\t"), unit))
+    findings = []
+    for place, (rendered, unit) in shown.items():
+        line = lines[place]
+        record = records[place]
+        findings.append(_finding(
+            "open_end_unsupported", OPEN_END_SEVERITY,
+            f"entry {record.element_idx} ({record.code}): renders "
+            f"'{rendered}', but its source line closes the span and has "
+            f"no open marker",
+            [unit[:OPEN_END_EVIDENCE_CHARS], line[:OPEN_END_EVIDENCE_CHARS]]))
+    return findings
