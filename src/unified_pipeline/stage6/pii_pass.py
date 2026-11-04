@@ -54,11 +54,13 @@ from .normalization.pii import (  # noqa: F401
     _FAMILY_SHAPE_LABEL_RE,
     _KNOWN_FIELD_LABEL_RE,
     _PII_FRAGMENT_SPLIT_RE,
+    _SPOUSE_NAME_CELL_RE,
     CAT_BIRTH,
     CAT_CHILDREN,
     CAT_DATE_OF_BIRTH,
     CAT_FAMILY,
     CAT_HOME_CONTACT,
+    CAT_MARITAL_STATUS,
     CAT_SPOUSE,
     CAT_THIRD_PARTY_CONTACT,
     SCOPE_ALL_CODES,
@@ -570,6 +572,25 @@ def _absorb_continuation_cells(text: str, end: int) -> int:
         end = limit
 
 
+def _absorb_spouse_name_cells(text: str, end: int) -> int:
+    """The offset a marital-status cut ending at `end` runs to once the cells
+    that follow it on the same line and are wholly a person's name
+    (`_SPOUSE_NAME_CELL_RE`) are taken in (#2061): "Marital Status: <status>;
+    <spouse's name>". Narrower than `_absorb_continuation_cells` on purpose:
+    an unlabelled citizenship or board cell after a marital status ("Married
+    <tab> US citizen") is a #821 render item and stays."""
+    while True:
+        delim = _PII_FRAGMENT_SPLIT_RE.match(text, end)
+        if delim is None or "\n" in delim.group():
+            return end
+        nxt = _PII_FRAGMENT_SPLIT_RE.search(text, delim.end())
+        limit = nxt.start() if nxt else len(text)
+        cell_start = limit - len(text[delim.end():limit].lstrip(" \t"))
+        if _SPOUSE_NAME_CELL_RE.fullmatch(text, cell_start, limit) is None:
+            return end
+        end = limit
+
+
 #: #1223: a family list that goes on over the next lines of one entry
 #: ("Children: <a>\n<b>\n<c>"). Unlike a cell, a line is only taken when the
 #: WHOLE line is shaped like a list of people: items of capitalised name
@@ -605,7 +626,9 @@ def _extend_label_span(text: str, match: PiiMatch, scope: str) -> _BareLabelSpan
     whole of what it matched, and the cell after it is somebody else's. A
     label-shaped family row ("Grandchildren:", `_FAMILY_SHAPE_LABEL_RE`) is
     a label here, and so is a bare "Birth <date>" (`_BARE_BIRTH_LABEL_RE`),
-    whose place of birth can sit in the cell after the date."""
+    whose place of birth can sit in the cell after the date. A marital
+    status label takes only the name cells after it
+    (`_absorb_spouse_name_cells`, #2061)."""
     span = _extend_bare_label_span(text, match.start, match.end)
     opens_with_label = (_KNOWN_FIELD_LABEL_RE.match(text, match.start)
                         or _FAMILY_SHAPE_LABEL_RE.match(text, match.start)
@@ -616,6 +639,9 @@ def _extend_label_span(text: str, match: PiiMatch, scope: str) -> _BareLabelSpan
         if match.category in _LIST_LINE_CATEGORIES:
             end = _absorb_list_lines(text, end)
         return span._replace(end=end)
+    if (scope == SCOPE_PERSONAL_AND_APPENDIX and match.category == CAT_MARITAL_STATUS
+            and opens_with_label):
+        return span._replace(end=_absorb_spouse_name_cells(text, span.end))
     return span
 
 

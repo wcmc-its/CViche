@@ -2608,6 +2608,115 @@ def test_1223_ndmrso_a_spelled_out_child_count_behind_a_marital_cut_is_withheld(
     assert [i.category for i in result.withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
 
 
+# --------------------------------------------------------------------------
+# #2061 (HTGWYH): a bare "Birth" label with a place and no date, and a
+# spouse's name in the cell after a marital-status cut. Every value is
+# synthetic; the spacing covers a single space, a tab and a wide gap.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Birth: Sampleton, ZZ",
+    "Birth:\tSampleton, ZZ",
+    "Birth:      Sampleton, ZZ",
+    "BIRTH\tPort Sampleton, Region, Examplestan.",
+    "Birth     Sampleton, ZZ",
+    "Birth - Sampleton, ZZ",
+    "• Birth: Sampleton, ZZ",
+])
+def test_2061_a_bare_birth_label_with_a_place_withholds_the_place(text):
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert residual == "", code
+        assert [item.category for item in withheld] == [CAT_PLACE_OF_BIRTH], code
+    # ambiguous as a title word: a routed content entry keeps it
+    assert not _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text", [
+    "Birth: A History of Midwifery",
+    "Birth: Labor, delivery and recovery",
+    "Birth cohort, Sampleton, ZZ",
+    "Preterm birth: Sampleton, ZZ",
+    "Birth Weight, Sample Outcomes",
+    "Birth: Sampleton, ZZ outcomes study",
+    "Birth Sampleton, ZZ",
+])
+def test_2061_birth_titles_with_a_comma_are_kept(text):
+    for code in (A, APPENDIX, CONTENT):
+        assert not _denied(text, code), (text, code)
+
+
+def test_2061_a_bare_birth_place_cut_stops_where_the_next_field_begins():
+    residual, withheld = _withheld_residual("Birth: Sampleton, ZZ\tCitizenship: US", code=A)
+    assert residual == "Citizenship: US"
+    assert [item.category for item in withheld] == [CAT_PLACE_OF_BIRTH]
+
+
+@pytest.mark.parametrize("text", [
+    "Marital Status: Married, 1990; Pat B. Zample",
+    "Marital Status:\tMarried\tPat Zample",
+    "Marital Status:      Married      Pat Zample, Jr.",
+    "Marital Status: Married; Pat Zample and Lee Zample",
+])
+def test_2061_a_spouse_name_after_a_marital_status_cut_is_withheld(text):
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert "Zample" not in residual, code
+        assert [item.category for item in withheld] == [CAT_MARITAL_STATUS], code
+
+
+@pytest.mark.parametrize("text, kept", [
+    # an unlabelled render item after the status is not a name (#821)
+    ("Marital Status: Married\tUS citizen", "US citizen"),
+    ("Marital Status: Single; Board Certified Internal Medicine",
+     "; Board Certified Internal Medicine"),
+    ("Marital Status: Single; Example University", "; Example University"),
+    ("Marital Status: Married; 1990", "; 1990"),
+    # the next labelled field is never the spouse's name
+    ("Marital Status: Married; Pat Zample\tCitizenship: US", "Citizenship: US"),
+    # a line break is the one boundary the source drew
+    ("Marital Status: Married\nPat Zample", "Pat Zample"),
+])
+def test_2061_a_marital_status_cut_takes_only_whole_name_cells(text, kept):
+    residual, _withheld = _withheld_residual(text, code=A)
+    assert residual == kept
+
+
+def test_2061_birth_place_and_spouse_name_never_reach_the_rendered_document(tmp_path):
+    """Render proof, not matcher proof: the real `generate()` over fieldless
+    A and T entries (recovered into the Appendix as HTGWYH's were), every XML
+    part of the docx searched for each value, tracked changes included."""
+    import json
+    import zipfile
+
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    lines = [("Birth: Zqxville, ZQ", "Zqxville"),
+             ("Birth:\tZqxburg, ZQ", "Zqxburg"),
+             ("Marital Status: Married, 1990; Pat B. Zqxson", "Zqxson"),
+             ("Marital Status:      Married      Lee Zqxmann", "Zqxmann")]
+    entries = [{"text": "Name: Jane Q. Public, MD", "taxonomy_code": "A",
+                "extracted_fields": {}, "element_idx_start": 0}]
+    for i, (text, _value) in enumerate(lines):
+        for j, code in enumerate(("A", "T")):
+            entries.append({"text": text, "taxonomy_code": code,
+                            "extracted_fields": {}, "element_idx_start": 1 + 2 * i + j})
+    entries.append({"text": "DISTINCTIVE_KEPT_T", "taxonomy_code": "T",
+                    "extracted_fields": {}, "element_idx_start": 99})
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    input_path, output_path = tmp_path / "in.json", tmp_path / "out.docx"
+    input_path.write_text(json.dumps({"document_uid": "TS2061", "entries": entries}))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    with zipfile.ZipFile(output_path) as zf:
+        xml = "\n".join(zf.read(n).decode("utf-8", "replace")
+                        for n in zf.namelist() if n.endswith(".xml"))
+    assert "DISTINCTIVE_KEPT_T" in xml, "the render did not include the entries at all"
+    for _text, value in lines:
+        assert value not in xml, f"{value!r} reached the rendered document"
+
+
 @pytest.mark.parametrize("text", [
     "Status; two sons",
     "Status\none child",

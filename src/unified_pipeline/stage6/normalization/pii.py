@@ -350,6 +350,7 @@ _BARE_BIRTH_LABEL = r"birth (?: [ \t]* [:\-–—] [ \t]* | [ \t]+ ) " + _BARE_B
 #: whose place of birth continues in the cells after it.
 _BARE_BIRTH_LABEL_RE = re.compile(_BARE_BIRTH_LABEL, re.X | re.I)
 
+
 # #1223 (EBYSBC, EQADVR): two family labels no row below opened, so the spouse's
 # and the grandchildren's names reached the Appendix. "Married:" names the
 # spouse; the spouse rows open only on "spouse"/"wife"/"husband", "married to"
@@ -411,6 +412,45 @@ _BARE_PARTNER_SHAPE = (
     + r"(?! [^\n\t|;]*? (?<! [\w-] ) " + _ORGANISATION_WORD + r" (?! [\w-] ) )"
     + _PERSON_NAME_RUN + _FRAGMENT_END_AHEAD
 )
+
+# #2061 (HTGWYH): the same bare "Birth" label with a place and no date --
+# "Birth: <city>, <state>" -- matched no row, so the place of birth rendered in
+# the Appendix while "Birthplace:" and "Place of birth:" are withheld (#1391).
+# "Birth:" alone still opens real titles ("Birth: A History"), so the value
+# must be shaped like a place and be the WHOLE fragment: capitalised name
+# runs joined by commas ("<City>, <ST>", "<City>, <Region>, <Country>"),
+# nothing after the last one but a full stop before the hard delimiter. A
+# colon or dash separator may be any run of blanks or tabs; with no colon the
+# gap must be a tab or two or more spaces, never one ("Birth Weight, ...").
+# Fragment-initial like `_BORN_STATEMENT`, so "preterm birth: <A>, <B>" inside
+# a line opens nothing. Each place token is capitalised (case-sensitive inside
+# the policy's case-insensitive patterns) and holds no blank or comma, so the
+# runs cannot overlap and the scan stays linear.
+_PLACE_TOKEN = r"(?-i: [A-ZÀ-ÖØ-Þ] [\w.'’-]* )"
+#: Up to four tokens per comma-separated part ("Port Saint Lucie").
+_PLACE_PART_MAX_EXTRA_TOKENS = 3
+#: Up to three commas ("<City>, <County>, <State>, <Country>").
+_PLACE_MAX_COMMAS = 3
+_PLACE_PART = _PLACE_TOKEN + r"(?: [ \t]+ " + _PLACE_TOKEN + r"){0,%d}" % _PLACE_PART_MAX_EXTRA_TOKENS
+_BIRTH_PLACE_VALUE = (_PLACE_PART + r"(?: [ \t]* , [ \t]* " + _PLACE_PART + r"){1,%d}" % _PLACE_MAX_COMMAS
+                      + _FRAGMENT_END_AHEAD)
+_BIRTH_PLACE_SEPARATOR = r"(?: [ \t]* [:\-–—] [ \t]* | \t [ \t]* | [ ]{2,} )"
+_BARE_BIRTH_PLACE_SHAPE = (_FRAGMENT_INITIAL + r"(?: [•·*–—-] [ \t]* )? birth "
+                           + _BIRTH_PLACE_SEPARATOR + _BIRTH_PLACE_VALUE)
+
+#: #2061 (HTGWYH): a cell that is wholly a person's name, the shape a spouse's
+#: name takes in the cell after "Marital Status: <status>" ("Marital Status:
+#: Married, <year>; <first> <initial>. <last>"). A middle initial ("A.") is a
+#: token of its own, which `_PERSON_NAME_TOKEN` alone is not; no organisation
+#: word (`_ORGANISATION_WORD`), no digit, no lowercase word other than "and".
+#: Read with `fullmatch` over one cell by `pii_pass._extend_label_span`.
+_NAME_INITIAL = r"(?-i: [A-Z] \. )"
+_SPOUSE_NAME_TOKEN = r"(?: " + _PERSON_NAME_TOKEN + r" | " + _NAME_INITIAL + r" )"
+_SPOUSE_NAME_CELL_RE = re.compile(
+    r"(?! .*? (?<! [\w-] ) " + _ORGANISATION_WORD + r" (?! [\w-] ) )"
+    + _SPOUSE_NAME_TOKEN + r"(?: [ \t]* ,? [ \t]+ (?: and [ \t]+ )? " + _SPOUSE_NAME_TOKEN
+    + r"){0,%d} [ \t.]*" % _PERSON_NAME_MAX_EXTRA_TOKENS,
+    re.X | re.I)
 
 #: #1391: a marital status word that is a whole line or cell of the Personal
 #: Data block ("Divorced", "• Single."). Personal Data only: elsewhere a line
@@ -657,6 +697,11 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  anchored=True, render_only=True),
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_BORN_STATEMENT, render_only=True),
+    # #2061: "Birth: <city>, <state>" (see `_BARE_BIRTH_PLACE_SHAPE`). The span
+    # is the whole fragment the shape matched. Render-time only: no pre-LLM
+    # value search reads a place.
+    WithholdRule(CAT_PLACE_OF_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_BARE_BIRTH_PLACE_SHAPE, render_only=True),
     # #1223 (EBYSBC): "Married: <name>" and "Grandchildren: <names>" (see
     # `_FAMILY_SHAPE_STEMS` for why these are shapes). Render-time only, like
     # the family label rows: the span runs to the next hard delimiter.
