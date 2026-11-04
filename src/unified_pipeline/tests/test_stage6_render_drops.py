@@ -1719,9 +1719,9 @@ def test_a_licence_pinned_into_licensure_names_its_profession() -> None:
     assert moved["extracted_fields"]["license_type"] == "Veterinary Medicine and Surgery"
     record = _license_record(_normalize_licensure_entry(moved))
     assert record.state == "Example State (Veterinary Medicine and Surgery)"
-    medical = _credential("F1", "Licensed to practice medicine in the state of Example", {
+    plain_row = _credential("F1", "Licensed to practice medicine in the state of Example", {
         "state_country": "Example State"}, pre_pin_code="B2", classification_reasoning=_pin_why("F1"))
-    [kept] = _grouped(medical)["F1"]
+    [kept] = _grouped(plain_row)["F1"]
     assert "license_type" not in kept["extracted_fields"]
 
 
