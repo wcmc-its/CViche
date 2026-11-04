@@ -68,7 +68,7 @@ from typing import Any
 
 from unified_pipeline.core.credential_lines import is_credential_list_label
 from unified_pipeline.core.honor_lines import YEAR_RE
-from unified_pipeline.core.text_norm import fold_quotes, norm
+from unified_pipeline.core.text_norm import MONTH_PATTERN, fold_quotes, norm
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
 from ..fan_out import (
@@ -114,19 +114,25 @@ MISSING_INSTITUTION_SENTINEL = 'none'
 INSTITUTION_ENRICHMENT_REASON = "Institution Enrichment"
 TEXT_EXTRACTION_REASON = "Text Extraction"
 
-# How far past its label a labelled date's year may sit: "June 28, " before
-# "2026", "8/09/" before "21".
-LABELLED_DATE_MAX_CHARS = 20
+# How many digits and separators may stand between a labelled date's label
+# (or month) and its year: "28, " before "2026", "8/09/" before "21".
+LABELLED_DATE_MAX_DIGIT_CHARS = 10
 # A date a line writes after an expiry or renewal label (`EXPIRY_LABEL`,
 # `RENEWAL_LABEL`), read up to its year: four digits, or the two after a
 # slash, dot or hyphen that end the date ("Exp. 4/2027", "Expires 8/09/21",
 # "(expires June 28, 2026)", "last renewal February 2021"). The label is a
-# whole word, so "experience 2010" names no expiry.
+# whole word with nothing but a date after it, so "experience 2010" and
+# "Expiry Course 2010" name no expiry.
 _LABELLED_DATE_RE = re.compile(
-    rf"\b(?:(?P<expiry>{EXPIRY_LABEL})|{RENEWAL_LABEL})\b\.?(?:\s+date)?\s*:?\s*"
-    rf"[^;|\t\n]{{0,{LABELLED_DATE_MAX_CHARS}}}?"
+    rf"\b(?:(?P<expiry>{EXPIRY_LABEL})|{RENEWAL_LABEL})\b\.?(?:\s+date)?\s*:?\s*(?:on\s+)?"
+    rf"(?:{MONTH_PATTERN}\s*)?[\d\s,/.-]{{0,{LABELLED_DATE_MAX_DIGIT_CHARS}}}?"
     rf"(?:(?P<year>{YEAR_RE.pattern})|(?<=[/.-])(?P<yy>\d{{2}})(?![\d/.-]))",
     re.IGNORECASE)
+# The same label ending a Description with no date after it: "ACLS Expires",
+# the name stage 6 carries from the line "ACLS   Expires July 2017" less its
+# edge date (OIVMMV 108).
+_DANGLING_LABEL_RE = re.compile(
+    rf"[\s,;:(-]*\b(?:{EXPIRY_LABEL}|(?:last\s+)?{RENEWAL_LABEL})\b[.:]?\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -283,6 +289,7 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
 
     location, location_is_enriched = _get_institution_location(entry)
     dates, dates_from_text = _resolve_b2_dates(fields, raw_text, program, entry.get(FOLDED_DATES_KEY))
+    program = _without_dangling_label(program, dates)
 
     return OtherEducationRecord(
         program=program,
@@ -293,6 +300,16 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
         dates_from_text=dates_from_text,
         source_entry=entry,
     )
+
+
+def _without_dangling_label(program: object, dates: str) -> object:
+    """`program` less an expiry or renewal label it ends on
+    (`_DANGLING_LABEL_RE`) when the Dates cell writes that label before the
+    date (`_labelled_dates`, #1577), so it is printed once, beside its date:
+    "ACLS | | Expires 07/17", not "ACLS Expires | | Expires 07/17"."""
+    if not (isinstance(program, str) and dates.startswith((f'{EXPIRES_PREFIX} ', f'{RENEWED_PREFIX} '))):
+        return program
+    return _DANGLING_LABEL_RE.sub('', program) or program
 
 
 def _named_in_program(institution: str, program: object) -> bool:

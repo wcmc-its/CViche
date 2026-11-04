@@ -820,6 +820,7 @@ def test_b2_institution_left_out_keeps_its_extracted_location():
     ("Example Course (expires June 28, 2031)", {'start_date': '2031-06', 'end_date': '2031-06'},
      'Expires 06/31', False),
     ("Example Life Support, last renewal February 2029", {'end_date': '2029-02'}, 'Renewed 02/29', False),
+    ("Example Life Support, expires on 6/30/2031", {'end_date': '2031-06-30'}, 'Expires 06/31', False),
     # the Description already writes the date after its label: printed once, there
     ("Example Life Support, last renewal February 2029",
      {'program_name': 'Example Life Support, last renewal February 2029', 'end_date': '2029-02'}, '', False),
@@ -835,7 +836,7 @@ def test_b2_institution_left_out_keeps_its_extracted_location():
     ("Example Course, renewed 2029, held 2029-2031", {'start_date': '2029', 'end_date': '2031'}, '2029-2031',
      False),
 ], ids=['exp-dot-month-year', 'expires-two-digit-year', 'expiration-date-year-field', 'valid-through-start',
-        'expires-month-name-same-start-and-end', 'renewal', 'description-holds-the-renewal',
+        'expires-month-name-same-start-and-end', 'renewal', 'expires-on', 'description-holds-the-renewal',
         'description-holds-the-expiry', 'text-year-labelled', 'unlabelled', 'label-on-another-year',
         'label-inside-a-word', 'range', 'range-with-a-labelled-start'])
 def test_b2_expiry_or_renewal_date_keeps_its_label(text, fields, dates, from_text):
@@ -843,6 +844,24 @@ def test_b2_expiry_or_renewal_date_keeps_its_label(text, fields, dates, from_tex
         {'taxonomy_code': 'B2', 'text': text,
          'extracted_fields': {'program_name': 'Example Course', **fields}})
     assert (record.dates, record.dates_from_text) == (dates, from_text)
+
+
+@pytest.mark.parametrize("text, program, fields, expected", [
+    ("Example Life Support           Expires July 2031", 'Example Life Support Expires', {'end_date': '2031-07'},
+     ('Example Life Support', 'Expires 07/31')),
+    ("Example Life Support, Exp. 4/2031", 'Example Life Support, Exp.', {'end_date': '2031-04'},
+     ('Example Life Support', 'Expires 04/31')),
+    ("Example Life Support, last renewal 2031", 'Example Life Support, last renewal', {'year': '2031'},
+     ('Example Life Support', 'Renewed 2031')),
+    # a label that is the whole name stays; a cell with no label leaves the name alone
+    ("Expires 2031", 'Expires', {'year': '2031'}, ('Expires', 'Expires 2031')),
+    ("Example Expiry Course 2031", 'Example Course Expires', {'start_date': '2031'},
+     ('Example Course Expires', '2031')),
+], ids=['expires', 'exp-dot', 'last-renewal', 'label-only-name', 'unlabelled-date'])
+def test_b2_description_drops_the_label_the_dates_cell_writes(text, program, fields, expected):
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': text, 'extracted_fields': {'program_name': program, **fields}})
+    assert (record.program, record.dates) == expected
 
 
 def test_b2_labelled_expiry_reaches_the_dates_cell():
