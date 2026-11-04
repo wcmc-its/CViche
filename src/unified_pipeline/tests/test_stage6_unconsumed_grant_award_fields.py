@@ -370,6 +370,19 @@ def test_the_template_goals_row_joins_the_project():
     assert _normalize_mentee(entry, ongoing=True).project == "Goals: Better archive access"
 
 
+def test_the_template_current_position_row_fills_an_n3a_mentee():
+    # MOZYFL: the N3A schema has no current_position, so every Current Mentees row was blank.
+    entry = {"text": "Name | Jane Roe\nCurrent Position | Simulation Fellowship Director\n"
+                     "Type of Supervision (Research, clinical, teaching, leadership) | Teaching",
+             "extracted_fields": {"mentee_name": "Jane Roe"}}
+    assert _normalize_mentee(entry, ongoing=True).current_position == "Simulation Fellowship Director"
+    entry["extracted_fields"]["current_position"] = "Attending"
+    assert _normalize_mentee(entry, ongoing=True).current_position == "Attending"
+    for blank in ("Current Position | \nType of Supervision | Lead", "Current Position | N/A",
+                  "Current Position\tType of Supervision Clinical"):
+        assert _normalize_mentee({"text": blank, "extracted_fields": {}}, ongoing=True).current_position == ""
+
+
 def test_without_a_role_line_supervision_type_is_inferred_as_before():
     entry = {"text": "Jane Roe, PhD student; her role: none", "extracted_fields": {"mentee_level": "PhD"}}
     assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research"
