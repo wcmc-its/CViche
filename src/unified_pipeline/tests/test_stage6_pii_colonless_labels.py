@@ -19,9 +19,10 @@ colon_terminator` in test_stage6_personal_data_recovery.py is the existing
 must not reintroduce; it stays green (asserted again here, from this file,
 as the acceptance criterion this predicate is built against).
 
-Scoped to date-of-birth and SSN only (declined here: a colon-less
-"place of birth" companion, since a place name has no comparably
-distinctive shape -- see the module comment above `_PII_LABEL_VALUE_RE`).
+Scoped to date-of-birth and SSN only. A colon-less "place of birth"
+companion was declined here, since a place name has no comparably
+distinctive shape; #2061 later added a narrower one (a whole-fragment
+place value, Personal Data / Appendix only) after a run leaked it.
 
 Run with:
 
@@ -79,12 +80,14 @@ def test_stem_with_no_separator_at_all_is_not_denied():
     assert not _pii_fragments('Born in the USA: Birth Cohort Methods')
 
 
-def test_declined_scope_colonless_place_of_birth_is_not_caught():
-    """Judgement call (#532): a colon-less place-of-birth companion is
-    declined -- a place name has no shape distinctive enough to require
-    without risking new false positives. This is a known, disclosed gap,
-    not a silent one."""
-    assert not _pii_fragments('PLACE OF BIRTH    Cincinnati, Ohio')
+def test_colonless_place_of_birth_is_caught_when_the_place_is_the_whole_fragment():
+    """#532 declined a colon-less place-of-birth companion: a place name has
+    no distinctive shape. #2061 (FBNZIP) leaked one ("Place of birth
+    <city>"), so the gap is closed in the Personal Data / Appendix scope
+    only, and only when the label opens the fragment and the value is a
+    whole place-shaped fragment (`_COLONLESS_BIRTH_PLACE_SHAPE`)."""
+    assert _pii_fragments('PLACE OF BIRTH    Sampleton, Examplestan')
+    assert not _pii_fragments('Place of birth effects on sample outcomes')
 
 
 # --------------------------------------------------------------------------

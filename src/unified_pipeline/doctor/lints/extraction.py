@@ -4686,6 +4686,11 @@ _STATED_LENGTH_RE = re.compile(
 _NUMBER_WORDS = MappingProxyType({word: at for at, word in enumerate(
     ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
      "twelve"), start=1)})
+#: A rendered Duration that is a length of time, not dates: "1 year",
+#: "6 months" (#2094).
+_DURATION_LENGTH_RE = re.compile(
+    r"(?P<n>\d+(?:\.\d+)?)[\s-]*(?:(?P<years>years?|yrs?\.?)|months?|mos?\.?)", re.IGNORECASE)
+MONTHS_PER_YEAR = 12
 
 
 class _LabelledAmount(NamedTuple):
@@ -4749,10 +4754,15 @@ def _labelled_amounts(text: str) -> list[_LabelledAmount]:
 def _shortest_span_months(duration: str) -> int | None:
     """The fewest months a rendered "Duration of support:" can span: a year
     with no month starts in December or ends in January ("2017-2018" is 2),
-    and a year alone is 1. None for an open or start-only duration."""
+    and a year alone is 1; a length of time is its months ("1 year" is 12).
+    None for an open or start-only duration."""
     duration = duration.strip()
     if _DURATION_YEAR_RE.fullmatch(duration):
         return 1
+    length = _DURATION_LENGTH_RE.fullmatch(duration)
+    if length:
+        months = round(float(length["n"]) * (MONTHS_PER_YEAR if length["years"] else 1))
+        return months if months > 0 else None
     span = _DURATION_SPAN_RE.fullmatch(duration)
     if not span:
         return None

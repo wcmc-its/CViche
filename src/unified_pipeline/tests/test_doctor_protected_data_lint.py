@@ -751,6 +751,31 @@ def test_2061_birth_titles_are_not_place_of_birth_shapes(text):
     assert _shape_categories(text) == []
 
 
+@pytest.mark.parametrize("text", [
+    "Place of birth Sampleton",
+    "Place of Birth  Port Sampleton, Examplestan",
+    "• Birthplace Sampleton.",
+])
+def test_2061_a_colonless_place_of_birth_line_is_a_shape_and_a_finding(text, tmp_path):
+    """FBNZIP's shape (invented values): the place label, no colon, the place
+    as the rest of the line. The matcher withholds it, so the lint reports it
+    once if it ever renders, and the scorer caps the run."""
+    assert _shape_categories(text) == ["place of birth"]
+    findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p(text)])
+    assert len(findings) == 1
+    assert "Sampleton" not in findings[0]["message"]
+    _write_flat_docx(tmp_path, ["T. APPENDIX", text])
+    assert score_protected_data(tmp_path)[2] == PROTECTED_DATA_CAP
+
+
+@pytest.mark.parametrize("text", [
+    "Place of birth effects on sample outcomes",
+    "An example study of place of birth Sampleton",
+])
+def test_2061_colonless_place_of_birth_prose_is_not_a_shape(text):
+    assert _shape_categories(text) == []
+
+
 def test_1223_titles_institutions_and_research_text_are_not_findings():
     """The negative controls the shapes were tuned on: none carries a family,
     birth or home VALUE after its keyword."""

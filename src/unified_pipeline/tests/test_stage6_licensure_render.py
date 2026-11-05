@@ -1316,3 +1316,27 @@ def test_534_a_licence_whose_row_is_removed_is_lost_on_the_receipt():
     row._tr.getparent().remove(row._tr)
     receipt, = gen._row_receipts.receipts({"licensure": [entry]})
     assert [lost.element_idx_start for lost in receipt.lost] == [10]
+
+
+def test_1254_an_all_null_licence_table_header_row_writes_no_row_and_is_set_aside():
+    """#1254: a source licence table's header row that stage 4 extracted
+    nothing from wrote its text as a licence row. It now writes none and is
+    set aside, not lost; an all-null record whose text is content is still
+    a row, from its text."""
+    blank = {"state_country": None, "license_number": None, "issue_date": None,
+             "expiration_date": None}
+    header = {"taxonomy_code": "F1", "element_idx_start": "40.0",
+              "text": "State | License Number | Date of Issue\n(mm/dd/yyyy) | Date of Last Registration",
+              "extracted_fields": dict(blank)}
+    content = {"taxonomy_code": "F1", "element_idx_start": 41,
+               "text": "Fictional Registry Diplomate", "extracted_fields": dict(blank)}
+    result = _resolve_licensure([header, content])
+    assert [record.state for record in result.licenses] == ["Fictional Registry Diplomate"]
+    assert [raw["element_idx_start"] for raw in result.no_row] == ["40.0"]
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._row_receipts.begin_section("licensure")
+    gen._fill_licensure([header, content])
+    gen._row_receipts.end_section()
+    receipt, = gen._row_receipts.receipts({"licensure": [header, content]})
+    assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (2, 1, 1, ())

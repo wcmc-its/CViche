@@ -1555,6 +1555,85 @@ def test_an_early_exam_step_coded_f2_is_grouped_as_other_education() -> None:
     assert moved["extracted_fields"]["start_date"] == "2031"
 
 
+def test_a_tab_separated_certificate_list_coded_f2_renders_its_specialty_not_its_line() -> None:
+    # #1577 (EM8CVG 31): the line is several cells under a non-date lead; stage 4's
+    # specialty is the name, so neither the tab gaps nor the lead reach the Description.
+    entry = _credential("F2", "Various \u2013 Present Basic Life Support\tExample Trauma Life Support\tCertificate",
+                        {"certifying_board": None, "certificate_number": None, "year_certified": None,
+                         "recertification_date": None,
+                         "specialty": "Basic Life Support; Example Trauma Life Support Certificate"}, idx=31)
+    [moved] = _grouped(entry)["B2"]
+    record = _normalize_other_education_entry(moved)
+    assert record.program == "Basic Life Support; Example Trauma Life Support Certificate"
+    assert (record.institution, record.dates) == ("", "")
+
+
+def test_a_table_row_certificate_coded_f2_takes_its_board_as_the_institution() -> None:
+    entry = _credential("F2", "Example Rescue Society | Basic Life Support for Rescuers",
+                        {"certifying_board": "Example Rescue Society", "specialty": "Basic Life Support for Rescuers",
+                         "year_certified": None}, idx=40)
+    [moved] = _grouped(entry)["B2"]
+    fields = moved["extracted_fields"]
+    assert (fields["program_name"], fields["institution"]) == ("Basic Life Support for Rescuers",
+                                                               "Example Rescue Society")
+
+
+def test_a_one_cell_certificate_line_coded_f2_keeps_its_line_as_the_name() -> None:
+    entry = _credential("F2", "Basic Life Support, Example Heart Society, 2031",
+                        {"certifying_board": "Example Heart Society", "specialty": "Basic Life Support",
+                         "year_certified": "2031"}, idx=41)
+    [moved] = _grouped(entry)["B2"]
+    fields = moved["extracted_fields"]
+    assert fields["program_name"] == "Basic Life Support, Example Heart Society"
+    assert "institution" not in fields
+
+
+def test_a_tab_separated_certificate_line_with_no_specialty_keeps_its_line_as_the_name() -> None:
+    entry = _credential("F2", "Example Heart Society\tBasic Life Support",
+                        {"certifying_board": "Example Heart Society", "specialty": None,
+                         "year_certified": None}, idx=42)
+    [moved] = _grouped(entry)["B2"]
+    fields = moved["extracted_fields"]
+    assert fields["program_name"] == "Example Heart Society\tBasic Life Support"
+    assert "institution" not in fields
+
+
+def _board_table_row(text: str, fields: dict, leaf: str = "Board Certification") -> dict:
+    return _credential("F2", text, fields, idx="32.3", element_type="table_row",
+                       hierarchy=["LICENSURE, BOARD CERTIFICATION", leaf])
+
+
+_NBME_ROW = "National Board of Medical Examiners | 000001 | 2031 (lifetime diplomate)"
+_NBME_ROW_FIELDS = {"certifying_board": "National Board of Medical Examiners", "certificate_number": "000001",
+                    "year_certified": "2031", "recertification_date": "lifetime diplomate", "specialty": None}
+
+
+def test_a_diplomate_row_of_the_board_certification_table_stays_a_board_row() -> None:
+    # #1577 (JZKANY 32.3): the owner's own Board Certification table, stage 4's F2 fields clean.
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_board_table_row(_NBME_ROW, dict(_NBME_ROW_FIELDS))])
+    assert list(groups) == ["F2"]
+    assert groups["F2"][0]["extracted_fields"] == _NBME_ROW_FIELDS
+    assert _credential_records(gen) == []
+
+
+@pytest.mark.parametrize("entry", [
+    # a diplomate line in prose is read by its line, as #2058 moves it
+    _credential("F2", "Diplomate, National Board of Medical Examiners, 2031", dict(_NBME_ROW_FIELDS)),
+    # a diplomate paragraph under the Board Certification heading, not a row of its table
+    {**_board_table_row("Diplomate, National Board of Medical Examiners, 2031", dict(_NBME_ROW_FIELDS)),
+     "element_type": "paragraph"},
+    # a row of the table that states no diplomate status
+    _board_table_row("National Board of Medical Examiners | 2031", dict(_NBME_ROW_FIELDS)),
+    # a diplomate row stage 4 found no board for
+    _board_table_row(_NBME_ROW, {**_NBME_ROW_FIELDS, "certifying_board": None}),
+    # a table under a heading that names more than board certification
+    _board_table_row(_NBME_ROW, dict(_NBME_ROW_FIELDS), leaf="Board Certification and Memberships"),
+])
+def test_an_nbme_line_off_the_board_table_or_unread_as_a_board_still_moves(entry) -> None:
+    assert list(_grouped(entry)) == ["B2"]
+
+
 def test_a_board_record_s_controlled_substance_line_is_grouped_as_a_licence() -> None:
     entry = _credential("F2", "Example State Controlled Substance Registration, 2031",
                         {"certifying_board": None, "certificate_number": "000000", "year_certified": "2031"})

@@ -116,6 +116,39 @@ def looks_like_record(line: str) -> bool:
     return len(line) > RECORD_ROW_MIN_CHARS and (" | " in line or "\t" in line)
 
 
+# A heading line that also holds the section's first record (#1254, #1252):
+# "LABEL: first record". The run doctor's header_consumed_record lint and
+# stage 1b's run-in flag read the text after the heading words with the same
+# test, so a line the lint calls a consumed record is one stage 1b keeps as
+# content.
+
+#: Text after the heading words that is a note on the list, not a record,
+#: though it has two words: a parenthetical or bracketed aside ("(past 3
+#: years only)", "[number withheld]"), "not applicable", or a page number
+#: ("Page 2 of 5"). A one-word note ("none", "(cont'd)") already falls under
+#: HEADER_RECORD_MIN_WORDS.
+_HEADER_NOTE_RE = re.compile(
+    r"^(?:\(.*\)|\[.*\]|not applicable|page\s*\d+(?:\s*of\s*\d+)?)[.:]?$",
+    re.IGNORECASE)
+#: Separators between a run-in heading and its first record.
+HEADER_SEPARATORS = " \t:;,.-\u2013\u2014"
+#: The fewest letter words a remainder needs to be a record rather than a
+#: stray word ("program", "Where?").
+HEADER_RECORD_MIN_WORDS = 2
+_LETTER_WORD_RE = re.compile(r"[^\W\d_]{2,}")
+
+
+def record_after_heading(rest: str) -> str | None:
+    """`rest`, the text after a heading's own words, without the separators
+    around it, when it reads as a record: two or more letter words, not a
+    note, not ALL CAPS (a column-header row, "YEAR JOINED"). None otherwise."""
+    rest = rest.strip(HEADER_SEPARATORS)
+    if (len(_LETTER_WORD_RE.findall(rest)) < HEADER_RECORD_MIN_WORDS
+            or _HEADER_NOTE_RE.match(rest) or rest.isupper()):
+        return None
+    return rest
+
+
 # One date range of a record line: "2009-2011", "1996-8", "5/2017-10/2020",
 # "2012-Jun 2015", "2013-present", "07/01/2012-05/31/2014", "07/2019-02/21".
 # A month, or a month and day, before either year ("5/2017", "07/01/2012") is

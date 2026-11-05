@@ -5768,7 +5768,8 @@ def test_grant_facts_reads_no_wrong_slot_where_the_label_agrees_or_says_neither(
     assert _wrong_slot(text, **table) == []
 
 
-@pytest.mark.parametrize("duration", ["07/19-06/20", "07/19-07/20", "2019", "2019-2020"])
+@pytest.mark.parametrize("duration", ["07/19-06/20", "07/19-07/20", "2019", "2019-2020",
+                                      "1 year", "6 months", "12 Months"])
 def test_grant_facts_reads_no_wrong_slot_on_a_one_year_grant(duration):
     """A one-year grant's yearly figure is also its whole award; a span given
     by years alone is read at its shortest, so 2019-2020 may be one year."""
@@ -5776,7 +5777,8 @@ def test_grant_facts_reads_no_wrong_slot_on_a_one_year_grant(duration):
     assert _wrong_slot("Glimmer repair, total $50,000", annual="$50,000", duration=duration) == []
 
 
-@pytest.mark.parametrize("duration", ["07/19-07/21", "2018-2020", "07/19-Present", ""])
+@pytest.mark.parametrize("duration", ["07/19-07/21", "2018-2020", "07/19-Present", "",
+                                      "2 years", "18 months"])
 def test_grant_facts_reports_a_yearly_amount_on_a_longer_or_open_grant(duration):
     assert len(_wrong_slot("Glimmer repair, $50,000 per year", total="$50,000", duration=duration)) == 1
 
