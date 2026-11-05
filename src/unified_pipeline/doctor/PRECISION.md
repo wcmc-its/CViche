@@ -814,6 +814,15 @@ The S3 runs had not been opened for #1672. 13 of the 28 share their source with 
 
 Severity: 213 of 213 read true (held out 14 of 14), but the held-out hits are one CV's, and a run-page row needs approved wording, so `wrong_slot` ships INFO with the other two shapes. Ceilings, not read: an amount labelled only "direct", an amount with no label in its cell or the entry's text, a per-year figure on a grant of one budget year, and a costs row that also shows an amount of its own kind. `precision.HELD_OUT_CHANGED` already lists `grant_facts` (new after dev-259), and a `wrong_slot` message names its shape, so the gate reads the `wrong_slot` row below and not the lint's rows pooled. The row does move the pooled `grant_facts` figure that each report's `lint_precision` block, `doctor.tsv` and the Teams card print, from 52 / 54 to 265 / 267.
 
+| HO-RT | 2026-11-05 | `fix/doctor-heldout-retunes` against origin/dev `a4dec9db` (a `git archive` tree), each arm's five lints called directly (`lint_degree_row_not_degree`, `lint_licensure_row_not_licence`, `lint_grant_facts` read for `wrong_slot`, `lint_section_lost`, `lint_renderer_row_receipts`) with the views `run_doctor` hands them, over one render of each run | fresh `scripts/render_gate.py --source-dir` renders of origin/dev `a4dec9db` made the same day (a doctor-only change, so one render serves both arms): the #1243 census farm's 460 runs, in-sample, and the 65 held-out runs of the 2026-11-05 replay (`s3_heldout` and `heldout2`, deduped against the farm and each other; 60 distinct CVs) | the held-out replay's 13 refuted=false lint claims, every remaining flag of the five lints on the 65 runs hand-read against its row and stage-4 entry; the farm flags carry the verdicts of DRN-1, LRNL-1, GF-2 and MIX11-LIC, whose counts they match exactly; the label store was not opened | #1415, #1577, #1672, #534 |
+
+HO-RT retunes five instruments from the 2026-11-05 held-out replay; no lint is added (`KNOWN_LINTS` stays at 87) and no severity changes. `degree_row_not_degree` reads DM (the super-specialty doctorate) as a degree, and reads a dotted run of short pieces with no spaces ("Dr.med.univ.") piece by piece, since dropping its dots fuses it into one token no list holds; a piece is at most four letters, so "Dr.Invented" or "Dept.of" is no such run. `licensure_row_not_licence` takes stage 4 as an optional view and skips a row made only of the cells of a stage-4 record whose every field is empty and whose text has two or more cells: a source template's header row ("Full Name of Board | Certificate # | Date") that stage 6 renders as label rows. A one-cell empty record is a line stage 4 extracted nothing from, and its row is still read. `grant_facts`' `wrong_slot` reads a table whose rendered Duration is blank by its stage-4 record: its start and end dates, else a length stated after a duration label in its text ("Duration of support: 1 year"), so a one-budget-year grant is skipped there too; a rendered span still wins. `section_lost` takes the render sidecar as an optional view: Licensure whose licence list stage 6 reported as `fan_out_record_list_rejected` is not lost when each predicted licence row's state and number are together in one line of the section, compared with whitespace dropped (the dates are left out: a fused cell writes them as the source does). `renderer_row_missing` takes stage 4 as an optional view: a lost entry that stage 2 split into children ("60" into "60.0" and "60.1"), none of which any receipt lists as lost, is no loss. A child no section was given is in no receipt, and this cannot see it.
+
+Held out, every named false positive goes and nothing else changes: 145 findings to 136 over the 65 runs. `degree_row_not_degree` 9 to 7 (DWRS8W "D.M ...", SBPHNA "Dr.med.univ., ..."), `licensure_row_not_licence` 3 to 2 (ZXVGAC's "Certificate #" label row, stage-4 entry 79.0), `wrong_slot` 44 to 41 (MQZMMA entries 168, 206 and 212, "1 year" and "6 months" grants whose Duration renders blank), `section_lost` 6 to 5 (ZXVGAC F1, its three licences fused into one State cell under the sidecar's `fan_out_record_list_rejected`). Licensure is not in `row_receipts.LINTED_SECTIONS`, so `renderer_row_missing` does not read 9TUVGW entry 60 either way; read with every receipt marked linted, the 9TUVGW split DEA and NPI parent leaves, and so does one more split parent, EH4XXA D1 242 (a template header line over one child row coded O that the O section writes), the intended shape. The remaining flags, hand-read: `degree_row_not_degree` 7 / 7 true (two Italian specialty diplomas and a school of management, a specialty school, two board acronyms, a residency and a specialization), `licensure_row_not_licence` 2 / 2 (two EMT certifications in Licensure), `wrong_slot` 41 / 41 (QJKSJQ 14, already counted in GF-2, QZAGWC 13, MQZMMA 8, 2BXUXG 3, MKEQKW 2, LBVJFG 1), `section_lost` none on F1. Every true flag the replay confirmed stays.
+
+On the farm the five lints read the same on both arms, finding for finding, over all 460 renders: `degree_row_not_degree` 86, `licensure_row_not_licence` 21, `wrong_slot` 190, `section_lost` 30 and `renderer_row_missing` 7 (317 with every receipt marked linted). So DM and the dotted-run reading silence no farm flag, no farm row is an all-empty record's label, no farm `wrong_slot` table has a blank Duration with a one-year stage-4 span, and no farm F1 is fused under the sidecar's warning. Ceilings: a fused licence row with no number is judged by its state alone; an all-empty record of one cell is read; a split parent whose child no section was given reads as receipted.
+
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -827,7 +836,7 @@ Severity: 213 of 213 read true (held out 14 of 14), but the held-out hits are on
 | `cross_entry_value` | 24 | 0 | none | 13 / 24 hand-checked (54%), 5 partial, in-sample; held-out 4 / 18 (22%) | 5 / 12 on labelled runs (42%) | 4 | CEV-1 |
 | `date_only_lines` | 2 | 0 | none | none | names text | 0 | M1 |
 | `dedup_drops` | 14 | 7 | 2 / 2 / 4 | 2 / 8 (25%) | 3 / 14 (21%) | 3 | M1-dup |
-| `degree_row_not_degree` | 89 | 89 | none | 87 / 89 hand-checked (98%), in-sample | 3 / 3 MIX11 controls | 3 | DRN-1 |
+| `degree_row_not_degree` | 96 | 96 | none | 94 / 96 hand-checked (98%): in-sample 87 / 89, held out 7 / 7 | 3 / 3 MIX11 controls | 3 | HO-RT |
 | `duplicate_passages` | 1 | 1 | none | none | names text | 0 | M1 |
 | `duplicate_records` | 13 | 13 | 4 / 0 / 1 | 6 / 7 judged or hand-checked (86%) | 1 / 9 (11%) | 1 | RCB-D |
 | `enrichment_failures` | 15 | 15 | 3 / 4 / 0 | 3 / 7 (43%) | names text | 0 | M1, RCB-D |
@@ -838,7 +847,7 @@ Severity: 213 of 213 read true (held out 14 of 14), but the held-out hits are on
 | `grant_bucket` | 16 | 16 | none | 16 / 16 matched (100%) | 16 / 16 (100%) | 2 | W3B-GR |
 | `grant_facts`: `value_missing` | 50 | 0 | none | 50 / 51 hand-checked (98%): held out 24 / 25 as scored, in-sample 26 / 26 | 9 / 50 (18%) | 5 | GF-1 |
 | `grant_facts`: `value_not_in_source` | 2 | 0 | none | 2 / 3 hand-checked (67%): held out 1 / 2 as scored, in-sample 1 / 1 | 2 / 2 (100%) | 2 | GF-1 |
-| `grant_facts`: `wrong_slot` | 213 | 0 | none | 213 / 213 hand-checked (100%): held out 14 / 14, in-sample 199 / 199 | not measured (label store not read) | not measured | GF-2 |
+| `grant_facts`: `wrong_slot` | 240 | 0 | none | 240 / 240 hand-checked (100%): held out 41 / 41, in-sample 199 / 199 | not measured (label store not read) | not measured | HO-RT |
 | `group_credit_dropped` | 402 | 161 | none | 40 / 40 hand-checked (100%): 20 WARN, 20 INFO | 11 / 181 on labelled runs (6%) | 3 | GCD-1 |
 | `group_header_context`: `children_lost_header` | 47 | 47 | none | 105 / 109 hand-checked on the `analysis` runs (96%) | 32 / 47 (68%) | 11 | X6-header |
 | `group_header_context`: `role_without_holder` | 8 | 8 | none | 29 / 33 hand-checked on the `analysis` runs (88%) | 5 / 8 (63%) | 5 | X6-header |
@@ -866,7 +875,7 @@ Severity: 213 of 213 read true (held out 14 of 14), but the held-out hits are on
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
 | `journal_name_joined` | 241 | 241 | none | 231 / 241 hand-checked (96%), 8 partial | not measured (no label) | 0 | JNJ-1 |
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
-| `licensure_row_not_licence` | 24 | 24 | none | 24 / 24 hand-checked (100%) | not matched (held-out labels not opened) | 3 | LRNL-1 |
+| `licensure_row_not_licence` | 26 | 26 | none | 26 / 26 hand-checked (100%): in-sample 24 / 24, held out 2 / 2 | not matched (held-out labels not opened) | 3 | HO-RT |
 | `llm_fallback_served` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | names text | 0 | M1 |
 | `missed_headers` | 21 | 0 | 4 / 2 / 2 | 4 / 8 (50%) | names text | 0 | M1 |
 | `multi_record_coverage` | 165 | 115 | none | 50 / 57 hand-checked (88%): RCB-D's 12 / 13 and X6-multirec's 38 / 44 | 90 / 165 (55%) | 51 | RCB-D, X6-multirec |
@@ -1037,7 +1046,7 @@ Any lint not listed here has no verdicts and is a comment.
 | `grant_bucket` | 16 / 16 (100%) | none | same | — | comment |
 | `grant_facts`: `value_missing` | 26 / 26 (100%) | 24 / 25 (96%), already in the per-lint row | same | — | comment, always on the grant's title (`REVIEW_COPY_ONLY_LINTS`) |
 | `grant_facts`: `value_not_in_source` | 1 / 1 (100%) | 1 / 2 (50%), already in the per-lint row | same | — | comment, always on the grant's title (`REVIEW_COPY_ONLY_LINTS`) |
-| `grant_facts`: `wrong_slot` | 199 / 199 (100%) | 14 / 14 (100%), already in the per-lint row | same | — | comment, always on the grant's title (`REVIEW_COPY_ONLY_LINTS`) |
+| `grant_facts`: `wrong_slot` | 199 / 199 (100%) | 41 / 41 (100%), already in the per-lint row | same | — | comment, always on the grant's title (`REVIEW_COPY_ONLY_LINTS`) |
 | `group_header_context`: `children_lost_header` | 105 / 109 (96%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
 | `group_header_context`: `role_without_holder` | 29 / 33 (88%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
 | `group_header_context`: `header_coded_unlike_list` | 19 / 22 (86%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
