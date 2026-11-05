@@ -718,6 +718,61 @@ class TestTheSourceTablesOwnHeaderRowIsNotACertification:
         assert [row[0] for row in _rows_after_board(gen)] == ["Fictional Surgery - Certified"]
 
 
+class TestAWholeTableEntryWhoseRowsAreEntriesWritesNoRow:
+    """#1254 (held-out MKEQKW entry 73): stage 2 emitted the board table both
+    as one entry holding every line, header lines included, and as one entry
+    per data row naming it by `parent_idx`. Stage 4 kept the whole-table
+    entry's certifications as a records list, the text reparse wrote its
+    header lines and both data rows again: 5 junk rows under the 2 real ones."""
+
+    TABLE_TEXT = ("Full Name of Board\tCertificate # \n(indicate if board eligible)\t"
+                  "Dates of Certification \n(yyyy\u2013yyyy)\nABFM\t\t2004\nABFM\t\t2014")
+
+    @staticmethod
+    def _record(year):
+        return {"certifying_board": "ABFM", "certificate_number": None,
+                "year_certified": year, "recertification_date": None}
+
+    def _parent(self, records):
+        return {"taxonomy_code": "F2", "element_idx_start": 40, "text": self.TABLE_TEXT,
+                "extracted_fields": {"records": records}}
+
+    def _row(self, n, year):
+        return {"taxonomy_code": "F2", "element_idx_start": f"40.{n}", "parent_idx": 40,
+                "text": f"ABFM |  | {year}", "extracted_fields": self._record(int(year))}
+
+    def test_the_whole_table_entry_writes_no_row_and_is_set_aside(self):
+        entries = [self._parent([self._record("2004"), self._record("2014")]),
+                   self._row(1, "2004"), self._row(2, "2014")]
+        gen = _generator()
+        gen._row_receipts.begin_section("board_certification")
+        gen._fill_board_certification(entries)
+        gen._row_receipts.end_section()
+        assert _rows_after_board(gen) == [("ABFM", "", "2014"), ("ABFM", "", "2004")]
+        receipt, = gen._row_receipts.receipts({"board_certification": entries})
+        assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (3, 2, 1, ())
+
+    def test_a_record_no_row_holds_keeps_the_whole_table_entry(self):
+        """One certification only the whole-table entry holds is not
+        redundant: the entry still renders, so that certification is not lost."""
+        parent = self._parent([self._record("2004"), self._record("2014"),
+                               {"certifying_board": "ABEM", "certificate_number": None,
+                                "year_certified": "2019", "recertification_date": None}])
+        parent["text"] += "\nABEM\t\t2019"
+        gen = _generator()
+        gen._fill_board_certification([parent, self._row(1, "2004"), self._row(2, "2014")])
+        assert any("ABEM" in row[0] for row in _rows_after_board(gen))
+
+    def test_rows_of_another_table_do_not_set_the_entry_aside(self):
+        """`parent_idx` must name this entry: rows whose parent is another
+        element leave it rendering as before."""
+        parent = self._parent([self._record("2004"), self._record("2014")])
+        rows = [{**self._row(1, "2004"), "parent_idx": 41}, {**self._row(2, "2014"), "parent_idx": 41}]
+        gen = _generator()
+        gen._fill_board_certification([parent, *rows])
+        assert len(_rows_after_board(gen)) > 2
+
+
 class TestRejectedTokenIsLogged:
     """Defect 4 (accuracy gate, 2026-08-25): a token like '123-' or '-'
     classifies to None with no log anywhere (§5.3/§5.10)."""
