@@ -451,12 +451,13 @@ def test_a_findings_shape_is_its_stage6_shape_or_the_row_its_message_names():
 
 def test_the_committed_ledger_reads_each_grant_facts_shape_by_its_own_row():
     """GF-1 and GF-2: a grant_facts message names its shape, so each shape
-    reads its own row of the real ledger, never the lint's rows pooled."""
+    reads its own row of the real ledger, never the lint's rows pooled.
+    `wrong_slot`'s row was last re-measured by HO-RT (held-out replay)."""
     load_shape_ledger.cache_clear()
     rows = load_shape_ledger()
     for shape in (GRANT_FACT_MISSING, GRANT_FACT_NOT_IN_SOURCE, GRANT_FACT_WRONG_SLOT):
         assert finding_shape("grant_facts", f"entry 20 (M2B): {shape}: $27,000 ... (#1672)", rows) == shape
-    assert rows[("grant_facts", GRANT_FACT_WRONG_SLOT)].measured == "GF-2"
+    assert rows[("grant_facts", GRANT_FACT_WRONG_SLOT)].measured == "HO-RT"
 
 
 def test_review_verdicts_fold_one_for_one_and_unknown_is_not_judged():

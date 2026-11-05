@@ -44,6 +44,7 @@ from unified_pipeline.core.text_norm import (
     tab_record_segments,
 )
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+from unified_pipeline.stage6.fan_out import REJECTED_LIST_CHECK
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
 from unified_pipeline.stage6.institution_headings import (
@@ -904,8 +905,33 @@ def _licence_row_lines(entries: list[Mapping]) -> frozenset[str]:
                                        or _normalize_licensure_entry(row.source).number))
 
 
-def lint_section_lost(stage4: dict,
-                      blocks: list[tuple[str, str]]) -> list[dict]:
+#: A licence row's date cell, which a fused row writes as its source does
+#: ("6/1/2007" for the row's "06/01/2007"), so it is not compared.
+_FUSED_ROW_DATE_RE = re.compile(r"[\d/.\-–\s]+")
+
+
+def _fused_licence_codes(report: Mapping | None) -> frozenset[str]:
+    """The codes whose record list stage 6 did not fan out and reported as
+    `fan_out_record_list_rejected`: their records render fused in one row."""
+    return frozenset(str(w.get("code")) for w in (report or {}).get("warnings", [])
+                     if w.get("check") == REJECTED_LIST_CHECK)
+
+
+def _licences_in_fused_row(rows: frozenset[str], section: set[str]) -> bool:
+    """Whether the state and number of each predicted licence row
+    (`_licence_row_lines`) are together in one line of the section, compared
+    with whitespace dropped: the licences render, fused into one cell rather
+    than a row each, with no space between the cells and the dates as the
+    source writes them (ZXVGAC, held-out replay 2026-11-05)."""
+    squashed = ["".join(line.split()) for line in section]
+    return all(any(all("".join(cell.split()) in line for cell in row.split(TABLE_ROW_JOINER)
+                       if not _FUSED_ROW_DATE_RE.fullmatch(cell))
+                   for line in squashed)
+               for row in rows)
+
+
+def lint_section_lost(stage4: dict, blocks: list[tuple[str, str]],
+                      report: Mapping | None = None) -> list[dict]:
     """One WARN per taxonomy code whose entries are absent from the code's
     own output section (see `_code_absent_from_section`): lost at render,
     or rendered in another section or the Appendix. A record stage 6
@@ -916,7 +942,11 @@ def lint_section_lost(stage4: dict,
     section. Its words cannot judge it either way -- a rendered row prints
     too few for the share test, and a lost table's lines still match the
     section's template words -- and the row is the record, as stage 6
-    writes it."""
+    writes it. With the render-warnings sidecar (`report`), Licensure whose
+    licence list stage 6 already reported as not fanned out
+    (`fan_out_record_list_rejected`) is not lost when every cell of its
+    rows is in the section, fused into one row: that finding is the
+    sidecar's."""
     entries: dict[str, list[Mapping]] = defaultdict(list)
     for e in stage4.get("entries", []):
         code = _rendered_code(e)
@@ -925,12 +955,14 @@ def lint_section_lost(stage4: dict,
     sections = _section_tokens(blocks)
     section_lines = _section_lines(blocks)
     ubiquitous = _rendered_lines(blocks).ubiquitous | _template_label_tokens()
+    fused = _fused_licence_codes(report)
     findings = []
     for code, code_entries in entries.items():
         entry_texts = [str(e.get("text") or "") for e in code_entries]
         rows = _licence_row_lines(code_entries) if code == LICENSURE_CODE else frozenset()
         if rows:
-            if rows & section_lines[code[0]]:
+            if rows & section_lines[code[0]] or (
+                    code in fused and _licences_in_fused_row(rows, section_lines[code[0]])):
                 continue
         elif not _code_absent_from_section(entry_texts, sections[code[0]], ubiquitous):
             continue
@@ -972,7 +1004,23 @@ def lint_stage6_warnings(report: dict) -> list[dict]:
     return findings
 
 
-def lint_renderer_row_receipts(report: dict) -> list[dict]:
+def _split_parent_idxs(stage4: Mapping | None, lost_idxs: set[str]) -> frozenset[str]:
+    """The element indexes of stage-4 entries that stage 2 split into
+    children ("60" into "60.0" and "60.1") none of which a receipt lists as
+    lost: the children carry the parent's content, so a parent receipt with
+    no row of its own is no loss (9TUVGW entry 60, a DEA and an NPI line set
+    aside as two children; held-out replay 2026-11-05). A child that no
+    section was given at all is in no receipt, and this cannot see it."""
+    children: dict[str, list[str]] = defaultdict(list)
+    for entry in (stage4 or {}).get("entries", []):
+        parent, dot, row = str(entry.get("element_idx_start")).partition(".")
+        if dot and row.isdigit():
+            children[parent].append(str(entry.get("element_idx_start")))
+    return frozenset(parent for parent, kids in children.items()
+                     if not any(kid in lost_idxs for kid in kids))
+
+
+def lint_renderer_row_receipts(report: dict, stage4: Mapping | None = None) -> list[dict]:
     """One WARN per taxonomy code whose section was handed an entry it wrote
     no row for (#534): the entry has no row or paragraph left in the
     document and is not in the Appendix. Reads the render-warnings sidecar's `row_receipts`, which stage 6 builds by
@@ -993,12 +1041,18 @@ def lint_renderer_row_receipts(report: dict) -> list[dict]:
     The message opens "taxonomy code <code>:" -- a prefix the run page and
     the review copy (`run_quality_report._section_and_detail`) already read
     -- so both name the section. One receipt (Service: Q1 to Q4D) spans
-    several codes, hence one finding per code."""
+    several codes, hence one finding per code.
+
+    With stage 4, a lost entry whose split children are all receipted
+    (`_split_parent_idxs`) is not counted."""
     findings = []
+    lost_idxs = {str(e.get("element_idx_start")) for receipt in report.get("row_receipts", [])
+                 for e in receipt.get("lost", [])}
+    split_parents = _split_parent_idxs(stage4, lost_idxs)
     for receipt in report.get("row_receipts", []):
         if not receipt.get("linted"):
             continue
-        lost = receipt.get("lost", [])
+        lost = [e for e in receipt.get("lost", []) if str(e.get("element_idx_start")) not in split_parents]
         if not lost:
             continue
         section = receipt.get("section", "?")
@@ -5273,6 +5327,11 @@ _BOARD_ROW_CERTIFICATE_RE = re.compile(
     r"(?<!board\s)\bcertificate\b|\b(?:A\.?C|B|P\.?A)\.L\.S\.?", re.IGNORECASE)
 #: The cell a table prints when its section has nothing.
 _EMPTY_SECTION_CELL = "N/A"
+#: Where a stage-4 record's text splits into the cells stage 6 may render
+#: one per row: a source table row's " | " and tab joins, and its lines.
+_RECORD_CELL_SPLIT_RE = re.compile(r"\s*\|\s*|[\t\n]")
+#: The fewest cells an all-empty record needs to read as a header row.
+EMPTY_RECORD_MIN_CELLS = 2
 
 
 class _MisplacedCredential(NamedTuple):
@@ -5322,14 +5381,46 @@ def _is_board_certification_table(header: list[str]) -> bool:
     return bool(header) and _is_certification_header_line(" | ".join(header))
 
 
-def _misplaced_credentials(table_rows: list[list[list[str]]]) -> list[_MisplacedCredential]:
+def _empty_record_cells(stage4: Mapping | None) -> frozenset[str]:
+    """The cells of every stage-4 record whose fields are all empty: a
+    source template's column-header row ("Full Name of Board | Certificate #
+    | Date"), which stage 4 extracts as a record with nothing in it. Stage 6
+    may still render its labels as rows; the row then holds no credential
+    of the owner's, so no misplaced one either (ZXVGAC, held-out replay
+    2026-11-05). A record of one cell is left out: that is a line stage 4
+    extracted nothing from, which stage 6 may render whole, and the lint
+    reads it."""
+    cells: set[str] = set()
+    for entry in (stage4 or {}).get("entries", []):
+        fields = entry.get("extracted_fields")
+        if (not isinstance(fields, Mapping) or not fields
+                or any(value.strip() for value in _leaf_strings(fields))):
+            continue
+        record = {" ".join(cell.split())
+                  for cell in _RECORD_CELL_SPLIT_RE.split(str(entry.get("text") or "")) if cell.strip()}
+        if len(record) >= EMPTY_RECORD_MIN_CELLS:
+            cells |= record
+    return frozenset(cells)
+
+
+def _row_is_empty_record(row: list[str], empty_cells: frozenset[str]) -> bool:
+    """Whether every non-blank cell of ``row`` is a cell of an all-empty
+    stage-4 record (`_empty_record_cells`)."""
+    shown = [" ".join(cell.split()) for cell in row if cell.strip()]
+    return bool(shown) and all(cell in empty_cells for cell in shown)
+
+
+def _misplaced_credentials(table_rows: list[list[list[str]]],
+                           empty_cells: frozenset[str] = frozenset()) -> list[_MisplacedCredential]:
     """Every Licensure, Board Certification and Honors row the lint reports,
-    in document order."""
+    in document order. A row made only of an all-empty stage-4 record's
+    cells (`_empty_record_cells`) is skipped."""
     found = []
     for table in table_rows:
         if not table or not table[0]:
             continue
-        data = [row for row in table[1:] if any(cell.strip() for cell in row)]
+        data = [row for row in table[1:] if any(cell.strip() for cell in row)
+                and not _row_is_empty_record(row, empty_cells)]
         if _licensure_rows([table]):
             for row in data:
                 cell = " ".join(row[0].split())
@@ -5353,15 +5444,17 @@ def _misplaced_credentials(table_rows: list[list[list[str]]]) -> list[_Misplaced
     return found
 
 
-def lint_licensure_row_not_licence(table_rows: list[list[list[str]]]) -> list[dict]:
+def lint_licensure_row_not_licence(table_rows: list[list[list[str]]],
+                                   stage4: Mapping | None = None) -> list[dict]:
     """A rendered row holding a credential its table is not for (#1577
     shape 3): a certificate, a course or another credential in Licensure, an
     exam, course or certificate in Board Certification, a certification in
-    Honors. WARN, one finding per row. Reads the docx's table rows."""
+    Honors. WARN, one finding per row. Reads the docx's table rows, and,
+    when given, stage 4, whose all-empty records' rows it skips."""
     return [_finding(
         "licensure_row_not_licence", LICENSURE_ROW_NOT_LICENCE_SEVERITY,
         f"{found.table} row holds {found.reason}: its home is not the {found.table} table",
-        [found.cell]) for found in _misplaced_credentials(table_rows)]
+        [found.cell]) for found in _misplaced_credentials(table_rows, _empty_record_cells(stage4))]
 
 
 # --- glyph_field -------------------------------------------------------------
