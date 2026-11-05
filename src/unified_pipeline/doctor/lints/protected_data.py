@@ -335,6 +335,13 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?i:born|birthplace|place[ \t]+of[ \t]+birth)\b"
                 + r"(?:" + _SEP + r"|[ \t]+(?i:in)[ \t]+)(?P<value>" + _NAMES + ")"),
      CAT_PLACE_OF_BIRTH),
+    # #2061 (FBNZIP): a line-initial place label with no colon and the place
+    # as the rest of the line -- "Place of birth <city>". The whole line is
+    # the place, so "Place of birth effects on ..." names none.
+    (re.compile(r"(?:^|(?<=[\n\t|;]))[ \t]*(?:[•·*–—-][ \t]*)?"
+                + r"(?i:place[ \t]+of[ \t]+birth|birth[ \t-]?place)[ \t]+"
+                + r"(?P<value>" + _NAMES + r")(?=[ \t.]*(?:[\n\t|;]|$))"),
+     CAT_PLACE_OF_BIRTH),
     (re.compile(_HOME_LABEL + r"[ \t]*(?:[:\-–—][ \t]*)?(?P<value>" + _PHONE + "|" + _STREET + ")"),
      CAT_HOME_CONTACT),
     (re.compile(r"(?P<value>" + _PHONE + "|" + _STREET + r")[ \t]*[,;:]?[ \t]*" + _HOME_TAG_AFTER),
