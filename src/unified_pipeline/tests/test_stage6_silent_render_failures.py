@@ -1007,6 +1007,22 @@ def test_n2_foreign_table_after_heading_survives_the_shape_guard():
     assert len(tables_by_label['Something else:'].rows) == 5
 
 
+def test_n2_table_renders_the_duration_line_span_from_the_entry_text():
+    """The N2 table writer hands the entry's text to the Duration fallback
+    (#2094): no dates, no `duration` key, only a span on the entry's own
+    Duration line, and the rendered cell still reads that span."""
+    gen = _new_generator()
+    gen.doc.add_paragraph(N2_HEADING)
+    entry = _n2(agency='Invented Training Fund',
+                text='Invented Training Grant\nDuration of support: | 3 years')
+
+    gen._fill_mentoring({'N2': [entry]})
+
+    (table,) = gen.doc.tables
+    assert [(r.cells[0].text, r.cells[1].text) for r in table.rows][2] == (
+        'Duration of support (mm/yyyy-mm/yyyy):', '3 years')
+
+
 def test_n2_real_template_no_entries_leaves_the_region_unchanged():
     """With NO N2 entries the placeholder table stays (#1942, reversing
     #529 round 2 F3's removal with no entries), and every element of the
