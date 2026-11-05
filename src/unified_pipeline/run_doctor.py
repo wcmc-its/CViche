@@ -1901,7 +1901,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("dead_sections", lint_dead_sections, ("stage_2", "blocks")),
     LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks"),
              optional=("subpoints",)),
-    LintSpec("section_lost", lint_section_lost, ("stage_4", "blocks")),
+    LintSpec("section_lost", lint_section_lost, ("stage_4", "blocks"),
+             optional=("stage_6_report",)),
     LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
     LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
     LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",),
@@ -2010,7 +2011,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("institution_cleaned_name", lint_institution_cleaned_name,
              ("stage_5b", "table_rows"), optional=("blocks",)),
-    LintSpec("renderer_row_missing", lint_renderer_row_receipts, ("stage_6_report",)),
+    LintSpec("renderer_row_missing", lint_renderer_row_receipts, ("stage_6_report",),
+             optional=("stage_4",)),
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("mentee_field_incomplete", lint_mentee_field_incomplete, ("table_rows",),
              optional=("blocks",)),
@@ -2020,7 +2022,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("cross_section_duplicate", lint_cross_section_duplicate, ("stage_4", "table_rows"),
              optional=("blocks",)),
     LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
-    LintSpec("licensure_row_not_licence", lint_licensure_row_not_licence, ("table_rows",)),
+    LintSpec("licensure_row_not_licence", lint_licensure_row_not_licence, ("table_rows",),
+             optional=("stage_4",)),
 )
 
 #: The views read from the stage-6 docx.

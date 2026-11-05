@@ -929,6 +929,8 @@ def _degrees(*cells, other_tables=1):
     "A.A.", "A.A.S., Invented Studies", "Undergraduate, Invented Studies", "Pre-medical Invented Track",
     "Medicine", "MRCP", "Fellow, Invented Royal College", "Medical Graduate, Invented Studies", "null",
     "Pre-Med and Invented School",
+    # a dotted run's pieces are read one by one only when each is short
+    "Fellow with Dr.Invented", "Residency, Dept.of Invented Medicine", "Dm, Invented Studies",
 ])
 def test_a_row_naming_no_degree_is_one_warn_finding_on_its_cell_1415(cell):
     findings = _degrees("Ph.D., Invented Science", cell)
@@ -954,6 +956,9 @@ def test_a_row_naming_no_degree_is_one_warn_finding_on_its_cell_1415(cell):
     "Dipl.-Ing.", "Diplom-Biologe", "MUDr.", "Licenciatura en Biologia", "Laurea in Medicina",
     "Maitrise de Biologie", "Médico Cirujano", "Staatsexamen, Medicine", "MDCM", "BAO",
     "Ingeniero Civil", "D.Phil., Invented Studies", "Habilitation, Medicine",
+    # held-out replay 2026-11-05: the super-specialty DM, and a dotted run with no spaces
+    "D.M Invented Endocrinology", "DM, Invented Cardiology", "D.M.", "Dr.med.univ., Medicine",
+    "Dr.rer.nat., Invented Biology",
 ])
 def test_a_row_naming_a_degree_is_quiet_1415(cell):
     assert names_academic_degree(cell), cell

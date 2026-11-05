@@ -5788,6 +5788,48 @@ def test_grant_facts_reads_a_fiscal_year_as_per_year_only_on_a_multi_year_grant(
     assert len(found) == hits
 
 
+def _blank_duration_wrong_slot(text, **fields):
+    """wrong_slot over one entry whose table renders the Duration blank."""
+    entry = _gf_entry(10, text, "Glimmer repair", **fields)
+    findings = lint_grant_facts({"entries": [entry]},
+                                [_gf_table("Glimmer repair", total="$50,000", duration="")])
+    return [f for f in findings if f": {GRANT_FACT_WRONG_SLOT}: " in f["message"]]
+
+
+@pytest.mark.parametrize("text, fields", [
+    # held-out MQZMMA shape: a stated length stage 6 renders blank
+    ("Annual direct costs: | $50,000\nDuration of support: | 1 year", {}),
+    ("Annual direct costs: | $50,000\nDuration of support: | 6 months", {}),
+    ("Annual direct costs: $50,000. Duration: twelve months", {}),
+    # stage-4 dates of one budget year
+    ("Glimmer repair, $50,000 per year", {"start_date": "2019-07-01", "end_date": "2020-06-30"}),
+    ("Glimmer repair, $50,000 per year", {"start_date": "07/2019", "end_date": "06/2020"}),
+])
+def test_grant_facts_reads_a_blank_duration_by_its_stage4_record(text, fields):
+    """A blank rendered Duration falls back to the record's dates, or to the
+    length its text states after a duration label: one budget year is skipped."""
+    assert _blank_duration_wrong_slot(text, **fields) == []
+
+
+@pytest.mark.parametrize("text, fields", [
+    ("Annual direct costs: | $50,000\nDuration of support: | 3 years", {}),
+    ("Glimmer repair, $50,000 per year", {"start_date": "2019-07-01", "end_date": "2022-06-30"}),
+    ("Glimmer repair, $50,000 per year", {"start_date": "2019-07-01", "end_date": None}),
+    # a length with no duration label says nothing about the grant's span
+    ("Glimmer repair, $50,000 per year, a 6 months pilot", {}),
+])
+def test_grant_facts_keeps_wrong_slot_when_the_stage4_span_is_longer_or_unknown(text, fields):
+    assert len(_blank_duration_wrong_slot(text, **fields)) == 1
+
+
+def test_grant_facts_prefers_the_rendered_duration_over_stage4():
+    """A rendered span wins: the stage-4 fallback reads only a blank Duration."""
+    entry = _gf_entry(10, "Glimmer repair, $50,000 per year\nDuration: 1 year", "Glimmer repair")
+    findings = lint_grant_facts({"entries": [entry]},
+                                [_gf_table("Glimmer repair", total="$50,000", duration="07/18-06/22")])
+    assert [f for f in findings if f": {GRANT_FACT_WRONG_SLOT}: " in f["message"]]
+
+
 def test_grant_facts_leaves_a_foreign_amount_to_value_not_in_source():
     """An amount the entry's text does not state is #1575's copy, not a slot."""
     entry = _gf_entry(10, "Glimmer repair, $318,500 per year", "Glimmer repair")

@@ -608,6 +608,29 @@ def test_ten_of_the_surface_is_private():
     )
 
 
+def test_heldout_retune_rows_hand_over_their_optional_views(tmp_path, monkeypatch):
+    """Held-out replay 2026-11-05: section_lost reads the render sidecar,
+    and licensure_row_not_licence and renderer_row_missing read stage 4,
+    each as an optional view handed over after its required ones."""
+    from test_run_doctor import _UID, _build_clean_run  # noqa: E402 (path set above)
+    mod = _module()
+    seen: dict[str, tuple] = {}
+
+    def record(lint_id):
+        return lambda *args: seen.setdefault(lint_id, args) and []
+    lint_ids = ("section_lost", "licensure_row_not_licence", "renderer_row_missing")
+    monkeypatch.setattr(mod, "LINT_REGISTRY", _registry_with(
+        mod, **{lint_id: record(lint_id) for lint_id in lint_ids}))
+    mod.run_doctor(_build_clean_run(tmp_path), _UID)
+    assert set(seen) == set(lint_ids)
+    section_lost_stage4, _blocks, report = seen["section_lost"]
+    assert isinstance(section_lost_stage4, dict) and isinstance(report, dict)
+    _rows, licence_stage4 = seen["licensure_row_not_licence"]
+    assert licence_stage4 == section_lost_stage4
+    receipts_report, receipts_stage4 = seen["renderer_row_missing"]
+    assert receipts_report == report and receipts_stage4 == section_lost_stage4
+
+
 def test_optional_registry_views_are_real_and_never_gate_the_lint(tmp_path, monkeypatch):
     """#890: `classified_unrendered` takes stage 4 as an OPTIONAL view. The row
     names a real view, the rule still runs when stage 4 is absent (it falls back
