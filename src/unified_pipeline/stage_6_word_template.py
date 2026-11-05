@@ -1673,7 +1673,12 @@ def _carry_non_seat_fields(entry: dict[str, Any]) -> None:
 # filled is kept (`_carry_credential_fields`):
 # - B2: program_name from the line less its dates; start and end dates from
 #   a licence's issue and expiration dates or a board's certification and
-#   recertification dates;
+#   recertification dates. A line of several cells (a tab or a table's
+#   " | " between them) is no name: a board record's specialty is its
+#   program_name and its certifying board its institution instead
+#   (`_cells_line_fields`; EM8CVG 31, a tab-separated list of life-support
+#   certificates under a "various - present" date, printed the line with
+#   its tab gaps and that date in the Description cell);
 # - F2: certificate_number from the licence number, year_certified from the
 #   issue or start date, recertification_date from a dated expiration or end
 #   date (the year the name no longer shows: "<board>, Recertified 2010";
@@ -1696,6 +1701,21 @@ _CREDENTIAL_START_KEYS = ('issue_date', 'year_certified', 'start_date', 'year', 
 _CREDENTIAL_END_KEYS = ('expiration_date', 'recertification_date', 'end_date')
 _B2_DATE_KEYS = ('start_date', 'end_date', 'year', 'year_awarded')
 _BOARD_NAME_KEYS = ('certifying_board', 'specialty')
+#: What sets one cell of a source line off from the next: a tab, or the
+#: " | " stage 2 writes between a table row's cells.
+_LINE_CELL_GAP_RE = re.compile(r'\t| \| ')
+
+
+def _cells_line_fields(fields: Mapping[str, Any], line: str) -> dict[str, str]:
+    """The B2 program_name and institution of a board record whose `line`
+    is several cells (`_LINE_CELL_GAP_RE`): its specialty and its
+    certifying board, each when stage 4 filled it; {} for a one-cell line
+    or a record with no specialty (see the comment above)."""
+    specialty = _first_field_text(fields, ('specialty',))
+    if not specialty or _LINE_CELL_GAP_RE.search(line) is None:
+        return {}
+    board = _first_field_text(fields, ('certifying_board',))
+    return {'program_name': specialty, **({'institution': board} if board else {})}
 
 
 def _first_field_text(fields: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -1721,7 +1741,10 @@ def _carry_credential_fields(entry: dict[str, Any], target_code: str, line: str)
         set(_B2_PROGRAM_KEYS + _B2_DATE_KEYS + _BOARD_NAME_KEYS) - set(fields))
     if target_code == OTHER_EDUCATION_CODE:
         if blank.issuperset(_B2_PROGRAM_KEYS):
-            fields['program_name'] = name
+            cells = _cells_line_fields(fields, line)
+            fields['program_name'] = cells.get('program_name', name)
+            if 'institution' in cells and _is_blank_value(fields.get('institution')):
+                fields['institution'] = cells['institution']
         if blank.issuperset(_B2_DATE_KEYS):
             fields.update({key: value for key, value in (('start_date', start), ('end_date', end)) if value})
     elif target_code == BOARD_CODE:
