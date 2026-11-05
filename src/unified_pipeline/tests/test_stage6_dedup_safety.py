@@ -47,6 +47,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _names_a_sibling,
     _names_record,
     _narrower_committee,
+    _occasions_apart,
     _one_slip_apart,
     _other_award_name,
     _other_journal_same_row,
@@ -61,9 +62,11 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _shorter_journal_than_kept,
     _split_record_family,
     _standalone_numerals,
+    _teaching_parts_apart,
     _title_only_fragment,
     _undated_split_record_absorbs_date,
     _under_another_year_head,
+    _unlabelled_beside_class_award,
     _verbatim_contained,
     _year_head,
     recovered_row_already_rendered,
@@ -3476,3 +3479,116 @@ def test_an_award_name_apart_needs_both_names():
     kept = _award_row("Jane Roe Scholar")
     assert not _other_award_name("H", {"award_name": None}, kept["extracted_fields"])
     assert not _other_award_name("H", {"award_name": "Gizmo Scholar"}, {"award_name": ["x"]})
+
+
+# #666 (SPIHVQ, LTTYWI 64 and 65): one talk given on two days shares its title,
+# venue and year, and only the CV line's month or day tells the two apart.
+
+def _talk_on(when: str) -> dict:
+    return _pub(f"Quill A. Spinning tops at dusk. Toy Society Annual Meeting. Quenby, ZQ, {when}.",
+                authors="Quill A", title="Spinning tops at dusk",
+                journal="Toy Society Annual Meeting", year="2029")
+
+
+@pytest.mark.parametrize("first, second", [
+    ("March 16, 2029", "April 6, 2029"),
+    ("May 6,2029", "May 13,2029"),       # the day against its comma, as typed
+    ("April 8 ,2029", "May 6, 2029"),    # the comma against the year
+])
+def test_one_talk_given_on_two_days_is_two_records(first, second):
+    a, b = _talk_on(first), _talk_on(second)
+    assert _occasions_apart(a["text"], b["text"])
+    assert len(deduplicate_entries([a, b], code="S8")) == 2
+
+
+@pytest.mark.parametrize("first, second", [
+    ("March 16, 2029", "March 16, 2029"),   # the same day: one talk listed twice
+    ("March 16, 2029", "2029"),             # one copy dates it to the year only
+    ("March 2029", "March 16, 2029"),       # the month holds the day
+])
+def test_one_talk_on_one_day_or_an_undated_copy_still_drops(first, second):
+    a, b = _talk_on(first), _talk_on(second)
+    assert not _occasions_apart(a["text"], b["text"])
+    assert len(deduplicate_entries([a, b], code="S8")) == 1
+
+
+# #666 (JFBPNC 63, 64): a course TA'd, listed under a "Teaching Assistant"
+# sub-heading, beside the same course guest-lectured, whose row names its role.
+
+def _course(text: str, heading: str, **fields) -> dict:
+    return {"taxonomy_code": "K1", "text": text, "extracted_fields": fields,
+            "hierarchy": ["TEACHING EXPERIENCE", heading]}
+
+
+_GUEST_ROW = _course("Guest Lecturer, WID6410 - Widgets in Public Gizmos Fall 2027-Spring 2034\t"
+                     "College of Gizmos, Acme University", "Guest Lectures:",
+                     role="Guest Lecturer", course_code="WID6410",
+                     course_title="Widgets in Public Gizmos", institution="Acme University")
+
+
+@pytest.mark.parametrize("term", ["Fall 2027", "Spring 2027"])
+def test_a_course_taught_as_an_assistant_beside_its_guest_lecture_row_is_kept(term):
+    dropped = _course(f"WID6410: Widgets in Public Gizmos {term}\tCollege of Gizmos, Acme University",
+                      "Teaching Assistant Positions:", course_code="WID6410",
+                      course_title="Widgets in Public Gizmos", institution="Acme University")
+    assert _teaching_parts_apart(dropped, _GUEST_ROW, "K1")
+    assert _kept_both("K1", dropped, _GUEST_ROW)
+
+
+def test_two_teaching_rows_whose_part_only_headings_name_still_drop():
+    # Neither row prints its part, so keeping both prints one row twice.
+    kept = _course("WID4101: Gizmo Concepts Fall 2030, 2031, and 2032\tAcme University",
+                   "Courses Taught:", course_code="WID4101", course_title="Gizmo Concepts")
+    dropped = _course("WID4101: Gizmo Concepts", "Courses Supervising in Fall 2033",
+                      course_code="WID4101", course_title="Gizmo Concepts")
+    assert not _teaching_parts_apart(dropped, kept, "K1")
+    assert not _kept_both("K1", dropped, kept)
+
+
+def test_a_template_label_row_naming_no_course_still_drops_against_a_role_row():
+    kept = _course("Role:\tCourse:\tInstitution:\tGuest Instructor\tWidget Assessment\tAcme University",
+                   "Teaching", role="Guest Instructor", course_title="Widget Assessment")
+    dropped = _course("Role:\tCourse:\tInstitution:", "Teaching")
+    assert not _teaching_parts_apart(dropped, kept, "K1")
+
+
+def test_the_same_part_under_two_headings_still_drops():
+    dropped = _course("WID6410: Widgets in Public Gizmos Fall 2027", "Guest Lectures given:",
+                      course_code="WID6410", course_title="Widgets in Public Gizmos")
+    assert not _teaching_parts_apart(dropped, _GUEST_ROW, "K1")
+    assert not _teaching_parts_apart(dropped, _GUEST_ROW, "R")   # not a teaching code
+
+
+def test_a_row_role_outranks_its_heading():
+    # A guest lecture listed under the TA heading is still a guest lecture.
+    dropped = _course("WID6410: Widgets in Public Gizmos Fall 2027", "Teaching Assistant Positions:",
+                      role="Guest Lecturer", course_code="WID6410",
+                      course_title="Widgets in Public Gizmos")
+    assert not _teaching_parts_apart(dropped, _GUEST_ROW, "K1")
+
+
+# #666 (LTTYWI 262): in one list, an award no class is named for beside the
+# award of a class in the same year.
+
+def _listed_award(text: str, heading: str = "Awards and Honors") -> dict:
+    return {"taxonomy_code": "H", "text": text, "extracted_fields": {}, "hierarchy": [heading]}
+
+
+def test_an_unlabelled_award_beside_a_class_award_in_one_list_is_kept():
+    kept = _listed_award("Teacher of the Year - (Class of 2033) - Widget College 2031\tAcme University")
+    dropped = _listed_award("Teacher of the Year - Widget College Acme University 2031")
+    assert _unlabelled_beside_class_award(dropped, kept, "H")
+    assert _kept_both("H", dropped, kept)
+
+
+@pytest.mark.parametrize("dropped, kept", [
+    # under two headings: one award may be listed twice
+    (_listed_award("Teacher of the Year - Widget College Acme University 2031", "Teaching Awards"),
+     _listed_award("Teacher of the Year - (Class of 2033) - Widget College 2031\tAcme University")),
+    # the class year is the kept text's one year, so it dates the honor
+    (_listed_award("Gizmo Honor Society, Acme Widget University, 2030"),
+     _listed_award("Gizmo Honor Society, Acme Widget University, Class of 2030")),
+])
+def test_an_unlabelled_award_under_another_heading_or_dated_by_its_class_still_drops(dropped, kept):
+    assert not _unlabelled_beside_class_award(dropped, kept, "H")
+    assert not _kept_both("H", dropped, kept)
