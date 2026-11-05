@@ -329,6 +329,39 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
     return ''
 
 
+# A grant's length given as a span of time rather than a date range: "1 year",
+# "6 months", "5 years" (MQZMMA, #2094).
+_LENGTH_OF_TIME = (r'(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten'
+                   r'|eleven|twelve)[\s-]*(?:years?|yrs?\.?|months?|mos?\.?)')
+_LENGTH_OF_TIME_RE = re.compile(_LENGTH_OF_TIME, re.IGNORECASE)
+# The entry's own duration line holding nothing but such a span
+# ("Duration of support: | 1 year"): the label, a colon or cell bar, the span.
+_DURATION_LINE_SPAN_RE = re.compile(
+    rf'^[ \t]*duration\b[^:|\n]*[:|][ \t|]*(?P<span>{_LENGTH_OF_TIME})[ \t|]*$',
+    re.IGNORECASE | re.MULTILINE)
+# The off-schema key stage 4 sometimes files the span under (MQZMMA M2C).
+GRANT_DURATION_KEY = 'duration'
+
+
+def with_duration_span(date_range: str, fields: Mapping[str, Any],
+                       source_text: str = '') -> str:
+    """A grant's Duration cell: `date_range`, or, when stage 4 gave no
+    start or end, the grant's length as the CV states it (#2094).
+
+    The length is the record's `duration` field when that is a span of time,
+    else the span on the entry's own "Duration ...:" line. A start/end range
+    always wins, and no other text is read, so a span in prose ("a 5-year
+    study") never becomes a duration.
+    """
+    if date_range:
+        return date_range
+    stated = str(fields.get(GRANT_DURATION_KEY) or '').strip()
+    if _LENGTH_OF_TIME_RE.fullmatch(stated):
+        return stated
+    line = _DURATION_LINE_SPAN_RE.search(source_text or '')
+    return line['span'] if line else ''
+
+
 # Keys outside every schema under which stage 4 files a record's second and
 # later spans (EBYSBC class E22, #1245): a list of `{start_date, end_date}`
 # periods, or a string of dates, under `additional_dates`/`additional_periods`

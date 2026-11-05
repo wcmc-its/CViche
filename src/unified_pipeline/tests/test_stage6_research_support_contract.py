@@ -2460,6 +2460,34 @@ def test_grant_duration_with_no_end_date_reads_as_present():
     assert gen._format_grant_duration({}, 'M2A') == ''
 
 
+@pytest.mark.parametrize('fields, text, expected', [
+    # stage 4 filed the length under an off-schema `duration` key
+    ({'duration': '5 years'}, '', '5 years'),
+    # no dates and no key: the length on the entry's own duration line (#2094)
+    ({}, 'Glimmer award\nDuration of support: | 1 year\nName of PI: | Ada Quill', '1 year'),
+    ({}, 'Glimmer award\nDuration of support: | 6 months', '6 months'),
+    ({}, 'Glimmer award\nDuration: 18 mos.', '18 mos.'),
+])
+def test_grant_duration_renders_a_stated_length_when_there_are_no_dates(fields, text, expected):
+    """A grant whose duration is a length of time, not dates, renders that
+    length instead of a blank cell (#2094)."""
+    assert _generator()._format_grant_duration(fields, 'M2B', text) == expected
+
+
+@pytest.mark.parametrize('fields, text, expected', [
+    # a start/end range always wins over a stated length
+    ({'start_date': '07/2019', 'end_date': '06/2021', 'duration': '1 year'},
+     'Duration of support: | 1 year', '07/19-06/21'),
+    # a length in prose is not the duration line
+    ({}, 'Glimmer award for a 5 year study of invented hinges', ''),
+    # a duration line that holds anything but a length is not read
+    ({}, 'Duration of support: | 1 year, renewable', ''),
+    ({'duration': 'ongoing'}, '', ''),
+])
+def test_grant_duration_reads_a_stated_length_only_in_its_own_cell(fields, text, expected):
+    assert _generator()._format_grant_duration(fields, 'M2B', text) == expected
+
+
 @pytest.mark.parametrize('text, expected', [
     ('2011 Fictional Pilot Study Award', '2011'),
     ('2011- Fictional Pilot Study Award', '2011-Present'),

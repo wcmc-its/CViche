@@ -33,6 +33,7 @@ from .dates import (  # noqa: F401
     further_date_spans,
     normalize_iso_dates_in_text,
     presentation_date_spans,
+    with_duration_span,
     with_extra_date_spans,
 )
 from .docx import (  # noqa: F401
