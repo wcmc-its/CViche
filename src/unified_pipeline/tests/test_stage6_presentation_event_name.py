@@ -242,6 +242,15 @@ def test_untitled_talk_drops_a_closing_two_digit_range_the_dates_cell_shows():
     assert cells[0] == "Invited Speaker, Example Grand Rounds"
 
 
+def test_untitled_talk_keeps_the_year_of_an_event_name_the_closing_date_repeats():
+    """YME2VA: the event is named with its year; the closing date repeats it,
+    so only the closing date goes and the title stays the event's name."""
+    cells = _untitled_cells("Zorblax Symposia 2007, Northgate Springs, March 28-31, 2007.", "2007",
+                            date="2007", event_name="Zorblax Symposia 2007",
+                            location="Northgate Springs")
+    assert cells[:2] == ["Zorblax Symposia 2007", "Northgate Springs"]
+
+
 def test_untitled_talk_keeps_an_earlier_date_the_dates_cell_lacks():
     """The strip stops at the first closing date the Dates cell does not show,
     and a closing date's day never takes the earlier year's last digits."""

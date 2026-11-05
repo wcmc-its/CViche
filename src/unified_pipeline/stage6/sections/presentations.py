@@ -169,7 +169,10 @@ def _strip_trailing_dates(line: str, shown_years: set[str]) -> str:
     them: a year range whole, when it shows both years, else a date
     (`_TRAILING_DATE_RE`), then the one before it in a list ("..., 1962-1981,
     1983-2015"). A range's end year alone is never cut, which left its start
-    year in the title ("..., 1983": VVRTUC 117, #1245)."""
+    year in the title ("..., 1983": VVRTUC 117, #1245). A list names each
+    year once, so a year already cut ends it: that one belongs to a name
+    ("Keystone Symposia 2007, <venue>, March 28-31, 2007": YME2VA)."""
+    cut: set[str] = set()
     while True:
         span = _TRAILING_RANGE_RE.search(line)
         if span and not all(_year_is_shown(year, shown_years) for year in span.groups()):
@@ -178,6 +181,9 @@ def _strip_trailing_dates(line: str, shown_years: set[str]) -> str:
             span = _TRAILING_DATE_RE.search(line)
             if not span or span.group(1) not in shown_years:
                 return line
+        if cut & set(span.groups()):
+            return line
+        cut.update(span.groups())
         line = line[:span.start()]
 
 
