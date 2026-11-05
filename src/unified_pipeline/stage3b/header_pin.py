@@ -50,6 +50,11 @@ procedure credential or a life-support or teaching certificate coded F1 or F2
 is B2, a registry certification coded F1 is F2, a licence to practise coded
 B2 or I is F1, and a diplomate line coded I is F2; so is an unworded line
 listed right after a board certification.
+Two R extensions close #312's named residuals: a Q2 naming the owner's part
+in a session (moderator, panelist, discussant, a session's chair) loses to an
+R pin (`_is_session_role_q2`), and an R sub-heading under a parent that maps
+another code still pins R, from the leaf-side run of levels
+(`leaf_run_header_code`), for the measured set and that Q2 only.
 
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`, except `apply_non_seat_pins`, which reads the whole CV's
@@ -64,6 +69,7 @@ credential_misfiled lint share).
 import logging
 import re
 from collections.abc import Iterable
+from itertools import takewhile
 
 from ..core.credential_lines import (
     BOARD_BLOCK_WHY,
@@ -121,6 +127,52 @@ _CONTRIBUTED_WORK = re.compile(
     r"|research\s+forum|residents?\s+conference)\b",
     re.I,
 )
+
+# --- #312 A2n: a session role under an R pin is the owner's part in the program ---
+#
+# Under a heading whose mapped levels all say R, the model answers Q2, committee
+# service, for the owner's role in a session ("Moderator, <session>, <meeting>",
+# "Co-Chair of <topic> Mini-Symposium": ZGLAAD 60/61, MOCDRL 111), and the row
+# renders under Service. By the merged #1061 placement policy, chairing,
+# co-chairing or moderating a session, symposium, panel, workshop or course, or
+# serving in one as panelist or discussant, is the owner's invited part and stays
+# under the heading the author filed it in. Chairing a whole meeting ("Meeting
+# Chair", "Chair, <meeting>") is no session role. A line naming a body one sits
+# on is a seat: `_SESSION_ROLE_BODY` is wider than `_SEAT_BODY` on a bare
+# "steering" or "advisory", and leaves out a panel, which here is a session.
+# Both stay Q2, as does any activity the owner's #1580 decision keeps
+# (`_names_stay_activity`). Over the 434 stored stage-3b files of the #1243
+# tuning farm this moves 189 rows in 41 runs; a seeded 20-row sample of them
+# read 20/20 right, where an earlier test that also took a meeting's chair read
+# 17/20. The Q2 rows with no session role are #312 owner question 4a.
+_INVITED_TALK_PIN = "R"
+_SESSION_ROLE_SOURCE_CODE = "Q2"
+_SESSION_KIND = (r"(?:session|symposium|symposia|mini-?symposium|panel|plenary|workshop"
+                 r"|roundtable|round\s+table|course)")
+# A moderator, panelist or discussant; a session's chair ("Session Co-Chair"); the
+# chair of one ("Chairperson, Postgraduate Course", "Co-Chair of the <topic> Workshop").
+_SESSION_ROLE = re.compile(
+    r"\bmoderat(?:or|ors|ed|ing)\b|\bpanel(?:ist|ists)\b|\bdiscussants?\b"
+    rf"|\b{_SESSION_KIND}\s+(?:co-?)?chair\w*"
+    rf"|\b(?:co-?)?chair\w*\s*[,:]?\s*(?:of\s+(?:the\s+|a\s+)?)?(?:[\w'-]+\s+){{0,2}}?{_SESSION_KIND}\b",
+    re.I)
+_SESSION_ROLE_BODY = re.compile(
+    r"\b(?:(?:sub)?committees?|boards?|councils?|commissions?|task\s*forces?|working\s+groups?"
+    r"|work\s*groups?|steering|advisory|study\s+sections?)\b", re.I)
+
+# --- #312 C1b: an R sub-heading under a parent that maps another code ---
+#
+# `pinned_header_code` needs every mapped level to agree, so an invited-lectures
+# sub-heading under a parent stage 3a maps elsewhere ("PUBLICATIONS > Invited
+# Lectures", HJPBEM 233) pins nothing, and a talk the model read as teaching, or
+# a moderator line it read as committee service, renders outside the talks. The
+# R pin also reads the leaf-side run (`leaf_run_header_code`): the most specific
+# level and the levels above it that share its code. There it recodes only the
+# measured set and a session-role Q2 (`_r_named_set_takes`). The unsure
+# author-less S8 stays an agreeing-levels call (a mixed list's S8 rows read 10/20
+# as invited talks: #312 owner question 1), and no other code reads the run.
+# Over the same farm this moves 141 rows in 19 runs (K4 60, K1 47, Q2 34); a
+# seeded 20-row sample read 20/20 right by the #1061 placement rubric.
 
 # Q2 under a heading 3a maps to Q3. Only the most specific level has to say Q3:
 # a grant-reviewer sub-heading under a general service heading maps the parent Q2/Q4 at 0.5 (HFAJCC,
@@ -797,26 +849,42 @@ _POINTER_LINE_MAX_WORDS = 4
 _BARE_URL = re.compile(r"^(?:https?://|www\.)\S+$", re.I)
 
 
+def _mapped_tops(context: TaxonomyContext) -> list[tuple[str, dict]]:
+    """(title, top option) of each level of the entry's path stage 3a mapped, the most specific first."""
+    levels = (context.subsection, context.section, context.meta_section)
+    return [(str(level.get("title", "")), max(level["taxonomy_options"], key=lambda o: o["confidence"]))
+            for level in levels if level and level.get("taxonomy_options")]
+
+
+def leaf_run_header_code(context: TaxonomyContext) -> str | None:
+    """The top code of the leaf-side run of mapped levels, or None (#312 C1b).
+
+    The run is the most specific mapped level and every level above it that
+    shares its top code, up to the first that does not. The most specific level
+    must reach HEADER_PIN_MIN_CONFIDENCE, and at least one level of the run must
+    be a real section title, not a bare scope word. Where every level agrees
+    this is `pinned_header_code`'s code.
+    """
+    tops = _mapped_tops(context)
+    if not tops or tops[0][1]["confidence"] < HEADER_PIN_MIN_CONFIDENCE:
+        return None
+    code = tops[0][1]["code"]
+    run = takewhile(lambda mapped: mapped[1]["code"] == code, tops)
+    if all(title.strip().lower() in GEOGRAPHIC_SCOPE_TITLES for title, _ in run):
+        return None
+    return code
+
+
 def pinned_header_code(context: TaxonomyContext) -> str | None:
     """The code the CV author's own section placement pins, or None.
 
     Every level of the entry's path that stage 3a mapped must agree on one top
     code, the most specific level must reach HEADER_PIN_MIN_CONFIDENCE, and at
-    least one agreeing level must be a real section title, not a bare scope word.
+    least one agreeing level must be a real section title, not a bare scope word:
+    the leaf-side run (`leaf_run_header_code`) spans every mapped level.
     """
-    levels = [
-        level for level in (context.subsection, context.section, context.meta_section)
-        if level and level.get("taxonomy_options")
-    ]
-    if not levels:
-        return None
-    tops = [max(level["taxonomy_options"], key=lambda o: o["confidence"]) for level in levels]
-    code = tops[0]["code"]
-    if tops[0]["confidence"] < HEADER_PIN_MIN_CONFIDENCE:
-        return None
-    if any(top["code"] != code for top in tops):
-        return None
-    if all(str(level.get("title", "")).strip().lower() in GEOGRAPHIC_SCOPE_TITLES for level in levels):
+    code = leaf_run_header_code(context)
+    if any(top["code"] != code for _, top in _mapped_tops(context)):
         return None
     return code
 
@@ -860,6 +928,29 @@ def _r_pin_takes(entry: dict) -> bool:
         and not _has_author_list(text)
         and not _CONTRIBUTED_WORK.search(text)
     )
+
+
+def _is_session_role_q2(entry: dict) -> bool:
+    """A Q2 naming the owner's part in a session, no body one sits on, and no
+    activity the owner's #1580 decision keeps (#312 A2n)."""
+    text = entry.get("text") or ""
+    return (entry.get("taxonomy_code") == _SESSION_ROLE_SOURCE_CODE
+            and bool(_SESSION_ROLE.search(text))
+            and not _SESSION_ROLE_BODY.search(text)
+            and not _names_stay_activity(text))
+
+
+def _r_named_set_takes(entry: dict) -> bool:
+    """Whether an R heading, agreeing or leaf-side, recodes this model answer:
+    the measured set, or a session-role Q2 (#312 A2n, C1b)."""
+    return entry.get("taxonomy_code") in HEADER_PIN_OVERRIDES[_INVITED_TALK_PIN] or _is_session_role_q2(entry)
+
+
+def _log_r_pin(entry: dict, pin: str | None) -> None:
+    """Log one #312 R recode by element index and codes, never the CV's text."""
+    where = "session role under agreeing R levels" if pin == _INVITED_TALK_PIN else "R leaf-side run"
+    logger.info("Stage 3b header pin (#312 %s): element %s %s -> %s", where,
+                entry.get("element_idx_start"), entry.get("taxonomy_code"), _INVITED_TALK_PIN)
 
 
 def _heading_text(entry: dict) -> str:
@@ -923,11 +1014,19 @@ def _s1_pin_takes(entry: dict) -> bool:
     )
 
 
-def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | None:
-    """The code the group's header pins this model answer to, or None to keep it."""
+def header_pin_code(entry: dict, pin: str | None, leaf: str | None, leaf_run: str | None) -> str | None:
+    """The code the group's header pins this model answer to, or None to keep it.
+
+    `leaf_run` is `leaf_run_header_code`'s code: R wherever `pin` is R, and also
+    for an R sub-heading under a parent that maps another code (#312 C1b). A
+    recode on that path is logged (`_log_r_pin`).
+    """
     code = entry.get("taxonomy_code")
     if pin == "R" and _r_pin_takes(entry):
         return "R"
+    if leaf_run == _INVITED_TALK_PIN and _r_named_set_takes(entry):
+        _log_r_pin(entry, pin)
+        return _INVITED_TALK_PIN
     if pin and pin != "R" and code in HEADER_PIN_OVERRIDES.get(pin, ()):
         return pin
     if pin == _HONOR_CODE and _h_pin_takes(entry):
@@ -1258,13 +1357,13 @@ def apply_non_seat_pins(entries: Iterable[dict]) -> tuple[list[dict], dict]:
     return out, {"corrections_applied": len(details), "correction_details": details}
 
 
-def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool,
+def _pin_for(entry: dict, pin: str | None, leaf: str | None, leaf_run: str | None, after_mentee: bool,
              after_unseen_reviewer_lead_in: bool, lead: str, in_board_block: bool) -> tuple[str, str] | None:
     """(code, why) for one model answer: the header pin, then the mentor-grant,
     mentee, someone-else's, content, credential, reviewer and fellowship pins.
     A mentee's abstract under a students level is the mentee's (N4), not the
     owner's (S8)."""
-    header_code = header_pin_code(entry, pin, leaf)
+    header_code = header_pin_code(entry, pin, leaf, leaf_run)
     if header_code:
         return header_code, _HEADER_PIN_WHY
     return (mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee)
@@ -1296,14 +1395,14 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext,
     sent in, in the order given here; None means the group went in one call, so
     the model saw every lead-in and the reviewer pin never applies.
     """
-    pin, leaf = pinned_header_code(context), leaf_header_code(context)
+    pin, leaf, leaf_run = pinned_header_code(context), leaf_header_code(context), leaf_run_header_code(context)
     out, recoded, after_mentee, reviewer_lead_in_at, lead = [], 0, False, None, ""
     in_board_block = False
     for position, entry in enumerate(entries):
         as_coded = entry  # the lead line is read off the model's codes, not the pins' (#1573)
         if entry.get("classification_source") == _MODEL_SOURCE:
             unseen_lead_in = _in_later_batch(position, reviewer_lead_in_at, batch_size)
-            pinned = _pin_for(entry, pin, leaf, after_mentee, unseen_lead_in, lead, in_board_block)
+            pinned = _pin_for(entry, pin, leaf, leaf_run, after_mentee, unseen_lead_in, lead, in_board_block)
             if pinned and pinned[0] != entry.get("taxonomy_code"):
                 recoded += 1
                 entry = _recode(entry, *pinned)
