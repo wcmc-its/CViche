@@ -120,6 +120,31 @@ def test_a_level_that_is_only_part_of_a_word_is_not_contained():
     assert rows["Site/Position:"] == "Postdoc - Postdoctoral advisor"
 
 
+@pytest.mark.parametrize(("mentee_name", "mentee_level"), [
+    ("Brian Wood, DO", "DO"),
+    ("Brian Wood, M.D., Ph.D.", "M.D., Ph.D."),
+    ("Brian Wood, MD, MPH", "MD, MPH"),
+])
+def test_a_level_the_name_already_shows_is_not_prefixed(mentee_name, mentee_level):
+    # #2088: "DO - Fictional Emergency Medicine" repeated the Name row's degree.
+    rows = _mentee(mentee_name=mentee_name, mentee_level=mentee_level,
+                   site_position="Fictional Emergency Medicine")
+    assert rows["Site/Position:"] == "Fictional Emergency Medicine"
+
+
+def test_a_level_that_adds_to_the_name_is_still_prefixed():
+    rows = _mentee(mentee_name="Brian Wood, PhD", mentee_level="PhD student",
+                   site_position="Fictional Genetics Program")
+    assert rows["Site/Position:"] == "PhD student - Fictional Genetics Program"
+    rows = _mentee(mentee_name="Brian Wood", mentee_level="MD", site_position="Fictional Pediatrics")
+    assert rows["Site/Position:"] == "MD - Fictional Pediatrics"
+    # Case counts in the Name: an honorific "Ms." or a surname "Do" is no degree.
+    rows = _mentee(mentee_name="Ms. Jane Do", mentee_level="MS", site_position="Fictional Biology")
+    assert rows["Site/Position:"] == "MS - Fictional Biology"
+    rows = _mentee(mentee_name="Jane Do", mentee_level="DO", site_position="Fictional Medicine")
+    assert rows["Site/Position:"] == "DO - Fictional Medicine"
+
+
 def test_either_value_alone_renders_as_it_is():
     assert _mentee(mentee_level="Fellow")["Site/Position:"] == "Fellow"
     assert _mentee(site_position="Fictional Fellow")["Site/Position:"] == "Fictional Fellow"
@@ -357,6 +382,33 @@ def test_site_position_naming_a_phd_backs_up_an_uninformative_level():
     # Only the research-degree words are read there: a state is not a degree.
     assert _inferred_supervision("MPH Student", "Riverside Hospital, MA") == ""
     assert _inferred_supervision("MPH Student", "Clinical Research Unit") == ""
+
+
+@pytest.mark.parametrize("site_position", [
+    "Department of Clinical and Health Psychology",   # #2066: a department
+    "Dept. of Psychology (Clinical)",
+    "Paper published in Fictional Clinical Practice",  # a journal (ZDKMKD-05)
+    "Assistant Clinical Professor",                    # a job title
+    "Clinical Research Center",
+    "Fictional University (Springfield, MA)",          # a state, not a degree
+    "Fictional Pharma, Springfield, MA",
+    "Fictional College, Jackson, MS",
+])
+def test_with_no_level_a_site_clinical_or_state_infers_nothing(site_position):
+    assert _inferred_supervision(site_position=site_position) == ""
+
+
+@pytest.mark.parametrize(("site_position", "expected"), [
+    ("Clinical Mentor", "Clinical"),
+    ("Clinical Education Advising", "Clinical"),
+    ("Clinical Supervisor, Fictional Clinic", "Clinical"),
+    ("Internal Medicine Resident", "Clinical"),
+    ("Clinical fellow", "Research"),
+    ("MS", "Research"),
+    ("Fictional Masters in Medical Science Program", "Research"),
+])
+def test_with_no_level_a_site_naming_the_supervision_still_infers_it(site_position, expected):
+    assert _inferred_supervision(site_position=site_position) == expected
 
 
 def test_the_template_goals_row_joins_the_project():

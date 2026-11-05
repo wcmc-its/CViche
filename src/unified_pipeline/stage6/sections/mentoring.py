@@ -813,6 +813,20 @@ _SUPERVISION_LEVEL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r'(?<![a-z])(?:master|m[sa](?:c|ph|w)?(?![a-z0-9]))', re.I), 'Research'),
 )
 
+#: The rules read on Site/Position when there is no level (#2066): there a
+#: "clinical" is as often a department, journal or job title ("Department of
+#: Clinical ... Psychology", "Assistant Clinical Professor") as the kind of
+#: supervision, so it counts only before a supervision word ("Clinical
+#: Mentor"); and a degree abbreviation after a comma is a state ("Boston,
+#: MA"), not a master's degree.
+_SITE_SUPERVISION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    *_SUPERVISION_LEVEL_RULES[:2],
+    (re.compile(r'(?<![a-z])(?:resident|clinical (?:mentor|supervis|precept|educat|advis))',
+                re.I), 'Clinical'),
+    (re.compile(r'(?<![a-z])(?:master|(?<!,)(?<!, )m[sa](?:c|ph|w)?(?![a-z0-9]))', re.I),
+     'Research'),
+)
+
 #: The dotted degrees ("Ph.D.", "Ph D", "M.S.", "M.A.", "M.Sc.", "M.S.P.H."),
 #: tried after every rule above, so "M.D., Ph.D., ... resident" stays
 #: Clinical. With no level they count only at the start of Site/Position
@@ -825,14 +839,15 @@ _DOTTED_DEGREE_RE = re.compile(
 def _infer_supervision_type(mentee_level: str, site_position: str) -> str:
     """Supervision type when stage 4 and the source gave none: the first
     `_SUPERVISION_LEVEL_RULES` entry matching the level (or, with no level,
-    Site/Position), else Research for a dotted degree (`_DOTTED_DEGREE_RE`).
+    the first `_SITE_SUPERVISION_RULES` entry matching Site/Position), else Research for a dotted degree (`_DOTTED_DEGREE_RE`).
     When the level is a word such as a department name that implies
     nothing, a Site/Position naming a PhD, thesis or dissertation
     (`_RESEARCH_DEGREE_RE`) still gives Research, as it did by accident
     before #2066; the other rules are not tried on it, since a site's ", MA"
     (a state) or "Clinical Research" names no level. Else ''."""
     level_text = mentee_level or site_position
-    for pattern, supervision_type in _SUPERVISION_LEVEL_RULES:
+    rules = _SUPERVISION_LEVEL_RULES if mentee_level else _SITE_SUPERVISION_RULES
+    for pattern, supervision_type in rules:
         if pattern.search(level_text):
             return supervision_type
     dotted = (_DOTTED_DEGREE_RE.search(mentee_level) if mentee_level
@@ -856,7 +871,9 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     mentee_level as whole words (`_contains_words`) it is the longer, more
     specific value and renders alone: "Transplant Fellow" with level
     "Fellow" is "Transplant Fellow", not "Fellow" (EBYSBC autopsy, class
-    E14: 12 rows on one CV lost the fellowship type). Awards and
+    E14: 12 rows on one CV lost the fellowship type). A level the Name
+    already holds as whole words (a degree: "<mentee>, DO") is not prefixed
+    either, since the Name row shows it (#2088: "DO - <site>"). Awards and
     fellowships the mentee won
     belong in Project/Accomplishments: the WCM template's footnote for that
     row reads "Optional: List publications, awards, grants ... arising
@@ -872,9 +889,12 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     """
     fields = entry.get('extracted_fields') or {}
 
+    name = _text(fields.get('name') or fields.get('mentee_name'))
     mentee_level = _text(fields.get('mentee_level'))       # e.g. "PhD, MBSB"
     site_pos_raw = _text(fields.get('site_position'))      # e.g. "Thesis"
-    if mentee_level and site_pos_raw and not _contains_words(site_pos_raw, mentee_level):
+    if (mentee_level and site_pos_raw and not _contains_words(site_pos_raw, mentee_level)
+            # Case-sensitive: "Ms." or a surname "Do" in the Name is no degree.
+            and not re.search(rf'(?<!\w){re.escape(mentee_level)}(?!\w)', name)):
         site_position = f"{mentee_level} - {site_pos_raw}"
     else:
         site_position = site_pos_raw or mentee_level
@@ -907,7 +927,7 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
         supervision_type = f"{supervision_type} ({role})" if supervision_type else role
 
     return MenteeRecord(
-        name=_text(fields.get('name') or fields.get('mentee_name')),
+        name=name,
         site_position=site_position,
         mentoring_period=_format_mentee_duration(
             fields, ongoing=ongoing, source_text=_text(entry.get('text'))),
