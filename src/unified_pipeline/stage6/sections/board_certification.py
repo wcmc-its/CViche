@@ -720,6 +720,56 @@ def _is_source_header_row(entry: dict) -> bool:
             or is_label_only_record(fields, text, _CERTIFICATION_LABEL_WORDS))
 
 
+# The F2 fields that identify one certification, for matching a whole-table
+# entry's records against its row entries (`_parents_rendered_by_rows`).
+_CERTIFICATION_IDENTITY_FIELDS = ('certifying_board', 'certificate_number', 'year_certified')
+
+
+def _certification_identity(fields: object) -> tuple[str, ...] | None:
+    """The case- and whitespace-folded board, certificate number and year of
+    one certification record, or None when it names no board."""
+    if not isinstance(fields, dict):
+        return None
+    identity = tuple(' '.join(str(fields.get(key) or '').split()).casefold()
+                     for key in _CERTIFICATION_IDENTITY_FIELDS)
+    return identity if identity[0] else None
+
+
+def _certification_records(fields: dict) -> list[object]:
+    """Every certification record an entry's stage-4 fields hold: the records
+    of each list of records, or the fields themselves when they hold none."""
+    records = [record for value in fields.values()
+               if isinstance(value, list) and value and all(isinstance(r, dict) for r in value)
+               for record in value]
+    return records or [fields]
+
+
+def _parents_rendered_by_rows(entries: list[dict]) -> list[dict]:
+    """The F2 entries that are a whole source table whose rows are F2 entries
+    of their own (#1254, held-out MKEQKW entry 73).
+
+    Stage 2 can emit a table twice: once as one entry holding every line,
+    header lines included, and once as one entry per data row, each naming
+    the first by `parent_idx`. When stage 4 declines to split the whole-table
+    entry, the text reparse writes its header lines and each data row again.
+    Such an entry is redundant only when every certification record it holds
+    (`_certification_records`) is one a row entry holds too, by board,
+    certificate number and year; one record no row carries keeps it."""
+    rows_by_parent: dict[int, set[tuple[str, ...]]] = {}
+    for entry in entries:
+        parent = entry.get('parent_idx')
+        identity = _certification_identity(entry.get('extracted_fields'))
+        if isinstance(parent, int) and identity is not None:
+            rows_by_parent.setdefault(parent, set()).add(identity)
+    redundant = []
+    for entry in entries:
+        rows = rows_by_parent.get(entry.get('element_idx_start'))
+        records = _certification_records(entry.get('extracted_fields') or {})
+        if rows and all(_certification_identity(record) in rows for record in records):
+            redundant.append(entry)
+    return redundant
+
+
 def _reparse_renders_less_than_structured(rows: list[tuple]) -> bool:
     """True when the reconstructed rows would render less than the entry's
     own structured fields: no row recovered a certificate number or a date,
@@ -1001,10 +1051,15 @@ class BoardCertificationSection:
         # Neither a source header row nor a bare year is a certification of
         # its own: the year folds into the row above or is reported as a
         # skipped row, so each is set aside for the row receipt (#534).
+        # A whole-table entry whose rows are entries of their own writes none
+        # either: its rows are written from those entries (#1254).
+        redundant = _parents_rendered_by_rows(entries)
         for entry in entries:
-            if _is_source_header_row(entry) or _bare_year(entry):
+            if _is_source_header_row(entry) or _bare_year(entry) \
+                    or any(entry is parent for parent in redundant):
                 self._row_receipts.set_aside(entry)
-        entries = [e for e in entries if not _is_source_header_row(e)]
+        entries = [e for e in entries if not _is_source_header_row(e)
+                   and not any(e is parent for parent in redundant)]
         entries, unattached_years = _attach_bare_years(entries, current_year)
         for year in unattached_years:
             self._warn_skipped_certification_row(year)
