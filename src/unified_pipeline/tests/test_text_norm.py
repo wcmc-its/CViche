@@ -26,6 +26,23 @@ def test_norm_folds_latin_greek_and_cyrillic_accents_only():
     assert text_norm.norm("Rohe\u00b4") == "rohe "
 
 
+@pytest.mark.parametrize("rest, record", [
+    (": Ph.D., Example University, 2001", "Ph.D., Example University, 2001"),
+    ("  \u2013 Residency, Example Hospital.", "Residency, Example Hospital"),
+    ("Example University", "Example University"),
+    ("program", None),
+    ("a b", None),
+    ("(In Reverse Chronological Order)", None),
+    ("[number withheld]", None),
+    ("Not applicable.", None),
+    ("Page 2 of 5", None),
+    ("YEAR JOINED", None),
+])
+def test_record_after_heading_reads_a_record_and_not_a_note(rest, record):
+    """#1254, #1252: the run doctor and stage 1b share this test."""
+    assert text_norm.record_after_heading(rest) == record
+
+
 def test_text_helpers_read_none_as_empty_and_keep_falsy_values():
     """#1916: `str(text or "")` turned 0 and False into ""."""
     for helper in (text_norm.norm, text_norm.fold_quotes, text_norm.squash):
