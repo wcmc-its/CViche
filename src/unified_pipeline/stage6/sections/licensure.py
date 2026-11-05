@@ -112,6 +112,7 @@ from ..formatting import EXPIRES_PREFIX, _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem, line_without_edge_dates
 from ..normalization.pii import _dea_check_digit_ok
 from ..parsing.dates import CURRENT_DATE_VALUES, EXPIRY_LABEL
+from ..parsing.text import is_label_only_record
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -310,7 +311,8 @@ class LicensureResult:
     identifiers: IdentifierSet
     dea_withheld: bool = False
     #: Raw entries that write no licence row on purpose (#534): a DEA record
-    #: (withheld with notice) and the NPI the identifier table shows.
+    #: (withheld with notice), the NPI the identifier table shows, and the
+    #: source table's own header row (#1254).
     no_row: tuple[Mapping[str, Any], ...] = ()
 
 
@@ -688,6 +690,16 @@ def _has_npi_shaped_token(text: str) -> bool:
     return any(_NPI_SHAPE_RE.match(run) for run in re.findall(r'\d+', text))
 
 
+# The words of a licence table's column labels ("State | License Number |
+# Date of Issue | Date of Last Registration"). A record stage 4 extracted
+# nothing from whose cells are all these words is the source table's header
+# row and writes no licence row (#1254, `is_label_only_record`).
+_LICENSURE_LABEL_WORDS = frozenset({
+    'state', 'license', 'licence', 'number', 'date', 'issue', 'registration',
+    'expiration', 'exp', 'expires', 'renewal', 'mm/dd/yyyy',
+})
+
+
 def _resolve_licensure(
         entries: Sequence[MutableMapping[str, Any]]) -> LicensureResult:
     """Decide the whole of section F1 without touching a document.
@@ -733,6 +745,10 @@ def _resolve_licensure(
     under_expiry_header = _rows_under_expiry_header(entries)
 
     for raw in sort_entries_reverse_chronological(entries):
+        if is_label_only_record(raw.get('extracted_fields'), str(raw.get('text') or ''),
+                                _LICENSURE_LABEL_WORDS):
+            no_row.append(raw)  # the source table's header row (#1254)
+            continue
         entry = _normalize_licensure_entry(raw)
         if id(raw) in under_expiry_header:
             entry = replace(entry, expiry_by_column_header=True)

@@ -274,6 +274,45 @@ def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int
     return False
 
 
+# What separates the cells of a flattened source table row: stage 2 joins a
+# row's cells with " | " or a tab, and a cell's own line break survives as "\n".
+_CELL_SEPARATOR_RE = re.compile(r'[\t|\n]')
+_HAS_WORD_OR_DIGIT_RE = re.compile(r'[A-Za-z0-9]')
+
+
+def _is_blank_field(value: object) -> bool:
+    """Whether a stage-4 field holds nothing: None, a blank string, or a
+    list or object made only of such values."""
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, dict):
+        return all(_is_blank_field(v) for v in value.values())
+    if isinstance(value, list | tuple):
+        return all(_is_blank_field(v) for v in value)
+    return value is None
+
+
+def is_label_only_record(fields: object, text: str,
+                         header_keywords: frozenset[str]) -> bool:
+    """Whether an entry is a source table's column-label row and nothing else:
+    stage 4 extracted no value at all, and every cell of its text is made of
+    column-label words (`_is_header_cell` with `header_keywords`).
+
+    Both must hold (#1254). Stage 4 leaves every field null on a template
+    header row ("Full Name of Board | Certificate # | Date"), but it also
+    leaves them null on real one-line credentials ("NBME Diplomate", a bare
+    recertification year), which the section renders from their text; so an
+    all-null record alone is not junk. A cell with no letter or digit (a lone
+    "#" or dash) is no evidence either way and is skipped.
+    """
+    if not isinstance(fields, dict) or not _is_blank_field(fields):
+        return False
+    cells = [cell.strip().lower() for cell in _CELL_SEPARATOR_RE.split(text or '')
+             if _HAS_WORD_OR_DIGIT_RE.search(cell)]
+    keywords = sorted(header_keywords)
+    return bool(cells) and all(_is_header_cell(cell, keywords) for cell in cells)
+
+
 def _is_structural_label(entry: dict) -> bool:
     """Check if an entry is a structural label from the source CV rather than actual content.
 
