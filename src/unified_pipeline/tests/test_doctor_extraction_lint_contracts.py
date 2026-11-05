@@ -2212,6 +2212,25 @@ def test_offschema_a_talks_further_dates_are_judged_as_its_date_cells_span():
     assert "its span did not reach the record's date cell" in findings[0]["message"]
 
 
+def test_offschema_listed_years_the_row_joins_into_ranges_are_shown():
+    """#1245 (BMHBJZ 211): stage 6 joins a record's consecutive listed years,
+    so '2006', '2007' and '2008' print '2006-2008'; 2007 is shown inside the
+    range, not lost. A range over a year the record does not list is an
+    envelope, and still leaves its inner years unshown."""
+    entry = _fields_entry("Q2", {
+        "activity": "Abstract Reviewer", "organization": "Example Association",
+        "start_date": "2003", "end_date": "2008",
+        "additional_dates": ["2003", "2004", "2006", "2007", "2008"]})
+    joined = [_table(_row("Abstract Reviewer", "Example Association", "2003-2004, 2006-2008"))]
+    assert _graded(joined, entry) == []
+    gap = _fields_entry("Q2", {
+        "activity": "Abstract Reviewer", "organization": "Example Association",
+        "start_date": "2003", "end_date": "2006", "additional_dates": ["2003", "2004", "2006"]})
+    envelope = [_table(_row("Abstract Reviewer", "Example Association", "2003-2006"))]
+    assert [(f["severity"], f["message"].split("`")[1]) for f in _graded(envelope, gap)] == [
+        ("WARN", "additional_dates")]
+
+
 def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
     """RCBKFG (#1245, UYFRTL 33): `additional_date_ranges` is a string, so
     as a date-named key outside `EXTRA_SPAN_KEYS` it was never a candidate.

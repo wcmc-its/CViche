@@ -1809,13 +1809,31 @@ def _value_years(value: object) -> frozenset[str]:
                      for year in _FOUR_DIGIT_YEAR_RE.findall(leaf))
 
 
+#: A year range on a rendered line, squashed ("2006-2010").
+_LINE_YEAR_RANGE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})[-–—]((?:19|20)\d{2})(?!\d)")
+
+
+def _joined_years(squashed: str, years: frozenset[str]) -> set[str]:
+    """The years a line shows inside a range of its own whose every year
+    `years` lists: stage 6 joins a record's consecutive listed years, so
+    "2006", "2007" and "2008" print "2006-2008" (#1245, BMHBJZ 211). A range
+    over a year `years` lacks is an envelope and shows none of them."""
+    joined: set[str] = set()
+    for start, end in _LINE_YEAR_RANGE_RE.findall(squashed):
+        run = {str(year) for year in range(int(start), int(end) + 1)}
+        if run <= years:
+            joined |= run
+    return joined
+
+
 def _shown_on(value: object, line: OutputLine, date_key: bool) -> bool:
     """Whether the line shows the value. A date: every four-digit year in it,
-    as a word of the line (one with none has nothing to lose). Anything
-    else: every string in it, whole (`_value_on_line`) or as all of its
-    words."""
+    as a word of the line or inside a range the line joined it into
+    (`_joined_years`); one with none has nothing to lose. Anything else:
+    every string in it, whole (`_value_on_line`) or as all of its words."""
     if date_key:
-        return _value_years(value) <= line.words
+        years = _value_years(value)
+        return years <= line.words | _joined_years(line.squashed, years)
     return all(_value_on_line(squash(leaf), line.squashed)
                or set(_alphanumeric_tokens(leaf)) <= line.words
                for leaf in _value_leaves(value))
