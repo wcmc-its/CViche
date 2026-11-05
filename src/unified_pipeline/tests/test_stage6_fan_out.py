@@ -2096,6 +2096,62 @@ class TestStage4B2Folds:
         assert len(children) == 2 and not any(FOLDED_DATES_KEY in c for c in children)
 
 
+# --- #2068: one grant stage 4 split into a record per role the owner held ---
+# Invented values; the shape is HTGWYH 92 (one study, four roles) and 102.
+
+
+def _grant_record(role, **overrides):
+    return {'title': 'Example Cohort Study', 'agency': 'Example Institute', 'grant_number': 'U01-XX000001',
+            'pi_name': 'Jane Smith', 'pi_role': role, 'start_date': '2003-01', 'end_date': '2018-04-30',
+            'status': 'Ongoing', 'notes': 'To follow an example cohort.', **overrides}
+
+
+_GRANT_TEXT = ('Title: Example Cohort Study\tFunding Source: Example Institute: U01-XX000001\t'
+               'Role: Laboratory Lead\tSteering Committee Co-Chair\tSite Committee Member')
+
+
+def _grant_children(records, code='M2B'):
+    return _fan4(_stage4_entry(copy.deepcopy(records), code=code, text=_GRANT_TEXT))
+
+
+class TestStage4GrantRoleFolds:
+    @pytest.mark.parametrize('code', ['M2A', 'M2B', 'M2C'])
+    def test_one_grants_roles_are_one_table_listing_every_role(self, code):
+        roles = ('Laboratory Lead', 'Steering Committee Co-Chair', 'Site Committee Member')
+        [child] = _grant_children([_grant_record(role) for role in roles], code)
+        assert LAST_STAGE4_RECORD in child
+        assert child['extracted_fields']['pi_role'] == 'Laboratory Lead; Steering Committee Co-Chair; Site Committee Member'
+        assert child['extracted_fields']['title'] == 'Example Cohort Study'
+
+    def test_a_repeated_or_blank_role_is_listed_once(self):
+        records = [_grant_record('Laboratory Lead'), _grant_record(None), _grant_record('Laboratory Lead'),
+                   _grant_record('Site Committee Member')]
+        [child] = _grant_children(records)
+        assert child['extracted_fields']['pi_role'] == 'Laboratory Lead; Site Committee Member'
+
+    @pytest.mark.parametrize('overrides', [
+        {'start_date': '2010-01'}, {'end_date': '2012-06'}, {'grant_number': 'U01-XX000002'},
+        {'title': 'Example Cohort Study, Phase II'}, {'agency': 'Example Foundation'},
+    ], ids=['start', 'end', 'number', 'title', 'agency'])
+    def test_records_that_differ_in_more_than_the_role_keep_their_own_tables(self, overrides):
+        children = _grant_children([_grant_record('Laboratory Lead'),
+                                    _grant_record('Site Committee Member', **overrides)])
+        assert [c['extracted_fields']['pi_role'] for c in children] == ['Laboratory Lead', 'Site Committee Member']
+
+    def test_an_earlier_grants_roles_fold_into_its_own_last_record(self):
+        records = [_grant_record('Laboratory Lead'), _grant_record('Site Committee Member'),
+                   _grant_record('Principal Investigator', title='Example Other Study')]
+        folded, last = _grant_children(records)
+        assert folded[FANNED_OUT_FROM]['index'] == 1
+        assert folded['extracted_fields']['pi_role'] == 'Laboratory Lead; Site Committee Member'
+        assert last['extracted_fields']['pi_role'] == 'Principal Investigator'
+
+    def test_a_non_grant_code_keeps_one_row_per_role(self):
+        committees = [_committee('Glade Board', 'Chair'), _committee('Glade Board', 'Member')]
+        children = _fan4(_stage4_entry(copy.deepcopy(committees)))
+        assert [c['extracted_fields']['role'] for c in children] == ['Chair', 'Member']
+
+
 # --- #1243: stage 5d's one citation on an entry stage 4 split into records ---
 # NDMRSO VYRDHN 607/613: two tab-joined articles, split by stage 4; 5d wrote
 # one citation (of the first) and the split was declined, so the second

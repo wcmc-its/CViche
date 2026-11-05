@@ -343,6 +343,39 @@ def test_the_owners_share_of_the_award_gets_its_own_row(code):
     assert research_support.ANNUAL_COSTS_LABEL not in cells
 
 
+@pytest.mark.parametrize(('code', 'label'), [
+    ('M2A', 'Total award:'), ('M2B', 'Total award:'), ('M2C', 'Total requested:'),
+])
+def test_a_blank_amount_the_source_calls_a_total_renders_under_the_total_label(code, label):
+    """#2068 (ZDKMKD 275): the source's "Total Budget:" is blank, so no amount
+    renders; the empty costs row asks for the total the source names, as
+    every sibling grant's row does, not for the template's yearly figure."""
+    entry = _entry(code, text='Kestrel Project 2019-2024\tRole: Site Lead\tTotal Budget:\tPI: Jane Smith')
+    rows = _rows(_generator()._create_grant_table(
+        {'agency': 'NIH', 'title': 'Kestrel Project', 'start_date': '2019'}, code, entry))
+    assert (label, '') in rows
+    assert research_support.ANNUAL_COSTS_LABEL not in dict(rows)
+
+
+@pytest.mark.parametrize('text', ['Kestrel Project 2019-2024\tRole: Site Lead', 'Annual budget:', ''])
+def test_a_blank_amount_with_no_total_wording_keeps_the_template_label(text):
+    rows = _rows(_generator()._create_grant_table(
+        {'agency': 'NIH', 'title': 'Kestrel Project', 'start_date': '2019'}, 'M2A',
+        _entry('M2A', text=text)))
+    assert (research_support.ANNUAL_COSTS_LABEL, '') in rows
+    assert research_support.TOTAL_AWARD_LABEL not in dict(rows)
+
+
+def test_a_pending_requested_amount_is_not_repeated_as_a_blank_total_row():
+    """A pending grant's own `total_funding_requested` renders below, so the
+    costs row does not name a second, empty "Total requested:" beside it."""
+    rows = _rows(_generator()._create_grant_table(
+        {'agency': 'NIH', 'title': 'Kestrel Project', 'total_funding_requested': '250000'},
+        'M2C', _entry('M2C', text='Kestrel Project\tTotal budget requested: $250,000')))
+    assert [label for label, _ in rows].count(research_support.TOTAL_REQUESTED_LABEL) == 1
+    assert (research_support.TOTAL_REQUESTED_LABEL, '$250,000') in rows
+
+
 @pytest.mark.parametrize('share', [None, '', '   ', False])
 def test_a_grant_without_a_share_gets_no_share_row(share):
     cells = _cells(_generator()._create_grant_table(
@@ -384,6 +417,8 @@ PROTOCOL_TITLE = 'Synthetic Kestrel Cohort Study'
     'QXIRB #22-9047', 'Protocol 5520-883', 'Protocol No. 4417/2093',
     'Protocol number: 9031.66', 'IRB 3141-0277', 'IRB no 3141-0277', 'IRB 3141-0277-15',
     'Protocol  no. 3141-0277',
+    # #2068: a sponsor's lettered protocol ID (LPPQAJ 129's shape).
+    'QRS-TUV-06-02', 'XY-ZW-528-9023', 'abc-def-ghi-12',
 ])
 def test_protocol_number_shapes_are_recognised(number):
     assert research_support.is_unfunded_protocol_number(number, '', 'M2A')
@@ -393,6 +428,11 @@ def test_protocol_number_shapes_are_recognised(number):
     'R01 CA123456', 'K23-6620194', 'U54 6620194', 'NCT09990001', '5520-883A',
     'IRB', 'Protocol', '22-', '-22', '22--9047', 'PROTOCOLS 5520', 'IRBX 5520',
     'IRB study 5520 B', 'TIRBX #5520', '6620194 R01', 'Protocolnumber 5520',
+    # #2068: what the lettered-ID shape leaves alone -- one letter segment (an
+    # NSF or a drug-code number), a segment mixing letters and digits, letters
+    # with no number after them, a number before the letters.
+    'DMS-1234567', 'MK-5592-069', 'W81XWH-15-1-0001', 'R01-CA-123456',
+    'ABC-DEF', 'ABC-DEF-06-B2', '06-ABC-DEF', 'AB-CD 12',
 ])
 def test_grant_number_shapes_are_not_protocol_numbers(number):
     assert not research_support.is_unfunded_protocol_number(number, '', 'M2A')
@@ -2581,6 +2621,23 @@ def test_existing_template_table_is_replaced_by_the_grant_tables():
 
     assert _titles_under(gen, CURRENT) == ['Replacement Project Study']
     assert len(gen.doc.tables) == 1
+
+
+def test_existing_template_table_stays_when_no_grant_renders():
+    """#2068 (SLIMGK 84): a Current bucket whose only entry is a bare "None"
+    declines it, and the placeholder stays for the empty-slot pass's N/A,
+    as for a bucket with no entries at all."""
+    gen = _generator()
+    gen.doc.add_paragraph().add_run(CURRENT).bold = True
+    placeholder = gen.doc.add_table(rows=1, cols=2)
+    placeholder.cell(0, 0).text = 'Award Source:'
+    gen.doc.add_paragraph().add_run(COMPLETED).bold = True
+    gen.doc.add_paragraph().add_run(PENDING).bold = True
+
+    gen._fill_research_support({'M2A': [_entry('M2A', text='None')]}, as_of=TEST_AS_OF)
+
+    assert [t._tbl for t in gen.doc.tables] == [placeholder._tbl]
+    assert gen.stats['tables_populated'] == 0
 
 
 def test_empty_category_renders_no_table():
