@@ -1314,9 +1314,33 @@ def test_format_date_list_is_empty_for_anything_but_a_list_of_dates(value):
     ({"date": "2016", "additional_dates": ["2014", "2016"]}, ["2016", "2014"]),
     # With no date of its own, its further spans are the cell (X6 VPMMFM 531).
     ({"year": "None", "additional_dates": ["2014", "2016"]}, ["2014", "2016"]),
-], ids=["none", "one", "first_field", "list", "range", "further", "spans_only"])
+    # A range that is only the envelope of its spans gives way to them
+    # (#1245, PBSGQZ 230.3), not "2003-2013, 2003, 2007, 2013".
+    ({"start_date": "2003", "end_date": "2013", "additional_dates": ["2003", "2007", "2013"]},
+     ["2003", "2007", "2013"]),
+    ({"date": "None", "start_date": "2003", "end_date": "2013",
+      "additional_dates": ["2003", "2013"]}, ["2003", "2013"]),
+    # A talk dated by `year` or `date` keeps that date first.
+    ({"year": "2013", "start_date": "2003", "end_date": "2013",
+      "additional_dates": ["2003", "2007", "2013"]}, ["2013", "2003", "2007"]),
+    ({"date": "2013", "start_date": "2003", "end_date": "2013",
+      "additional_dates": ["2003", "2007", "2013"]}, ["2013", "2003", "2007"]),
+    # A range its spans do not make an envelope of stays first.
+    ({"start_date": "2003", "end_date": "2013", "additional_dates": ["2005"]},
+     ["2003-2013", "2005"]),
+], ids=["none", "one", "first_field", "list", "range", "further", "spans_only",
+        "envelope", "envelope_none_date", "year_first", "date_first", "not_envelope"])
 def test_presentation_date_spans_are_the_dates_a_talks_cell_prints(fields, spans):
     assert presentation_date_spans(fields, "R") == spans
+
+
+@pytest.mark.parametrize("code", ["Q3", "Q4", "Q4A", "Q4B", "Q4C", "Q4D"])
+def test_every_q_code_reads_further_spans(code):
+    """#1245: the Q3-Q4D date cells call `with_extra_date_spans`, so stage 4
+    writes a record's listed spans for them too."""
+    from unified_pipeline.stage6.formatting import EXTRA_SPAN_CODES
+
+    assert code in EXTRA_SPAN_CODES
 
 
 # --- #1342: a season after the year, and a year start with a month end -------

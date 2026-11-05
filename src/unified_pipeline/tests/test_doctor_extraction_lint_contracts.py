@@ -5401,6 +5401,26 @@ def test_span_count_judges_teaching_rows():
     assert [f["lint"] for f in findings] == ["span_count"]
 
 
+def test_span_count_reads_spans_with_the_parser_stage_4_repairs_from():
+    """#1245: the written-span parser moved to stage 4, whose
+    `derive_listed_spans` writes the spans span_count reports. One
+    definition, so a record stage 4 repaired renders its spans and the lint
+    is quiet on it."""
+    from unified_pipeline.doctor.lints import extraction as doctor_extraction
+    from unified_pipeline.stage4 import coercion
+    from unified_pipeline.stage6.formatting import with_extra_date_spans
+
+    for name in ("_envelope_of_separate_spans", "_span_source", "_written_spans",
+                 "_SPAN_OPEN_END"):
+        assert getattr(doctor_extraction, name) is getattr(coercion, name), name
+    entry = _span_entry("Reviewer, Example Society, 2003, 2007, 2013")
+    assert _span_count(entry, "2003-2013")
+    coercion.derive_listed_spans(entry["text"], entry["extracted_fields"], "Q2", {})
+    row = with_extra_date_spans("2003-2013", entry["extracted_fields"], "Q2")
+    assert row == "2003, 2007, 2013"
+    assert _span_count(entry, row) == []
+
+
 # ---------------------------------------------------------------------------
 # orphaned_fragments (#1256) -- a stage-3b fragment whose text no record
 # holds: WARN, or INFO when stage 3b left a label or an organisation

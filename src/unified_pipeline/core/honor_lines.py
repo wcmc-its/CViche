@@ -1,5 +1,5 @@
 """Which CV headings and lines read as honors, and which lines as grants: one
-definition for stage 3b, stage 6 and the doctor (#1577).
+definition for stage 3b, stage 4, stage 6 and the doctor (#1577).
 
 Stage 3b's H pin (#1618) and its inverse read a line's grant marker, and its
 fellowship pin reads `is_honorific_fellowship`; stage 6's research-support
@@ -29,6 +29,10 @@ read a line the same way.
   ("Professional Certifications", HBALTD 26; "CERTIFICATION", EUCSNU 45)
   keeps one too: the owner ruled on 2026-11-02 that such a fellowship stays
   a membership.
+- `PROGRAM_LINE_RE` and `names_award`: the dated line naming the program a
+  two-line award was given to (PR #1847), and whether a line names an award.
+  Stage 6 joins such a line to its award's name; stage 4 folds the record a
+  model made of it into that award (#1245, UNKNBU 286).
 
 Pure: data in, bool out; imports nothing but `re` and `collections.abc`.
 """
@@ -127,6 +131,35 @@ _OPEN_SPAN_RE = re.compile(r"\b((?:19|20)\d{2})\s*[-\u2013\u2014]\s*(?:present|c
 #: A four-digit year standing alone: the one year pattern core/credential_lines
 #: and stage 6's licensure guard read too.
 YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+#: The one shape a program line may have (PR #1847 review round 4): a name
+#: with no comma and no digit that ends in a program noun, a spaced dash, and
+#: a date to the day ("SHOUT (Student-Driven HCV Outreach) Program —
+#: 02/07/2005", X6 KJJVVO 286). An allow-list: a comma, a month-only date, a
+#: year, parentheses around the date or no dash all leave the line its own
+#: honor, as on dev.
+PROGRAM_LINE_RE = re.compile(
+    r'(?P<program>[a-z][^,\d]*?\b(?:program|programme|project|initiative))'
+    r'\s+[–—-]\s+\d{1,2}/\d{1,2}/(?:19|20)\d{2}',
+    re.IGNORECASE)
+#: A word of an award name, for comparing one with a line of the entry's
+#: text regardless of case, spacing, quote style or punctuation.
+AWARD_WORD_RE = re.compile(r'[a-z0-9]+')
+
+
+def _award_words(text: str) -> set[str]:
+    return set(AWARD_WORD_RE.findall(text.casefold()))
+
+
+def names_award(line: str, award_name: str) -> bool:
+    """Whether `line` names stage 4's award: every word of `award_name` is
+    in it. On words rather than a substring, because a curly apostrophe or
+    a double space in the source hid the award's own line from a substring
+    test against stage 4's straight-quoted, single-spaced name (ZDCXIV 282,
+    VYICGW 41)."""
+    award_words = _award_words(award_name)
+    return bool(award_words) and award_words <= _award_words(line)
+
 
 #: The words that name a society-like body.
 _BODY = r"(?:association|society|college|academy|institute)"

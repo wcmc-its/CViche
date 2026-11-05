@@ -953,10 +953,16 @@ class TestDegreeAdvisor:
 
     @pytest.mark.parametrize("key,label", [("advisor", "Advisor"),
                                            ("major_professor", "Major professor"),
-                                           ("mentor", "Mentor")])
+                                           ("mentor", "Mentor"),
+                                           ("thesis_advisor", "Thesis advisor")])
     def test_each_advisor_key_follows_the_degree_with_its_label(self, key, label):
         row = self._render(degree="PhD", discipline="Zymology", **{key: "Q. Example, PhD"})
         assert row.cells[0].text == f"PhD, Zymology; {label}: Q. Example, PhD"
+
+    def test_a_thesis_advisor_yields_to_any_other_advisor_key(self):
+        """#1245 (web05 24, web30 27): `thesis_advisor` is read last."""
+        row = self._render(degree="PhD", mentor="Q. Example", thesis_advisor="R. Sample")
+        assert row.cells[0].text == "PhD; Mentor: Q. Example"
 
     def test_the_advisor_follows_the_honors(self):
         row = self._render(degree="BA", honors="cum laude", mentor="Q. Example")

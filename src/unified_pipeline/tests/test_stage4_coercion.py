@@ -62,11 +62,14 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage4.coercion import (  # noqa: E402
     DATE_FIELD_NAMES,
+    LISTED_SPAN_CODES,
+    LISTED_SPANS_KEY,
     ExtractedFields,
     ReformattedField,
     ReformattedFields,
     apply_regex_post_processing,
     coerce_field_value_types,
+    derive_listed_spans,
     normalize_authors_vancouver,
     normalize_dates,
     split_joined_journals,
@@ -378,8 +381,13 @@ def test_reformatted_fields_keys_are_all_declared_extracted_fields():
     # Every key ReformattedFields reports on is a field some schema declares,
     # so a schema-side rename that the test above catches also tells you which
     # post-processor's key went stale. Kept separate from that assertion so a
-    # failure names which of the two invariants broke.
-    assert set(ReformattedFields.__annotations__) <= set(ExtractedFields.__annotations__)
+    # failure names which of the two invariants broke. The one exception is
+    # the further-span key `derive_listed_spans` writes (#1245), which no
+    # schema declares and stage 6's date cells read.
+    assert set(ReformattedFields.__annotations__) - {LISTED_SPANS_KEY} <= set(
+        ExtractedFields.__annotations__)
+    assert LISTED_SPANS_KEY in ReformattedFields.__annotations__
+    assert LISTED_SPANS_KEY not in ExtractedFields.__annotations__
 
 
 def test_reformatted_field_record_shape_is_pinned():
@@ -1345,3 +1353,166 @@ def test_title_trailing_colon_and_leading_label_still_stripped():
     text = "Submitted: Fern Habitats: a review. 2022."
     updated, _ = apply_regex_post_processing(text, {"title": "Submitted: Fern Habitats:"}, "S1")
     assert updated["title"] == "Fern Habitats"
+
+
+# --- #1245: the spans a one-record entry's text lists -----------------------
+#
+# Stage 4 wrote separate years or terms as their min-max ("2003, 2007, 2013"
+# stored 2003-2013), or kept one span and dropped the rest. Invented text.
+
+def _listed(text, code="O", **fields):
+    """`fields` after `derive_listed_spans`, and what it reported."""
+    updated, reformatted = dict(fields), {}
+    derive_listed_spans(text, updated, code, reformatted)
+    return updated.get(LISTED_SPANS_KEY), reformatted
+
+
+@pytest.mark.parametrize("text, start, end, spans", [
+    ("Chair, Fern Society, 2003, 2007, 2013", "2003", "2013", ["2003", "2007", "2013"]),
+    ("Fern Society 1976-79, 1984-1990, 2001-2011", "1976", "2011",
+     ["1976-1979", "1984-1990", "2001-2011"]),
+    ("Glade Board, Fall 2003 and Spring 2013", "2003", "2013", ["2003", "2013"]),
+    ("Glade Board 2005-2008; 2015-present", "2005", "present", ["2005-2008", "2015-present"]),
+    ("Glade Board 2003, 2007, 2003, 2013", "2003-09", "2013-05", ["2003", "2007", "2013"]),
+    # A range, unlike a lone year, may be followed by a dash.
+    ("Glade Board 2003, 2009, 2011-2013 - Fern Society", "2003", "2013",
+     ["2003", "2009", "2011-2013"]),
+    # A month after a year ("2013-05") is that year, not a range back to 2005.
+    ("Glade Board 2013-05, 2016, 2019", "2013", "2019", ["2013", "2016", "2019"]),
+])
+def test_the_spans_a_record_is_the_min_max_of_are_listed(text, start, end, spans):
+    listed, reformatted = _listed(text, start_date=start, end_date=end)
+    assert listed == spans
+    assert reformatted[LISTED_SPANS_KEY] == {
+        "original": None, "reformatted": "; ".join(spans),
+        "reason": "Listed the separate spans the source gives in place of their min-max"}
+
+
+def test_the_spans_beside_the_one_a_record_kept_are_listed():
+    listed, reformatted = _listed("Fern Panel 1990-1995, 2001, 2004-2006", "P",
+                                  start_date="1990", end_date="1995")
+    assert listed == ["2001", "2004-2006"]
+    assert reformatted[LISTED_SPANS_KEY]["reason"] == (
+        "Kept the spans the source lists beside the record's own")
+    assert _listed("Fern Panel 1990-1995, 2001, 2004-2006", "P",
+                   start_date="2001")[0] == ["1990-1995", "2004-2006"]
+
+
+def test_a_record_dated_by_neither_the_min_max_nor_one_span_is_left_alone():
+    assert _listed("Fern Panel 2003, 2007, 2013", start_date="2003", end_date="2007") == (None, {})
+    assert _listed("Fern Panel 2003, 2007, 2013", start_date="2005", end_date="2013") == (None, {})
+
+
+@pytest.mark.parametrize("code", ["H", "B2", "I", "M2B", "C", "F1", "N3B", "N2", ""])
+def test_a_code_whose_date_cell_shows_no_further_span_is_left_alone(code):
+    assert _listed("Fern Award 2003, 2007, 2013", code,
+                   start_date="2003", end_date="2013") == (None, {})
+
+
+@pytest.mark.parametrize("text", [
+    "Fern Panel 2003-2008, 2009-2013",                  # the spans fill their min-max
+    "Fern Panel 2003-2013",                             # one span
+    "Fern Panel 2003 Glade Board 2013",                 # no list separator
+    "Chair 2003, Member 2007, Treasurer 2013",          # words between the spans
+    "Fern Panel 2001, 2007\u2013 Lecturer, Glade\t2012",  # a range wrapped across cells
+    "Fern Panel 2003, 2008, 2013 -",                    # a lone year opens a range
+    "",
+])
+def test_text_that_lists_no_separate_spans_leaves_the_record_alone(text):
+    start, end = ("2001", "2012") if "2001" in text else ("2003", "2013")
+    assert _listed(text, start_date=start, end_date=end) == (None, {})
+
+
+@pytest.mark.parametrize("extra", [
+    {"additional_periods": [{"start_date": "2007"}]},
+    {"additional_dates": "2007"},
+    {"additional_date_ranges": "2003; 2007; 2013"},
+    {"additional_period_start": "2007"},
+    {"additional_period_end": "2007"},
+    {"additional_info": "Also 2007"},
+])
+def test_a_record_that_keeps_a_further_span_already_is_left_alone(extra):
+    fields = {"start_date": "2003", "end_date": "2013", **extra}
+    listed, reformatted = _listed("Fern Panel 2003, 2007, 2013", **fields)
+    assert (listed, reformatted) == (extra.get(LISTED_SPANS_KEY), {})
+
+
+@pytest.mark.parametrize("blank", [None, "", [], {}])
+def test_an_empty_further_span_key_or_a_yearless_remark_holds_no_span(blank):
+    listed, _ = _listed("Fern Panel 2003, 2007, 2013", start_date="2003", end_date="2013",
+                        additional_periods=blank, additional_info="Elected by the members")
+    assert listed == ["2003", "2007", "2013"]
+
+
+@pytest.mark.parametrize("start, end", [
+    ("2013", "2003"),            # a list stored last-to-first
+    ("2013-09", "2013-02"),      # backwards within one year
+    ("Fall 2003", "2013"),       # a start this reads no date from
+    ("2003, 2013", ""),
+    (None, "2013"),
+    ("2003-13", "2013"),         # no month 13
+])
+def test_a_backwards_or_unread_stored_range_is_left_alone(start, end):
+    assert _listed("Fern Panel 2003, 2007, 2013", start_date=start, end_date=end) == (None, {})
+
+
+@pytest.mark.parametrize("text, found", [
+    ("2003, 2007, 2013", ((2003, 2013), 3)),
+    # A span written twice is one span.
+    ("2003, 2007, 2003, 2013", ((2003, 2013), 3)),
+    # A short span inside a longer one opens no gap.
+    ("2003-2010, 2005-2006, 2011-2013", None),
+    # Every gap must hold a list separator, not just one of them.
+    ("2003 Glade 2007, 2013", None),
+    ("2003, 2007 Glade 2013", None),
+])
+def test_span_counts_reading_of_separate_spans(text, found):
+    """The written-span parser span_count and `derive_listed_spans` share
+    (moved here from doctor/lints/extraction.py, #1245)."""
+    from unified_pipeline.stage4.coercion import _envelope_of_separate_spans
+
+    assert _envelope_of_separate_spans(text) == found
+
+
+@pytest.mark.parametrize("end, own", [
+    ("", (2003, 2003)), ("2003", (2003, 2003)), ("None", (2003, 2003)),
+    ("2007, 2013", (2003, 2003)), ("present", (2003, 10_000)), ("To Date", (2003, 10_000)),
+    ("2013-05-31", (2003, 2013)),
+])
+def test_the_stored_range_is_read_as_stage_6_reads_it(end, own):
+    from unified_pipeline.stage4.coercion import _stored_span
+    from unified_pipeline.stage6.formatting.dates import _span_years
+
+    assert _stored_span({"start_date": "2003", "end_date": end}) == own
+    assert _span_years("2003", end) == own
+
+
+def test_the_listed_span_vocabulary_matches_stage_6s():
+    # Hand-kept: stage 4 and stage 6 import nothing from each other. A test
+    # may import both, as test_date_range_taxonomy_codes_matches_schema_derived_codes
+    # does for DATE_RANGE_TAXONOMY_CODES.
+    from unified_pipeline.stage4 import coercion
+    from unified_pipeline.stage6.formatting import dates
+    from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES
+
+    assert LISTED_SPAN_CODES == dates.EXTRA_SPAN_CODES
+    assert not any(code.startswith("N") for code in LISTED_SPAN_CODES)
+    assert coercion._FURTHER_SPAN_KEYS == dates.EXTRA_SPAN_KEYS
+    assert LISTED_SPANS_KEY in dates.EXTRA_SPAN_LIST_KEYS
+    assert coercion._REMARK_KEY == dates.EXTRA_SPAN_PROSE_KEY
+    assert coercion._OPEN_END_VALUES == CURRENT_DATE_VALUES
+    assert coercion._SPAN_OPEN_END == dates._OPEN_END_YEAR
+
+
+@pytest.mark.parametrize("text, start, end, code, own_range, cell", [
+    ("Fern Society, 2003, 2007, 2013", "2003", "2013", "O", "2003-2013", "2003, 2007, 2013"),
+    ("Fern Panel 1990-1995, 2001", "1990", "1995", "P", "1990-1995", "1990-1995, 2001"),
+    ("Glade Board 2005-2008; 2015-present", "2005", "present", "Q3", "2005-Present",
+     "2005-2008, 2015-Present"),
+])
+def test_stage_6_shows_the_listed_spans_in_the_date_cell(text, start, end, code, own_range, cell):
+    from unified_pipeline.stage6.formatting.dates import with_extra_date_spans
+
+    fields = {"start_date": start, "end_date": end}
+    derive_listed_spans(text, fields, code, {})
+    assert with_extra_date_spans(own_range, fields, code) == cell

@@ -150,15 +150,16 @@ def _with_honors(degree: str, fields: Mapping) -> str:
     return f"{degree} ({honors})" if degree else honors
 
 
-# The degree's advisor, under the B1 schema's `advisor` or one of the two
+# The degree's advisor, under the B1 schema's `advisor` or one of the three
 # off-schema names stage 4 also gives it, each with the label the CV's own
 # line uses ("Major professor: ...", X6 RINASX 15 and EQADVR 15; "Mentor:
-# ...", CMTQDR 10; #1245). No column read any of them. First key with a
-# value wins.
+# ...", CMTQDR 10; "Thesis advisor: ...", web05 24 and web30 27; #1245). No
+# column read any of them. First key with a value wins.
 ADVISOR_LABELS: tuple[tuple[str, str], ...] = (
     ('advisor', 'Advisor'),
     ('major_professor', 'Major professor'),
     ('mentor', 'Mentor'),
+    ('thesis_advisor', 'Thesis advisor'),
 )
 ADVISOR_SEPARATOR = '; '
 

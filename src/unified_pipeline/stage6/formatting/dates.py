@@ -353,12 +353,14 @@ EXTRA_SPAN_PROSE_KEY = 'additional_info'
 
 # The codes whose date cell calls `with_extra_date_spans` (or, for K, its
 # `extra_date_spans` core): O (leadership.py), P (administrative_activities.py,
-# one record per entry), Q1 and Q2 (service.py), D1-D3 (positions.py, rows not
-# superseded), K1-K5 (teaching.py) and, through `further_date_spans`, R
-# (presentations.py). On any other code (H, say) no renderer reads the span
-# keys at all.
-EXTRA_SPAN_CODES = frozenset({'O', 'P', 'Q1', 'Q2', 'D1', 'D2', 'D3',
-                              'K1', 'K2', 'K3', 'K4', 'K5', 'R'})
+# one record per entry), Q1, Q2, Q3, Q4, Q4A, Q4B, Q4C and Q4D (service.py;
+# the last six since #1245), D1-D3 (positions.py, rows not superseded), K1-K5
+# (teaching.py) and, through `further_date_spans`, R (presentations.py). On
+# any other code (H, say) no renderer reads the span keys at all. Stage 4
+# writes a record's listed spans for these codes only
+# (`stage4.coercion.LISTED_SPAN_CODES`, a hand-kept copy a test pins equal).
+EXTRA_SPAN_CODES = frozenset({'O', 'P', 'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',
+                              'D1', 'D2', 'D3', 'K1', 'K2', 'K3', 'K4', 'K5', 'R'})
 
 # How the spans of one record are joined in its date cell: "2019-2020, 2021".
 DATE_SPAN_SEPARATOR = ', '
@@ -635,6 +637,14 @@ def _own_talk_dates(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
     return [own] if own else []
 
 
+def _talk_dates_are_its_range(fields: Mapping[str, Any]) -> bool:
+    """Whether a talk's own dates are its `start_date`-`end_date` range: no
+    other of `PRESENTATION_DATE_FIELDS` (`year`, `date`) holds a date, so
+    `_own_talk_dates` reads the range."""
+    return not any(_talk_date_field(fields, key) for key in PRESENTATION_DATE_FIELDS
+                   if key != RANGE_START_KEY)
+
+
 def presentation_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
     """The dates an invited talk's Dates cell prints, in order: its own
     (`_own_talk_dates`), then each further span stage 4 kept under an
@@ -643,7 +653,13 @@ def presentation_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> li
     with `DATE_SPAN_SEPARATOR`, and the #1205 sub-point pass counts them, so
     the count is of the dates the row prints. A talk whose dates are only
     under `additional_dates` prints them instead of an empty cell (X6 VPMMFM
-    531, #1245)."""
+    531, #1245). A talk dated by its range that is only the envelope of
+    those spans prints the spans in its place (`envelope_date_spans`), not
+    the range and then the spans (#1245, PBSGQZ 230.3)."""
+    if _talk_dates_are_its_range(fields):
+        envelope = envelope_date_spans(fields, taxonomy_code)
+        if envelope:
+            return envelope
     own = _own_talk_dates(fields, taxonomy_code)
     own_cell = DATE_SPAN_SEPARATOR.join(own)
     return [*own, *(span for span in further_date_spans(fields, taxonomy_code)

@@ -2128,6 +2128,139 @@ def test_an_object_sharing_schema_keys_is_the_parent_at_another_venue(monkeypatc
     assert "2017" in (second.get("date"), second.get("start_date"))
 
 
+# --- #1245: a one-record entry's listed spans --------------------------------
+
+def _items_reply(code_text: str, code: str, items: list[dict]):
+    entry = {"text": code_text, "taxonomy_code": code, "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, **item} for item in items]})
+    return entry, reply
+
+
+def test_the_spans_a_one_record_entry_lists_reach_its_fields(monkeypatch):
+    # The model stored three separate years as their min-max.
+    entry, reply = _items_reply("Chair, Fern Society, 2003, 2007, 2013", "O", [
+        {"organization": "Fern Society", "role": "Chair", "start_date": "2003", "end_date": "2013"}])
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    assert out["extracted_fields"]["additional_dates"] == ["2003", "2007", "2013"]
+    assert out["reformatted_fields"]["additional_dates"]["reformatted"] == "2003; 2007; 2013"
+    assert (out["extracted_fields"]["start_date"], out["extracted_fields"]["end_date"]) == (
+        "2003", "2013")
+
+
+def test_the_spans_reach_a_recovered_entry_too(monkeypatch):
+    entry = {"text": "Member, Glade Panel, 1990-1995, 2001, 2004-2006", "taxonomy_code": "P",
+             "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"recovered_entries": [{"entry_id": "0_0", "fields": {
+            "committee_name": "Glade Panel", "role": "Member",
+            "start_date": "1990", "end_date": "1995"}}]})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.attempt_llm_recovery([entry])["entries"]
+    assert out["llm_recovery_applied"] is True
+    assert out["extracted_fields"]["additional_dates"] == ["2001", "2004-2006"]
+
+
+def test_the_spans_of_a_several_record_entry_are_no_one_records(monkeypatch):
+    entry, reply = _items_reply("Chair, Fern Society, 2003, 2007, 2013; Glade Board 2009", "O", [
+        {"organization": "Fern Society", "role": "Chair", "start_date": "2003", "end_date": "2013"},
+        {"organization": "Glade Board", "start_date": "2009"}])
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    fields = out["extracted_fields"]
+    assert "additional_dates" not in fields
+    assert not any("additional_dates" in record for record in fields[STAGE4_RECORDS_KEY])
+
+
+# --- #1245: an honor's program line returned as a record of its own ----------
+
+_AWARD_LINE = "Fictional Agency Made-up Award for Pretend Outreach (2005)"
+_PROGRAM_LINE = "Imaginary Outreach Program \u2014 02/07/2005"
+_AWARD_ITEM = {"award_name": "Made-up Award for Pretend Outreach",
+               "granting_body": "Fictional Agency", "date": "2005"}
+_PROGRAM_ITEM = {"award_name": "Imaginary Outreach Program", "granting_body": None,
+                 "date": "2005-02-07"}
+
+
+def _h_extraction(monkeypatch, text, items, code="H"):
+    entry, reply = _items_reply(text, code, items)
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    return out
+
+
+def test_an_awards_program_line_record_folds_into_the_award(monkeypatch):
+    from unified_pipeline.stage6.sections.honors import parse_honor_entry
+
+    out = _h_extraction(monkeypatch, f"{_AWARD_LINE}\n{_PROGRAM_LINE}",
+                        [_AWARD_ITEM, _PROGRAM_ITEM])
+
+    assert out["extracted_fields"] == _AWARD_ITEM
+    assert out[STAGE4_RECORDS_RETURNED_KEY] == 2  # the model returned two items
+    (row,) = parse_honor_entry({**out, "taxonomy_code": "H"})
+    assert (row.award, row.organization, row.date) == (
+        "Made-up Award for Pretend Outreach - Imaginary Outreach Program",
+        "Fictional Agency", "2005")
+
+
+@pytest.mark.parametrize("text, items, code", [
+    # The program record names a granting body: it is an award of its own.
+    (f"{_AWARD_LINE}\n{_PROGRAM_LINE}", [_AWARD_ITEM, {**_PROGRAM_ITEM, "granting_body": "Glade"}], "H"),
+    # The second line is not a dated program line, or not only one.
+    (f"{_AWARD_LINE}\nImaginary Outreach Program, 2005", [_AWARD_ITEM, _PROGRAM_ITEM], "H"),
+    (f"{_AWARD_LINE}\n{_PROGRAM_LINE} (renewed)", [_AWARD_ITEM, _PROGRAM_ITEM], "H"),
+    # The program record names something else.
+    (f"{_AWARD_LINE}\n{_PROGRAM_LINE}", [_AWARD_ITEM, {**_PROGRAM_ITEM, "award_name": "Heron Prize"}],
+     "H"),
+    # The first line does not name the first record's award.
+    (f"Fictional Agency Heron Medal (2005)\n{_PROGRAM_LINE}", [_AWARD_ITEM, _PROGRAM_ITEM], "H"),
+    # The program line names the award too.
+    (f"{_AWARD_LINE}\nMade-up Award for Pretend Outreach Program \u2014 02/07/2005",
+     [_AWARD_ITEM, {**_PROGRAM_ITEM, "award_name": "Made-up Award for Pretend Outreach Program"}],
+     "H"),
+    # A third line, or a third record.
+    (f"{_AWARD_LINE}\n{_PROGRAM_LINE}\nHeron Prize 2007", [_AWARD_ITEM, _PROGRAM_ITEM], "H"),
+    (f"{_AWARD_LINE}\n{_PROGRAM_LINE}", [_AWARD_ITEM, _PROGRAM_ITEM, {"award_name": "Heron Prize"}],
+     "H"),
+    # The same lines under another code.
+    (f"{_AWARD_LINE}\n{_PROGRAM_LINE}", [_AWARD_ITEM, _PROGRAM_ITEM], "B2"),
+])
+def test_two_records_that_are_not_an_award_over_its_program_stay_two(monkeypatch, text, items, code):
+    out = _h_extraction(monkeypatch, text, items, code)
+    assert len(out["extracted_fields"][STAGE4_RECORDS_KEY]) == len(items)
+
+
+def test_a_program_name_is_matched_whatever_its_case_and_spacing():
+    records = [_AWARD_ITEM, {**_PROGRAM_ITEM, "award_name": "imaginary  outreach PROGRAM"}]
+    assert extraction._is_award_over_program_line(f"{_AWARD_LINE}\n{_PROGRAM_LINE}", records, "H")
+    # Blank lines are no lines.
+    assert extraction._is_award_over_program_line(
+        f"{_AWARD_LINE}\n \n{_PROGRAM_LINE}\n", [_AWARD_ITEM, _PROGRAM_ITEM], "H")
+
+
+@pytest.mark.parametrize("records", [
+    [{**_AWARD_ITEM, "award_name": None}, _PROGRAM_ITEM],
+    [_AWARD_ITEM, {**_PROGRAM_ITEM, "award_name": None}],
+    [_AWARD_ITEM, {**_PROGRAM_ITEM, "award_name": ["Imaginary Outreach Program"]}],
+])
+def test_an_award_or_program_with_no_name_is_no_award_over_its_program(records):
+    assert not extraction._is_award_over_program_line(
+        f"{_AWARD_LINE}\n{_PROGRAM_LINE}", records, "H")
+
+
+def test_the_folded_award_keeps_its_own_reformatted_fields(monkeypatch):
+    # The program record's date repair is not the award's.
+    out = _h_extraction(monkeypatch, f"{_AWARD_LINE}\n{_PROGRAM_LINE}",
+                        [_AWARD_ITEM, {**_PROGRAM_ITEM, "date": "1999-02-07"}])
+    assert out["extracted_fields"] == _AWARD_ITEM
+    assert "reformatted_fields" not in out
+
+
 def test_other_offschema_values_are_left_as_they_were(monkeypatch):
     # A one-fact key, an object sharing no schema key and a record list are
     # not a second record here: a list is fan-out's to split (#1187).

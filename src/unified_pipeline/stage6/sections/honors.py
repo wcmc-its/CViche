@@ -99,6 +99,11 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from unified_pipeline.core.honor_lines import (
+    AWARD_WORD_RE,
+    PROGRAM_LINE_RE,
+    names_award,
+)
 from unified_pipeline.core.render_check import entry_lines
 
 from ..fan_out import H_DATE_LIST_KEYS, fallback_text as record_fallback_text, is_split_record
@@ -739,25 +744,6 @@ def _start_years(text: str) -> set[str]:
     return {match.group(1) for match in _TEXT_DATE_RE.finditer(text)}
 
 
-# A word of an award name, for comparing one with a line of the entry's
-# text regardless of case, spacing, quote style or punctuation.
-_WORD_RE = re.compile(r'[a-z0-9]+')
-
-
-def _words(text: str) -> set[str]:
-    return set(_WORD_RE.findall(text.casefold()))
-
-
-def _names_award(line: str, award_name: str) -> bool:
-    """Whether `line` names stage 4's award: every word of `award_name` is
-    in it. On words rather than a substring, because a curly apostrophe or
-    a double space in the source hid the award's own line from a substring
-    test against stage 4's straight-quoted, single-spaced name (ZDCXIV 282,
-    VYICGW 41)."""
-    award_words = _words(award_name)
-    return bool(award_words) and award_words <= _words(line)
-
-
 def _has_date_cell(line: str) -> bool:
     """Whether `_parse_honor_lines` reads a date cell in this one part: a
     bare year, a tab-joined row whose last cell is a bare year, or a '|' row
@@ -788,7 +774,7 @@ def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
     - a list that names no date has nothing to tie a line to the record;
     - a list whose only date is on the line naming stage 4's award is a list
       in which stage 4 extracted that one award (RKJGSG 63.1 in the 61-CV
-      farm: twelve awards, the last alone dated). `_names_award` is on
+      farm: twelve awards, the last alone dated). `names_award` is on
       words, so a curly quote or a double space in the source does not hide
       the award's line and collapse such a list;
     - a list with a line the delimiter contract reads as a date cell
@@ -810,29 +796,22 @@ def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
     text_years = _start_years('\n'.join(lines))
     if not text_years or not text_years <= _start_years(date):
         return False
-    return not any(_names_award(line, award_name) and _start_years(line)
+    return not any(names_award(line, award_name) and _start_years(line)
                    for line in lines)
 
 
 # What joins an award's name and the program line it was given to, the
-# shape stage 4 itself writes when it keeps both ("Award - Program").
+# shape stage 4 itself writes when it keeps both ("Award - Program"). The
+# program line's one shape is `PROGRAM_LINE_RE` (core/honor_lines.py), which
+# stage 4 reads too when it folds a model's record of that line into the
+# award (#1245, UNKNBU 286).
 _PROGRAM_LINE_JOIN = ' - '
-# The one shape a program line may have (PR #1847 review round 4): a name
-# with no comma and no digit that ends in a program noun, a spaced dash, and
-# a date to the day ("SHOUT (Student-Driven HCV Outreach) Program —
-# 02/07/2005", X6 KJJVVO 286). An allow-list: a comma, a month-only date, a
-# year, parentheses around the date or no dash all leave the line its own
-# honor, as on dev.
-_PROGRAM_LINE_RE = re.compile(
-    r'(?P<program>[a-z][^,\d]*?\b(?:program|programme|project|initiative))'
-    r'\s+[–—-]\s+\d{1,2}/\d{1,2}/(?:19|20)\d{2}',
-    re.IGNORECASE)
 
 
 def _names_any_award(line: str) -> bool:
     """Whether any word of `line` is an award noun or an award's own
     wording ("Award", "Prize", "Scholarship", "Finalist", ...)."""
-    return any(_ends_in_award_noun(word) for word in _WORD_RE.findall(line.casefold()))
+    return any(_ends_in_award_noun(word) for word in AWARD_WORD_RE.findall(line.casefold()))
 
 
 def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
@@ -846,7 +825,7 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
     reads the entry as a list. The line is the award's only when all of
     these hold: exactly one of the two lines names stage 4's award and
     neither is a date cell; the other has exactly the program-line shape
-    (`_PROGRAM_LINE_RE`), names no award noun and is not the granting body;
+    (`PROGRAM_LINE_RE`), names no award noun and is not the granting body;
     the award's line is not itself dated to the month or day; every date
     either line names is one of the record's own; and the joined name does
     not split again on a comma into an award and an organization.
@@ -861,10 +840,10 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
         return ''
     # The award line comes first; a program line above the award is its own
     # honor, as on dev (PR #1847 review round 4).
-    if [_names_award(line, award_name) for line in lines] != [True, False]:
+    if [names_award(line, award_name) for line in lines] != [True, False]:
         return ''
     award_line, other = lines
-    match = _PROGRAM_LINE_RE.fullmatch(other.strip())
+    match = PROGRAM_LINE_RE.fullmatch(other.strip())
     if not match or _names_any_award(other):
         return ''
     if _TRAILING_NUMERIC_DATE_RE.search(award_line):
@@ -916,7 +895,7 @@ def _records_for_award_list(awards: Sequence[HonorRecord],
         # name, but a line's own date beats stage 4's one date: an award won
         # in three years is written as three lines, and all three rendered
         # stage 4's year (ZDCXIV-03).
-        if _names_award(parsed.award, award_name):
+        if names_award(parsed.award, award_name):
             own_date = parsed.date or _line_date(parsed.award)
             records.append(HonorRecord(
                 award_name,

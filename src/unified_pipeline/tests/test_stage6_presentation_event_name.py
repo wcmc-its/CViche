@@ -370,6 +370,14 @@ def test_a_string_none_end_date_is_ignored():
     assert _rendered_date(start_date="2006", end_date="None") == "2006"
 
 
+def test_a_talk_range_that_only_spans_its_listed_years_renders_the_years():
+    """#1245 (PBSGQZ 230.3): stage 4 kept the years a talk was given under
+    `additional_dates` and their min-max as its range; the Dates cell showed
+    the range and then the years."""
+    assert _rendered_date(start_date="2003", end_date="2013",
+                          additional_dates=["2003", "2007", "2013"]) == "2003, 2007, 2013"
+
+
 def test_a_dict_date_does_not_take_a_second_end_date():
     assert _rendered_date(date={"start_date": "2021-12-30", "end_date": "2022-01-02"},
                           end_date="2022-01-02") == "2021-2022"

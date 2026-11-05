@@ -986,10 +986,14 @@ def _other_service_dates_text(fields: dict, taxonomy_code: str,
     """Coerce `start_date`/`end_date` before `format_date_range` for an
     Other Service row (#812 round 2; see `_service_boards_dates_text` above
     for the defect this guards and for `source_text` -- a pure move, round 3,
-    verify-D-812-R2 finding 2, no formula changed)."""
+    verify-D-812-R2 finding 2, no formula changed). The record's further
+    spans follow its own range, or replace a range that is only their
+    envelope (`with_extra_date_spans`), as on a Q2 row (#1245)."""
     start_date = _cell_text(fields.get('start_date', ''))
     end_date = _cell_text(fields.get('end_date', ''))
-    return format_date_range(start_date, end_date, taxonomy_code, source_text)
+    return with_extra_date_spans(
+        format_date_range(start_date, end_date, taxonomy_code, source_text),
+        fields, taxonomy_code)
 
 
 class ServiceSection:
@@ -1426,8 +1430,10 @@ class ServiceSection:
             # structured value's Python repr into the cell).
             start_date = _cell_text(fields.get('start_date', '') or fields.get('year', ''))
             end_date = _cell_text(fields.get('end_date', ''))
-            dates = format_date_range(start_date, end_date, taxonomy_code,
-                                      entry.get('text', ''))
+            # The record's further spans, as on every Q row (#1245).
+            dates = with_extra_date_spans(
+                format_date_range(start_date, end_date, taxonomy_code, entry.get('text', '')),
+                fields, taxonomy_code)
 
             if not journal:
                 # Parse from raw text, but clean up common patterns

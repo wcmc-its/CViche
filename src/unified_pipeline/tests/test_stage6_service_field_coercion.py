@@ -1128,6 +1128,30 @@ def test_q1_further_span_follows_the_first(tmp_path):
     rows = list(_rows_containing(_render(tmp_path, entries), "Fictional Org Five"))
     assert len(rows) == 1
     assert rows[0][2] == "2001-2003, 2007-2009"
+
+
+@pytest.mark.parametrize("code, fields, cell", [
+    ("Q3", {"agency": "Fictional Agency Nine"}, 2),
+    ("Q4B", {"journal_name": "Fictional Agency Nine Review", "role": "Associate Editor"}, 1),
+    ("Q4C", {"journal_name": "Fictional Agency Nine Journal", "role": "Editorial Board Member"}, 1),
+    ("Q4D", {"organization": "Fictional Agency Nine Letters"}, 1),
+])
+@pytest.mark.parametrize("dates, listed, shown", [
+    # The range is only the min-max of the listed years: they replace it.
+    (("2003", "2013"), ["2003", "2007", "2013"], "2003, 2007, 2013"),
+    # The range is one listed span: the others follow it.
+    (("1990", "1995"), ["2001", "2004-2006"], "1990-1995, 2001, 2004-2006"),
+])
+def test_a_q3_to_q4d_row_shows_its_further_spans(tmp_path, code, fields, cell, dates, listed, shown):
+    """#1245 (MQJAVH 294): stage 4's spans under `additional_dates` reach the
+    Q3, Q4B, Q4C and Q4D date cells, as they reach Q1's and Q2's; those
+    cells read none before."""
+    entries = [_entry("A", name="Jane Q. Public, MD"),
+               _entry(code, start_date=dates[0], end_date=dates[1], additional_dates=listed,
+                      **fields)]
+    rows = list(_rows_containing(_render(tmp_path, entries), "Fictional Agency Nine"))
+    assert len(rows) == 1
+    assert rows[0][cell] == shown
 # --- EBYSBC E14 (ZGBCIT-07): Q4B `section` had no slot ------------------------
 
 def test_q4b_section_follows_the_journal():
