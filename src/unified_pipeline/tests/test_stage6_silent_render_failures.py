@@ -806,6 +806,14 @@ def test_training_grant_rows_none_values_are_safe():
     ]
 
 
+def test_training_grant_rows_render_a_stated_length_when_there_are_no_dates():
+    """N2 shares the grant table's fallback to a stated length (#2094)."""
+    text = 'Invented Training Grant\nDuration of support: | 2 years'
+    assert _training_grant_rows({'agency': 'Invented Fund'}, text)[2] == (
+        'Duration of support (mm/yyyy-mm/yyyy):', '2 years')
+    assert _training_grant_rows({'start_date': '2018', 'end_date': '2021'}, text)[2][1] == '2018-2021'
+
+
 def test_training_grant_is_sparse_true_when_no_identifying_field():
     assert _training_grant_is_sparse({}) is True
     assert _training_grant_is_sparse({'role': 'Mentor'}) is True
@@ -997,6 +1005,22 @@ def test_n2_foreign_table_after_heading_survives_the_shape_guard():
     tables_by_label = {t.rows[0].cells[0].text: t for t in gen.doc.tables}
     assert 'Something else:' in tables_by_label
     assert len(tables_by_label['Something else:'].rows) == 5
+
+
+def test_n2_table_renders_the_duration_line_span_from_the_entry_text():
+    """The N2 table writer hands the entry's text to the Duration fallback
+    (#2094): no dates, no `duration` key, only a span on the entry's own
+    Duration line, and the rendered cell still reads that span."""
+    gen = _new_generator()
+    gen.doc.add_paragraph(N2_HEADING)
+    entry = _n2(agency='Invented Training Fund',
+                text='Invented Training Grant\nDuration of support: | 3 years')
+
+    gen._fill_mentoring({'N2': [entry]})
+
+    (table,) = gen.doc.tables
+    assert [(r.cells[0].text, r.cells[1].text) for r in table.rows][2] == (
+        'Duration of support (mm/yyyy-mm/yyyy):', '3 years')
 
 
 def test_n2_real_template_no_entries_leaves_the_region_unchanged():

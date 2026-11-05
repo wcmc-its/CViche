@@ -2283,6 +2283,40 @@ def test_section_lost_reads_a_licence_by_its_rendered_row_534():
     assert lint_section_lost(_body_licence_stage4(), blocks) == []
 
 
+_FUSED_LICENCES = (("Quillfeather", "11111", "2031-01-02"), ("Marbleton", "A 22222", "2032-03-04"))
+
+
+def _fused_licence_stage4():
+    return {"entries": [{"taxonomy_code": "F1", "text": f"{st}\t{n}\t{d}",
+                         "extracted_fields": {"state_country": st, "license_number": n, "issue_date": d}}
+                        for st, n, d in _FUSED_LICENCES]}
+
+
+_REJECTED_F1 = {"warnings": [{"check": "fan_out_record_list_rejected", "code": "F1"}]}
+
+
+def test_section_lost_reads_licences_fused_in_one_row_that_the_sidecar_reports():
+    """Held-out ZXVGAC shape: stage 6 did not fan the licence list out
+    (`fan_out_record_list_rejected`), so every licence renders in one State
+    cell, cells run together and dates as the source writes them."""
+    fused = "Quillfeather111111/2/2031MarbletonA 222223/4/2032"
+    blocks = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION", ["Licensure:", fused]))
+    assert [f["message"][:3] for f in lint_section_lost(_fused_licence_stage4(), blocks)] == ["F1:"]
+    assert lint_section_lost(_fused_licence_stage4(), blocks, _REJECTED_F1) == []
+    # the sidecar's warning about another code excuses nothing
+    other = {"warnings": [{"check": "fan_out_record_list_rejected", "code": "B1"}]}
+    assert [f["message"][:3] for f in lint_section_lost(_fused_licence_stage4(), blocks, other)] == ["F1:"]
+
+
+def test_section_lost_reads_a_fused_row_missing_a_licence_as_lost():
+    """Each licence's state and number must be together in one line: one
+    licence's number absent, or a state alone, is not the record."""
+    for shown in ("Quillfeather11111Marbleton", "Quillfeather Marbleton"):
+        blocks = _page(_FILLER, ("LICENSURE, BOARD CERTIFICATION", ["Licensure:", shown]))
+        assert [f["message"][:3] for f in lint_section_lost(_fused_licence_stage4(), blocks,
+                                                             _REJECTED_F1)] == ["F1:"]
+
+
 def test_section_lost_still_reads_an_empty_licence_table_as_lost_534():
     # The rows print a word or two each (a state, often the CV's own), too few for
     # the share test to judge; the rows are judged instead, so a table left at N/A
@@ -2805,6 +2839,26 @@ def test_534_row_receipt_lint_reports_a_lost_kept_twin_whose_text_dedup_dropped(
                             "kept_text": "Pretend Mentee M.D.", "code": "N3B"}]}
     finding, = lint_renderer_row_receipts(report)
     assert finding["evidence"] == ["N3B 7: Pretend Mentee M.D."]
+
+
+def test_534_row_receipt_lint_reads_a_split_parent_by_its_children():
+    """Held-out 9TUVGW shape: stage 2 split entry 60 into rows 60.0 and 60.1,
+    each receipted (set aside); the parent, with no row of its own, is no
+    loss. A parent with a lost child, or with no children, still is."""
+    def stage4(*idxs):
+        return {"entries": [{"element_idx_start": idx, "taxonomy_code": "Q1", "text": "x"}
+                            for idx in idxs]}
+    report = {"warnings": [], "row_receipts": [
+        _receipt("service", [_lost(60, "Pretend Society, Member | Pretend Board, Chair")])]}
+    assert lint_renderer_row_receipts(report, stage4(60, "60.0", "60.1")) == []
+    assert len(lint_renderer_row_receipts(report, stage4(60))) == 1
+    assert len(lint_renderer_row_receipts(report)) == 1
+    with_lost_child = {"warnings": [], "row_receipts": [
+        _receipt("service", [_lost(60, "Pretend Society, Member | Pretend Board, Chair"),
+                             _lost("60.1", "Pretend Board, Chair")])]}
+    finding, = lint_renderer_row_receipts(with_lost_child, stage4(60, "60.0", "60.1"))
+    assert finding["evidence"] == ["Q1 60: Pretend Society, Member | Pretend Board, Chair",
+                                   "Q1 60.1: Pretend Board, Chair"]
 
 
 def test_stage6_warnings_reemits_appendix_diversion_with_code_and_count():
@@ -10361,6 +10415,37 @@ def test_licensure_row_not_licence_reports_a_certification_in_honors():
 def test_licensure_row_not_licence_is_quiet_on_an_award_certificate(name):
     """A certificate a body awards is an honor."""
     assert _lrnl_hits(_HONORS_HEADER, [name, "Example Society", "2019"]) == []
+
+
+def _empty_record_stage4(text, code="F2", **fields):
+    blank = {"certifying_board": None, "certificate_number": None, "year_certified": None}
+    return {"entries": [{"element_idx_start": "79.0", "taxonomy_code": code, "text": text,
+                         "extracted_fields": {**blank, **fields}}]}
+
+
+def test_licensure_row_not_licence_skips_a_row_of_an_all_empty_stage4_record():
+    """Held-out ZXVGAC shape: a source template's header row, which stage 4
+    extracted as a record with every field null, renders its labels as Board
+    rows; a label row holds no credential of the owner's."""
+    rows = [["Certificate #", "", ""], ["Full Name of Board", "", ""]]
+    stage4 = _empty_record_stage4("Full Name of Board | Certificate # | Date")
+    assert len(lint_licensure_row_not_licence([[_BOARD_HEADER, *rows]])) == 1
+    assert lint_licensure_row_not_licence([[_BOARD_HEADER, *rows]], stage4) == []
+
+
+def test_licensure_row_not_licence_keeps_a_row_the_empty_record_does_not_cover():
+    """Only a row made of the empty record's own cells is skipped: a record
+    with any field set, a one-cell record (a line stage 4 extracted nothing
+    from), and a row with another cell beside the label still read."""
+    rows = [["Certificate #", "", ""]]
+    header_text = "Full Name of Board | Certificate # | Date"
+    filled = _empty_record_stage4(header_text, certifying_board="Example Board")
+    assert len(lint_licensure_row_not_licence([[_BOARD_HEADER, *rows]], filled)) == 1
+    one_cell = _empty_record_stage4("Certificate #")
+    assert len(lint_licensure_row_not_licence([[_BOARD_HEADER, *rows]], one_cell)) == 1
+    widened = [["Certificate #", "Example Course Certificate", ""]]
+    assert len(lint_licensure_row_not_licence([[_BOARD_HEADER, *widened]],
+                                              _empty_record_stage4(header_text))) == 1
 
 
 def test_licensure_row_not_licence_reads_no_other_table():

@@ -4323,6 +4323,9 @@ class _EntryFacts(NamedTuple):
     code: str
     text: str
     tables: list[dict[str, str]]
+    #: Per table, the fewest months its stage-4 record states the grant
+    #: runs (`_stage4_span_months`), or None.
+    stage4_months: list[int | None]
 
 
 def _amount_fact(match: re.Match[str]) -> GrantFact:
@@ -4488,11 +4491,13 @@ def _grant_fact_entries(stage4: dict, table_rows: list[list[list[str]]]
     tables = _grant_tables(table_rows)
     rendered = fan_out_multi_record_entries(entries, FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
     owned: dict[object, list[dict[str, str]]] = {}
+    months: dict[object, list[int | None]] = {}
     unmatched = []
     for (_, cells), entry in zip(tables, _table_producers(rendered, [cells for _, cells in tables]),
                                  strict=True):
         if entry is not None:
             owned.setdefault(entry.get("element_idx_start"), []).append(cells)
+            months.setdefault(entry.get("element_idx_start"), []).append(_stage4_span_months(entry))
         else:
             unmatched.append(cells)
     texts: dict[object, list[str]] = {}
@@ -4501,7 +4506,8 @@ def _grant_fact_entries(stage4: dict, table_rows: list[list[list[str]]]
         idx = entry.get("element_idx_start")
         texts.setdefault(idx, []).append(str(entry.get("text") or ""))
         codes.setdefault(idx, str(entry.get("taxonomy_code")))
-    return ([_EntryFacts(idx, codes[idx], "\n".join(dict.fromkeys(parts)), owned.get(idx, []))
+    return ([_EntryFacts(idx, codes[idx], "\n".join(dict.fromkeys(parts)), owned.get(idx, []),
+                         months.get(idx, []))
              for idx, parts in texts.items()], unmatched)
 
 
@@ -4552,6 +4558,21 @@ ONE_BUDGET_YEAR_MAX_MONTHS = 13
 _DURATION_SPAN_RE = re.compile(
     r"(?:(?P<m1>\d{1,2})/)?(?P<y1>\d{4}|\d{2})\s*[-–]\s*(?:(?P<m2>\d{1,2})/)?(?P<y2>\d{4}|\d{2})")
 _DURATION_YEAR_RE = re.compile(r"\d{4}")
+#: A stage-4 date: "2023-11-07", "2023-11", "11/2023", "2023".
+_STAGE4_DATE_RE = re.compile(r"(?:(?P<m1>\d{1,2})/)?(?P<y>(?:19|20)\d\d)(?:-(?P<m2>\d{1,2})\b)?")
+#: A grant's length stated after a duration label: "Duration of support: |
+#: 1 year", "Duration: 6 months".
+_STATED_LENGTH_RE = re.compile(
+    r"\bduration\b[^:\n]{0,30}:[\s|]*(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight"
+    r"|nine|ten|eleven|twelve)\s*(?P<unit>years?|yrs?|months?|mos?)\b", re.IGNORECASE)
+_NUMBER_WORDS = MappingProxyType({word: at for at, word in enumerate(
+    ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+     "twelve"), start=1)})
+#: A rendered Duration that is a length of time, not dates: "1 year",
+#: "6 months" (#2094).
+_DURATION_LENGTH_RE = re.compile(
+    r"(?P<n>\d+(?:\.\d+)?)[\s-]*(?:(?P<years>years?|yrs?\.?)|months?|mos?\.?)", re.IGNORECASE)
+MONTHS_PER_YEAR = 12
 
 
 class _LabelledAmount(NamedTuple):
@@ -4615,10 +4636,15 @@ def _labelled_amounts(text: str) -> list[_LabelledAmount]:
 def _shortest_span_months(duration: str) -> int | None:
     """The fewest months a rendered "Duration of support:" can span: a year
     with no month starts in December or ends in January ("2017-2018" is 2),
-    and a year alone is 1. None for an open or start-only duration."""
+    and a year alone is 1; a length of time is its months ("1 year" is 12).
+    None for an open or start-only duration."""
     duration = duration.strip()
     if _DURATION_YEAR_RE.fullmatch(duration):
         return 1
+    length = _DURATION_LENGTH_RE.fullmatch(duration)
+    if length:
+        months = round(float(length["n"]) * (MONTHS_PER_YEAR if length["years"] else 1))
+        return months if months > 0 else None
     span = _DURATION_SPAN_RE.fullmatch(duration)
     if not span:
         return None
@@ -4626,6 +4652,35 @@ def _shortest_span_months(duration: str) -> int | None:
     end = int(span["y2"]) if len(span["y2"]) == 4 else year_at_or_after(span["y2"], start)
     months = (end - start) * 12 + int(span["m2"] or 1) - int(span["m1"] or 12) + 1
     return months if months > 0 else None
+
+
+def _stage4_date(value: object) -> str | None:
+    """A stage-4 date field as a rendered duration writes it, "m/yyyy" or
+    "yyyy" ("2023-11-07" -> "11/2023"); None for a value with no year."""
+    match = _STAGE4_DATE_RE.search(str(value or ""))
+    if not match:
+        return None
+    month = match["m1"] or match["m2"]
+    return f"{int(month)}/{match['y']}" if month else match["y"]
+
+
+def _stage4_span_months(record: Mapping) -> int | None:
+    """The fewest months a grant's stage-4 record states it runs: from its
+    start and end dates as `_shortest_span_months` reads a rendered span,
+    else from a stated length after a duration label in its text ("Duration
+    of support: 1 year"), which stage 6 renders blank (MQZMMA, held-out
+    replay 2026-11-05). None when it states neither."""
+    fields = record.get("extracted_fields")
+    fields = fields if isinstance(fields, Mapping) else {}
+    start, end = _stage4_date(fields.get("start_date")), _stage4_date(fields.get("end_date"))
+    if start and end:
+        return _shortest_span_months(f"{start}-{end}")
+    stated = _STATED_LENGTH_RE.search(str(record.get("text") or ""))
+    if not stated:
+        return None
+    count = stated["count"].lower()
+    count_value = int(count) if count.isdigit() else _NUMBER_WORDS[count]
+    return count_value * (12 if stated["unit"].lower().startswith("y") else 1)
 
 
 def _reads_per_year(label: str, multi_year: bool) -> bool:
@@ -4666,11 +4721,13 @@ def _wrong_slot_row(value: str, stated: list[_LabelledAmount], multi_year: bool,
 def _wrong_slots(entry: _EntryFacts) -> dict[str, list[GrantFact]]:
     """wrong_slot's amounts on ``entry``'s rendered tables, per costs row
     label. A table whose duration is one budget year is skipped: its yearly
-    figure is also its whole award."""
+    figure is also its whole award. A table whose Duration renders blank is
+    read by its stage-4 record's (`_stage4_span_months`)."""
     stated = _labelled_amounts(entry.text)
     found: dict[str, list[GrantFact]] = {}
-    for cells in entry.tables:
-        months = _shortest_span_months(cells.get(DURATION_LABEL, ""))
+    for cells, stage4_months in zip(entry.tables, entry.stage4_months, strict=True):
+        duration = cells.get(DURATION_LABEL, "")
+        months = _shortest_span_months(duration) if duration.strip() else stage4_months
         if months is not None and months <= ONE_BUDGET_YEAR_MAX_MONTHS:
             continue
         multi_year = months is not None and months > ONE_BUDGET_YEAR_MAX_MONTHS

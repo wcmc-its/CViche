@@ -438,6 +438,26 @@ _BIRTH_PLACE_SEPARATOR = r"(?: [ \t]* [:\-–—] [ \t]* | \t [ \t]* | [ ]{2,} )
 _BARE_BIRTH_PLACE_SHAPE = (_FRAGMENT_INITIAL + r"(?: [•·*–—-] [ \t]* )? birth "
                            + _BIRTH_PLACE_SEPARATOR + _BIRTH_PLACE_VALUE)
 
+# #2061 (FBNZIP): "Place of birth <city>" -- the place label with no colon, the
+# value set off by a single space (a two-column table flattened to one line),
+# matched no row: the label row above needs a colon. Unlike a bare "Birth",
+# the label itself names a place of birth, so one place part is enough
+# ("<City>"), and lowercase name particles ("Rio de <X>") may join its
+# tokens. The value must still be the WHOLE fragment and place-shaped, so a
+# fragment-initial title that opens with the label and goes on in prose
+# ("Place of birth effects on ...", "Birthplace diversity and ...") opens
+# nothing. Inside the value only spaces join tokens, never a tab: a tab
+# opens the next cell ("<City><tab>Citizenship <X>") and that cell is kept.
+_PLACE_PARTICLE = (r"(?-i: d[aeiou] | d[eo]s | del | della | di | du | la | le"
+                   r"     | van | von | der | upon | sur | am | an )")
+_COLONLESS_PLACE_PART = (_PLACE_TOKEN + r"(?: [ ]{1,2} (?: " + _PLACE_PARTICLE + r" [ ]{1,2} )? "
+                         + _PLACE_TOKEN + r"){0,%d}" % _PLACE_PART_MAX_EXTRA_TOKENS)
+_COLONLESS_BIRTH_PLACE_VALUE = (_COLONLESS_PLACE_PART + r"(?: [ ]? , [ ]{0,2} " + _COLONLESS_PLACE_PART
+                                + r"){0,%d}" % _PLACE_MAX_COMMAS + _FRAGMENT_END_AHEAD)
+_COLONLESS_BIRTH_PLACE_SHAPE = (
+    _FRAGMENT_INITIAL + r"(?: [•·*–—-] [ \t]* )? (?: place [ \t]+ of [ \t]+ birth | birth [ \t-]? place )"
+    + r"(?: [ \t]* [-–—] [ \t]* | [ \t]+ )" + _COLONLESS_BIRTH_PLACE_VALUE)
+
 #: #2061 (HTGWYH): a cell that is wholly a person's name, the shape a spouse's
 #: name takes in the cell after "Marital Status: <status>" ("Marital Status:
 #: Married, <year>; <first> <initial>. <last>"). A middle initial ("A.") is a
@@ -702,6 +722,10 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # value search reads a place.
     WithholdRule(CAT_PLACE_OF_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_BARE_BIRTH_PLACE_SHAPE, render_only=True),
+    # #2061 (FBNZIP): "Place of birth <city>" with no colon (see
+    # `_COLONLESS_BIRTH_PLACE_SHAPE`). Same scope and span as the row above.
+    WithholdRule(CAT_PLACE_OF_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_COLONLESS_BIRTH_PLACE_SHAPE, render_only=True),
     # #1223 (EBYSBC): "Married: <name>" and "Grandchildren: <names>" (see
     # `_FAMILY_SHAPE_STEMS` for why these are shapes). Render-time only, like
     # the family label rows: the span runs to the next hard delimiter.

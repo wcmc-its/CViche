@@ -338,8 +338,10 @@ def _other_series_member(dropped_text: str, kept_text: str) -> bool:
 # year (#867).
 _NUMERIC_MONTH_DATE_RE = re.compile(
     r'(?<![\d/.])\d{1,2}/(?:\d{1,2}/(?:\d{4}|\d{2})|\d{4})(?![\d/])')
+# The day may stand against its comma or the comma against the year, as a
+# typed CV has them ("May 6,2029", "April 8 ,2029": LTTYWI 64, 65).
 _NAMED_MONTH_DATE_RE = re.compile(
-    r'\b([a-z]{3,9})\.?\s+(?:(\d{1,2})(?:st|nd|rd|th)?,?\s+)?((?:19|20)\d{2})\b',
+    r'\b([a-z]{3,9})\.?\s+(?:(\d{1,2})(?:st|nd|rd|th)?(?:\s*,\s*|\s+))?((?:19|20)\d{2})\b',
     re.IGNORECASE)
 _DAYS_IN_LONGEST_MONTH = 31
 # What joins the two ends of a range, and an open end after it.
@@ -411,7 +413,10 @@ def _month_spans_overlap(span: tuple[_MonthDate, _MonthDate | None],
 # award: a degree's "Class of" year is its date. And only when the kept text
 # states a year outside its class labels: when the class year is its one year,
 # it dates the award ("Gizmo Honor Society, Class of 2031" beside "Gizmo Honor
-# Society, 2031" is one honor).
+# Society, 2031" is one honor). The same reading makes an award that names no
+# class, in the same list, another award than one of a class in the same year
+# (#666, LTTYWI 262: "Teacher of the Year, 2029" listed beside "Teacher of the
+# Year (Class of 2031), 2029", one line apart; `_unlabelled_beside_class_award`).
 _CLASS_YEAR_RE = re.compile(rf'\bclass\s+of\s+({_YEAR_PATTERN})\b', re.IGNORECASE)
 _CLASS_YEAR_CODES = frozenset({'H'})
 
@@ -428,6 +433,23 @@ def _class_year_apart(dropped_text: str, kept_text: str, code: str | None) -> bo
     kept_dates = _CLASS_YEAR_RE.sub(' ', kept_text)
     return bool(_YEAR_RE.search(kept_dates)) and not _dates_compatible(
         _CLASS_YEAR_RE.sub(' ', dropped_text), kept_dates)
+
+
+def _unlabelled_beside_class_award(dropped_entry: dict, kept_entry: dict,
+                                   code: str | None) -> bool:
+    """True, for an award code, when the two rows stand in one source list
+    (the same hierarchy), the kept text names a class (`_CLASS_YEAR_RE`) and
+    states a year outside its class labels, and the dropped text names no
+    class: the class's award does not vouch for an award no class is named
+    for. Under two headings the two rows may be one award listed twice, and
+    the drop stands."""
+    dropped_text, kept_text = dropped_entry.get('text') or '', kept_entry.get('text') or ''
+    hierarchy = dropped_entry.get('hierarchy')
+    return (code in _CLASS_YEAR_CODES and bool(hierarchy)
+            and kept_entry.get('hierarchy') == hierarchy
+            and not _CLASS_YEAR_RE.search(dropped_text)
+            and bool(_CLASS_YEAR_RE.search(kept_text))
+            and bool(_YEAR_RE.search(_CLASS_YEAR_RE.sub(' ', kept_text))))
 
 
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
@@ -1344,6 +1366,68 @@ def _ad_hoc_apart(dropped_entry: dict, kept_entry: dict, code: str | None) -> bo
             and _is_ad_hoc(dropped_entry) != _is_ad_hoc(kept_entry))
 
 
+# #666 (JFBPNC 63, 64): a teaching list split under sub-headings that name
+# the part the owner played ("Courses Taught:", "Teaching Assistant
+# Positions:", "Guest Lectures:", "Courses Supervising in <term>", "Course
+# Development and Re-Design:") lists one course under several of them, and
+# each is another record: a course TA'd in 2027 beside the same course
+# guest-lectured 2027-2034. Stage 3b leaves the sub-heading in the hierarchy,
+# not in the row's role (#985), so the part is read from the role when stage 4
+# filled one, else from the nearest heading that names a part. The same part
+# under two headings ("Courses Teaching in <term>" beside "Courses Taught:")
+# is one record listed twice and still drops, and so do two rows whose part
+# only their headings name: neither prints it, so the two would read as one
+# row printed twice.
+# ponytail: a closed list of parts, in priority order ("Teaching Assistant"
+# before "Teaching"). A heading naming a part not on it says nothing, and the
+# drop goes through as before; the upgrade is #985, the heading's role carried
+# into the row.
+_TEACHING_PART_CODES = frozenset({'K1', 'K2', 'K3', 'K4', 'K5'})
+_COURSE_NAME_FIELDS = ('course_title', 'course_code')
+_TEACHING_PARTS = (
+    ('assistant', re.compile(r'(?i:\bteaching\s+assistant)|\bTAs?\b|\bTAships?\b')),
+    ('guest', re.compile(r'\bguest\b', re.IGNORECASE)),
+    ('supervision', re.compile(r'\bsupervis', re.IGNORECASE)),
+    ('development', re.compile(r'\b(?:re-?design|development|developed)\b', re.IGNORECASE)),
+    ('teaching', re.compile(r'\b(?:taught|teach(?:ing)?|instructor|lecturer|courses?)\b',
+                            re.IGNORECASE)),
+)
+
+
+def _teaching_part(text: str) -> str | None:
+    """The first `_TEACHING_PARTS` part `text` names, or None."""
+    return next((part for part, pattern in _TEACHING_PARTS if pattern.search(text)), None)
+
+
+def _role_teaching_part(entry: dict) -> str | None:
+    """The part the entry's role field names, or None."""
+    role = (entry.get('extracted_fields') or {}).get('role')
+    return _teaching_part(role) if isinstance(role, str) else None
+
+
+def _entry_teaching_part(entry: dict) -> str | None:
+    """The part the entry's role names, else the part its nearest source
+    heading names (the hierarchy read from the leaf up), or None."""
+    headings = [heading for heading in entry.get('hierarchy') or () if isinstance(heading, str)]
+    return _role_teaching_part(entry) or next(
+        (part for part in map(_teaching_part, reversed(headings)) if part), None)
+
+
+def _teaching_parts_apart(dropped_entry: dict, kept_entry: dict, code: str | None) -> bool:
+    """True, for a teaching code, when the dropped entry names a course and a
+    part (`_entry_teaching_part`) and the kept entry's role names another.
+    The kept part is read from its role alone: that row prints the role, so
+    the two rows read apart on the page. Two rows whose part only their
+    headings name print alike (#985), and keeping both would print a copy."""
+    fields = dropped_entry.get('extracted_fields') or {}
+    if code not in _TEACHING_PART_CODES or not any(
+            isinstance(fields.get(key), str) and fields[key].strip()
+            for key in _COURSE_NAME_FIELDS):
+        return False
+    parts = _entry_teaching_part(dropped_entry), _role_teaching_part(kept_entry)
+    return all(parts) and parts[0] != parts[1]
+
+
 def _split_record_family(entry: dict, document: list[dict] | None) -> list[dict]:
     """`entry` and every other record of `document` split out of the same
     multi-record entry: the same source position and the same records list
@@ -1435,7 +1519,11 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     #666 (LTTYWI, BLBVPD, IXJMKS): an undated row under another year head
     than the kept row is another term (`_under_another_year_head`), an ad
     hoc review beside a standing seat is another record (`_ad_hoc_apart`),
-    and an award of another class is another award (`_class_year_apart`)."""
+    and an award of another class is another award (`_class_year_apart`).
+
+    #666 (JFBPNC): a course listed under a teaching sub-heading that names
+    another part than the kept row's (TA beside guest lecturer) is another
+    record (`_teaching_parts_apart`)."""
     dropped_text = dropped_entry.get('text') or ''
     kept_text = kept_entry.get('text') or ''
     verbatim = _verbatim_contained(dropped_text, kept_text)
@@ -1459,6 +1547,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #666: an undated row takes another year head's years
     if _ad_hoc_apart(dropped_entry, kept_entry, code):
         return False  # #666: an ad hoc review and a standing seat are two records
+    if _teaching_parts_apart(dropped_entry, kept_entry, code):
+        return False  # #666: a course TA'd and the same course lectured are two records
     if _undated_split_record_absorbs_date(dropped_entry, kept_entry, document):
         return False  # #666: an undated split record does not vouch for a date
     if _shorter_journal_than_kept(dropped_entry, kept_entry, code):
@@ -1472,6 +1562,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #666: a different date is a different record
     if _class_year_apart(dropped_text, kept_text, code):
         return False  # #666: another class's award, or a class year is no date
+    if _unlabelled_beside_class_award(dropped_entry, kept_entry, code):
+        return False  # #666: one list's class award does not vouch for an unlabelled one
     if not _trial_phases(dropped_text) <= _trial_phases(kept_text):
         return False  # #1106: a different trial phase is a different trial
     if not _part_numbers(dropped_text) <= _part_numbers(kept_text):
@@ -1826,6 +1918,16 @@ def _titles_disagree(first: set[str], second: set[str]) -> bool:
                 and len(first & second) / len(first | second) < _CITATION_TITLE_AGREEMENT)
 
 
+def _occasions_apart(first_text: str, second_text: str) -> bool:
+    """True when both texts state a date to the month (`_month_spans`) and no
+    date or range of one overlaps one of the other's: "March 16, 2029" and
+    "April 6, 2029" are two deliveries of a talk. A text that states its year
+    alone says nothing about which delivery it is."""
+    first, second = _month_spans(first_text), _month_spans(second_text)
+    return bool(first and second) and not any(
+        _month_spans_overlap(a, b) for a in first for b in second)
+
+
 def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
                         second: tuple[dict, ResolvedPublication]) -> bool:
     """True when two copies sharing a `kind` key say they are two records.
@@ -1845,7 +1947,11 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
     (RXYBVF). It still refuses when neither copy's first author is an author
     of the other copy (`_first_authors_differ`) or the part numbers differ
     (`_part_numbers_differ`): a titled commentary by another author under the
-    paper's DOI, or a Part I and Part II under one DOI (#446)."""
+    paper's DOI, or a Part I and Part II under one DOI (#446). A shared title,
+    journal and year also refuses when the two CV lines each date their
+    listing to the month and no date of one falls in the other's
+    (`_occasions_apart`): one talk given on two days (#666, SPIHVQ, LTTYWI 64
+    and 65)."""
     if kind == 'citation':
         return False
     (first_entry, first_pub), (second_entry, second_pub) = first, second
@@ -1856,6 +1962,8 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
              (_citation_doi(first_pub), _citation_doi(second_pub)),
              (_citation_year(first_pub), _citation_year(second_pub))]
     if kind == 'title_journal_year':
+        if _occasions_apart(first_entry.get('text') or '', second_entry.get('text') or ''):
+            return True
         pairs += [(_alnum(first_pub.volume), _alnum(second_pub.volume)),
                   (_alnum(first_pub.pages), _alnum(second_pub.pages)),
                   (_first_author(first_pub), _first_author(second_pub))]

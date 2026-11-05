@@ -57,6 +57,7 @@ from unified_pipeline.core.render_check import entry_lines
 
 from ..fan_out import is_split_record
 from ..formatting import _set_font, format_date_for_section
+from ..parsing.text import is_label_only_record
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -699,6 +700,26 @@ def _is_header_record(fields: dict, text: str) -> bool:
             and all(_is_certification_header_line(line) for line in lines))
 
 
+# The words of the board-certification table's column labels, for a header
+# row whose cells are not spelled exactly as `_CERTIFICATION_HEADER_CELLS`
+# has them: ZXVGAC's source writes the date column as "Date" (#1254).
+_CERTIFICATION_LABEL_WORDS = frozenset({
+    'full', 'board', 'specialty', 'certificate', 'certification', 'number',
+    'date', 'indicate', 'if', 'eligible',
+})
+
+
+def _is_source_header_row(entry: dict) -> bool:
+    """True when an F2 entry is the source table's header row: an exact
+    header (`_is_header_record`), or a record stage 4 extracted nothing from
+    whose cells are all column labels (`is_label_only_record`, #1254). Such
+    a row is not a certification, so it writes no row."""
+    fields = entry.get('extracted_fields') or {}
+    text = entry.get('text', '')
+    return (_is_header_record(fields, text)
+            or is_label_only_record(fields, text, _CERTIFICATION_LABEL_WORDS))
+
+
 def _reparse_renders_less_than_structured(rows: list[tuple]) -> bool:
     """True when the reconstructed rows would render less than the entry's
     own structured fields: no row recovered a certificate number or a date,
@@ -981,11 +1002,9 @@ class BoardCertificationSection:
         # its own: the year folds into the row above or is reported as a
         # skipped row, so each is set aside for the row receipt (#534).
         for entry in entries:
-            if (_is_header_record(entry.get('extracted_fields') or {}, entry.get('text', ''))
-                    or _bare_year(entry)):
+            if _is_source_header_row(entry) or _bare_year(entry):
                 self._row_receipts.set_aside(entry)
-        entries = [e for e in entries
-                   if not _is_header_record(e.get('extracted_fields') or {}, e.get('text', ''))]
+        entries = [e for e in entries if not _is_source_header_row(e)]
         entries, unattached_years = _attach_bare_years(entries, current_year)
         for year in unattached_years:
             self._warn_skipped_certification_row(year)

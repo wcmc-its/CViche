@@ -103,6 +103,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _refold_shattered,
     _strip_appended_initials,
     heading_names_teaching_role,
+    is_label_only_record,
     is_membership_date_part,
     names_teaching_or_authorship_role,
     split_appointment_title,
@@ -963,3 +964,35 @@ def test_the_split_keeps_every_character_but_the_separators():
     split = split_date_led_records(text)
     assert split.replace("\n", "\t") == text
     assert split_date_led_records(split) == split  # a second pass changes nothing
+
+
+# #1254: a source table's header row stage 4 extracted nothing from.
+_BOARD_LABELS = frozenset({'full', 'board', 'certificate', 'date'})
+
+
+@pytest.mark.parametrize("text", [
+    "Full Name of Board | Certificate # | Date",
+    "Full Name of Board\tCertificate #\tDate",
+    "Full Name of Board | # | Dates",
+])
+def test_an_all_null_record_of_column_labels_is_label_only(text):
+    fields = {"certifying_board": None, "certificate_number": "", "year_certified": [None]}
+    assert is_label_only_record(fields, text, _BOARD_LABELS)
+
+
+@pytest.mark.parametrize("fields, text", [
+    # one real value: stage 4 read a record, whatever the text says
+    ({"certifying_board": "Example Board", "certificate_number": None},
+     "Full Name of Board | Certificate # | Date"),
+    # all null, but a cell is content: rendered from its text, so kept
+    ({"certifying_board": None}, "Example Diplomate"),
+    ({"certifying_board": None}, "Full Name of Board | Example Board | Date"),
+    ({"certifying_board": None}, "Full Name of Board | Certificate # | 2015"),
+    ({"certifying_board": None}, "2015"),
+    # nothing at all to judge
+    ({"certifying_board": None}, ""),
+    ({"certifying_board": None}, " | # | "),
+    ("not a dict", "Full Name of Board"),
+])
+def test_a_record_with_a_value_or_a_content_cell_is_not_label_only(fields, text):
+    assert not is_label_only_record(fields, text, _BOARD_LABELS)

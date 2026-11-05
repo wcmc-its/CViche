@@ -627,3 +627,19 @@ def test_stage6_dedup_drops_a_paper_listed_in_two_article_lists() -> None:
         gen._group_entries_by_code([sparse, full]))
     assert [e["element_idx_start"] for e in grouped.get("S1", []) + grouped.get("S2", [])] == [50]
     assert any(d["metric"] == "record=paper_identifier" for d in decisions)
+
+
+# #666 (RSRRUF 28): stage 4 fanned one residency line out into one record per
+# role it lists; the roles tell them apart.
+
+@pytest.mark.parametrize("roles, kept", [
+    (("Chief Resident", "Founder, Widget Society Student Chapter"), [26, 34]),
+    (("Chief Resident", "Chief Resident"), [26]),          # the same role: one record
+    (("Chief Resident", None), [26]),                      # one names no role: no evidence
+])
+def test_training_records_naming_different_roles_stay(roles, kept) -> None:
+    first = _training(26, "Diagnostic Widget Imaging", "Norvale University")
+    second = _training(34, "Diagnostic Widget Imaging", "Norvale University")
+    first["extracted_fields"]["role"], second["extracted_fields"]["role"] = roles
+    grouped, _, _ = _run([first, second])
+    assert _indexes(grouped) == kept

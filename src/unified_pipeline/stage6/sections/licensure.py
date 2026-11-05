@@ -103,6 +103,7 @@ from unified_pipeline.core.credential_lines import (
     is_credential_pin,
     misfiled_credential_home,
     names_state_controlled_substance,
+    opens_board_block,
 )
 from unified_pipeline.core.honor_lines import YEAR_RE
 from unified_pipeline.core.text_norm import date_clauses, record_date_anchors
@@ -112,6 +113,7 @@ from ..formatting import EXPIRES_PREFIX, _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem, line_without_edge_dates
 from ..normalization.pii import _dea_check_digit_ok
 from ..parsing.dates import CURRENT_DATE_VALUES, EXPIRY_LABEL
+from ..parsing.text import is_label_only_record
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -310,7 +312,8 @@ class LicensureResult:
     identifiers: IdentifierSet
     dea_withheld: bool = False
     #: Raw entries that write no licence row on purpose (#534): a DEA record
-    #: (withheld with notice) and the NPI the identifier table shows.
+    #: (withheld with notice), the NPI the identifier table shows, and the
+    #: source table's own header row (#1254).
     no_row: tuple[Mapping[str, Any], ...] = ()
 
 
@@ -688,6 +691,16 @@ def _has_npi_shaped_token(text: str) -> bool:
     return any(_NPI_SHAPE_RE.match(run) for run in re.findall(r'\d+', text))
 
 
+# The words of a licence table's column labels ("State | License Number |
+# Date of Issue | Date of Last Registration"). A record stage 4 extracted
+# nothing from whose cells are all these words is the source table's header
+# row and writes no licence row (#1254, `is_label_only_record`).
+_LICENSURE_LABEL_WORDS = frozenset({
+    'state', 'license', 'licence', 'number', 'date', 'issue', 'registration',
+    'expiration', 'exp', 'expires', 'renewal', 'mm/dd/yyyy',
+})
+
+
 def _resolve_licensure(
         entries: Sequence[MutableMapping[str, Any]]) -> LicensureResult:
     """Decide the whole of section F1 without touching a document.
@@ -733,6 +746,10 @@ def _resolve_licensure(
     under_expiry_header = _rows_under_expiry_header(entries)
 
     for raw in sort_entries_reverse_chronological(entries):
+        if is_label_only_record(raw.get('extracted_fields'), str(raw.get('text') or ''),
+                                _LICENSURE_LABEL_WORDS):
+            no_row.append(raw)  # the source table's header row (#1254)
+            continue
         entry = _normalize_licensure_entry(raw)
         if id(raw) in under_expiry_header:
             entry = replace(entry, expiry_by_column_header=True)
@@ -796,6 +813,16 @@ def _resolve_licensure(
 # (`fan_out.fallback_text`). So a licence fused with an ECFMG certificate on
 # one paragraph stays a licence, and two life-support records of one line do
 # not both print the line. Any other record's line is its text.
+# A row of the CV's own Board Certification table (a table row under a
+# heading that names board certification and nothing else,
+# `core.credential_lines.opens_board_block`) that states its diplomate
+# status and that stage 4 read as a board certification (it names the
+# certifying board) stays in Board Certification
+# (`_is_board_table_diplomate`): the owner filed it there and both readings
+# agree, so its line's exam name does not move it (#1577: JZKANY 32.3, an
+# NBME diplomate row of the table, left it for Other Education and printed
+# its cells pipe-joined). A diplomate line in prose, and any other row of
+# the table, is read by its line as before.
 CREDENTIAL_REROUTE_CHECK = 'credential_listed_as_licence_reroute'
 #: The section a reroute warning names, by the code a record left (the
 #: `TAXONOMY_TO_SECTION` names of F1 and F2).
@@ -803,6 +830,12 @@ _REROUTED_FROM_SECTION = {LICENCE_CODE: 'licensure', BOARD_CODE: 'board_certific
 #: What joins one clause of a paragraph to the next ("<certificate>, 2029;
 #: <licence>"): not part of either clause's line.
 _CLAUSE_EDGE_CHARS = ' \t;,'
+#: The element type stage 2 gives a row of a source table.
+_TABLE_ROW_ELEMENT = 'table_row'
+#: A diplomate of a board ("Diplomate", "Diplomat", "lifetime diplomate").
+_DIPLOMATE_RE = re.compile(r'\bdiplomat(?:e|s|es)?\b', re.IGNORECASE)
+#: The stage-4 F2 field that names the board a certification is from.
+_CERTIFYING_BOARD_KEY = 'certifying_board'
 
 
 class CredentialReroute(NamedTuple):
@@ -847,11 +880,24 @@ def record_line(entry: Mapping[str, Any]) -> str:
     return _own_dated_clause(entry, text) or fallback_text(entry)
 
 
+def _is_board_table_diplomate(entry: Mapping[str, Any]) -> bool:
+    """Whether `entry` is a diplomate row of the CV's own Board
+    Certification table that stage 4 read as a board certification (see
+    the comment above)."""
+    fields = entry.get('extracted_fields') or {}
+    return (entry.get('element_type') == _TABLE_ROW_ELEMENT
+            and opens_board_block('', [str(level) for level in entry.get('hierarchy') or []])
+            and _DIPLOMATE_RE.search(str(entry.get('text') or '')) is not None
+            and bool(_field_text(fields.get(_CERTIFYING_BOARD_KEY))))
+
+
 def credential_listed_as_licence(entry: Mapping[str, Any], code: str) -> CredentialReroute | None:
     """Where a record grouped under `code` (F1 or F2) belongs instead, and
     the line read (`record_line`), or None (see the comment above)."""
     line = record_line(entry)
     if code == BOARD_CODE:
+        if _is_board_table_diplomate(entry):
+            return None
         home = misfiled_credential_home(line, BOARD_CODE)
         return CredentialReroute(home, line) if home else None
     if code != LICENCE_CODE:

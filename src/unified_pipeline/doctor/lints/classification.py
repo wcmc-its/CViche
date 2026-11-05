@@ -620,7 +620,7 @@ DEGREE_TABLE_HEADER_RE = re.compile(r"^\s*degree(?:\(s\))?\s*,", re.IGNORECASE)
 #: token counts written as listed or in capitals ("PHD"), never in lower or
 #: title case, so the words "do", "be", "am" and "med" (MEd) are no degree.
 #: It holds the international forms (MBBS, MBChB, Dr med, Dipl-Ing, MUDr, the
-#: Dutch Drs) so a degree written the way its country writes it is not
+#: Dutch Drs, the Indian super-specialty doctorate DM) so a degree written the way its country writes it is not
 #: flagged, and the nursing and physician-assistant credentials a nursing CV
 #: lists as its degree (RN, BSN, NP, PA-C): the cell names a credential, and
 #: whether it belongs here is the reader's call.
@@ -639,7 +639,7 @@ DEGREE_ABBREVIATIONS = frozenset({
     "MAT", "MCP", "MSPT", "MPAS", "MSPAS", "MHPE", "MAEd", "EMBA", "MPharm",
     # doctoral and professional
     "MD", "DO", "PhD", "DPhil", "ScD", "DSc", "DrPH", "EdD", "JD", "PharmD", "DDS", "DMD",
-    "DVM", "VMD", "DNP", "DNSc", "DPT", "OD", "PsyD", "AuD", "OTD", "DMSc", "DHSc", "DSW",
+    "DM", "DVM", "VMD", "DNP", "DNSc", "DPT", "OD", "PsyD", "AuD", "OTD", "DMSc", "DHSc", "DSW",
     "DMA", "DBA", "DPM", "DC", "ND", "MDCM", "MBBS", "MBChB", "MBBCh", "BMBS", "BMBCh",
     "MB", "BCh", "ChB", "BChir", "BAO", "BChD", "DrMed", "MUDr", "DrPhil", "Dr", "Drs",
     "Dipl", "LMS",
@@ -661,6 +661,11 @@ _DEGREE_TOKEN_RE = re.compile(r"[A-Za-z]+")
 #: capitalised one of up to four: the gap "M. Sc", "Ph. D." and "B. A." write
 #: inside one abbreviation, not the one before "Ph. D. in Invented Studies".
 _ABBREVIATION_DOTS_RE = re.compile(r"\b([A-Za-z]{1,3})\.\s+(?=[A-Z][A-Za-z]{0,3}\b)")
+#: A run of short pieces joined by dots with no space between them
+#: ("Dr.med.univ.", "Dr.rer.nat."): dropping its dots fuses it into one
+#: token no list holds, so its pieces are read one by one too. A piece is
+#: at most four letters, so "Dr.Invented" is no such run.
+_DOTTED_RUN_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]{1,4}(?:\.[A-Za-z]{1,4})+\.?(?![A-Za-z])")
 #: Characters of the degree cell quoted in the evidence: one of the run
 #: page's `DOCTOR_EVIDENCE_CAPS`, so a cut quote shows its ellipsis.
 DEGREE_CELL_QUOTE_CHARS = 120
@@ -671,9 +676,11 @@ def names_academic_degree(cell: str) -> bool:
     `DEGREE_WORDS_RE`, or a token of `DEGREE_ABBREVIATIONS`."""
     if DEGREE_WORDS_RE.search(cell):
         return True
-    # Two readings: dots dropped ("B.S. Invented" -> "BS Invented"), and dots
-    # closed up with the space after them ("M. Sc" -> "MSc").
-    readings = (cell.replace(".", ""), _ABBREVIATION_DOTS_RE.sub(r"\1", cell).replace(".", ""))
+    # Three readings: dots dropped ("B.S. Invented" -> "BS Invented"), dots
+    # closed up with the space after them ("M. Sc" -> "MSc"), and a dotted
+    # run's pieces apart ("Dr.med.univ." -> "Dr med univ").
+    readings = (cell.replace(".", ""), _ABBREVIATION_DOTS_RE.sub(r"\1", cell).replace(".", ""),
+                " ".join(match.replace(".", " ") for match in _DOTTED_RUN_RE.findall(cell)))
     return any(token in DEGREE_ABBREVIATIONS
                or (token.isupper() and token in _DEGREE_ABBREVIATIONS_UPPER)
                for reading in readings for token in _DEGREE_TOKEN_RE.findall(reading))
