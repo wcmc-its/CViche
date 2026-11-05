@@ -293,7 +293,13 @@ def _same_training(first: dict, second: dict) -> dict | None:
     specialties the less full copy goes, or the fuller one when only the
     less full one names every level: a row naming an internship and a
     residency holds a resident copy, and a resident row does not hold that
-    row."""
+    row. Two records that each name a role in the programme and name
+    different ones (`_compatible`) are two records, whatever else they share:
+    stage 4 fans one residency line out into one record per role it lists
+    (#666, RSRRUF 28: chief resident, a student chapter's founder, a resident
+    representative), and C renders the role."""
+    if not _compatible(_field(first, 'role'), _field(second, 'role')):
+        return None
     (short, dropped), (long, kept) = sorted(
         ((_norm_words(_field(e, 'specialty')), e) for e in (first, second)),
         key=lambda pair: len(pair[0]))
