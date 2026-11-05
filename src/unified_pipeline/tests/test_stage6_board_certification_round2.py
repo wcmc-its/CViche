@@ -17,6 +17,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from docx import Document
@@ -680,6 +681,41 @@ class TestTheSourceTablesOwnHeaderRowIsNotACertification:
     def test_older_revision_header_cells_are_header_cells(self):
         assert _is_certification_header_line(self.HEADER)
         assert not _is_certification_header_line("Certificate # 24680")
+
+    ALL_NULL: ClassVar[dict[str, None]] = {
+        "certifying_board": None, "certificate_number": None, "year_certified": None,
+        "recertification_date": None, "specialty": None}
+
+    def test_an_all_null_header_row_not_spelled_exactly_renders_no_row(self):
+        """#1254 (held-out ZXVGAC entry 79.0): a header row whose date column
+        reads "Date" matched no exact header cell, stage 4 extracted nothing
+        from it, and the text reparse wrote each cell as a certification: 3
+        junk rows. It now writes none and is set aside on the receipt."""
+        header = {"taxonomy_code": "F2", "element_idx_start": "30.0",
+                  "text": "Full Name of Board | Certificate # | Date",
+                  "extracted_fields": dict(self.ALL_NULL)}
+        real = {"taxonomy_code": "F2", "element_idx_start": "30.1",
+                "text": "American Board of Fictional Medicine |  | 11/2011",
+                "extracted_fields": {**self.ALL_NULL,
+                                     "certifying_board": "American Board of Fictional Medicine",
+                                     "year_certified": "2011"}}
+        gen = _generator()
+        gen._row_receipts.begin_section("board_certification")
+        gen._fill_board_certification([header, real])
+        gen._row_receipts.end_section()
+        assert [row[0] for row in _rows_after_board(gen)] == ["American Board of Fictional Medicine"]
+        receipt, = gen._row_receipts.receipts({"board_certification": [header, real]})
+        assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (2, 1, 1, ())
+
+    def test_an_all_null_record_with_real_text_still_renders(self):
+        """All-null fields alone are not a header: a one-line credential
+        stage 4 extracted nothing from renders from its text, as before."""
+        entry = {"taxonomy_code": "F2", "element_idx_start": 31,
+                 "text": "Fictional Surgery - Certified",
+                 "extracted_fields": dict(self.ALL_NULL)}
+        gen = _generator()
+        gen._fill_board_certification([entry])
+        assert [row[0] for row in _rows_after_board(gen)] == ["Fictional Surgery - Certified"]
 
 
 class TestRejectedTokenIsLogged:
