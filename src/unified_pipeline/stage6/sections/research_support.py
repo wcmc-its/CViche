@@ -73,6 +73,7 @@ from ..formatting import (
     _set_table_border,
     format_date_for_section,
     format_date_range,
+    with_duration_span,
 )
 from ..normalization import (
     _deduplicate_repeated_content,
@@ -2210,9 +2211,11 @@ class ResearchSupportSection:
         Grants use mm/yy format per the template.
         Clinical trials may use 'date' instead of 'start_date'.
         `source_text` is the entry's text: a start-only grant renders its
-        start alone unless the source leaves it open (class 13).
+        start alone unless the source leaves it open (class 13), and a grant
+        with no dates renders the length its text states (#2094).
         """
         start = fields.get('start_date', '') or fields.get('date', '')
         end = fields.get('end_date', '')
 
-        return format_date_range(start, end, taxonomy_code, source_text)
+        return with_duration_span(format_date_range(start, end, taxonomy_code, source_text),
+                                  fields, source_text)

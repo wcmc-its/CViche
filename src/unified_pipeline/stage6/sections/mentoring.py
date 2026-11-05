@@ -56,6 +56,7 @@ from ..formatting import (
     _set_table_border,
     _source_leaves_year_open,
     format_date_range,
+    with_duration_span,
 )
 from ..normalization import _clean_inline_tabs
 from ..parsing import _is_mentee_record, _is_mentoring_outcome
@@ -308,7 +309,8 @@ def _n3a_entry_has_ended(entry: Mapping[str, Any], current_year: int) -> bool:
     return last_year is not None and last_year < current_year
 
 
-def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
+def _training_grant_rows(fields: Mapping[str, Any],
+                         source_text: str = '') -> list[tuple[str, str]]:
     """The three (label, value) rows of an N2 training-grant table, same
     labels as the template's own placeholder table (#529).
 
@@ -328,7 +330,9 @@ def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
     also falls back to `fields.get('date')` when `start_date` is absent, for
     clinical-trial schemas that key duration off `date` instead. N2's schema
     has no `date` key, so the two agree in practice, but the claim that they
-    are the same call was wrong.
+    are the same call was wrong. Both fall back to the grant's stated length
+    through `with_duration_span` when there are no dates (#2094);
+    `source_text` is the entry's text, read only for that.
     """
     agency = str(fields.get('agency') or '').strip()
     grant_number = str(fields.get('grant_number') or '').strip()
@@ -346,7 +350,7 @@ def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
 
     start = str(fields.get('start_date') or '').strip()
     end = str(fields.get('end_date') or '').strip()
-    duration = format_date_range(start, end, 'N2')
+    duration = with_duration_span(format_date_range(start, end, 'N2'), fields, source_text)
 
     return [
         ('Award Source (funding agency, type of grant):', award_source),
@@ -1236,7 +1240,7 @@ class MentoringSection:
         no template table survives to clone) and placed directly after
         ``anchor`` with a spacer, exactly as `_create_mentee_table_with_spacing`
         does one heading over (#529)."""
-        rows = _training_grant_rows(fields)
+        rows = _training_grant_rows(fields, _text(entry.get('text')))
         table = self.doc.add_table(rows=len(rows), cols=2)
         _set_table_border(table, color='808080', size=4)
 

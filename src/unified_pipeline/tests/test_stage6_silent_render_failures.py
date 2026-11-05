@@ -806,6 +806,14 @@ def test_training_grant_rows_none_values_are_safe():
     ]
 
 
+def test_training_grant_rows_render_a_stated_length_when_there_are_no_dates():
+    """N2 shares the grant table's fallback to a stated length (#2094)."""
+    text = 'Invented Training Grant\nDuration of support: | 2 years'
+    assert _training_grant_rows({'agency': 'Invented Fund'}, text)[2] == (
+        'Duration of support (mm/yyyy-mm/yyyy):', '2 years')
+    assert _training_grant_rows({'start_date': '2018', 'end_date': '2021'}, text)[2][1] == '2018-2021'
+
+
 def test_training_grant_is_sparse_true_when_no_identifying_field():
     assert _training_grant_is_sparse({}) is True
     assert _training_grant_is_sparse({'role': 'Mentor'}) is True
