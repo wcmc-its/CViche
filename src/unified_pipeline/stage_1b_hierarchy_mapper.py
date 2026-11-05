@@ -23,16 +23,19 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NamedTuple, NotRequired, TypedDict
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.docx_structure_extractor import (
+    BOLD_SPANS_KEY,
+    TAB_OFFSETS_KEY,
     extract_docx_structure,
     extract_unified_elements,
 )
 from core.output_manager import OutputManager
+from core.text_norm import HEADER_SEPARATORS, record_after_heading
 
 _PREAMBLE_SECTION_ALIASES = frozenset({
     "personal data", "personal information", "contact information",
@@ -236,6 +239,172 @@ def _is_run_in_line(expected_header: str, line_text: str) -> bool:
     )
 
 
+# The run-in lines #1802 left unplaced or unflagged (#1252). Each is a
+# heading line that also holds the section's first record: the heading, a
+# gap, then the record.
+#
+# S1 (VQFSDI): the gap is ONE tab ("EDUCATION<tab>Ph.D., ..."). The extractor
+# reads a tab as one blank, so _RUN_IN_GAP misses it; the element's
+# TAB_OFFSETS_KEY says which blank was a tab. The head is the text before the
+# first tab, and it does not end in a colon (that is S2).
+_ONE_TAB_GAP = re.compile(r"([^\t]*[^\t:])\t")
+# S2 (CTWLTR, ATUVAL, PFBSNH; owner rule 2026-10-30): the head, a colon, then
+# ONE blank (a space, or a tab read as one) or ONE line break. A label:value
+# line has the same shape ("Residency: Renal, ..."), so the head must also be
+# set apart from the rest (`_head_set_apart`); otherwise the line stays one
+# record.
+# In both, a second blank after the gap makes it _RUN_IN_GAP's two blanks,
+# which every caller tries first.
+_COLON_ONE_BLANK_GAP = re.compile(r"([^:\n]*):[ \n]")
+# _RUN_IN_GAP as a split: the head is the text before the first two blanks.
+_TWO_BLANK_GAP = re.compile(r"([\s\S]*?)" + _RUN_IN_GAP.pattern)
+# A rest that only leads in to the list below it ("... include the
+# following", "(see the following)") is not a record, though it has two
+# words.
+_LEAD_IN_END = re.compile(r"following\W*$", re.IGNORECASE)
+
+
+class _RunInSplit(NamedTuple):
+    """Where a run-in line's heading and the text after its gap sit in the
+    line (character offsets)."""
+    head_start: int
+    head_end: int
+    rest_start: int
+
+
+def _split_run_in(gap: re.Pattern[str], expected_header: str, line: str) -> _RunInSplit | None:
+    """The split of `line` at `gap` (group 1 is the head) after any leading
+    separator rule, when the head is the heading; None otherwise."""
+    lead = len(line) - len(line.lstrip(_SEPARATOR_CHARS))
+    match = gap.match(line, lead)
+    if match is None or normalize_text(match.group(1)) != expected_header:
+        return None
+    return _RunInSplit(lead, match.end(1), match.end())
+
+
+def _line_with_tabs(elem: dict[str, Any]) -> str:
+    """The element's text with the blanks the extractor recorded as tabs
+    read back as tabs. A table header, or a line the PII scrub rewrote,
+    records none."""
+    tabs = frozenset(elem.get(TAB_OFFSETS_KEY, ()))
+    return "".join("\t" if i in tabs else char for i, char in enumerate(elem.get("text", "")))
+
+
+def _bold_flags(elem: dict[str, Any]) -> list[bool]:
+    """Per character of the element's text, whether the extractor recorded
+    it bold (none when it recorded no bold spans)."""
+    flags = [False] * len(elem.get("text", ""))
+    spans = elem.get(BOLD_SPANS_KEY, ())
+    for start, end in spans:
+        for i in range(start, min(end, len(flags))):
+            flags[i] = True
+    return flags
+
+
+def _head_set_apart(elem: dict[str, Any], split: _RunInSplit) -> bool:
+    """Whether a colon-gap head is set apart from the text after it (owner
+    rule, 2026-10-30): its letters are all capitals and the rest has a
+    lowercase letter, or every non-blank head character is bold and the
+    rest's first character is not."""
+    text = elem.get("text", "")
+    head, rest = text[split.head_start:split.head_end], text[split.rest_start:]
+    letters = [char for char in head if char.isalpha()]
+    if letters and all(char.isupper() for char in letters) and any(char.islower() for char in rest):
+        return True
+    flags = _bold_flags(elem)
+    head_bold = [flags[i] for i in range(split.head_start, split.head_end) if not text[i].isspace()]
+    return bool(head_bold) and all(head_bold) and not flags[split.rest_start]
+
+
+def _opens_with_outline_heading(rest: str, outline: frozenset[str]) -> bool:
+    """Whether `rest` opens with a heading of the CV's outline: two headings
+    fused on one line (two column headings), not a heading and a record."""
+    words = normalize_text(rest.strip(HEADER_SEPARATORS)).strip(_SEPARATOR_CHARS)
+    return any(words == heading or words.startswith(heading + " ") for heading in outline)
+
+
+def _is_record_after_heading(rest: str, outline: frozenset[str]) -> bool:
+    """Whether the text after a run-in heading's gap is the section's first
+    record: the run doctor's record test (`record_after_heading`), and
+    neither another heading fused onto the line nor a lead-in."""
+    record = record_after_heading(rest)
+    return (
+        record is not None
+        and not _opens_with_outline_heading(record, outline)
+        and not _LEAD_IN_END.search(record)
+    )
+
+
+def _one_tab_split(
+    expected_header: str, elem: dict[str, Any], outline: frozenset[str]
+) -> _RunInSplit | None:
+    """S1: the heading, ONE tab, then text that opens with no other heading."""
+    line = _line_with_tabs(elem)
+    split = _split_run_in(_ONE_TAB_GAP, expected_header, line)
+    if split is None or _opens_with_outline_heading(line[split.rest_start:], outline):
+        return None
+    return split
+
+
+def _colon_one_blank_split(
+    expected_header: str, elem: dict[str, Any], outline: frozenset[str]
+) -> _RunInSplit | None:
+    """S2: the heading set apart, a colon, ONE blank or line break, then
+    text that opens with no other heading."""
+    text = elem.get("text", "")
+    split = _split_run_in(_COLON_ONE_BLANK_GAP, expected_header, text)
+    if (
+        split is None
+        or _opens_with_outline_heading(text[split.rest_start:], outline)
+        or not _head_set_apart(elem, split)
+    ):
+        return None
+    return split
+
+
+def _long_run_in_split(
+    expected_header: str, elem: dict[str, Any], outline: frozenset[str]
+) -> _RunInSplit | None:
+    """The S1 or S2 split of a line the strict match rejects as too long for
+    a heading (the caller checks). Such a line is placed; its node is
+    flagged run-in only when the text after the gap is a record, and is a
+    plain header otherwise (a note such as "(In Reverse Chronological
+    Order)")."""
+    return (
+        _one_tab_split(expected_header, elem, outline)
+        or _colon_one_blank_split(expected_header, elem, outline)
+    )
+
+
+def _short_run_in_split(expected_header: str, elem: dict[str, Any]) -> _RunInSplit | None:
+    """S3 (VPMMFM 20, ZEIGYO 12) for a line short enough that the strict
+    match accepts it (the caller checks): the heading, a gap (two blanks,
+    one tab, or a colon and one blank or break), then text. Such a line was
+    placed as a header and any record on it consumed."""
+    text = elem.get("text", "")
+    return (
+        _split_run_in(_TWO_BLANK_GAP, expected_header, text)
+        or _split_run_in(_ONE_TAB_GAP, expected_header, _line_with_tabs(elem))
+        or _split_run_in(_COLON_ONE_BLANK_GAP, expected_header, text)
+    )
+
+
+def _holds_first_record(
+    expected_header: str, elem: dict[str, Any], outline: frozenset[str]
+) -> bool:
+    """Whether a node's placed line also holds its section's first record,
+    so stage 2 keeps the line as content (`run_in`, #1252): #1802's two-blank
+    line, or an S1, S2 or S3 line whose text after the gap is a record."""
+    text = elem.get("text", "")
+    if _is_run_in_line(expected_header, text):
+        return True
+    if is_header_match(expected_header, normalize_text(text), strict=True):
+        split = _short_run_in_split(expected_header, elem)
+    else:
+        split = _long_run_in_split(expected_header, elem, outline)
+    return split is not None and _is_record_after_heading(text[split.rest_start:], outline)
+
+
 def _find_header_element(
     elements: list[dict[str, Any]],
     expected_header: str,
@@ -244,6 +413,7 @@ def _find_header_element(
     partial_floor: int = 0,
     excluded_headers: frozenset[str] = frozenset(),
     exact_only: bool = False,
+    outline: frozenset[str] = frozenset(),
 ) -> tuple[int, int] | None:
     """Locate `expected_header` among elements[search_start:search_end].
 
@@ -251,7 +421,8 @@ def _find_header_element(
     an exact one: a partial match is skipped when its element index is below
     `partial_floor` or its text is in `excluded_headers` (#1178). An exact
     paragraph is always accepted, wherever it sits. `exact_only` skips every
-    partial match.
+    partial match. `outline` is the CV's heading texts, which a run-in line's
+    record may not open with (`_long_run_in_split`).
 
     Returns (position in `elements`, element index to report), or None. A
     paragraph whose normalized text IS the header wins over an earlier
@@ -284,6 +455,7 @@ def _find_header_element(
         if first_partial is None and (
             is_header_match(expected_header, para_text, strict=True)
             or _is_run_in_line(expected_header, elem_text)
+            or _long_run_in_split(expected_header, elem, outline) is not None
         ):
             if len(para_text) > len(expected_header):
                 # The header sits inside a longer paragraph: the old
@@ -300,6 +472,7 @@ def find_header_in_sequence(
     end_idx: int | None = None,
     partial_floor: int = 0,
     excluded_headers: frozenset[str] = frozenset(),
+    outline: frozenset[str] = frozenset(),
 ) -> list[tuple[str, int]] | None:
     """
     Find a sequence of headers in the document elements starting from start_idx.
@@ -311,6 +484,7 @@ def find_header_in_sequence(
         end_idx: Exclusive end of the search (default: end of the document)
         partial_floor: The last header (the node itself) may match partially
             only at or after this element index; an exact line is always taken
+        outline: The CV's heading texts (`_find_header_element`)
 
     Returns:
         List of (header_text, element_idx) tuples, or None if not found
@@ -335,7 +509,7 @@ def find_header_in_sequence(
         hit = _find_header_element(
             elements, expected_header, current_search_idx, search_end,
             partial_floor=partial_floor, excluded_headers=excluded_headers,
-            exact_only=pos < last,
+            exact_only=pos < last, outline=outline,
         )
         if hit is None:
             # Sequence broken - return None
@@ -366,12 +540,15 @@ class ForwardScope:
     before; exact lines are not floored. `claimed` are the normalized texts of
     every header in the hierarchy: a child's partial match never lands on a
     line whose whole text is another header's, since that line is that
-    header's own.
+    header's own. `outline` is the same set of texts for every node, top
+    level included: a run-in line whose text after the heading opens with
+    one of them holds two headings, not a heading and a record (#1252).
     """
     end: int | None = None
     followers: frozenset[str] = frozenset()
     partial_floor: int = 0
     claimed: frozenset[str] = frozenset()
+    outline: frozenset[str] = frozenset()
 
 
 # A node searched with no range end, no followers, no floor and no claimed
@@ -402,6 +579,7 @@ def _fallback_header_search(
     forward = _find_header_element(
         elements, expected_header, start_search_idx, forward_end,
         partial_floor=scope.partial_floor, excluded_headers=scope.claimed,
+        outline=scope.outline,
     )
     if forward is not None and not _is_fragment_hit(elements, forward[0], expected_header):
         return forward[1]
@@ -417,6 +595,7 @@ def _fallback_header_search(
         partial = _find_header_element(
             elements, expected_header, 0, start_search_idx,
             partial_floor=parent_idx, excluded_headers=excluded_headers,
+            outline=scope.outline,
         )
         return partial[1] if partial is not None else None
     return None
@@ -448,7 +627,7 @@ def _locate_node(
     if is_child and not parent_mapped:
         matches = find_header_in_sequence(
             elements, search_sequence, start_search_idx, scope.end, scope.partial_floor,
-            scope.claimed,
+            scope.claimed, scope.outline,
         )
         if matches:
             return matches[-1][1]
@@ -518,8 +697,8 @@ def map_hierarchy_node(
         "element_idx": element_idx,
         "synthetic": is_synthetic
     }
-    if element_idx is not None and _is_run_in_line(
-        normalize_text(node_text), elements[element_idx]["text"]
+    if element_idx is not None and _holds_first_record(
+        normalize_text(node_text), elements[element_idx], scope.outline
     ):
         mapped_node["run_in"] = True
 
@@ -543,7 +722,7 @@ def map_hierarchy_node(
 
         for child, later in zip(node["children"], later_texts, strict=True):
             child_scope = ForwardScope(
-                child_end, later | scope.followers, child_floor, scope.claimed
+                child_end, later | scope.followers, child_floor, scope.claimed, scope.outline
             )
             mapped_child, child_next_idx = map_hierarchy_node(
                 child,
@@ -576,6 +755,12 @@ def map_hierarchy_node(
             next_search_idx = max(max(child_indices) + 1, next_search_idx)
 
         mapped_node["children"] = mapped_children
+
+    # Stage 2 starts a parent's own range after the parent's line, so the
+    # record on a run-in parent's line would be in no section: a node with a
+    # mapped child keeps its line a header (#1252).
+    if mapped_node.get("run_in") and has_mapped_children(mapped_node):
+        del mapped_node["run_in"]
 
     return mapped_node, next_search_idx
 
@@ -1276,7 +1461,7 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
     for node, later in zip(top_level, _later_header_texts(top_level), strict=True):
         mapped_node, next_search_idx = map_hierarchy_node(
             node, elements, [], next_search_idx, top_level_headers=top_level_headers,
-            scope=ForwardScope(followers=later, claimed=claimed),
+            scope=ForwardScope(followers=later, claimed=claimed, outline=claimed),
         )
         mapped_hierarchy.append(mapped_node)
     released_headers = release_shared_header_lines(mapped_hierarchy, elements)

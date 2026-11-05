@@ -33,6 +33,9 @@ from unified_pipeline.core.output_manager import (
     OutputManager as _RealOutputManager,  # noqa: E402
 )
 from unified_pipeline.stage_1b_hierarchy_mapper import (  # noqa: E402
+    BOLD_SPANS_KEY,
+    TAB_OFFSETS_KEY,
+    ForwardScope,
     compute_section_boundaries,
     drop_headers_absent_from_document,
     find_header_in_sequence,
@@ -63,6 +66,21 @@ def _bold_paragraph(doc: Document, text: str) -> None:
 
 def _elem(unified_idx: int, text: str, elem_type: str = "paragraph") -> dict:
     return {"unified_idx": unified_idx, "type": elem_type, "text": text}
+
+
+def _read_elem(unified_idx: int, line: str, bold: tuple[tuple[int, int], ...] = ()) -> dict:
+    """The element the extractor writes for `line`: each tab read as a blank,
+    its offset kept, and the `bold` (start, end) spans."""
+    return {
+        **_elem(unified_idx, line.replace("\t", " ")),
+        TAB_OFFSETS_KEY: [i for i, char in enumerate(line) if char == "\t"],
+        BOLD_SPANS_KEY: list(bold),
+    }
+
+
+def _outline(*headings: str) -> ForwardScope:
+    """A top-level node's scope, with the CV's outline headings."""
+    return ForwardScope(outline=frozenset(normalize_text(h) for h in headings))
 
 
 # ------------------------------------------------------------- normalize_text
@@ -322,12 +340,180 @@ def test_map_hierarchy_node_leaves_a_long_line_that_only_opens_with_the_heading_
     assert mapped["element_idx"] is None
 
 
-def test_map_hierarchy_node_leaves_a_colon_and_one_blank_unplaced():
-    # A colon then one blank is not a run-in gap (a decision left to #1252's
-    # residual: 46 corpus lines have this shape, some of them sub-labels).
-    elements = [_elem(0, "A. Person"), _elem(1, "EDUCATION: Ph.D., Example University, Sampletown, NY, 2001")]
+_RECORD = "Ph.D., Example University, Sampletown, NY, 2001"
+
+
+@pytest.mark.parametrize("line", [
+    "EDUCATION\t" + _RECORD,
+    "***** EDUCATION\t" + _RECORD,
+])
+def test_map_hierarchy_node_places_a_heading_one_tab_before_its_record_and_flags_it(line):
+    # #1252 S1 (VQFSDI): the extractor reads the one tab as one blank, which
+    # #1802's two-blank gap misses; the element's tab offsets keep it.
+    elements = [_elem(0, "A. Person"), _read_elem(1, line), _elem(2, "M.S., Sample College, 1998")]
+    mapped, _ = map_hierarchy_node(
+        {"text": "EDUCATION", "level": "H1"}, elements, [], 0, scope=_outline("EDUCATION"))
+    assert mapped["element_idx"] == 1
+    assert mapped["run_in"] is True
+
+
+_CERTIFICATION = "Internal Medicine, American Board of Example Medicine, 2005-2015"
+
+
+@pytest.mark.parametrize("heading, line, bold", [
+    ("EDUCATION", "EDUCATION: " + _RECORD, ()),            # an ALL CAPS head
+    ("EDUCATION", "EDUCATION: 1996-2001: " + _RECORD, ()),  # the head ends at the first colon
+    ("EDUCATION", "EDUCATION:\n" + _RECORD, ()),           # a line break after the colon
+    ("EDUCATION", "EDUCATION:\t" + _RECORD, ()),           # a tab after the colon
+    ("EDUCATION", "Education: " + _RECORD, ((0, 9),)),     # a bold head
+    ("EDUCATION", "Education: " + _RECORD, ((0, 10),)),    # a bold head and colon
+    ("EDUCATION", "**** Education: " + _RECORD, ((5, 14),)),
+    ("Board Certification", "Board Certification: " + _CERTIFICATION, ((0, 5), (6, 19))),
+])
+def test_map_hierarchy_node_places_a_set_apart_colon_heading_and_flags_its_record(heading, line, bold):
+    # #1252 S2, owner rule 2026-10-30 (CTWLTR 2/28, PFBSNH 7): a heading set
+    # apart from the rest by capitals or bold (a blank inside the head need
+    # not be bold), a colon, then one blank or one line break. This replaces
+    # #1802's pin that left the line unplaced.
+    elements = [_elem(0, "A. Person"), _read_elem(1, line, bold), _elem(2, "M.S., Sample College, 1998")]
+    mapped, _ = map_hierarchy_node(
+        {"text": heading, "level": "H1"}, elements, [], 0, scope=_outline(heading))
+    assert mapped["element_idx"] == 1
+    assert mapped["run_in"] is True
+
+
+@pytest.mark.parametrize("line", [
+    "EDUCATION\t(In Reverse Chronological Order)",
+    "EDUCATION: (In Reverse Chronological Order)",
+])
+def test_map_hierarchy_node_places_a_run_in_heading_before_a_note_as_a_plain_header(line):
+    # ATUVAL 20: the heading is placed, and the note after it is no record,
+    # so the line stays a header.
+    elements = [_elem(0, "A. Person"), _read_elem(1, line), _elem(2, _RECORD)]
     mapped, _ = map_hierarchy_node({"text": "EDUCATION", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] == 1
+    assert "run_in" not in mapped
+
+
+@pytest.mark.parametrize("heading, line, bold", [
+    ("Residency", "Residency: Renal, Example Hospital, Sampletown, NY, 2001-2004", ()),
+    ("Residency", "RESIDENCY: RENAL, EXAMPLE HOSPITAL, SAMPLETOWN, NY, 2001-2004", ()),
+    ("Residency", "Residency: Renal, Example Hospital, Sampletown, NY, 2001-2004", ((0, 200),)),
+    ("Residency Training", "Residency Training: Renal, Example Hospital, Sampletown, 2001", ((10, 18),)),
+    ("Education", "Education:\t" + _RECORD, ()),
+    ("Education", "Continuing EDUCATION: Example Course, Sampletown, 2015", ()),
+    ("Education", "Note:\tEDUCATION\t" + _RECORD, ()),
+])
+def test_map_hierarchy_node_leaves_a_label_value_line_unplaced(heading, line, bold):
+    # Owner rule 2026-10-30, "otherwise": a colon line whose head is not set
+    # apart (mixed case and not bold; capitals with an ALL CAPS rest; bold
+    # with a bold rest; only partly bold) is a label and its value, one
+    # record (MOFVYH 202/203). A colon then one tab is that shape too, and a
+    # line the heading does not open is not its line.
+    elements = [_elem(0, "A. Person"), _read_elem(1, line, bold)]
+    mapped, _ = map_hierarchy_node({"text": heading, "level": "H1"}, elements, [], 0)
     assert mapped["element_idx"] is None
+
+
+@pytest.mark.parametrize("line, bold", [
+    ("EDUCATION\tEMPLOYMENT AND APPOINTMENTS", ()),
+    ("EDUCATION\t\u2013 EMPLOYMENT AND APPOINTMENTS", ()),
+    ("EDUCATION\tEMPLOYMENT AND APPOINTMENTS____", ()),
+    ("Education: Employment and appointments, 2001-2005", ((0, 9),)),
+])
+def test_map_hierarchy_node_leaves_two_headings_fused_on_one_line_unplaced(line, bold):
+    # TXTATQ 16: two column headings on one line; the text after the gap is
+    # another heading of the outline, not a record.
+    elements = [_elem(0, "A. Person"), _read_elem(1, line, bold)]
+    mapped, _ = map_hierarchy_node(
+        {"text": "Education", "level": "H1"}, elements, [], 0,
+        scope=_outline("Education", "Employment and Appointments"))
+    assert mapped["element_idx"] is None
+
+
+@pytest.mark.parametrize("node, start", [
+    # the sequence search, for a child of a synthetic parent
+    ({"text": "Background", "level": "H1", "text_metadata": {"synthetic": True},
+      "children": [{"text": "Education", "level": "H2"}]}, 0),
+    # the backward search, from a cursor past the line
+    ({"text": "Education", "level": "H1"}, 3),
+    # a child's forward search under a placed parent
+    ({"text": "Background", "level": "H1", "children": [{"text": "Education", "level": "H2"}]}, 0),
+])
+def test_map_hierarchy_node_keeps_the_fused_heading_guard_on_every_search(node, start):
+    elements = [_elem(0, "A. Person"), _elem(1, "Background"),
+                _read_elem(2, "EDUCATION\tEMPLOYMENT AND APPOINTMENTS"), _elem(3, "Sample text")]
+    mapped, _ = map_hierarchy_node(
+        node, elements, [], start, scope=_outline("Background", "Education", "Employment and Appointments"))
+    education = mapped["children"][0] if node.get("children") else mapped
+    assert education["element_idx"] is None
+
+
+def test_map_hierarchy_node_never_places_a_heading_that_normalizes_to_nothing():
+    # A head with no letters and no bold is not set apart.
+    elements = [_elem(0, "A. Person"), _read_elem(1, "***: Sampletown general hospital")]
+    mapped, _ = map_hierarchy_node({"text": "-", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] is None
+
+
+@pytest.mark.parametrize("heading, line", [
+    ("Post Graduate Experience", "Post Graduate Experience   2001-2004: Residency, Example Hospital"),
+    ("Board Certification", "Board Certification\tInternal Medicine, 2005"),
+    ("Board Certification", "Board Certification: Internal Medicine, 2005"),
+    ("Licensure and Certification", "Licensure and\nCertification  Example State Board, 2005"),
+    ("Board Certification", "Board Certification  Internal Medicine  2005"),
+    ("Research Support", "Research Support  Grantsmanship award, 2010"),
+    ("Post Graduate Experience", "Post Graduate Experience   Following residency, Example Hospital"),
+])
+def test_map_hierarchy_node_flags_a_short_run_in_line_whose_record_the_header_consumed(heading, line):
+    # #1252 S3 (VPMMFM 20, ZEIGYO 12): the strict match accepts the line, so
+    # it was placed as a header and stage 2 dropped the record on it. The
+    # line keeps its element_idx and is flagged, so the record stays content.
+    # The head ends at the first gap. A record whose first word only starts
+    # with an outline heading ("Grants"), or that opens with "Following", is
+    # still a record.
+    elements = [_elem(0, "A. Person"), _read_elem(1, line), _elem(2, "Sample record, 2010")]
+    mapped, _ = map_hierarchy_node(
+        {"text": heading, "level": "H1"}, elements, [], 0, scope=_outline(heading, "Grants"))
+    assert mapped["element_idx"] == 1
+    assert mapped["run_in"] is True
+
+
+@pytest.mark.parametrize("heading, line", [
+    ("Society Memberships", "SOCIETY MEMBERSHIPS     YEAR JOINED"),
+    ("Professional Service", "Professional Service  Served on the following"),
+    ("Professional Service", "Professional Service  Committees (see the Following):"),
+    ("Research Support", "Research Support  Grants and Contracts"),
+    ("Licensure and Certification", "Licensure and\nCertification: Example State Board, 2005"),
+])
+def test_map_hierarchy_node_does_not_flag_a_short_heading_line_whose_tail_is_no_record(heading, line):
+    # A column-header row, a lead-in, and a second heading of the outline
+    # (HTNNHG 25/124, web244 819, YOXXOH 279) stay headers. So does a colon
+    # on a later line of the paragraph: it is that line's own label.
+    elements = [_elem(0, "A. Person"), _read_elem(1, line)]
+    mapped, _ = map_hierarchy_node(
+        {"text": heading, "level": "H1"}, elements, [], 0, scope=_outline(heading, "Grants and Contracts"))
+    assert mapped["element_idx"] == 1
+    assert "run_in" not in mapped
+
+
+def test_map_hierarchy_node_keeps_a_run_in_parent_line_a_header_when_a_child_is_placed():
+    # Stage 2's parent range starts after the parent's line, so the record
+    # on a run-in parent's line would be in no section (LWMSPJ 395).
+    node = {"text": "EDUCATION", "level": "H1", "children": [{"text": "Degrees", "level": "H2"}]}
+    elements = [_elem(0, "A. Person"), _elem(1, "EDUCATION  " + _RECORD), _elem(2, "Degrees"),
+                _elem(3, "M.S., Sample College, 1998")]
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert (mapped["element_idx"], mapped["children"][0]["element_idx"]) == (1, 2)
+    assert "run_in" not in mapped
+
+
+def test_map_hierarchy_node_keeps_run_in_on_a_parent_whose_children_are_unplaced():
+    node = {"text": "EDUCATION", "level": "H1", "children": [{"text": "Postdoctoral Training", "level": "H2"}]}
+    elements = [_elem(0, "A. Person"), _elem(1, "EDUCATION  " + _RECORD), _elem(2, "M.S., Sample College, 1998")]
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["children"][0]["element_idx"] is None
+    assert mapped["run_in"] is True
 
 
 # ------------------------------------------------------------- find_header_in_sequence
@@ -1246,6 +1432,51 @@ def test_run_stage_1b_autodetects_hierarchy_json_when_not_given(tmp_path, monkey
     output_data, _ = stage1b.run_stage_1b(str(docx_path))
 
     assert output_data["document_uid"] == "AUTO"
+
+
+def test_run_stage_1b_places_one_tab_and_bold_colon_run_in_headings(tmp_path, monkeypatch):
+    # #1252 through the pipeline's call: the extractor's tab offsets and bold
+    # spans reach stage 1b, which places both headings on their run-in lines
+    # and flags them, so stage 2 keeps each line as its section's first record.
+    _redirect_output_manager(monkeypatch, tmp_path)
+    doc = Document()
+    doc.add_paragraph("Example Person")
+    doc.add_paragraph("EDUCATION\tPh.D., Example University, Sampletown, 2001")
+    doc.add_paragraph("M.S., Sample College, Sampletown, 1998")
+    certification = doc.add_paragraph()
+    certification.add_run("Board Certification:").bold = True
+    certification.add_run(" Internal Medicine, American Board of Example Medicine, 2005-2015")
+    _bold_paragraph(doc, "AWARDS")
+    doc.add_paragraph("Best Paper Award, 2010")
+    docx_path = tmp_path / "run_in_cv.docx"
+    doc.save(docx_path)
+    hierarchy_path = tmp_path / "run_in_hierarchy.json"
+    hierarchy_path.write_text(json.dumps({"document_uid": "RUNIN", "hierarchy": [
+        {"text": h, "level": "H1", "children": []} for h in ("Education", "Board Certification", "Awards")]}))
+
+    output_data, _ = stage1b.run_stage_1b(str(docx_path), str(hierarchy_path))
+
+    nodes = output_data["hierarchy_with_indices"]
+    assert [(n["element_idx"], n.get("run_in", False)) for n in nodes] == [(1, True), (3, True), (4, False)]
+    bounds = {tuple(s["hierarchy"]): (s["element_idx_start"], s["element_idx_end"])
+              for s in output_data["section_boundaries"]}
+    assert bounds[("Education",)] == (1, 2)
+    assert bounds[("Board Certification",)] == (3, 3)
+
+
+def test_run_stage_1b_leaves_a_line_of_two_column_headings_to_the_heading_it_holds(tmp_path, monkeypatch):
+    # TXTATQ 16: "EDUCATION<tab>EMPLOYMENT ..." is two headings, not a heading
+    # and a record. The outline stage 1b checks it against is the stage-1a
+    # hierarchy's.
+    output_data = _run_stage_1b_on(
+        tmp_path, monkeypatch,
+        ["Example Person", "EDUCATION\tEMPLOYMENT HISTORY AND APPOINTMENTS",
+         "Ph.D., Example University, Sampletown, 2001"],
+        [{"text": h, "level": "H1"} for h in ("Education", "Employment History and Appointments")],
+    )
+
+    nodes = output_data["hierarchy_with_indices"]
+    assert [n["element_idx"] for n in nodes] == [None, 1]
 
 
 def test_run_stage_1b_exits_when_no_hierarchy_json_can_be_found(tmp_path, monkeypatch):
