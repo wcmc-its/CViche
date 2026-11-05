@@ -103,6 +103,7 @@ from unified_pipeline.core.credential_lines import (
     is_credential_pin,
     misfiled_credential_home,
     names_state_controlled_substance,
+    opens_board_block,
 )
 from unified_pipeline.core.honor_lines import YEAR_RE
 from unified_pipeline.core.text_norm import date_clauses, record_date_anchors
@@ -796,6 +797,16 @@ def _resolve_licensure(
 # (`fan_out.fallback_text`). So a licence fused with an ECFMG certificate on
 # one paragraph stays a licence, and two life-support records of one line do
 # not both print the line. Any other record's line is its text.
+# A row of the CV's own Board Certification table (a table row under a
+# heading that names board certification and nothing else,
+# `core.credential_lines.opens_board_block`) that states its diplomate
+# status and that stage 4 read as a board certification (it names the
+# certifying board) stays in Board Certification
+# (`_is_board_table_diplomate`): the owner filed it there and both readings
+# agree, so its line's exam name does not move it (#1577: JZKANY 32.3, an
+# NBME diplomate row of the table, left it for Other Education and printed
+# its cells pipe-joined). A diplomate line in prose, and any other row of
+# the table, is read by its line as before.
 CREDENTIAL_REROUTE_CHECK = 'credential_listed_as_licence_reroute'
 #: The section a reroute warning names, by the code a record left (the
 #: `TAXONOMY_TO_SECTION` names of F1 and F2).
@@ -803,6 +814,12 @@ _REROUTED_FROM_SECTION = {LICENCE_CODE: 'licensure', BOARD_CODE: 'board_certific
 #: What joins one clause of a paragraph to the next ("<certificate>, 2029;
 #: <licence>"): not part of either clause's line.
 _CLAUSE_EDGE_CHARS = ' \t;,'
+#: The element type stage 2 gives a row of a source table.
+_TABLE_ROW_ELEMENT = 'table_row'
+#: A diplomate of a board ("Diplomate", "Diplomat", "lifetime diplomate").
+_DIPLOMATE_RE = re.compile(r'\bdiplomat(?:e|s|es)?\b', re.IGNORECASE)
+#: The stage-4 F2 field that names the board a certification is from.
+_CERTIFYING_BOARD_KEY = 'certifying_board'
 
 
 class CredentialReroute(NamedTuple):
@@ -847,11 +864,24 @@ def record_line(entry: Mapping[str, Any]) -> str:
     return _own_dated_clause(entry, text) or fallback_text(entry)
 
 
+def _is_board_table_diplomate(entry: Mapping[str, Any]) -> bool:
+    """Whether `entry` is a diplomate row of the CV's own Board
+    Certification table that stage 4 read as a board certification (see
+    the comment above)."""
+    fields = entry.get('extracted_fields') or {}
+    return (entry.get('element_type') == _TABLE_ROW_ELEMENT
+            and opens_board_block('', [str(level) for level in entry.get('hierarchy') or []])
+            and _DIPLOMATE_RE.search(str(entry.get('text') or '')) is not None
+            and bool(_field_text(fields.get(_CERTIFYING_BOARD_KEY))))
+
+
 def credential_listed_as_licence(entry: Mapping[str, Any], code: str) -> CredentialReroute | None:
     """Where a record grouped under `code` (F1 or F2) belongs instead, and
     the line read (`record_line`), or None (see the comment above)."""
     line = record_line(entry)
     if code == BOARD_CODE:
+        if _is_board_table_diplomate(entry):
+            return None
         home = misfiled_credential_home(line, BOARD_CODE)
         return CredentialReroute(home, line) if home else None
     if code != LICENCE_CODE:
