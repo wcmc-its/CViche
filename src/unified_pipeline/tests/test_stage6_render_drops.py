@@ -1588,6 +1588,16 @@ def test_a_one_cell_certificate_line_coded_f2_keeps_its_line_as_the_name() -> No
     assert "institution" not in fields
 
 
+def test_a_tab_separated_certificate_line_with_no_specialty_keeps_its_line_as_the_name() -> None:
+    entry = _credential("F2", "Example Heart Society\tBasic Life Support",
+                        {"certifying_board": "Example Heart Society", "specialty": None,
+                         "year_certified": None}, idx=42)
+    [moved] = _grouped(entry)["B2"]
+    fields = moved["extracted_fields"]
+    assert fields["program_name"] == "Example Heart Society\tBasic Life Support"
+    assert "institution" not in fields
+
+
 def _board_table_row(text: str, fields: dict, leaf: str = "Board Certification") -> dict:
     return _credential("F2", text, fields, idx="32.3", element_type="table_row",
                        hierarchy=["LICENSURE, BOARD CERTIFICATION", leaf])
