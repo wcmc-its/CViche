@@ -138,6 +138,11 @@ def test_a_level_that_adds_to_the_name_is_still_prefixed():
     assert rows["Site/Position:"] == "PhD student - Fictional Genetics Program"
     rows = _mentee(mentee_name="Brian Wood", mentee_level="MD", site_position="Fictional Pediatrics")
     assert rows["Site/Position:"] == "MD - Fictional Pediatrics"
+    # Case counts in the Name: an honorific "Ms." or a surname "Do" is no degree.
+    rows = _mentee(mentee_name="Ms. Jane Do", mentee_level="MS", site_position="Fictional Biology")
+    assert rows["Site/Position:"] == "MS - Fictional Biology"
+    rows = _mentee(mentee_name="Jane Do", mentee_level="DO", site_position="Fictional Medicine")
+    assert rows["Site/Position:"] == "DO - Fictional Medicine"
 
 
 def test_either_value_alone_renders_as_it_is():

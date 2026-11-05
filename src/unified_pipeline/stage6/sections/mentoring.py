@@ -893,7 +893,8 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     mentee_level = _text(fields.get('mentee_level'))       # e.g. "PhD, MBSB"
     site_pos_raw = _text(fields.get('site_position'))      # e.g. "Thesis"
     if (mentee_level and site_pos_raw and not _contains_words(site_pos_raw, mentee_level)
-            and not _contains_words(name, mentee_level)):
+            # Case-sensitive: "Ms." or a surname "Do" in the Name is no degree.
+            and not re.search(rf'(?<!\w){re.escape(mentee_level)}(?!\w)', name)):
         site_position = f"{mentee_level} - {site_pos_raw}"
     else:
         site_position = site_pos_raw or mentee_level
