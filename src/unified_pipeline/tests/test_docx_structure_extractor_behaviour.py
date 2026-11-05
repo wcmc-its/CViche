@@ -41,6 +41,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.enum.style import WD_STYLE_TYPE  # noqa: E402
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # noqa: E402
 from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls, qn  # noqa: E402
@@ -48,6 +49,8 @@ from docx.shared import Inches, Pt  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
+    BOLD_SPANS_KEY,
+    TAB_OFFSETS_KEY,
     _fold_orphan_date_tail,
     _is_date_column,
     _is_date_only_text,
@@ -358,6 +361,127 @@ def test_extract_paragraph_metadata_list_numbering():
 
     assert meta["list_level"] == 1
     assert meta["num_fmt"] == "numbered"
+
+
+# --------------------------------------------------------------------------
+# extract_paragraph_metadata: tab offsets and bold spans for stage 1b's
+# run-in split (#1252)
+# --------------------------------------------------------------------------
+
+
+def test_extract_paragraph_metadata_records_tab_offsets_into_the_stripped_text():
+    # The text reads each tab as a blank and is stripped; the offsets index
+    # the text as stored, so the leading and trailing tabs are not kept.
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("\tEDUCATION\tPh.D., Example University\t")
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["text"] == "EDUCATION Ph.D., Example University"
+    assert meta[TAB_OFFSETS_KEY] == [9]
+    assert meta[BOLD_SPANS_KEY] == []
+
+
+def test_extract_paragraph_metadata_records_bold_spans_of_runs_inside_a_hyperlink():
+    # The same walk as get_paragraph_text: a run inside w:hyperlink counts,
+    # which python-docx's Paragraph.runs leaves out.
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("Education:").bold = True
+    para.add_run(" Ph.D., ")
+    para._p.append(parse_xml(
+        f'<w:hyperlink {nsdecls("w")}><w:r><w:rPr><w:b/></w:rPr><w:t>Example</w:t></w:r></w:hyperlink>'))
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["text"] == "Education: Ph.D., Example"
+    assert meta[BOLD_SPANS_KEY] == [(0, 10), (18, 25)]
+
+
+def test_extract_paragraph_metadata_reads_bold_from_the_run_then_its_styles():
+    # A run's own w:b wins; without one, the character style it names, if
+    # that sets bold; without that, the paragraph style, up its basedOn
+    # chain, where an explicit "not bold" also counts.
+    doc = Document()
+    inherits = doc.styles.add_style("Inherits Bold", WD_STYLE_TYPE.PARAGRAPH)
+    inherits.base_style = doc.styles["Heading 1"]
+    not_bold = doc.styles.add_style("Not Bold", WD_STYLE_TYPE.PARAGRAPH)
+    not_bold.base_style = doc.styles["Heading 1"]
+    not_bold.font.bold = False
+    styled = doc.add_paragraph(style="Inherits Bold")
+    styled.add_run("Head ")
+    styled.add_run("plain").bold = False
+    styled.add_run(" Emph", style="Emphasis")
+    plain = doc.add_paragraph()
+    plain.add_run("Key", style="Strong")
+    plain.add_run(" value")
+    unbolded = doc.add_paragraph(style="Not Bold")
+    unbolded.add_run("Heading text")
+
+    assert extract_paragraph_metadata(styled, 0)[BOLD_SPANS_KEY] == [(0, 5), (10, 15)]
+    assert extract_paragraph_metadata(plain, 1)[BOLD_SPANS_KEY] == [(0, 3)]
+    assert extract_paragraph_metadata(unbolded, 2)[BOLD_SPANS_KEY] == []
+
+
+def test_extract_paragraph_metadata_does_not_read_the_default_character_style():
+    # Word applies a character style only where a run names one; the
+    # default character style is not looked up for a run that names none.
+    doc = Document()
+    doc.styles["Default Paragraph Font"].font.bold = True
+    para = doc.add_paragraph()
+    para.add_run("Plain text")
+
+    assert extract_paragraph_metadata(para, 0)[BOLD_SPANS_KEY] == []
+
+
+def test_extract_paragraph_metadata_stops_at_a_based_on_loop():
+    # A malformed styles part whose basedOn chain loops is read as not bold.
+    doc = Document()
+    first = doc.styles.add_style("Loop A", WD_STYLE_TYPE.PARAGRAPH)
+    second = doc.styles.add_style("Loop B", WD_STYLE_TYPE.PARAGRAPH)
+    first.base_style = second
+    second.base_style = first
+    para = doc.add_paragraph("Plain text", style="Loop A")
+
+    assert extract_paragraph_metadata(para, 0)[BOLD_SPANS_KEY] == []
+
+
+def test_extract_paragraph_metadata_reads_text_outside_a_run_as_not_bold():
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("Bold").bold = True
+    para._p.append(parse_xml(f'<w:t {nsdecls("w")}>Loose</w:t>'))
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["text"] == "BoldLoose"
+    assert meta[BOLD_SPANS_KEY] == [(0, 4)]
+
+
+def test_extract_unified_elements_drops_the_offsets_of_a_line_the_pii_scrub_rewrites(tmp_path):
+    # The offsets index the text as read; a scrubbed value changes its
+    # length, so a rewritten line keeps none. Both scrub paths: the value on
+    # the label's own line, and the value on the line after a bare label.
+    doc = Document()
+    doc.add_paragraph().add_run("Date of Birth:\t01/02/1970")
+    doc.add_paragraph("Date of Birth:")
+    doc.add_paragraph().add_run("01/02/1970\tExample City")
+    doc.add_paragraph().add_run("EDUCATION\tPh.D., Example University")
+    path = tmp_path / "scrubbed.docx"
+    doc.save(path)
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["text"] for e in elements] == [
+        "Date of Birth: [withheld]", "Date of Birth:", "[withheld] Example City",
+        "EDUCATION Ph.D., Example University",
+    ]
+    for rewritten in (elements[0], elements[2]):
+        assert TAB_OFFSETS_KEY not in rewritten
+        assert BOLD_SPANS_KEY not in rewritten
+    assert elements[1][TAB_OFFSETS_KEY] == []
+    assert elements[3][TAB_OFFSETS_KEY] == [9]
 
 
 # --------------------------------------------------------------------------
