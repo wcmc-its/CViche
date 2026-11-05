@@ -2682,6 +2682,42 @@ def test_2061_a_marital_status_cut_takes_only_whole_name_cells(text, kept):
     assert residual == kept
 
 
+@pytest.mark.parametrize("text", [
+    "Place of birth Sampleton",
+    "Place of Birth\tSampleton, Examplestan",
+    "Place of birth  Port Sampleton, ZZ",
+    "Birthplace Rio de Sampleton, Examplestan",
+    "Birth place - Sampleton",
+    "• Place of birth Sampleton.",
+])
+def test_2061_a_colonless_place_of_birth_withholds_the_place(text):
+    """FBNZIP (invented values): "Place of birth <city>" with no colon."""
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert residual == "", code
+        assert [item.category for item in withheld] == [CAT_PLACE_OF_BIRTH], code
+
+
+@pytest.mark.parametrize("text", [
+    "Place of birth effects on sample outcomes",
+    "Birthplace diversity and innovation in Sampleton",
+    "Place of Birth Sampleton is a sample title",
+    "An example study of place of birth Sampleton",
+])
+def test_2061_colonless_place_of_birth_prose_is_kept(text):
+    for code in (A, APPENDIX):
+        assert not _denied(text, code), (text, code)
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("Place of birth Sampleton\tCitizenship Examplestani", "Citizenship Examplestani"),
+    ("Place of birth Sampleton   Citizenship Examplestani", "Citizenship Examplestani"),
+])
+def test_2061_a_colonless_place_of_birth_cut_stops_at_the_next_cell(text, kept):
+    residual, _withheld = _withheld_residual(text, code=A)
+    assert residual == kept
+
+
 def test_2061_birth_place_and_spouse_name_never_reach_the_rendered_document(tmp_path):
     """Render proof, not matcher proof: the real `generate()` over fieldless
     A and T entries (recovered into the Appendix as HTGWYH's were), every XML
@@ -2693,6 +2729,7 @@ def test_2061_birth_place_and_spouse_name_never_reach_the_rendered_document(tmp_
 
     lines = [("Birth: Zqxville, ZQ", "Zqxville"),
              ("Birth:\tZqxburg, ZQ", "Zqxburg"),
+             ("Place of birth Zqxtown", "Zqxtown"),
              ("Marital Status: Married, 1990; Pat B. Zqxson", "Zqxson"),
              ("Marital Status:      Married      Lee Zqxmann", "Zqxmann")]
     entries = [{"text": "Name: Jane Q. Public, MD", "taxonomy_code": "A",
