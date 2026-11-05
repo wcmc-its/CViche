@@ -1810,7 +1810,7 @@ def _value_years(value: object) -> frozenset[str]:
 
 
 #: A year range on a rendered line, squashed ("2006-2010").
-_LINE_YEAR_RANGE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})[-–—]((?:19|20)\d{2})(?!\d)")
+_LINE_YEAR_RANGE_RE = re.compile(r"((?:19|20)\d{2})[-–—]((?:19|20)\d{2})")
 
 
 def _joined_years(squashed: str, years: frozenset[str]) -> set[str]:

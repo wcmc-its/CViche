@@ -60,16 +60,16 @@ _LEADING_YEAR_RE = re.compile(r'^\s*((?:19|20)\d{2})(?!\d)[\s.,:;\-–—]*')
 _YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
 _MONTH = r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?'
 # A date closing the line ("..., March 3-4, 1997."); group 1 is its year. Its
-# day and year start on a digit boundary, or its day would take an earlier
-# year's last digits ("..., 1990, 2004" read as day 90 of 2004 and cut to "..., 19").
+# day starts on a digit boundary, or it would take an earlier year's last
+# digits ("..., 1990, 2004" read as day 90 of 2004 and cut to "..., 19").
 _WEEKDAY = r'(?:mon|tues|wednes|thurs|fri|satur|sun)day'
 _TRAILING_DATE_RE = re.compile(
     rf'[\s,;:\-–—(]*(?:{_WEEKDAY},?\s*)?(?:{_MONTH}\s*)?(?:(?<!\d)\d{{1,2}}(?:st|nd|rd|th)?(?:\s*[-–]\s*\d{{1,2}})?,?\s*)?'
-    r'(?<!\d)((?:19|20)\d{2})\)?\.?\s*$', re.IGNORECASE)
+    r'((?:19|20)\d{2})\)?\.?\s*$', re.IGNORECASE)
 # A year range closing the line ("..., 1983-2015"); groups 1 and 2 are its
 # years, the end as written ("2015", "93").
 _TRAILING_RANGE_RE = re.compile(
-    r'[\s,;:\-–—(]*(?<!\d)((?:19|20)\d{2})\s*[-–—]\s*((?:19|20)?\d{2})(?!\d)\)?\.?\s*$')
+    r'[\s,;:\-–—(]*((?:19|20)\d{2})\s*[-–—]\s*((?:19|20)?\d{2})\)?\.?\s*$')
 _WORD_RE = re.compile(r'[^\W\d_]{2,}')
 _DATE_WORD_RE = re.compile(rf'\b{_MONTH}(?!\w)|\d+(?:st|nd|rd|th)?\b', re.IGNORECASE)
 # Joining words left over once role, event and venue are taken out of a source

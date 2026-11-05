@@ -2229,6 +2229,12 @@ def test_offschema_listed_years_the_row_joins_into_ranges_are_shown():
     envelope = [_table(_row("Abstract Reviewer", "Example Association", "2003-2006"))]
     assert [(f["severity"], f["message"].split("`")[1]) for f in _graded(envelope, gap)] == [
         ("WARN", "additional_dates")]
+    past_the_end = _fields_entry("Q2", {
+        "activity": "Abstract Reviewer", "organization": "Example Association",
+        "start_date": "2003", "end_date": "2006",
+        "additional_dates": ["2003", "2004", "2005"]})
+    assert [(f["severity"], f["message"].split("`")[1])
+            for f in _graded(envelope, past_the_end)] == [("WARN", "additional_dates")]
 
 
 def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
