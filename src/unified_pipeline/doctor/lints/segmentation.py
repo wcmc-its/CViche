@@ -36,7 +36,12 @@ from difflib import SequenceMatcher
 from typing import NamedTuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
-from unified_pipeline.core.text_norm import fold_quotes, norm, squash
+from unified_pipeline.core.text_norm import (
+    fold_quotes,
+    norm,
+    record_after_heading,
+    squash,
+)
 from unified_pipeline.segmentation_regression import (
     compute_metrics,
     find_lost_blocks,
@@ -657,39 +662,20 @@ def lint_record_date_shift(stage2: dict) -> list[dict]:
 # whole line `header`, so the record after the label never reaches stage 3b
 # (WBBUHK 29/32/36/49: the only board certification, the first licence and
 # society, the current employer; MFJRKW 52: an award). The heading counts as
-# covered, so `source_coverage_pct` reads 100.
-
-#: Text after the heading words that is a note on the list, not a record,
-#: though it has two words: a parenthetical or bracketed aside ("(past 3
-#: years only)", "[number withheld]"), "not applicable", or a page number
-#: ("Page 2 of 5"). A one-word note ("none", "(cont'd)") already falls under
-#: HEADER_RECORD_MIN_WORDS.
-_HEADER_NOTE_RE = re.compile(
-    r"^(?:\(.*\)|\[.*\]|not applicable|page\s*\d+(?:\s*of\s*\d+)?)[.:]?$",
-    re.IGNORECASE)
-#: Separators between a run-in heading and its first record.
-_HEADER_SEPARATORS = " \t:;,.-\u2013\u2014"
-#: The fewest letter words a remainder needs to be a record rather than a
-#: stray word ("program", "Where?").
-HEADER_RECORD_MIN_WORDS = 2
-_LETTER_WORD_RE = re.compile(r"[^\W\d_]{2,}")
+# covered, so `source_coverage_pct` reads 100. The record test is
+# core.text_norm's, which stage 1b's run-in flag shares (#1252).
 
 
 def _header_remainder(entry: dict) -> str | None:
     """The text a header entry holds after its own heading words, when it
-    reads as a record: two or more letter words, not a note, not ALL CAPS
-    (a column-header row, "YEAR JOINED")."""
+    reads as a record (`record_after_heading`)."""
     text, path = entry.get("text"), entry.get("hierarchy") or []
     if not isinstance(text, str) or not path:
         return None
     flat, heading = " ".join(text.split()), " ".join(str(path[-1]).split())
     if not heading or not flat.lower().startswith(heading.lower()):
         return None
-    rest = flat[len(heading):].strip(_HEADER_SEPARATORS)
-    if (len(_LETTER_WORD_RE.findall(rest)) < HEADER_RECORD_MIN_WORDS
-            or _HEADER_NOTE_RE.match(rest) or rest.isupper()):
-        return None
-    return rest
+    return record_after_heading(flat[len(heading):])
 
 
 def lint_header_consumed_record(stage2: dict,

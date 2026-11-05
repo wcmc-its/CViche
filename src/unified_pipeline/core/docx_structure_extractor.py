@@ -22,10 +22,12 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
+from docx.oxml.text.run import CT_R
 from docx.oxml.xmlchemy import BaseOxmlElement
 from docx.shared import Pt, RGBColor
 from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 
 from unified_pipeline.stage6.normalization.pii import (
     PRE_LLM_PLACEHOLDER,
@@ -183,8 +185,19 @@ def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
 
     Without this, paragraphs using smartTags appear empty even though they contain text.
     """
-    from docx.oxml.ns import qn
+    return ''.join(piece for piece, _node in _paragraph_text_pieces(para, tab_char))
 
+
+_W_T, _W_BR, _W_CR, _W_TAB = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
+_W_NO_BREAK_HYPHEN = qn('w:noBreakHyphen')
+_W_R = qn('w:r')
+
+
+def _paragraph_text_pieces(
+    para: Paragraph, tab_char: str
+) -> Iterator[tuple[str, BaseOxmlElement]]:
+    """(the text it reads as, the node) for each text node of `para`, in
+    document order: the walk `get_paragraph_text` joins."""
     # Walk w:t (text), w:br/w:cr (line breaks) and w:tab in document order so the
     # returned text keeps the paragraph's internal line structure. Bare w:t iteration
     # mashed multi-line paragraphs into run-on text ("CURRICULUM VITAEZachary..."),
@@ -197,20 +210,17 @@ def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     # 'PEERREVIEWED', a hyphenated surname lost its hyphen). It reads as '-',
     # as python-docx's Run.text reads it. w:softHyphen is only a permitted
     # break point, so it is not walked and reads as ''.
-    WT, WBR, WCR, WTAB = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
-    WNBH = qn('w:noBreakHyphen')
-    parts = []
-    for node in _iter_text_nodes(para._p, (WT, WBR, WCR, WTAB, WNBH)):
-        if node.tag == WT:
+    tags = (_W_T, _W_BR, _W_CR, _W_TAB, _W_NO_BREAK_HYPHEN)
+    for node in _iter_text_nodes(para._p, tags):
+        if node.tag == _W_T:
             if node.text:
-                parts.append(node.text)
-        elif node.tag == WTAB:
-            parts.append(tab_char)
-        elif node.tag == WNBH:
-            parts.append('-')
+                yield node.text, node
+        elif node.tag == _W_TAB:
+            yield tab_char, node
+        elif node.tag == _W_NO_BREAK_HYPHEN:
+            yield '-', node
         else:  # w:br / w:cr -> line break
-            parts.append('\n')
-    return ''.join(parts)
+            yield '\n', node
 
 
 def get_cell_text(cell, tab_char: str = ' ') -> str:
@@ -292,6 +302,69 @@ def get_cell_text_with_nested(cell: _Cell) -> str:
     if _cell_has_nested_table(cell):
         return _cell_text_in_order(cell)
     return get_cell_text(cell)
+
+
+#: Paragraph-element keys that record, as character offsets into the
+#: element's `text`, where the paragraph had a tab and which of its characters
+#: are bold. Stage 1b reads them to split a run-in heading from the record on
+#: its line ("EDUCATION<tab>Ph.D., ...", a bold "Education:" before plain
+#: text) (#1252). The text reads each tab as a blank, so these offsets are the
+#: only record of which blanks were tabs; the text is not stored twice.
+TAB_OFFSETS_KEY = "tab_offsets"
+BOLD_SPANS_KEY = "bold_spans"
+#: How far up a paragraph style's basedOn chain bold is looked for. A longer
+#: chain is a loop in a malformed styles part.
+_STYLE_CHAIN_MAX_DEPTH = 10
+
+
+def _paragraph_style_bold(para: Paragraph) -> bool:
+    """Whether the paragraph's style, or a style it is based on, sets bold."""
+    style = para.style
+    for _ in range(_STYLE_CHAIN_MAX_DEPTH):
+        if style is None:
+            return False
+        if style.font.bold is not None:
+            return style.font.bold
+        style = style.base_style
+    return False
+
+
+def _run_is_bold(run_elem: CT_R, para: Paragraph, style_bold: bool) -> bool:
+    """A w:r's bold: its own properties, else the character style it names,
+    else the paragraph style's (`style_bold`). A run that names no character
+    style is not looked up: the default one sets no bold, and finding it
+    scans every style in the document."""
+    run = Run(run_elem, para)
+    if run.bold is not None:
+        return run.bold
+    if run_elem.style is not None and run.style.font.bold is not None:
+        return run.style.font.bold
+    return style_bold
+
+
+def _run_in_layout(para: Paragraph) -> dict[str, list[Any]]:
+    """`TAB_OFFSETS_KEY` and `BOLD_SPANS_KEY` for `para`: the offset of each
+    tab, and a (start, end) span per bold text node, into the paragraph's text
+    as `extract_paragraph_metadata` strips it. The same walk as
+    `get_paragraph_text`, so a run inside a hyperlink or smartTag counts."""
+    pieces = list(_paragraph_text_pieces(para, ' '))
+    raw = ''.join(piece for piece, _node in pieces)
+    lead, length = len(raw) - len(raw.lstrip()), len(raw.strip())
+    style_bold = _paragraph_style_bold(para)
+    tabs: list[int] = []
+    bold: list[tuple[int, int]] = []
+    end = -lead
+    for piece, node in pieces:
+        start, end = end, end + len(piece)
+        span = (max(start, 0), min(end, length))
+        if span[0] >= span[1]:
+            continue
+        run_elem = node.getparent()
+        if node.tag == _W_TAB:
+            tabs.append(span[0])
+        elif run_elem.tag == _W_R and _run_is_bold(run_elem, para, style_bold):
+            bold.append(span)
+    return {TAB_OFFSETS_KEY: tabs, BOLD_SPANS_KEY: bold}
 
 
 def extract_paragraph_metadata(para: Paragraph, idx: int | None) -> dict[str, Any]:
@@ -390,7 +463,8 @@ def extract_paragraph_metadata(para: Paragraph, idx: int | None) -> dict[str, An
         "italic": italic,
         "underline": underline,
         "font_size": font_size,
-        "font_color": font_color
+        "font_color": font_color,
+        **_run_in_layout(para),
     }
 
 
@@ -1510,6 +1584,16 @@ def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
             _scrub_cells_below(next_row, cell, col_idx, category)
 
 
+def _set_scrubbed_text(el: dict[str, Any], scrubbed: str) -> None:
+    """Write a paragraph element's scrubbed text. When the scrub rewrote the
+    text, the tab offsets and bold spans recorded against the text as read no
+    longer index it, so they are dropped (#1252)."""
+    if scrubbed != el["text"]:
+        el.pop(TAB_OFFSETS_KEY, None)
+        el.pop(BOLD_SPANS_KEY, None)
+    el["text"] = scrubbed
+
+
 def _scrub_pre_llm_value_of_category_in_element(el: dict[str, Any], category: str) -> None:
     """Replace the value for `category` that OPENS `el`, wherever `el` keeps
     its text: a plain paragraph's own `text`, or -- for a table element --
@@ -1533,7 +1617,7 @@ def _scrub_pre_llm_value_of_category_in_element(el: dict[str, Any], category: st
         return
     text = el.get("text")
     if isinstance(text, str) and text:
-        el["text"] = redact_pre_llm_value_of_category(text, category, cross_boundary=True)
+        _set_scrubbed_text(el, redact_pre_llm_value_of_category(text, category, cross_boundary=True))
 
 
 def _scrub_pre_llm_pii_next_element(elements: list[dict[str, Any]]) -> None:
@@ -1589,7 +1673,7 @@ def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str
         else:
             text = el.get("text")
             if isinstance(text, str) and text:
-                el["text"] = redact_pre_llm_values(text)
+                _set_scrubbed_text(el, redact_pre_llm_values(text))
     _scrub_pre_llm_pii_next_element(elements)
     return elements
 
