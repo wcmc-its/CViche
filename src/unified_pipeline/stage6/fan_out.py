@@ -1222,7 +1222,8 @@ _CREDENTIAL_NUMBER_RE = re.compile(r'#\s*\w*\d')
 class _Fold(NamedTuple):
     """Records of one entry that render as one row: their indexes in order,
     the last the row's own, and its name when they are one numbered
-    credential's parts (None to keep the last record's name)."""
+    credential's parts (None to keep the last record's name) -- or, for a
+    grant's roles (`_role_folds`), the roles the row lists."""
     members: tuple[int, ...]
     name: str | None
 
@@ -1283,6 +1284,38 @@ def _fold_into(child: dict[str, Any], records: Sequence[Mapping[str, Any]], fold
         child['extracted_fields'][_FOLDED_NAME_KEY] = fold.name
 
 
+# #2068 (HTGWYH 92, 102): stage 4 split one grant into a record per role the
+# owner held on it -- the same title, funder, number, dates and notes, one role
+# each -- and each record printed a whole grant table: one study as four
+# tables. Records of a grant entry whose tables differ in the owner's role
+# alone are one grant: they render as the last record's table, its role cell
+# listing every role in order, as stage 4 writes a grant's roles when it keeps
+# them in one record ("<role>; <role>"). Records that differ in anything else
+# a table prints, dates included, stay tables of their own.
+_ROLE_FOLDED_CODES = frozenset({'M2A', 'M2B', 'M2C'})
+_FOLDED_ROLE_KEY = 'pi_role'
+_FOLDED_ROLE_SEPARATOR = '; '
+
+
+def _role_folds(records: Sequence[Mapping[str, Any]], rendered: frozenset[str],
+                code: str) -> list[_Fold]:
+    """The records of one grant entry that render as one table (see the
+    comment above), each fold named by the roles it joins."""
+    same: dict[tuple[tuple[str, str], ...], list[int]] = {}
+    for i, record in enumerate(records):
+        identity = tuple(pair for pair in _row_identity(record, rendered, code)
+                         if pair[0] != _FOLDED_ROLE_KEY)
+        if identity:
+            same.setdefault(identity, []).append(i)
+    folds = []
+    for members in same.values():
+        roles = [str(records[i].get(_FOLDED_ROLE_KEY) or '').strip() for i in members]
+        joined = _FOLDED_ROLE_SEPARATOR.join(dict.fromkeys(role for role in roles if role))
+        if len(members) > 1 and joined:
+            folds.append(_Fold(tuple(members), joined))
+    return folds
+
+
 def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
                      records_key: str) -> list[dict[str, Any]] | None:
     """One child per record stage 4 kept under `records_key`, or None.
@@ -1313,6 +1346,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     (`_unsourced_date_records`), and an earlier record whose row a later one
     prints identically is not emitted (`_repeated_rows`). #1577: nor is an
     earlier B2 record folded into a later one's row (`_record_folds`).
+    #2068: nor an earlier grant record whose table differs from a later
+    one's in the owner's role alone (`_role_folds`).
     """
     code = str(entry.get('taxonomy_code'))
     rendered = _RENDERED_FIELDS.get(code)
@@ -1332,7 +1367,9 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     records = [_without_dates(record) if i in unsourced else dict(record)
                for i, record in enumerate(records)]
     folds = _record_folds(records, rendered, code) if code in _FOLDED_CODES else []
-    repeated = _repeated_rows(records, rendered, code) | {i for fold in folds for i in fold.members[:-1]}
+    role_folds = _role_folds(records, rendered, code) if code in _ROLE_FOLDED_CODES else []
+    repeated = (_repeated_rows(records, rendered, code)
+                | {i for fold in (*folds, *role_folds) for i in fold.members[:-1]})
     citation = {key: fields[key] for key in _CITATION_KEYS if key in fields}
     bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
     earlier = {i: _child(bare, {**copy.deepcopy(record), **(citation if i == cited else {})},
@@ -1350,6 +1387,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     rows = {**earlier, len(records) - 1: last}
     for fold in folds:
         _fold_into(rows[fold.members[-1]], records, fold)
+    for fold in role_folds:
+        rows[fold.members[-1]]['extracted_fields'][_FOLDED_ROLE_KEY] = fold.name
     return [*earlier.values(), last]
 
 

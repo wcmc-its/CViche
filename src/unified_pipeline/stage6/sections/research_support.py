@@ -1434,6 +1434,12 @@ PROTOCOL_NUMBER_RE = re.compile(
     r'\d+(?:[-/.]\d+)*',
     re.IGNORECASE,
 )
+# A sponsor's lettered protocol ID: two or more all-letter segments, then
+# all-digit ones, joined by hyphens ("ABC-DEF-06-02", the "GS-US-528-9023"
+# shape). A funder's grant number mixes letters and digits in one segment
+# (R01, K23, W81XWH) or opens with one letter segment (an NSF "DMS-1234567"),
+# so it never matches (#2068, LPPQAJ 129).
+LETTERED_PROTOCOL_ID_RE = re.compile(r'[a-z]{2,}(?:-[a-z]{2,})+(?:-\d+)+', re.IGNORECASE)
 
 
 def is_unfunded_protocol_number(grant_number: str, agency: str, code: str) -> bool:
@@ -1447,7 +1453,8 @@ def is_unfunded_protocol_number(grant_number: str, agency: str, code: str) -> bo
     Award Source, as a sponsored trial's protocol number should.
     """
     return (code in PROTOCOL_NUMBER_CODES and not agency
-            and PROTOCOL_NUMBER_RE.fullmatch(grant_number) is not None)
+            and any(pattern.fullmatch(grant_number) is not None
+                    for pattern in (PROTOCOL_NUMBER_RE, LETTERED_PROTOCOL_ID_RE)))
 
 
 def protocol_number_warning(code: str, entry: dict | None) -> dict[str, Any]:
@@ -1799,9 +1806,24 @@ def _first_rendering_amount(fields: GrantFields) -> str | int | float:
     return ''
 
 
+# The source names the grant's amount a total ("Total Budget:" with the amount
+# left blank, ZDKMKD 275): its empty costs row asks for that total, not for the
+# template's yearly figure (#2068).
+TOTAL_AMOUNT_WORDING_RE = re.compile(r'\btotal\s+(?:budget|award|funding|amount)\b', re.IGNORECASE)
+
+
+def _names_total(raw_text: str, fields: GrantFields) -> bool:
+    """Whether the source names the grant's amount a total
+    (`TOTAL_AMOUNT_WORDING_RE`). Not for a pending grant with its own
+    `total_funding_requested`: that renders as "Total requested:" in the
+    optional rows, so the costs row does not name a blank one beside it."""
+    return (TOTAL_AMOUNT_WORDING_RE.search(raw_text or '') is not None
+            and not _format_currency(fields.get('total_funding_requested')))
+
+
 def _format_grant_costs(
     annual_costs: str | int | float | None, total_funding: str | int | float | None,
-    code: str,
+    code: str, names_total: bool = False,
 ) -> list[tuple[str, str]]:
     """The costs rows as (label, currency text) pairs.
 
@@ -1809,8 +1831,9 @@ def _format_grant_costs(
     `total_funding` that renders goes under "Total award:" (under Pending,
     `code` M2C, "Total requested:"), never under "Annual": alone it is the
     only costs row, and beside a different yearly amount it is a second row,
-    so neither figure is dropped. With neither, the template's own label and
-    an empty cell. Both arguments are `_create_grant_table`'s locals rather
+    so neither figure is dropped. With neither, an empty cell under the
+    template's own label -- or under the total's label when `names_total`
+    says the source names the amount a total (#2068). Both arguments are `_create_grant_table`'s locals rather
     than fresh `fields` reads, so a duplicate-of-title blanking made before
     the call is what renders here too.
 
@@ -1821,8 +1844,10 @@ def _format_grant_costs(
     """
     annual_formatted = _format_currency(annual_costs)
     total_formatted = _format_currency(total_funding)
+    if not annual_formatted and not total_formatted:
+        return [(_total_amount_label(code) if names_total else ANNUAL_COSTS_LABEL, '')]
     rows = []
-    if annual_formatted or not total_formatted:
+    if annual_formatted:
         rows.append((ANNUAL_COSTS_LABEL, annual_formatted))
     if total_formatted and total_formatted != annual_formatted:
         rows.append((_total_amount_label(code), total_formatted))
@@ -1959,17 +1984,20 @@ class ResearchSupportSection:
 
             # A heading with no grants keeps the template's placeholder table,
             # which the empty-slot pass fills with N/A (#1942, reversing the
-            # removal "even with no entries"). With grants, the placeholder
-            # makes way for theirs. `_find_table_after_paragraph` has no
-            # section boundary and returns the first table anywhere below --
-            # for Past/Pending, which have no placeholder of their own, that
-            # was N2's table and a mentee placeholder (#836); the shape guard
-            # is what keeps this removal inside M2.
+            # removal "even with no entries"). It makes way for the first grant
+            # table that renders, so a heading whose entries all decline (a
+            # bare "None", SLIMGK 84) keeps it and its N/A too (#2068).
+            # `_find_table_after_paragraph` has no section boundary and
+            # returns the first table anywhere below -- for Past/Pending,
+            # which have no placeholder of their own, that was N2's table and
+            # a mentee placeholder (#836); the shape guard is what keeps this
+            # removal inside M2. It is looked up before any grant table is
+            # inserted, so it cannot find one of them.
             if not entries:
                 continue
-            existing_table = self._find_table_after_paragraph(section_idx)
-            if existing_table and _looks_like_funding_placeholder(existing_table):
-                existing_table._element.getparent().remove(existing_table._element)
+            placeholder = self._find_table_after_paragraph(section_idx)
+            if placeholder is not None and not _looks_like_funding_placeholder(placeholder):
+                placeholder = None
 
             # Sort entries reverse chronologically (most recent first)
             sorted_entries = sort_entries_reverse_chronological(entries)
@@ -1987,6 +2015,9 @@ class ResearchSupportSection:
                 # Create grant table - pass the element to insert after and owner name
                 grant_table = self._create_grant_table(fields, code, entry, insert_after_element=last_element, owner_name=owner_name)
                 if grant_table:
+                    if placeholder is not None:
+                        placeholder._element.getparent().remove(placeholder._element)
+                        placeholder = None
                     rendered_grant_ids.add(id(entry))
                     self.stats['tables_populated'] += 1
                     self.stats['entries_inserted'] += 1
@@ -2120,7 +2151,8 @@ class ResearchSupportSection:
         raw_text = entry.get('text', '') if entry else ''
         role, pi_name = resolve_role_and_pi(fields, raw_text, role, owner_name, entry)
 
-        cost_rows = _format_grant_costs(annual_direct_costs, total_funding, code)
+        cost_rows = _format_grant_costs(annual_direct_costs, total_funding, code,
+                                        _names_total(raw_text, fields))
 
         # The grant number rides in Award Source -- unless it is a protocol or
         # IRB number with no funder, which is not an award source (#1694).
