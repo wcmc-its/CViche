@@ -448,6 +448,18 @@ def test_plan_gives_an_entry_naming_no_degree_no_sub_point(fields, planned):
     assert not sp._names_degree(entry)
 
 
+def test_every_off_schema_advisor_name_is_a_degree_cell_field():
+    """#1245: the education writer prints the advisor under each of
+    `ADVISOR_LABELS`' keys; those `_RENDERED_FIELDS` cannot list are counted
+    here, so a fragment restating the advisor is not offered again."""
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+    from unified_pipeline.stage6.sections.education import ADVISOR_LABELS
+
+    off_schema = {key for key, _ in ADVISOR_LABELS} - _RENDERED_FIELDS["B1"]
+    assert "thesis_advisor" in off_schema
+    assert off_schema <= set(sp._DEGREE_CELL_FIELDS)
+
+
 @pytest.mark.parametrize("field", sp._DEGREE_CELL_FIELDS)
 def test_a_degrees_cell_fields_count_as_its_rendered_values(field):
     # The degree's cell prints them, though `_RENDERED_FIELDS` cannot list

@@ -59,11 +59,17 @@ _LIST_NUMBER_RE = re.compile(r'^\s*(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
 _LEADING_YEAR_RE = re.compile(r'^\s*((?:19|20)\d{2})(?!\d)[\s.,:;\-–—]*')
 _YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
 _MONTH = r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?'
-# A date closing the line ("..., March 3-4, 1997."); group 1 is its year.
+# A date closing the line ("..., March 3-4, 1997."); group 1 is its year. Its
+# day starts on a digit boundary, or it would take an earlier year's last
+# digits ("..., 1990, 2004" read as day 90 of 2004 and cut to "..., 19").
 _WEEKDAY = r'(?:mon|tues|wednes|thurs|fri|satur|sun)day'
 _TRAILING_DATE_RE = re.compile(
-    rf'[\s,;:\-–—(]*(?:{_WEEKDAY},?\s*)?(?:{_MONTH}\s*)?(?:\d{{1,2}}(?:st|nd|rd|th)?(?:\s*[-–]\s*\d{{1,2}})?,?\s*)?'
+    rf'[\s,;:\-–—(]*(?:{_WEEKDAY},?\s*)?(?:{_MONTH}\s*)?(?:(?<!\d)\d{{1,2}}(?:st|nd|rd|th)?(?:\s*[-–]\s*\d{{1,2}})?,?\s*)?'
     r'((?:19|20)\d{2})\)?\.?\s*$', re.IGNORECASE)
+# A year range closing the line ("..., 1983-2015"); groups 1 and 2 are its
+# years, the end as written ("2015", "93").
+_TRAILING_RANGE_RE = re.compile(
+    r'[\s,;:\-–—(]*((?:19|20)\d{2})\s*[-–—]\s*((?:19|20)?\d{2})\)?\.?\s*$')
 _WORD_RE = re.compile(r'[^\W\d_]{2,}')
 _DATE_WORD_RE = re.compile(rf'\b{_MONTH}(?!\w)|\d+(?:st|nd|rd|th)?\b', re.IGNORECASE)
 # Joining words left over once role, event and venue are taken out of a source
@@ -158,6 +164,29 @@ def _strip_leading_date(line: str, shown_years: set[str]) -> str:
     return line
 
 
+def _strip_trailing_dates(line: str, shown_years: set[str]) -> str:
+    """`line` without the dates that close it, while the Dates cell shows
+    them: a year range whole, when it shows both years, else a date
+    (`_TRAILING_DATE_RE`), then the one before it in a list ("..., 1962-1981,
+    1983-2015"). A range's end year alone is never cut, which left its start
+    year in the title ("..., 1983": VVRTUC 117, #1245). A list names each
+    year once, so a year already cut ends it: that one belongs to a name
+    ("Keystone Symposia 2007, <venue>, March 28-31, 2007": YME2VA)."""
+    cut: set[str] = set()
+    while True:
+        span = _TRAILING_RANGE_RE.search(line)
+        if span and not all(_year_is_shown(year, shown_years) for year in span.groups()):
+            return line
+        if not span:
+            span = _TRAILING_DATE_RE.search(line)
+            if not span or span.group(1) not in shown_years:
+                return line
+        if cut & set(span.groups()):
+            return line
+        cut.update(span.groups())
+        line = line[:span.start()]
+
+
 def _shown_phrases(venue: str, role: str, event_name: str) -> list[str]:
     """The phrases of the source line the row already shows, in the order
     they are taken out: the whole venue, role and event name (longest
@@ -178,7 +207,8 @@ def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
 
     The source line restates what the Institution and Dates cells already
     show. Strip its list number, the year or numeric date the Dates cell
-    shows when it opens or closes the line, and the venue. When nothing is
+    shows when it opens the line, the venue, and the dates the Dates cell
+    shows that close it (`_strip_trailing_dates`). When nothing is
     left beyond role, event name, venue (or a piece of any of them), date
     words and words naming the kind of appearance, the title is role + event
     name ("Visiting Professor, <event>"), then those words ("Invited talk");
@@ -189,9 +219,7 @@ def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
     line = _LIST_NUMBER_RE.sub('', _normalize_space(text or ''), count=1)
     line = _strip_leading_date(line, shown_years)
     line = _remove_venue(line, _normalize_space(venue or ''))
-    trailing_date = _TRAILING_DATE_RE.search(line)
-    if trailing_date and trailing_date.group(1) in shown_years:
-        line = line[:trailing_date.start()]
+    line = _strip_trailing_dates(line, shown_years)
 
     residue = line
     for phrase in _shown_phrases(venue, role, event_name):

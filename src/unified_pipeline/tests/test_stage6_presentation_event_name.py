@@ -202,6 +202,63 @@ def test_untitled_talk_with_role_only_drops_venue_and_trailing_date():
     assert cells == ["Visiting Professor", "Northgate School", "1976"]
 
 
+def _untitled_cells(text, date_cell, **fields):
+    """Render one title-less R entry and return the cells of the row whose
+    Dates cell is `date_cell`."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen.cv_owner_location = None
+    gen._fill_presentations(
+        [{"taxonomy_code": "R", "text": text, "extracted_fields": fields}])
+    for table in gen.doc.tables:
+        for row in table.rows:
+            cells = [c.text for c in row.cells]
+            if cells[-1] == date_cell:
+                return cells
+    raise AssertionError("row not rendered")
+
+
+def test_untitled_talk_drops_a_closing_list_of_ranges_the_dates_cell_shows():
+    """VVRTUC 117 (#1245): once the Dates cell listed both spans, the
+    trailing-date strip cut the line's last range to its end year alone,
+    leaving '..., 1983' in the title. Each closing range goes whole."""
+    cells = _untitled_cells(
+        "Invited Speaker, Annual Meetings of the Example Academy 1962-1981, 1983-2015",
+        "1962-1981, 1983-2015", event_name="Annual Meetings of the Example Academy",
+        start_date="1962", end_date="1981", additional_dates=["1983-2015"])
+    assert cells[0] == "Invited Speaker, Annual Meetings of the Example Academy"
+
+
+def test_untitled_talk_keeps_a_closing_range_whose_start_the_dates_cell_lacks():
+    """Only the end year is shown, so the range stays whole in the title."""
+    cells = _untitled_cells("Invited Speaker, Example Grand Rounds 1983-2015", "2015",
+                            date="2015")
+    assert cells[0] == "Invited Speaker, Example Grand Rounds 1983-2015"
+
+
+def test_untitled_talk_drops_a_closing_two_digit_range_the_dates_cell_shows():
+    cells = _untitled_cells("Invited Speaker, Example Grand Rounds 1997-98", "1997-1998",
+                            start_date="1997", end_date="1998")
+    assert cells[0] == "Invited Speaker, Example Grand Rounds"
+
+
+def test_untitled_talk_keeps_the_year_of_an_event_name_the_closing_date_repeats():
+    """YME2VA: the event is named with its year; the closing date repeats it,
+    so only the closing date goes and the title stays the event's name."""
+    cells = _untitled_cells("Zorblax Symposia 2007, Northgate Springs, March 28-31, 2007.", "2007",
+                            date="2007", event_name="Zorblax Symposia 2007",
+                            location="Northgate Springs")
+    assert cells[:2] == ["Zorblax Symposia 2007", "Northgate Springs"]
+
+
+def test_untitled_talk_keeps_an_earlier_date_the_dates_cell_lacks():
+    """The strip stops at the first closing date the Dates cell does not show,
+    and a closing date's day never takes the earlier year's last digits."""
+    cells = _untitled_cells("Invited Speaker, Example Grand Rounds 1990, 2004", "2004",
+                            date="2004")
+    assert cells[0] == "Invited Speaker, Example Grand Rounds 1990"
+
+
 def test_untitled_talk_drops_the_leading_year_and_the_venue_from_the_source_line():
     """EBYSBC GJXIWD-04: '<year> Invited Speaker - <program>, <venue>' with no
     role field -- the year and venue already fill their own cells."""
@@ -368,6 +425,14 @@ def test_an_end_date_extends_a_year_given_under_date():
 
 def test_a_string_none_end_date_is_ignored():
     assert _rendered_date(start_date="2006", end_date="None") == "2006"
+
+
+def test_a_talk_range_that_only_spans_its_listed_years_renders_the_years():
+    """#1245 (PBSGQZ 230.3): stage 4 kept the years a talk was given under
+    `additional_dates` and their min-max as its range; the Dates cell showed
+    the range and then the years."""
+    assert _rendered_date(start_date="2003", end_date="2013",
+                          additional_dates=["2003", "2007", "2013"]) == "2003, 2007, 2013"
 
 
 def test_a_dict_date_does_not_take_a_second_end_date():

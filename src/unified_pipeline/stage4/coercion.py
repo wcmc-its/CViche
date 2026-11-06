@@ -5,8 +5,10 @@ name here. Pure functions over extracted-field dicts: no LLM calls, no I/O.
 """
 
 import re
-from typing import Any, TypedDict
+from itertools import pairwise
+from typing import Any, NamedTuple, TypedDict
 
+from unified_pipeline.core.text_norm import MONTH_PATTERN
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 from unified_pipeline.stage4.grounding import text_facts
 
@@ -201,9 +203,12 @@ class ReformattedFields(TypedDict, total=False):
     (extraction.py stores the result as an entry's ``reformatted_fields`` and
     counts non-empty ones for ``entries_reformatted``; the one other writer,
     ``year_groups.py``, adds date keys already named here), so a new
-    post-processor adds its key here.
+    post-processor adds its key here. ``additional_dates`` is the one key no
+    schema declares: the record's listed spans (``derive_listed_spans``),
+    under the further-span key stage 6's date cells read (#1245).
     """
 
+    additional_dates: ReformattedField
     authors: ReformattedField
     date: ReformattedField
     dates_attended: ReformattedField
@@ -1846,6 +1851,299 @@ def split_joined_journals(
         'reason': _JOINED_JOURNALS_REASON if len(journals) > 1 else _ROLE_COLUMN_REASON,
     }
     return earlier
+
+
+# --- listed spans (#1245) ----------------------------------------------------
+#
+# Stage 4 sometimes writes a record of separate years or terms ("2003, 2013",
+# "1982-86, 1989-1995, 2004-2012") as one start_date-end_date pair, their
+# min-max, and the row renders a continuous range the CV does not claim
+# (batch RCBKFG, UYFRTL 33/34/48/49). Or it keeps one of the spans and drops
+# the rest (RINASX 30, KHXOUF 1262). The written-span reader below is the
+# doctor's span_count lint's (moved here from doctor/lints/extraction.py,
+# which imports it), so the repair and the lint read a list of spans the same
+# way, as `find_single_closed_range` does for #729.
+
+#: A dash between the two ends of a span, any of the ways a CV types one.
+_SPAN_DASH = r"[-‐-―−─]"
+#: A written span: a year (a dotted or slashed month after it is read past),
+#: then optionally a dash and an end year, a one- or two-digit end, or an
+#: ongoing word.
+_WRITTEN_SPAN_RE = re.compile(
+    r"(?<![\d/.])((?:19|20)\d{2})(?:[./]\d{1,2}(?!\d))?(?![\d/])"
+    rf"(?:\s*{_SPAN_DASH}\s*((?:19|20)\d{{2}}(?:[./]\d{{1,2}})?(?!\d)|\d{{1,2}}(?!\d)"
+    r"|present|current|ongoing|now))?", re.IGNORECASE)
+#: A month or term word, and the day after it, read past so "Fall 2014 -
+#: Spring 2018" is one span; with the short term names ("Spr 2015") course
+#: lists use. A comma straight after the word goes with it: "June, 2018" is
+#: no list (#1585, batch YUYVIG: 14 of its 22 false positives).
+_SPAN_MONTH_RE = re.compile(
+    rf"(?:{MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])"
+    r"(?:,|\s*(?:\d{1,2}(?:st|nd|rd|th)?\b,?)?)",
+    re.IGNORECASE)
+#: Words that join the two ends of one span: "1980 to 1987", "between 1978
+#: and 1988".
+_SPAN_CONNECTOR_RE = re.compile(r"\s+(?:to|through|thru|until|till)\s*(?=\d)", re.IGNORECASE)
+_SPAN_BETWEEN_RE = re.compile(r"\bbetween\s+((?:19|20)\d{2})\s+and\s+", re.IGNORECASE)
+#: What separates two spans of one list: "2003, 2013", "2001; 2004", "2015
+#: and 2017". Two years with none of these between them are a range split
+#: across cells or lines ("2014<tab>...2016"), not a list.
+_SPAN_LIST_SEPARATOR_RE = re.compile(r"[,;&]|\band\b", re.IGNORECASE)
+#: The end of a span still running (`present`), for envelope comparison.
+_SPAN_OPEN_END = 10_000
+
+
+class WrittenSpan(NamedTuple):
+    """One span of years as written: its first and last year, and where the
+    text it was read from holds it."""
+    first: int
+    last: int
+    start: int
+    end: int
+
+
+def _span_source(text: str) -> str:
+    """`text` with month and term words read past and "X to Y" / "between X
+    and Y" written as one dashed span, the form `_written_spans` reads."""
+    return _SPAN_BETWEEN_RE.sub(r"\1-", _SPAN_CONNECTOR_RE.sub("-", _SPAN_MONTH_RE.sub("", text)))
+
+
+def _written_spans(text: str) -> list[WrittenSpan]:
+    """The year spans of `text` (already `_span_source`), in order. A one- or
+    two-digit end is completed from the start year; one that would end before
+    it (a month: "2019-05") leaves the start year alone."""
+    spans: list[WrittenSpan] = []
+    for match in _WRITTEN_SPAN_RE.finditer(text):
+        first, end = int(match[1]), match[2]
+        if end is None:
+            last = first
+        elif end.isalpha():
+            last = _SPAN_OPEN_END
+        elif len(end) <= 2:
+            last = first - first % 10 ** len(end) + int(end)
+        else:
+            last = int(end[:4])
+        spans.append(WrittenSpan(first, max(first, last), match.start(), match.end()))
+    return spans
+
+
+#: The gap between two lone years of one range: a dash right after the first
+#: that no end follows ("2007– Professor of X, Y\t2012"), or one right before
+#: the second that no start precedes ("2014 Professor of X, Y\tto 2019",
+#: once `_span_source` has made "to" a dash). Not a gap a semicolon ends an
+#: item in, or whose dash a comma follows ("2003 - Talk; 2013", "2003 -, 2013").
+_SPAN_WRAPPED_GAP_RE = re.compile(
+    rf"^(?!.*;)(?:\s*{_SPAN_DASH}(?!\s*,)|.*{_SPAN_DASH}\s*$)", re.DOTALL)
+#: A dash right after a lone year: the year opens a span of its own.
+_SPAN_OPEN_DASH_RE = re.compile(rf"\s*{_SPAN_DASH}")
+
+
+def _join_wrapped_ranges(text: str, spans: list[WrittenSpan]) -> list[WrittenSpan]:
+    """`spans` with a range a table cell or line wrapped joined into one: two
+    consecutive lone years, the later second, whose dash sits in the gap with
+    no year on its other side (`_SPAN_WRAPPED_GAP_RE`), the later one opening
+    no dash of its own ("2011 - Talk, 2013 - Talk" is two items). Nothing
+    lies between them that `_WRITTEN_SPAN_RE` reads as a year (#1585, batch
+    YUYVIG: 12 of its 22 false positives). Source text only: a rendered
+    "2011 - Title 2013 - Title" line is that list."""
+    joined: list[WrittenSpan] = []
+    for span in spans:
+        before = joined[-1] if joined else None
+        if (before is not None and before.first == before.last
+                and span.first == span.last and span.first > before.first
+                and _SPAN_WRAPPED_GAP_RE.search(text[before.end:span.start])
+                and not _SPAN_OPEN_DASH_RE.match(text, span.end)):
+            joined[-1] = WrittenSpan(before.first, span.last, before.start, span.end)
+        else:
+            joined.append(span)
+    return joined
+
+
+def _is_a_list(text: str, spans: list[WrittenSpan]) -> bool:
+    """Whether consecutive spans of `text` are separated as items of one list."""
+    return all(_SPAN_LIST_SEPARATOR_RE.search(text[before.end:after.start])
+               for before, after in zip(spans, spans[1:]))
+
+
+def _leaves_a_gap(spans: list[tuple[int, int]], envelope: tuple[int, int]) -> bool:
+    """Whether a year inside `envelope` lies in none of `spans`."""
+    reached = envelope[0] - 1
+    for first, last in sorted(spans):
+        if first > reached + 1:
+            return True
+        reached = max(reached, last)
+    return False
+
+
+def _envelope_of_separate_spans(text: str) -> tuple[tuple[int, int], int] | None:
+    """The min-max of the text's spans and how many there are, when the text
+    lists two or more spans that leave a year of that min-max uncovered."""
+    source = _span_source(text)
+    spans = _join_wrapped_ranges(source, _written_spans(source))
+    years = list(dict.fromkeys((span.first, span.last) for span in spans))
+    if not years:
+        return None
+    envelope = (min(first for first, _ in years), max(last for _, last in years))
+    # One span, or spans that fill their min-max, leave no gap.
+    if not _leaves_a_gap(years, envelope) or not _is_a_list(source, spans):
+        return None
+    return envelope, len(years)
+
+
+#: The codes whose date cell shows a record's further spans: stage 6's
+#: `formatting.dates.EXTRA_SPAN_CODES`. Hand-kept, not imported: stage 4 and
+#: stage 6 import nothing from each other, and
+#: `test_listed_span_codes_match_stage6_extra_span_codes` pins the two
+#: equal. No mentoring (N) code: their lines list the mentee's milestones,
+#: not the record's spans (span_count skips them for that reason).
+LISTED_SPAN_CODES = frozenset({
+    'O', 'P', 'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',
+    'D1', 'D2', 'D3', 'K1', 'K2', 'K3', 'K4', 'K5', 'R',
+})
+#: The further-span key the derived spans are written under, and the keys a
+#: record may already keep a further span under: stage 6's
+#: `EXTRA_SPAN_KEYS`, pinned equal by the same test.
+LISTED_SPANS_KEY = 'additional_dates'
+_FURTHER_SPAN_KEYS = frozenset({
+    'additional_dates', 'additional_periods', 'additional_date_ranges',
+    'additional_period_start', 'additional_period_end',
+})
+#: Stage 4's catch-all remark key (stage 6's `EXTRA_SPAN_PROSE_KEY`). Stage 6
+#: reads a remark that is only dates as further spans, so a remark holding
+#: any year keeps the record as it is.
+_REMARK_KEY = 'additional_info'
+#: The stored ends stage 6 reads as still running (`parsing.dates.
+#: CURRENT_DATE_VALUES`, pinned equal by the same test).
+_OPEN_END_VALUES = frozenset({'present', 'current', 'ongoing', 'now', 'to date', 'date'})
+#: A stored start_date or end_date read for its year and month: the shapes
+#: stage 4 writes ("2003", "2003-09", "2003-09-15"). Any other value (a list,
+#: a season, "None") is no date here, so the record keeps what it has.
+_STORED_DATE_RE = re.compile(r'(\d{4})(?:-(0?[1-9]|1[0-2])(?:-\d{1,2})?)?')
+#: The gap between two consecutive spans of a list the repair reads: list
+#: separators (`_SPAN_LIST_SEPARATOR_RE`) and spaces, and nothing else. Words
+#: between two years ("2005 Chair, 2010") may date two records the model
+#: fused.
+_LIST_ONLY_GAP_RE = re.compile(
+    rf"\s*(?:{_SPAN_LIST_SEPARATOR_RE.pattern})(?:\s*(?:{_SPAN_LIST_SEPARATOR_RE.pattern}))*\s*",
+    re.IGNORECASE)
+_LISTED_SPANS_SEPARATOR = '; '
+_ENVELOPE_SPANS_REASON = "Listed the separate spans the source gives in place of their min-max"
+_LOST_SPANS_REASON = "Kept the spans the source lists beside the record's own"
+
+
+def _listed_spans(text: str) -> list[WrittenSpan] | None:
+    """The spans `text` lists for one record, in source order, or None.
+
+    Read by span_count's own parser: the text lists two or more spans that
+    leave a year of their min-max uncovered, as a list
+    (`_envelope_of_separate_spans`). Further, only list separators and spaces
+    lie between consecutive spans (`_LIST_ONLY_GAP_RE`), which also rules out
+    a range wrapped across cells (`_join_wrapped_ranges` joins two years only
+    across a dash), and no lone year is followed by a dash ("2013 -" opens a
+    range the text does not close).
+    """
+    if _envelope_of_separate_spans(text) is None:
+        return None
+    source = _span_source(text)
+    spans = _written_spans(source)
+    if not all(_LIST_ONLY_GAP_RE.fullmatch(source[before.end:after.start])
+               for before, after in pairwise(spans)):
+        return None
+    if any(span.first == span.last and _SPAN_OPEN_DASH_RE.match(source, span.end)
+           for span in spans):
+        return None
+    return spans
+
+
+def _span_item(first: int, last: int) -> str:
+    """One span as a further-span list item: "2003", "1982-1986", "2015-present"."""
+    if first == last:
+        return str(first)
+    return f"{first}-{'present' if last == _SPAN_OPEN_END else last}"
+
+
+def _stored_date(value: object) -> tuple[int, int | None] | None:
+    """A stored date's (year, month or None), or None (`_STORED_DATE_RE`)."""
+    match = _STORED_DATE_RE.fullmatch(str(value or '').strip())
+    if match is None:
+        return None
+    return int(match[1]), int(match[2]) if match[2] else None
+
+
+def _ends_before(end: tuple[int, int | None], start: tuple[int, int | None]) -> bool:
+    """Whether `end` is proved earlier than `start`: an earlier year, or the
+    same year with both months stated and the end's earlier."""
+    if end[0] != start[0]:
+        return end[0] < start[0]
+    return end[1] is not None and start[1] is not None and end[1] < start[1]
+
+
+def _stored_span(fields: dict[str, Any]) -> tuple[int, int] | None:
+    """The record's own first and last year, from start_date and end_date as
+    stage 6 reads them (`_SPAN_OPEN_END` for a running end; an unread end is
+    the start year). None when the start is no date or the range runs
+    backwards, as a newest-first list stored as its first and last item
+    does (#1432)."""
+    start = _stored_date(fields.get('start_date'))
+    if start is None:
+        return None
+    end_text = str(fields.get('end_date') or '').strip()
+    if end_text.lower() in _OPEN_END_VALUES:
+        return start[0], _SPAN_OPEN_END
+    end = _stored_date(end_text)
+    if end is None:
+        return start[0], start[0]
+    return None if _ends_before(end, start) else (start[0], end[0])
+
+
+def _holds_further_span(fields: dict[str, Any]) -> bool:
+    """Whether the record already keeps a span beyond its own: a value under
+    a further-span key, or a remark that holds a year."""
+    if any(fields.get(key) not in (None, '', [], {}) for key in _FURTHER_SPAN_KEYS):
+        return True
+    remark = fields.get(_REMARK_KEY)
+    return isinstance(remark, str) and _WRITTEN_SPAN_RE.search(remark) is not None
+
+
+def derive_listed_spans(original_text: str, updated: dict[str, Any], taxonomy_code: str,
+                        reformatted: ReformattedFields) -> None:
+    """Write the spans a one-record entry's text lists under `LISTED_SPANS_KEY`
+    when its own start_date-end_date shows only part of them (#1245).
+
+    The caller passes only an entry that ends as one record: on several, the
+    text's spans belong to different records. The code's date cell must show
+    further spans (`LISTED_SPAN_CODES`), the text must list them
+    (`_listed_spans`), and the record must keep no further span already
+    (`_holds_further_span`) and read a forward range (`_stored_span`). Then:
+
+    - its range is the spans' min-max, which claims years the CV does not:
+      every listed span is written, in source order, repeats dropped, and
+      stage 6 shows them in place of the range (`envelope_date_spans`);
+    - its range is exactly one listed span: the others are written, and
+      stage 6 shows them after it (`extra_date_spans`).
+
+    Any other range is left alone.
+    """
+    if taxonomy_code not in LISTED_SPAN_CODES or _holds_further_span(updated):
+        return
+    spans = _listed_spans(original_text)
+    own = _stored_span(updated) if spans else None
+    if own is None:
+        return
+    items = list(dict.fromkeys(_span_item(span.first, span.last) for span in spans))
+    if own == (min(span.first for span in spans), max(span.last for span in spans)):
+        listed, reason = items, _ENVELOPE_SPANS_REASON
+    elif own in {(span.first, span.last) for span in spans}:
+        listed = [item for item in items if item != _span_item(*own)]
+        reason = _LOST_SPANS_REASON
+    else:
+        return
+    reformatted[LISTED_SPANS_KEY] = {
+        'original': updated.get(LISTED_SPANS_KEY),
+        'reformatted': _LISTED_SPANS_SEPARATOR.join(listed),
+        'reason': reason,
+    }
+    updated[LISTED_SPANS_KEY] = listed
 
 
 def apply_regex_post_processing(

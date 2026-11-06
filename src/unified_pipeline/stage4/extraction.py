@@ -28,6 +28,7 @@ from unified_pipeline.core.batch_pool import (
     map_in_order,
     workers_from_config,
 )
+from unified_pipeline.core.honor_lines import PROGRAM_LINE_RE, names_award
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.log_redaction import redacted_error_label
@@ -43,6 +44,7 @@ from unified_pipeline.stage4.coercion import (
     ReformattedFields,
     apply_regex_post_processing,
     coerce_field_value_types,
+    derive_listed_spans,
     normalize_dates,
     split_joined_journals,
     split_parenthetical_title_span,
@@ -280,6 +282,12 @@ _BEFORE, _AFTER = 0, 1
 _QUALIFIER_ONLY_FIELDS = frozenset({"panel_name"})
 _QUALIFIER_SEPARATOR = "; "
 
+# An honor written on two lines, the award over the dated program it was given
+# to (`PROGRAM_LINE_RE`): two records from it are the award and a program row
+# with no granting body, which renders as a second award (#1245, UNKNBU 286).
+_AWARD_OVER_PROGRAM_CODE = "H"
+_AWARD_OVER_PROGRAM_PARTS = 2
+
 
 class _EntryExtraction(NamedTuple):
     """What the reply's items for one entry become on that entry."""
@@ -455,6 +463,37 @@ def _is_blank(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _same_name(value: object, name: str) -> bool:
+    """Whether a field's value is `name`, case and runs of spaces aside."""
+    return (isinstance(value, str)
+            and " ".join(value.split()).casefold() == " ".join(name.split()).casefold())
+
+
+def _is_award_over_program_line(entry_text: str, records: list[dict[str, Any]],
+                                taxonomy_code: str) -> bool:
+    """Whether an H entry's two records are one award and its program line.
+
+    The text is two lines: the first names the first record's award and the
+    second does not (`names_award`, as stage 6 reads them), and the second
+    is a dated program line (`PROGRAM_LINE_RE`, PR #1847). The second record
+    is that program, with no granting body. Kept alone, the award renders the
+    program in its own name, "<award> - <program>", as stage 6 joins a
+    one-record entry of this shape (KJJVVO 286). Two records rendered the
+    program as an award of its own (UNKNBU 286, #1245).
+    """
+    lines = [line for line in entry_text.split("\n") if line.strip()]
+    if (taxonomy_code != _AWARD_OVER_PROGRAM_CODE or len(records) != _AWARD_OVER_PROGRAM_PARTS
+            or len(lines) != _AWARD_OVER_PROGRAM_PARTS):
+        return False
+    award, program = records
+    award_name = award.get("award_name")
+    match = PROGRAM_LINE_RE.fullmatch(lines[1].strip())
+    return (match is not None and isinstance(award_name, str)
+            and [names_award(line, award_name) for line in lines] == [True, False]
+            and _same_name(program.get("award_name"), match["program"])
+            and _is_blank(program.get("granting_body")))
+
+
 def _with_offschema_records(cleaned: list[tuple[dict[str, Any], ReformattedFields]],
                             taxonomy_code: str,
                             ) -> list[tuple[dict[str, Any], ReformattedFields]]:
@@ -487,8 +526,14 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
     (`_range_dates_last_record`).
 
     A second record the model filed under an off-schema key follows the
-    record it came from (`_offschema_records`). `records_returned` stays the
-    count of items the model returned.
+    record it came from (`_offschema_records`). An honor's program line the
+    model returned as a record of its own is dropped, and its award stays
+    alone (`_is_award_over_program_line`). `records_returned` stays the count
+    of items the model returned.
+
+    An entry that ends as one record is offered its text's listed spans
+    (`derive_listed_spans`): on several records they would be no one
+    record's.
     """
     cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
     cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code,
@@ -502,8 +547,12 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
         for journal in split_joined_journals(entry_text, cleaned[-1][0], last_reformatted):
             cleaned.insert(-1, (dict(journal), {}))
     cleaned = _with_offschema_records(cleaned, taxonomy_code)
+    if _is_award_over_program_line(entry_text, [fields for fields, _ in cleaned], taxonomy_code):
+        cleaned = cleaned[:1]
+        last_reformatted = cleaned[0][1]
     last_fields = cleaned[-1][0]
     if len(cleaned) < _MIN_RECORDS_PER_ENTRY:
+        derive_listed_spans(entry_text, last_fields, taxonomy_code, last_reformatted)
         coverage = calculate_unextracted_content(entry_text, last_fields)
         return _EntryExtraction(last_fields, last_reformatted, coverage, len(items))
     records = [fields for fields, _ in cleaned]

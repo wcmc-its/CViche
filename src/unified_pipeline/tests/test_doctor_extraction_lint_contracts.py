@@ -2212,6 +2212,31 @@ def test_offschema_a_talks_further_dates_are_judged_as_its_date_cells_span():
     assert "its span did not reach the record's date cell" in findings[0]["message"]
 
 
+def test_offschema_listed_years_the_row_joins_into_ranges_are_shown():
+    """#1245 (BMHBJZ 211): stage 6 joins a record's consecutive listed years,
+    so '2006', '2007' and '2008' print '2006-2008'; 2007 is shown inside the
+    range, not lost. A range over a year the record does not list is an
+    envelope, and still leaves its inner years unshown."""
+    entry = _fields_entry("Q2", {
+        "activity": "Abstract Reviewer", "organization": "Example Association",
+        "start_date": "2003", "end_date": "2008",
+        "additional_dates": ["2003", "2004", "2006", "2007", "2008"]})
+    joined = [_table(_row("Abstract Reviewer", "Example Association", "2003-2004, 2006-2008"))]
+    assert _graded(joined, entry) == []
+    gap = _fields_entry("Q2", {
+        "activity": "Abstract Reviewer", "organization": "Example Association",
+        "start_date": "2003", "end_date": "2006", "additional_dates": ["2003", "2004", "2006"]})
+    envelope = [_table(_row("Abstract Reviewer", "Example Association", "2003-2006"))]
+    assert [(f["severity"], f["message"].split("`")[1]) for f in _graded(envelope, gap)] == [
+        ("WARN", "additional_dates")]
+    past_the_end = _fields_entry("Q2", {
+        "activity": "Abstract Reviewer", "organization": "Example Association",
+        "start_date": "2003", "end_date": "2006",
+        "additional_dates": ["2003", "2004", "2005"]})
+    assert [(f["severity"], f["message"].split("`")[1])
+            for f in _graded(envelope, past_the_end)] == [("WARN", "additional_dates")]
+
+
 def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
     """RCBKFG (#1245, UYFRTL 33): `additional_date_ranges` is a string, so
     as a date-named key outside `EXTRA_SPAN_KEYS` it was never a candidate.
@@ -5399,6 +5424,26 @@ def test_span_count_judges_teaching_rows():
     findings = lint_span_count({"entries": [entry]},
                                [("p", "2003-2013 - Example Course")])
     assert [f["lint"] for f in findings] == ["span_count"]
+
+
+def test_span_count_reads_spans_with_the_parser_stage_4_repairs_from():
+    """#1245: the written-span parser moved to stage 4, whose
+    `derive_listed_spans` writes the spans span_count reports. One
+    definition, so a record stage 4 repaired renders its spans and the lint
+    is quiet on it."""
+    from unified_pipeline.doctor.lints import extraction as doctor_extraction
+    from unified_pipeline.stage4 import coercion
+    from unified_pipeline.stage6.formatting import with_extra_date_spans
+
+    for name in ("_envelope_of_separate_spans", "_span_source", "_written_spans",
+                 "_SPAN_OPEN_END"):
+        assert getattr(doctor_extraction, name) is getattr(coercion, name), name
+    entry = _span_entry("Reviewer, Example Society, 2003, 2007, 2013")
+    assert _span_count(entry, "2003-2013")
+    coercion.derive_listed_spans(entry["text"], entry["extracted_fields"], "Q2", {})
+    row = with_extra_date_spans("2003-2013", entry["extracted_fields"], "Q2")
+    assert row == "2003, 2007, 2013"
+    assert _span_count(entry, row) == []
 
 
 # ---------------------------------------------------------------------------

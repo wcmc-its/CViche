@@ -1,6 +1,7 @@
 """core/honor_lines.py (#1577): the honors-heading and honorific-fellowship tests
 that stage 3b's fellowship pin, stage 6's research-support guard and the
-doctor's section_consistency lint share.
+doctor's section_consistency lint share; and the program-line shape and award
+naming stage 6's program join and stage 4's program fold share (#1245).
 
 Self-contained: no LLM, no network, invented text only.
 """
@@ -14,8 +15,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.core.honor_lines import (  # noqa: E402
+    PROGRAM_LINE_RE,
     heading_names_honors,
     is_honorific_fellowship,
+    names_award,
 )
 
 # --- heading_names_honors -----------------------------------------------------
@@ -292,3 +295,46 @@ def test_an_associations_leaf_under_a_mixed_heading_keeps_only_an_elected_fellow
 ])
 def test_a_fellowship_title_under_a_heading_naming_election_is_an_honor(heading_path, honor):
     assert is_honorific_fellowship("Fellow Invented Royal College of Physicians - 2031", heading_path) is honor
+
+
+# --- PROGRAM_LINE_RE and names_award (#1245) ---------------------------------
+
+
+@pytest.mark.parametrize("line, program", [
+    ("Imaginary Outreach Program \u2014 02/07/2005", "Imaginary Outreach Program"),
+    ("Pretend (Invented-Name) Programme - 2/7/2005", "Pretend (Invented-Name) Programme"),
+    ("Made-up Wetland Project \u2013 12/31/1999", "Made-up Wetland Project"),
+    ("Fictional Literacy Initiative - 01/01/2020", "Fictional Literacy Initiative"),
+])
+def test_a_dated_program_line_names_its_program(line, program):
+    match = PROGRAM_LINE_RE.fullmatch(line)
+    assert match is not None and match["program"] == program
+
+
+@pytest.mark.parametrize("line", [
+    "Imaginary Outreach Program, 02/07/2005",       # a comma, no dash
+    "Imaginary Outreach Program \u2014 02/2005",    # a month-only date
+    "Imaginary Outreach Program \u2014 2005",       # a year
+    "Imaginary Outreach Program (02/07/2005)",      # parentheses, no dash
+    "Imaginary Outreach Program",                   # no date
+    "Imaginary, Outreach Program \u2014 02/07/2005",  # a comma in the name
+    "Imaginary Outreach Programs \u2014 02/07/2005",  # no program noun at the end
+    "Imaginary Outreach 2 Program \u2014 02/07/2005",  # a digit in the name
+])
+def test_any_other_line_is_no_program_line(line):
+    assert PROGRAM_LINE_RE.fullmatch(line) is None
+
+
+@pytest.mark.parametrize("line, award, named", [
+    ("Fictional Agency Made-up Award for Pretend Outreach (2005)",
+     "Made-up Award for Pretend Outreach", True),
+    # A curly apostrophe and a double space in the source.
+    ("Fictional Agency Secretary\u2019s  Award (2005)", "Secretary's Award", True),
+    ("Fictional Agency Made-up Award (2005)", "Made-up Award for Pretend Outreach", False),
+    ("FICTIONAL AGENCY MADE-UP AWARD (2005)", "Made-up Award", True),
+    ("Fictional Agency Prize 2006", "Prize 2005", False),
+    ("Fictional Agency Made-up Award (2005)", "", False),
+    ("Fictional Agency Made-up Award (2005)", " - ", False),
+])
+def test_a_line_names_an_award_when_it_holds_every_word_of_it(line, award, named):
+    assert names_award(line, award) is named

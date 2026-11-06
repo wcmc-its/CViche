@@ -79,10 +79,14 @@ from unified_pipeline.stage3b.fragment_merge import (
     merge_skip_reason,
 )
 from unified_pipeline.stage4.coercion import (
+    _SPAN_OPEN_END,
     DATE_RANGE_TAXONOMY_CODES,
     GRANT_EFFORT_TAXONOMY_PREFIX,
     IDENTIFIER_TAXONOMY_CODES,
     JOURNAL_LIST_TAXONOMY_CODES,
+    _envelope_of_separate_spans,
+    _span_source,
+    _written_spans,
     find_single_closed_range,
 )
 from unified_pipeline.stage4.grounding import (
@@ -1805,13 +1809,31 @@ def _value_years(value: object) -> frozenset[str]:
                      for year in _FOUR_DIGIT_YEAR_RE.findall(leaf))
 
 
+#: A year range on a rendered line, squashed ("2006-2010").
+_LINE_YEAR_RANGE_RE = re.compile(r"((?:19|20)\d{2})[-–—]((?:19|20)\d{2})")
+
+
+def _joined_years(squashed: str, years: frozenset[str]) -> set[str]:
+    """The years a line shows inside a range of its own whose every year
+    `years` lists: stage 6 joins a record's consecutive listed years, so
+    "2006", "2007" and "2008" print "2006-2008" (#1245, BMHBJZ 211). A range
+    over a year `years` lacks is an envelope and shows none of them."""
+    joined: set[str] = set()
+    for start, end in _LINE_YEAR_RANGE_RE.findall(squashed):
+        run = {str(year) for year in range(int(start), int(end) + 1)}
+        if run <= years:
+            joined |= run
+    return joined
+
+
 def _shown_on(value: object, line: OutputLine, date_key: bool) -> bool:
     """Whether the line shows the value. A date: every four-digit year in it,
-    as a word of the line (one with none has nothing to lose). Anything
-    else: every string in it, whole (`_value_on_line`) or as all of its
-    words."""
+    as a word of the line or inside a range the line joined it into
+    (`_joined_years`); one with none has nothing to lose. Anything else:
+    every string in it, whole (`_value_on_line`) or as all of its words."""
     if date_key:
-        return _value_years(value) <= line.words
+        years = _value_years(value)
+        return years <= line.words | _joined_years(line.squashed, years)
     return all(_value_on_line(squash(leaf), line.squashed)
                or set(_alphanumeric_tokens(leaf)) <= line.words
                for leaf in _value_leaves(value))
@@ -3589,135 +3611,13 @@ def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
 # (batch RCBKFG, UYFRTL 33/34/48/49; #1245). Stage 6 shows the separate spans
 # when stage 4 also kept them under a further-span key (`envelope_date_spans`),
 # but not when it kept only the envelope, and no other lint compares the
-# source's spans with the row's. Report-only.
+# source's spans with the row's. Report-only. The written-span reader is stage
+# 4's (`stage4.coercion`), whose `derive_listed_spans` writes those spans from
+# the same reading, so the repair and this lint cannot disagree.
 
-#: A dash between the two ends of a span, any of the ways a CV types one.
-_SPAN_DASH = r"[-‐-―−─]"
-#: A written span: a year (a dotted or slashed month after it is read past),
-#: then optionally a dash and an end year, a one- or two-digit end, or an
-#: ongoing word.
-_WRITTEN_SPAN_RE = re.compile(
-    r"(?<![\d/.])((?:19|20)\d{2})(?:[./]\d{1,2}(?!\d))?(?![\d/])"
-    rf"(?:\s*{_SPAN_DASH}\s*((?:19|20)\d{{2}}(?:[./]\d{{1,2}})?(?!\d)|\d{{1,2}}(?!\d)"
-    r"|present|current|ongoing|now))?", re.IGNORECASE)
-#: A month or term word, and the day after it, read past so "Fall 2014 -
-#: Spring 2018" is one span; with the short term names ("Spr 2015") course
-#: lists use. A comma straight after the word goes with it: "June, 2018" is
-#: no list (#1585, batch YUYVIG: 14 of its 22 false positives).
-_SPAN_MONTH_RE = re.compile(
-    rf"(?:{MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])"
-    r"(?:,|\s*(?:\d{1,2}(?:st|nd|rd|th)?\b,?)?)",
-    re.IGNORECASE)
-#: Words that join the two ends of one span: "1980 to 1987", "between 1978
-#: and 1988".
-_SPAN_CONNECTOR_RE = re.compile(r"\s+(?:to|through|thru|until|till)\s*(?=\d)", re.IGNORECASE)
-_SPAN_BETWEEN_RE = re.compile(r"\bbetween\s+((?:19|20)\d{2})\s+and\s+", re.IGNORECASE)
-#: What separates two spans of one list: "2003, 2013", "2001; 2004", "2015
-#: and 2017". Two years with none of these between them are a range split
-#: across cells or lines ("2014<tab>...2016"), not a list.
-_SPAN_LIST_SEPARATOR_RE = re.compile(r"[,;&]|\band\b", re.IGNORECASE)
-#: The end of a span still running (`present`), for envelope comparison.
-_SPAN_OPEN_END = 10_000
 #: Codes whose line names the mentee's own milestones ("M.S. 1982; Ph.D.
 #: 1986") rather than the record's span: the row's range is the mentorship.
 _SPAN_COUNT_SKIPPED_PREFIXES = ("N",)
-
-
-class WrittenSpan(NamedTuple):
-    """One span of years as written: its first and last year, and where the
-    text it was read from holds it."""
-    first: int
-    last: int
-    start: int
-    end: int
-
-
-def _span_source(text: str) -> str:
-    """`text` with month and term words read past and "X to Y" / "between X
-    and Y" written as one dashed span, the form `_written_spans` reads."""
-    return _SPAN_BETWEEN_RE.sub(r"\1-", _SPAN_CONNECTOR_RE.sub("-", _SPAN_MONTH_RE.sub("", text)))
-
-
-def _written_spans(text: str) -> list[WrittenSpan]:
-    """The year spans of `text` (already `_span_source`), in order. A one- or
-    two-digit end is completed from the start year; one that would end before
-    it (a month: "2019-05") leaves the start year alone."""
-    spans: list[WrittenSpan] = []
-    for match in _WRITTEN_SPAN_RE.finditer(text):
-        first, end = int(match[1]), match[2]
-        if end is None:
-            last = first
-        elif end.isalpha():
-            last = _SPAN_OPEN_END
-        elif len(end) <= 2:
-            last = first - first % 10 ** len(end) + int(end)
-        else:
-            last = int(end[:4])
-        spans.append(WrittenSpan(first, max(first, last), match.start(), match.end()))
-    return spans
-
-
-#: The gap between two lone years of one range: a dash right after the first
-#: that no end follows ("2007– Professor of X, Y\t2012"), or one right before
-#: the second that no start precedes ("2014 Professor of X, Y\tto 2019",
-#: once `_span_source` has made "to" a dash). Not a gap a semicolon ends an
-#: item in, or whose dash a comma follows ("2003 - Talk; 2013", "2003 -, 2013").
-_SPAN_WRAPPED_GAP_RE = re.compile(
-    rf"^(?!.*;)(?:\s*{_SPAN_DASH}(?!\s*,)|.*{_SPAN_DASH}\s*$)", re.DOTALL)
-#: A dash right after a lone year: the year opens a span of its own.
-_SPAN_OPEN_DASH_RE = re.compile(rf"\s*{_SPAN_DASH}")
-
-
-def _join_wrapped_ranges(text: str, spans: list[WrittenSpan]) -> list[WrittenSpan]:
-    """`spans` with a range a table cell or line wrapped joined into one: two
-    consecutive lone years, the later second, whose dash sits in the gap with
-    no year on its other side (`_SPAN_WRAPPED_GAP_RE`), the later one opening
-    no dash of its own ("2011 - Talk, 2013 - Talk" is two items). Nothing
-    lies between them that `_WRITTEN_SPAN_RE` reads as a year (#1585, batch
-    YUYVIG: 12 of its 22 false positives). Source text only: a rendered
-    "2011 - Title 2013 - Title" line is that list."""
-    joined: list[WrittenSpan] = []
-    for span in spans:
-        before = joined[-1] if joined else None
-        if (before is not None and before.first == before.last
-                and span.first == span.last and span.first > before.first
-                and _SPAN_WRAPPED_GAP_RE.search(text[before.end:span.start])
-                and not _SPAN_OPEN_DASH_RE.match(text, span.end)):
-            joined[-1] = WrittenSpan(before.first, span.last, before.start, span.end)
-        else:
-            joined.append(span)
-    return joined
-
-
-def _is_a_list(text: str, spans: list[WrittenSpan]) -> bool:
-    """Whether consecutive spans of `text` are separated as items of one list."""
-    return all(_SPAN_LIST_SEPARATOR_RE.search(text[before.end:after.start])
-               for before, after in zip(spans, spans[1:]))
-
-
-def _leaves_a_gap(spans: list[tuple[int, int]], envelope: tuple[int, int]) -> bool:
-    """Whether a year inside `envelope` lies in none of `spans`."""
-    reached = envelope[0] - 1
-    for first, last in sorted(spans):
-        if first > reached + 1:
-            return True
-        reached = max(reached, last)
-    return False
-
-
-def _envelope_of_separate_spans(text: str) -> tuple[tuple[int, int], int] | None:
-    """The min-max of the text's spans and how many there are, when the text
-    lists two or more spans that leave a year of that min-max uncovered."""
-    source = _span_source(text)
-    spans = _join_wrapped_ranges(source, _written_spans(source))
-    years = list(dict.fromkeys((span.first, span.last) for span in spans))
-    if not years:
-        return None
-    envelope = (min(first for first, _ in years), max(last for _, last in years))
-    # One span, or spans that fill their min-max, leave no gap.
-    if not _leaves_a_gap(years, envelope) or not _is_a_list(source, spans):
-        return None
-    return envelope, len(years)
 
 
 def _renders_only_the_envelope(line: OutputLine, envelope: tuple[int, int]) -> bool:

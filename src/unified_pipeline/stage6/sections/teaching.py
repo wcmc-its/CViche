@@ -137,6 +137,7 @@ from unified_pipeline.core.render_check import (
     entry_lines,
     wrapped_row_text,
 )
+from unified_pipeline.core.text_norm import MONTH_PATTERN
 from unified_pipeline.log_redaction import redacted_error_label
 
 from ..formatting import (
@@ -147,6 +148,7 @@ from ..formatting import (
     format_date_range,
     normalize_iso_dates_in_text,
 )
+from ..formatting.dates import _OPEN_END_YEAR, _span_years
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..parsing.dates import _MONTH_NAME_TO_NUM, _SEASON_TOKENS, _parse_date_components
@@ -233,6 +235,17 @@ _LEADING_LIST_NUMBER_RE = re.compile(r'^(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
 _OWN_DATE_TOKEN = (r'(?<!\d){year}(?:\s*[-\u2013\u2014]\s*(?:\d{{2,4}}|present|current))?'
                    r'(?!\d)')
 
+# Stage 5c's own range for a record from `first` to `last`, the one token the
+# spans replace when that range is only their envelope (#1245): a month or
+# term word may come before either year ("Fall 2003 - Spring 2013"), a dash
+# or "to" joins them, and the end is the year, its last two digits
+# ("2003-13") or, for a running range, an ongoing word. The term words are
+# span_count's (`stage4.coercion._SPAN_MONTH_RE`), spelled out here: stage 6
+# may not import stage 4.
+_TERM_WORD = rf'(?:(?:{MONTH_PATTERN}|spr|sum|fa|win)\.?,?\s+)?'
+_OWN_RANGE_TOKEN = r'(?<![\d\w]){term}{first}\s*(?:[-\u2013\u2014]|\bto\b)\s*{term}{last}(?!\d)'
+_ONGOING_END = r'(?:present|current|ongoing)'
+
 
 # A record's own date as stage 5c wrote it, when it is one date and not a
 # range: the year, after a month or season word or a numeric month
@@ -271,6 +284,18 @@ def _item_parts(text: str | None) -> list[str]:
 
 
 
+def _envelope_token(text: str, fields: _TeachingFields) -> re.Match[str] | None:
+    """Stage 5c's own range in `text` from the record's start year to its
+    end year (`_OWN_RANGE_TOKEN`), or None."""
+    years = _span_years(fields.get('start_date'), fields.get('end_date'))
+    if years is None:
+        return None
+    first, last = years
+    end = _ONGOING_END if last == _OPEN_END_YEAR else rf'(?:{last}|{last % 100:02d})'
+    return re.search(_OWN_RANGE_TOKEN.format(term=_TERM_WORD, first=first, last=end),
+                     text, re.IGNORECASE)
+
+
 def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) -> str:
     """Stage 5c's `text` with the record's other spans (`extra_date_spans`)
     written after its own date: "1982-1986, 1989-1995, 2004-2012 - <role>".
@@ -278,18 +303,27 @@ def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) ->
     `additional_periods`/`additional_dates` (EBYSBC E22: EQADVR 33/34). The
     own date is the first year-or-range token naming the record's start
     year; a text with none is left as it is, since there is no date to
-    extend. When that own range is only the envelope of the spans
-    (`envelope_date_spans`: UYFRTL 33/34/48/49), the spans replace it."""
+    extend.
+
+    When that own range is only the envelope of the spans
+    (`envelope_date_spans`: UYFRTL 33/34/48/49), the spans replace it, and
+    only a token running from the start year to the end year
+    (`_envelope_token`). A text that dates the record any other way is left
+    as it is: 5c may already list the years, and a start year alone would
+    take the list in the middle of "Fall 2003 - Spring 2013" (#1245)."""
     envelope = envelope_date_spans(fields, taxonomy_code)
-    extras = envelope or extra_date_spans(fields, taxonomy_code)
-    if not extras:  # also when the start has no year: both are [] then
+    if envelope:
+        token = _envelope_token(text, fields)
+        if token is None:
+            return text
+        return text[:token.start()] + DATE_SPAN_SEPARATOR.join(envelope) + text[token.end():]
+    extras = extra_date_spans(fields, taxonomy_code)
+    if not extras:  # also when the start has no year: it is [] then
         return text
     start_year = _parse_date_components(str(fields.get('start_date') or '').strip())[0]
     own_date = re.search(_OWN_DATE_TOKEN.format(year=start_year), text, re.IGNORECASE)
     if own_date is None:
         return text
-    if envelope:
-        return text[:own_date.start()] + DATE_SPAN_SEPARATOR.join(envelope) + text[own_date.end():]
     cut = own_date.end()
     return DATE_SPAN_SEPARATOR.join([text[:cut], *extras]) + text[cut:]
 

@@ -1019,6 +1019,44 @@ class TestFurtherSpansFollowStage5csDate:
             "1990, 1992, 1994 - Fictional Course"]
 
 
+    @pytest.mark.parametrize("own_range", [
+        "Fall 1990 - Spring 1994", "1990-94", "1990 to 1994", "Jan. 1990 \u2013 Dec. 1994",
+        "spr 1990-fa 1994", "Spr. 1990 - Fa. 1994", "June, 1990 - May, 1994"])
+    def test_the_spans_replace_the_whole_range_stage_5c_wrote(self, own_range):
+        """#1245 (G1): the token the spans replace runs from the start year to
+        the end year, its month or term words with it. Replacing the start
+        year alone left "Fall 1990, 1992, 1994 - Spring 1994"."""
+        fields = self._fields(f"{own_range} - Fictional Course", additional_dates=["1990", "1992",
+                                                                                    "1994"])
+        assert _teaching_entry_lines(fields, "Fictional Course 1990, 1992, 1994",
+                                     taxonomy_code="K1") == ["1990, 1992, 1994 - Fictional Course"]
+
+    def test_a_record_with_no_start_year_has_no_range_token(self):
+        from unified_pipeline.stage6.sections.teaching import _envelope_token
+
+        assert _envelope_token("1990-1994 - Fictional Course", {"end_date": "1994"}) is None
+
+    def test_the_spans_replace_a_range_running_to_present(self):
+        fields = {"formatted_text": "2010-Present - Fictional Course", "start_date": "2010",
+                  "end_date": "present", "additional_dates": ["2010-2012", "2015-present"]}
+        assert _teaching_entry_lines(fields, "Fictional Course 2010-2012, 2015-present",
+                                     taxonomy_code="K1") == [
+            "2010-2012, 2015-Present - Fictional Course"]
+
+    @pytest.mark.parametrize("formatted_text", [
+        "1990, 1992, 1994 - Fictional Course",      # 5c listed the years (RFNZAS 497)
+        "1990 - Fictional Course",                   # no range to replace
+        "1990-1993 - Fictional Course",              # a range to another year
+        "Fictional Course 1990-19945",               # inside a longer number
+        "Fictional Course 41990-1994",
+        "Fictional Course BIO1990-1994",
+    ])
+    def test_a_text_without_the_rows_whole_range_keeps_its_dates(self, formatted_text):
+        fields = self._fields(formatted_text, additional_dates=["1990", "1992", "1994"])
+        assert _teaching_entry_lines(fields, "Fictional Course 1990, 1992, 1994",
+                                     taxonomy_code="K1") == [formatted_text]
+
+
 def test_the_spans_skip_a_start_year_inside_a_longer_number():
     """EBYSBC E22 (#1245): the row's own date is a whole token, not the tail
     of a course number that ends in its start year."""

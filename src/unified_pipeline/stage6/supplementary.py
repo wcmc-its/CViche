@@ -654,12 +654,13 @@ _MENTEE_NAME_FIELDS = ('name', 'mentee_name')
 #: The fields the education writer prints in a degree's cell that
 #: `_RENDERED_FIELDS` cannot list, as its probe marks only schema fields:
 #: `major` or `field_of_study`, stage 4's off-schema `honors` (#817), and the
-#: advisor under its two off-schema names (#1245, `ADVISOR_LABELS`). A
+#: advisor under its three off-schema names (#1245, `ADVISOR_LABELS`). A
 #: fragment restating them is the degree's row reformatted
 #: (`_holds_field_values`). Literals, as `_MENTEE_NAME_FIELDS` are: importing
 #: `sections.education` here imports `sections.positions`, which imports this
 #: module.
-_DEGREE_CELL_FIELDS = ('major', 'field_of_study', 'honors', 'major_professor', 'mentor')
+_DEGREE_CELL_FIELDS = ('major', 'field_of_study', 'honors', 'major_professor', 'mentor',
+                       'thesis_advisor')
 #: The fields the leadership writer reads a role's role cell and its
 #: institution cell from, each the first that holds text: the schema's, then
 #: stage 4's off-schema names. The writer reads them from here, so the row
