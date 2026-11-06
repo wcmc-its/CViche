@@ -81,7 +81,9 @@ from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     _institution_from_raw_text,
     _is_one_appointment,
     _position_row_cells,
+    _names_only_a_sub_unit,
     _separated_in_source,
+    _source_employers,
     _source_order_keys,
     _tab_joined_child_fragments,
 )
@@ -1174,26 +1176,125 @@ def test_a_record_of_another_code_naming_an_employer_stops_the_carry():
     titled = _position_entry(31, "Research Fellow", "", CONSULTING_HEADING)
 
     WCMTemplateGenerator._propagate_institution_to_subentries(
-        [employer, titled], source_keys=_source_order_keys({"C": [school]}))
+        [employer, titled], source_employers=_source_employers({"C": [school]}))
 
     assert _institution_of(titled) == ""
     assert INHERITED_INSTITUTION_KEY not in titled
 
 
-def test_a_dated_row_keeps_its_employer_across_a_leadership_role():
-    """A dated rank in one employer's list, with a leadership role at that
-    employer (coded elsewhere, naming it) listed between, still takes the
-    list's employer: only a row with no dates of its own is separated."""
+@pytest.mark.parametrize("start, end", [("2009", "present"), ("2009", ""), ("", "2012")],
+                         ids=["both-dates", "start-only", "end-only"])
+def test_a_dated_row_keeps_its_employer_across_another_employer(start, end):
+    """A dated rank in one employer's list, with a role coded elsewhere naming
+    another employer listed between, still takes the list's employer: only a
+    row with no dates of its own is separated. Either date alone dates it."""
     employer = _position_entry(20, "Assistant Professor", "Quexley College",
                                CONSULTING_HEADING, "2001", "2009")
-    chair = _position_entry(25, "Chair", "Quexley College", CONSULTING_HEADING, "2005", "2012")
-    chair["taxonomy_code"] = "O"
-    rank = _position_entry(31, "Professor", "", CONSULTING_HEADING, "2009", "present")
+    board = _position_entry(25, "Board Member", "Brindlemoor Trust", CONSULTING_HEADING, "2005", "2012")
+    board["taxonomy_code"] = "O"
+    rank = _position_entry(31, "Professor", "", CONSULTING_HEADING, start, end)
 
     WCMTemplateGenerator._propagate_institution_to_subentries(
-        [employer, rank], source_keys=_source_order_keys({"O": [chair]}))
+        [employer, rank], source_employers=_source_employers({"O": [board]}))
 
     assert _institution_of(rank) == "Quexley College"
+
+
+def test_a_record_naming_only_a_sub_unit_does_not_stop_the_carry():
+    """web204's shape: a role coded O whose institution is only a School of
+    the employer, no parent named, sits between the employer's row and a
+    title-only role there. It names no other employer, so the role still
+    takes the employer."""
+    employer = _position_entry(80, "Professor", "Quexley University", CONSULTING_HEADING, "2001", "")
+    dean = _position_entry(85, "Associate Dean", "School of Allied Studies", CONSULTING_HEADING)
+    dean["taxonomy_code"] = "O"
+    titled = _position_entry(90, "Director, Nutrition Center", "", CONSULTING_HEADING)
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [employer, titled], source_employers=_source_employers({"O": [dean]}))
+
+    assert _institution_of(titled) == "Quexley University"
+
+
+def test_a_record_naming_the_donors_employer_does_not_stop_the_carry():
+    """A role coded elsewhere at the same employer as the donor is a role
+    there, not another employer between them."""
+    employer = _position_entry(20, "", "Quexley College, Norvale, Texas", CONSULTING_HEADING, "2001", "")
+    chair = _position_entry(25, "Chair", "Quexley College", CONSULTING_HEADING)
+    chair["taxonomy_code"] = "O"
+    titled = _position_entry(31, "Lecturer", "", CONSULTING_HEADING)
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [employer, titled], source_employers=_source_employers({"O": [chair]}))
+
+    assert _institution_of(titled) == "Quexley College, Norvale, Texas"
+
+
+def test_the_carry_ends_at_the_nearest_separated_donor():
+    """The nearest donor separated from the row ends the scan, even where the
+    separating record names an EARLIER donor's employer: the row is not
+    handed an employer from before the one it sits beyond."""
+    first = _position_entry(10, "", "Norvale University", CONSULTING_HEADING)
+    nearest = _position_entry(20, "", "Quexley College", CONSULTING_HEADING)
+    role = _position_entry(25, "Board Member", "Norvale University", CONSULTING_HEADING)
+    role["taxonomy_code"] = "O"
+    titled = _position_entry(31, "Lecturer", "", CONSULTING_HEADING)
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [first, nearest, titled], source_employers=_source_employers({"O": [role]}))
+
+    assert _institution_of(titled) == ""
+
+
+def test_a_sub_unit_of_another_named_parent_still_stops_the_carry():
+    """Control for the two above: a School that names its own, different
+    university is another employer, and separates."""
+    employer = _position_entry(80, "Professor", "Quexley University", CONSULTING_HEADING, "2001", "")
+    dean = _position_entry(85, "Associate Dean", "School of Allied Studies, Norvale University",
+                           CONSULTING_HEADING)
+    dean["taxonomy_code"] = "O"
+    titled = _position_entry(90, "Director, Nutrition Center", "", CONSULTING_HEADING)
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [employer, titled], source_employers=_source_employers({"O": [dean]}))
+
+    assert _institution_of(titled) == ""
+
+
+@pytest.mark.parametrize("employer, only_a_unit", [
+    ("School of Health Professions", True),
+    ("the Department of Medicine", True),
+    ("Center for Rural Studies", True),
+    ("Office of Research", True),
+    ("Institute of Molecular Medicine, Norvale", False),
+    ("School of Medicine at Quexley", False),
+    ("College of Medicine - Norvale", False),
+    ("Institute for Children's Hospital Studies", False),
+    ("College of Physicians of Norvale University", False),
+    ("Graduate School of Quexley University", False),
+    ("Quexley Institute of Technology", False),
+    ("Schooling of Medicine", False),
+    ("Center Point Partners", False),
+    ("", False),
+])
+def test_names_only_a_sub_unit(employer, only_a_unit):
+    assert _names_only_a_sub_unit(employer) is only_a_unit
+
+
+def test_source_employers_pairs_each_key_with_its_employer():
+    """A G record's list of organizations pairs with '', and the keys are
+    exactly `_source_order_keys`."""
+    named = _position_entry(5, "", "Quexley College", CONSULTING_HEADING)
+    listed = _position_entry(3, "", "", CONSULTING_HEADING)
+    listed["extracted_fields"]["organization"] = ["Norvale Society", "Brindlemoor Trust"]
+    board = _position_entry(7, "", "", CONSULTING_HEADING)
+    board["extracted_fields"]["organization"] = "Norvale Society"
+    by_code = {"D2": [named], "G": [listed], "Q2": [board]}
+
+    employers = _source_employers(by_code)
+
+    assert [employer for _key, employer in employers] == ["", "Quexley College", "Norvale Society"]
+    assert [key for key, _employer in employers] == _source_order_keys(by_code)
 
 
 def test_another_code_record_naming_no_employer_leaves_the_carry_alone():
@@ -1205,7 +1306,7 @@ def test_another_code_record_naming_no_employer_leaves_the_carry_alone():
     titled = _position_entry(31, "Lecturer", "", CONSULTING_HEADING)
 
     WCMTemplateGenerator._propagate_institution_to_subentries(
-        [employer, titled], source_keys=_source_order_keys({"T": [stray]}))
+        [employer, titled], source_employers=_source_employers({"T": [stray]}))
 
     assert _institution_of(titled) == "Quexley College"
 

@@ -615,6 +615,22 @@ def _names_own_employer(entry: dict) -> bool:
     return False
 
 
+def _source_employers(entries_by_code: Mapping[str, list[dict]]) -> list[tuple[tuple[float, float], str]]:
+    """`_source_order_keys`, each key paired with the employer its record
+    names: what the institution carry checks a separating record against
+    (#2031). An employer that is not a string (a G record's list of
+    organizations) pairs with '', which matches nothing."""
+    employers = []
+    for entries in entries_by_code.values():
+        for entry in entries:
+            if _names_own_employer(entry):
+                fields = entry.get('extracted_fields') or {}
+                employer = fields.get('institution') or fields.get('organization')
+                employers.append((element_idx_sort_key(entry.get('element_idx_start')),
+                                  employer if isinstance(employer, str) else ''))
+    return sorted(employers)
+
+
 def _source_order_keys(entries_by_code: Mapping[str, list[dict]]) -> list[tuple[float, float]]:
     """The document-order key of every record, over all codes, that names an
     employer of its own, sorted -- what `_separated_in_source` searches.
@@ -624,9 +640,7 @@ def _source_order_keys(entries_by_code: Mapping[str, list[dict]]) -> list[tuple[
     (I5NKUG's "EXPERIENCE" line, #156), not a nearer parent. A record with no
     known element index keys to infinity and sorts last, where it can never
     fall strictly between two known positions."""
-    return sorted(element_idx_sort_key(entry.get('element_idx_start'))
-                  for entries in entries_by_code.values() for entry in entries
-                  if _names_own_employer(entry))
+    return [key for key, _employer in _source_employers(entries_by_code)]
 
 
 def _separated_in_source(first: dict, second: dict,
@@ -670,19 +684,51 @@ def _copy_dates(src: dict, dst: dict) -> None:
         dst_f['end_date'] = src_f.get('end_date', '')
 
 
+# An employer naming only a unit inside some organization, and not the
+# organization: "School of Health Professions", "Department of Medicine".
+# Without a parent it is no evidence of ANOTHER employer between a row and its
+# parent (web204: a School of the parent university's, coded O, sat between
+# the university's row and a title-only role there, #2031).
+_SUB_UNIT_LEAD_RE = re.compile(
+    r'^\W*(?:the\s+)?(?:school|college|department|division|cent(?:er|re)|institute'
+    r'|office|program(?:me)?|section|unit|faculty)\s+(?:of|for|in|on)\s', re.IGNORECASE)
+# What names the parent beside the unit: a separate part ("..., University of
+# X", "X - Y") or an "at", or a university or hospital in the name itself.
+_PARENT_NAMED_RE = re.compile(
+    r'[,;/()]|\s[-\u2013\u2014]\s|\b(?:at|universit\w*|hospital)\b', re.IGNORECASE)
+
+
+def _names_only_a_sub_unit(employer: str) -> bool:
+    """True when `employer` names a unit (School/Department/Center/... of
+    something) and no organization it belongs to."""
+    return bool(_SUB_UNIT_LEAD_RE.match(employer)) and not _PARENT_NAMED_RE.search(employer)
+
+
+def _carry_separated(donor: dict, entry: dict,
+                     source_employers: list[tuple[tuple[float, float], str]]) -> bool:
+    """True when a record naming ANOTHER employer than `donor`'s sits between
+    `donor` and `entry` (`_separated_in_source`, #2031). One naming the
+    donor's employer (`_employers_match`) is a role there, and one naming only
+    a sub-unit names no other employer: neither separates."""
+    donor_employer = _entry_employer(donor)
+    keys = [key for key, employer in source_employers
+            if not _names_only_a_sub_unit(employer) and not _employers_match(employer, donor_employer)]
+    return _separated_in_source(donor, entry, keys)
+
+
 def _eligible_donor(donors: list[dict], entry: dict,
-                    source_keys: list[tuple[float, float]]) -> dict | None:
+                    source_employers: list[tuple[tuple[float, float], str]]) -> dict | None:
     """The nearest of `donors` (in document order) that sits in `entry`'s
     source block and whose dates do not rule it out as `entry`'s parent, None
     when none qualifies (#1692). The block check is per donor: the list can
     reach back past a heading change that no blank record sat on.
 
-    Nor is a donor eligible with a record of `source_keys` (one naming an
-    employer of its own) between it and `entry` (`_separated_in_source`,
-    #2031): the merge refuses that pair, and the carry stops where the merge
-    does. Every earlier donor is then separated too, so the scan ends there."""
+    Nor is a donor eligible with a record of `source_employers` naming
+    another employer between it and `entry` (`_carry_separated`, #2031), and
+    the scan ends there: `entry` sits under that other employer, not under
+    any donor before it."""
     for donor in reversed(donors):
-        if _separated_in_source(donor, entry, source_keys):
+        if _carry_separated(donor, entry, source_employers):
             return None
         if _crosses_source_boundary(donor, entry):
             continue
@@ -911,7 +957,7 @@ class PositionsSection:
     @staticmethod
     def _propagate_institution_to_subentries(
             entries: list[dict], verbose: bool = False,
-            source_keys: list[tuple[float, float]] | None = None) -> list[dict]:
+            source_employers: list[tuple[tuple[float, float], str]] | None = None) -> list[dict]:
         """Fill blank institutions from the nearest preceding entry that could be their parent.
 
         Source CVs often list sub-positions as indented bullets under a parent
@@ -937,8 +983,8 @@ class PositionsSection:
         passes D1, D2 and D3 as ONE list, so an organization-only D3 row heading
         the D1 rows under it is the donor they see, not an older D1 employer.
 
-        Nor across a record of another code that names its own employer
-        (#2031): `source_keys`, from `_source_order_keys`, are what
+        Nor across a record of another code that names another employer
+        (#2031): `source_employers`, from `_source_employers`, are what
         `_eligible_donor` checks for one between donor and record (none given,
         nothing separates). Only a record with no dates of its own is
         separated: on the farm, every dated record a separation changed was a
@@ -951,7 +997,7 @@ class PositionsSection:
         """
         if not entries:
             return entries
-        source_keys = source_keys or []
+        source_employers = source_employers or []
         # Sort by document order (element_idx_start) to ensure parent comes first
         ordered = sorted(entries, key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
         donors: list[dict] = []
@@ -976,7 +1022,7 @@ class PositionsSection:
             # the only row the merge's separation test governs, and a dated
             # row in a list of one employer's appointments takes that
             # employer past the leadership roles listed between (#2031).
-            separators = [] if fields.get('start_date') or fields.get('end_date') else source_keys
+            separators = [] if fields.get('start_date') or fields.get('end_date') else source_employers
             donor = _eligible_donor(donors, entry, separators)
             if donor is None:
                 refused += 1
@@ -1228,12 +1274,13 @@ class PositionsSection:
         # the D1/D2 rows under it, which a per-code pass cannot see (#1692).
         # Then reassemble appointments that were fragmented into separate
         # title / employer+dates rows (see _merge_grouped_appointments).
-        # The same keys before the carry as after it: a record that inherits
-        # names no employer of its own, so `_source_order_keys` skips it.
-        source_keys = _source_order_keys(entries_by_code)
+        # The same records before the carry as after it: a record that
+        # inherits names no employer of its own, so neither list holds it.
+        source_employers = _source_employers(entries_by_code)
+        source_keys = [key for key, _employer in source_employers]
         self._propagate_institution_to_subentries(
             d1_entries + d2_entries + d3_entries, verbose=self.verbose,
-            source_keys=source_keys)
+            source_employers=source_employers)
         for code, entry_list in zip(POSITION_TAXONOMY_CODES, (d1_entries, d2_entries, d3_entries)):
             merged = self._merge_grouped_appointments(entry_list, verbose=self.verbose,
                                                       source_keys=source_keys)
