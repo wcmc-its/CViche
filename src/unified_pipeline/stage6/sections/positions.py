@@ -34,7 +34,9 @@ or "Role" as a title when the source CV had a table header there. All three are
 reached only from this module.
 """
 import logging
+import math
 import re
+from bisect import bisect_right
 from collections.abc import Mapping
 from datetime import datetime
 from types import MappingProxyType
@@ -564,7 +566,11 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
 
     Everything else fails closed, including the case the old rule was loosest
     on: two records that both name an employer and disagree, and two records
-    that neither name nor inherit one.
+    that neither name nor inherit one. So does any pair that
+    `_crosses_source_boundary` puts in different blocks of the source CV,
+    whatever the rules above say: the institution carry already stops there
+    (#476, #1692), and a merge across a heading change gave a title-only row
+    the dates of a row under the next heading and dropped that row (#2031).
 
     Rule 3 is the one that is still evidence-thin, and deliberately so. A
     record inherits from the nearest preceding row that named an employer,
@@ -581,6 +587,8 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     `_merge_grouped_appointments` counts it instead (the `unmatched_employer`
     tally there).
     """
+    if _crosses_source_boundary(first, second):
+        return False
     if _same_source_element(first, second):
         return True
     claim_first, claim_second = _employer_claim(first), _employer_claim(second)
@@ -589,6 +597,61 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     if claim_first or claim_second:
         return _inherited_institution(first) or _inherited_institution(second)
     return False
+
+
+def _source_order_keys(entries_by_code: Mapping[str, list[dict]]) -> list[tuple[float, float]]:
+    """The document-order key of every record, over all codes, that names an
+    employer of its own, sorted -- what `_separated_in_source` searches.
+
+    Only those: a stray heading fragment or a line of duties between an
+    employer row and its roles is noise stage 2 cut out of the same block
+    (I5NKUG's "EXPERIENCE" line, #156), not a nearer parent. A record with no
+    known element index is left out too: it has no place in the order."""
+    keys = (element_idx_sort_key(entry.get('element_idx_start'))
+            for entries in entries_by_code.values() for entry in entries
+            if _employer_claim(entry))
+    return sorted(key for key in keys if not math.isinf(key[0]))
+
+
+def _separated_in_source(first: dict, second: dict,
+                         source_keys: list[tuple[float, float]]) -> bool:
+    """True when a record naming an employer sits strictly between `first`
+    and `second` in document order (#2031).
+
+    The merge pass sees one taxonomy code at a time, so two rows it finds
+    side by side can have other employers between them in the source: in
+    IXJMKS a dated consultancy row and a later title-only row are separated
+    by three advisory-board rows coded elsewhere, each naming its own
+    organization. A row under those is not a role held at the one before
+    them.
+
+    An unknown element index proves nothing, so it never separates.
+    """
+    low, high = sorted((element_idx_sort_key(first.get('element_idx_start')),
+                        element_idx_sort_key(second.get('element_idx_start'))))
+    if math.isinf(high[0]):
+        return False
+    nearest_after_low = bisect_right(source_keys, low)
+    return nearest_after_low < len(source_keys) and source_keys[nearest_after_low] < high
+
+
+def _mergeable(first: dict, second: dict, source_keys: list[tuple[float, float]]) -> bool:
+    """True when `_merge_grouped_appointments` may join two rows it found side
+    by side: no employer-naming record sits between them in the source, and
+    `_is_one_appointment` finds them one appointment."""
+    return (not _separated_in_source(first, second, source_keys)
+            and _is_one_appointment(first, second))
+
+
+def _copy_dates(src: dict, dst: dict) -> None:
+    """Copy `src`'s dates onto `dst`, only when `dst` carries none of its own."""
+    src_f = src.get('extracted_fields', {}) or {}
+    dst_f = dst.get('extracted_fields')
+    if not dst_f:
+        dst['extracted_fields'] = dst_f = {}
+    if not (dst_f.get('start_date') or dst_f.get('end_date')):
+        dst_f['start_date'] = src_f.get('start_date', '')
+        dst_f['end_date'] = src_f.get('end_date', '')
 
 
 def _eligible_donor(donors: list[dict], entry: dict) -> dict | None:
@@ -907,8 +970,9 @@ class PositionsSection:
         return bool(fields.get('start_date') or fields.get('end_date'))
 
     @classmethod
-    def _merge_grouped_appointments(cls, entries: list[dict],
-                                    verbose: bool = False) -> list[dict]:
+    def _merge_grouped_appointments(
+            cls, entries: list[dict], verbose: bool = False,
+            source_keys: list[tuple[float, float]] | None = None) -> list[dict]:
         """Reassemble appointments fragmented across title / employer rows.
 
         Source CVs commonly list one employer with a date range on its own line
@@ -949,6 +1013,11 @@ class PositionsSection:
         missing employer as a match. It is that one pair on the stage-4
         inputs and none on stage-5 or -5d, 2082 being a stage-4-only document.
 
+        Both rules also refuse a pair with another employer-naming record
+        between them in the source (`_separated_in_source`, over `source_keys`
+        from `_source_order_keys`; none given, nothing separates), and
+        `_is_one_appointment` refuses a pair across a source boundary (#2031).
+
         Rules 2 then 1 run as separate passes so a header is never mistaken for a
         lone adjacent dates row. Dates are only ever *copied into* a row that
         lacks them; an entry that already carries its own dates is never
@@ -960,15 +1029,7 @@ class PositionsSection:
 
         ordered = sorted(entries,
                          key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
-
-        def _copy_dates(src: dict, dst: dict) -> None:
-            src_f = src.get('extracted_fields', {}) or {}
-            dst_f = dst.get('extracted_fields')
-            if not dst_f:
-                dst['extracted_fields'] = dst_f = {}
-            if not (dst_f.get('start_date') or dst_f.get('end_date')):
-                dst_f['start_date'] = src_f.get('start_date', '')
-                dst_f['end_date'] = src_f.get('end_date', '')
+        source_keys = source_keys or []
 
         # Positions in `ordered`, never id() of the dicts (#476 review item 4):
         # the bookkeeping then reads as "row 4 was absorbed by row 3" -- the
@@ -1005,7 +1066,11 @@ class PositionsSection:
                 if j in dropped:
                     continue
                 nxt = ordered[j]
+                # Separation is read against the row above (the header, or
+                # the previous child); the appointment test against the header.
                 if (cls._position_title(nxt) and not cls._position_has_dates(nxt)
+                        and not _separated_in_source(children[-1] if children else entry,
+                                                     nxt, source_keys)
                         and _is_one_appointment(entry, nxt)):
                     children.append(nxt)
                 else:
@@ -1036,7 +1101,7 @@ class PositionsSection:
             cand = ordered[j]
             if cls._position_title(cand) or not cls._position_has_dates(cand):
                 return None
-            if not _is_one_appointment(anchor, cand):
+            if not _mergeable(anchor, cand, source_keys):
                 return None
             return j
 
@@ -1121,8 +1186,10 @@ class PositionsSection:
         # title / employer+dates rows (see _merge_grouped_appointments).
         self._propagate_institution_to_subentries(
             d1_entries + d2_entries + d3_entries, verbose=self.verbose)
+        source_keys = _source_order_keys(entries_by_code)
         for code, entry_list in zip(POSITION_TAXONOMY_CODES, (d1_entries, d2_entries, d3_entries)):
-            merged = self._merge_grouped_appointments(entry_list, verbose=self.verbose)
+            merged = self._merge_grouped_appointments(entry_list, verbose=self.verbose,
+                                                      source_keys=source_keys)
             if merged is not entry_list:
                 entry_list[:] = merged
                 entries_by_code[code] = entry_list
