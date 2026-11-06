@@ -1122,6 +1122,17 @@ def test_a_record_naming_no_employer_does_not_separate():
     assert not _separated_in_source(header, role, keys)
 
 
+def test_a_non_string_employer_on_another_code_separates_and_does_not_raise():
+    """Every code's records are read, and a G record can carry a list of
+    organizations; the keys must not assume a string."""
+    header = _position_entry(1, "", "Quexley College", CONSULTING_HEADING, "2001", "2009")
+    role = _position_entry(3, "Lecturer", "", CONSULTING_HEADING)
+    listed = {"element_idx_start": 2, "taxonomy_code": "G",
+              "extracted_fields": {"organization": ["Norvale Society", "Quexley Board"]}}
+    keys = _source_order_keys({"D2": [header, role], "G": [listed]})
+    assert _separated_in_source(header, role, keys)
+
+
 def test_an_unknown_element_index_never_separates():
     """No index, no place in the order: nothing can be shown to sit between."""
     known = _position_entry(5, "", "Quexley College", CONSULTING_HEADING, "2001", "2009")

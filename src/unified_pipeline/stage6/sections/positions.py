@@ -599,6 +599,22 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     return False
 
 
+def _names_own_employer(entry: dict) -> bool:
+    """True when the record names an employer itself (not inherited).
+
+    Read over records of EVERY code, not only D rows, so it does not assume
+    a string: a G record can carry a list of organizations, and treating it
+    as text failed the whole positions section."""
+    if _inherited_institution(entry):
+        return False
+    fields = entry.get('extracted_fields') or {}
+    for key in ('institution', 'organization'):
+        value = fields.get(key)
+        if value.strip() if isinstance(value, str) else value:
+            return True
+    return False
+
+
 def _source_order_keys(entries_by_code: Mapping[str, list[dict]]) -> list[tuple[float, float]]:
     """The document-order key of every record, over all codes, that names an
     employer of its own, sorted -- what `_separated_in_source` searches.
@@ -609,7 +625,7 @@ def _source_order_keys(entries_by_code: Mapping[str, list[dict]]) -> list[tuple[
     known element index is left out too: it has no place in the order."""
     keys = (element_idx_sort_key(entry.get('element_idx_start'))
             for entries in entries_by_code.values() for entry in entries
-            if _employer_claim(entry))
+            if _names_own_employer(entry))
     return sorted(key for key in keys if not math.isinf(key[0]))
 
 
