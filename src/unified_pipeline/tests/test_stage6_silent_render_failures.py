@@ -52,6 +52,10 @@ from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 import unified_pipeline.stage_6_word_template as s6  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+)
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     CVICHE_BOX_FILL,
     DetachedAnchorError,
@@ -78,6 +82,7 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     _outcome_mentee_anchor,
     _outcome_mentee_suffix,
     _program_leadership_line,
+    _training_grant_is_not_grant_shaped,
     _training_grant_is_sparse,
     _training_grant_rows,
     annotate_outcome_mentees,
@@ -825,6 +830,169 @@ def test_training_grant_is_sparse_false_when_any_identifying_field_present():
     assert _training_grant_is_sparse({'grant_title': 'A'}) is False
 
 
+# --- N2: the person a grant's own line labels (#1710 residual 1) -------------------
+
+_AWARD_SOURCE_LABEL = 'Award Source (funding agency, type of grant):'
+
+
+def _award_source(fields: dict, text: str) -> str:
+    return dict(_training_grant_rows(fields, text))[_AWARD_SOURCE_LABEL]
+
+
+@pytest.mark.parametrize('line, phrase', [
+    ('Primary Mentor to Jordan Testperson, MD, PhD\t2019-2021',
+     'Primary Mentor to Jordan Testperson, MD, PhD'),
+    ('Mentor to Jordan Testperson\tInvented Agency Name', 'Mentor to Jordan Testperson'),
+    ('Primary  Mentor to Jordan Testperson', 'Primary Mentor to Jordan Testperson'),
+    ('Mentor to Dr. Alex Bo Inventedname Madeup', 'Mentor to Dr. Alex Bo Inventedname Madeup'),
+    ('Co-Mentor for Dr. Alex Inventedname', 'Co-Mentor for Dr. Alex Inventedname'),
+    ('Sponsor to Sam Placeholder.', 'Sponsor to Sam Placeholder'),
+    ('PI Name: Riley Fictional', 'PI Name: Riley Fictional'),
+    ('PI  Name: Riley Fictional', 'PI Name: Riley Fictional'),
+    ('PI : Riley Fictional', 'PI: Riley Fictional'),
+    ('Principal investigator: Casey Madeup PhD, Department of Invention',
+     'Principal investigator: Casey Madeup PhD, Department of Invention'),
+    ('Trainees: Morgan Sample and Taylor Example', 'Trainees: Morgan Sample and Taylor Example'),
+    ('Post-doctoral trainee: Morgan Sample', 'Post-doctoral trainee: Morgan Sample'),
+    ('Mentee: Morgan Sample', 'Mentee: Morgan Sample'),
+    ('Fellow: Morgan Sample', 'Fellow: Morgan Sample'),
+    ('Scholars: Morgan Sample', 'Scholars: Morgan Sample'),
+    ('Awardee: Morgan Sample', 'Awardee: Morgan Sample'),
+])
+def test_training_grant_rows_name_the_person_the_line_labels(line, phrase):
+    """The label and the name, as the line writes them, join Award Source;
+    with no role they make the parenthetical."""
+    assert _award_source({'agency': 'Invented Fund'}, f'Invented Fund\t{line}') == (
+        f'Invented Fund ({phrase})')
+
+
+def test_training_grant_rows_labelled_person_replaces_the_role_it_contains():
+    fields = {'agency': 'Invented Fund', 'role': 'Postdoctoral Fellow'}
+    text = ('Invented Fund  $5,000\tPI: Jordan Testperson, Postdoctoral Fellow\t'
+            'Mentor: Alex Inventedname')
+    assert _award_source(fields, text) == (
+        'Invented Fund (PI: Jordan Testperson, Postdoctoral Fellow)')
+
+
+def test_training_grant_rows_labelled_person_follows_a_role_it_does_not_contain():
+    fields = {'agency': 'Invented Institutes', 'grant_number': 'K12-000',
+              'role': 'Core Faculty, Mentor'}
+    text = 'Invented Career Program\tPI: Riley Fictional, MD and Casey Madeup, MD'
+    assert _award_source(fields, text) == (
+        'Invented Institutes (K12-000) (Core Faculty, Mentor; '
+        'PI: Riley Fictional, MD and Casey Madeup, MD)')
+    # A role is replaced only by phrases holding its words, not its letters.
+    assert _award_source({'agency': 'Invented Fund', 'role': 'PI'}, 'Trainee: Jordan Pinvented') == (
+        'Invented Fund (PI; Trainee: Jordan Pinvented)')
+
+
+def test_training_grant_rows_with_no_agency_the_people_make_the_cell():
+    text = 'Invented Study\tPI: Riley Fictional'
+    assert _award_source({'grant_title': 'Invented Study'}, text) == '(PI: Riley Fictional)'
+
+
+@pytest.mark.parametrize('line', [
+    'Mentor: Alex Inventedname',               # "Mentor:" names the owner, never added
+    'pi: Alex Inventedname',                   # "PI" is a label in capitals only
+    'API: Alex Inventedname',                  # a label inside a word
+    'Mentor for the invented program',         # a lower-case word after "for" names nobody
+    'Dementor to Alex Inventedname',           # "mentor" inside a word
+    'Trainee: n/a',
+    'Trainee: N/A',                            # no capitalised word of two letters
+    'Trainee: none listed',
+    'Trainee: 2019-2021',
+])
+def test_training_grant_rows_add_no_person_without_a_label_and_a_name(line):
+    assert _award_source({'agency': 'Invented Fund', 'role': 'Mentor'},
+                         f'Invented Fund\t{line}') == 'Invented Fund (Mentor)'
+
+
+def test_training_grant_rows_add_no_person_a_cell_already_shows():
+    fields = {'agency': 'Invented Fund', 'grant_title': 'Invented Award to Jordan Testperson'}
+    assert _award_source(fields, 'Invented Fund\tTrainee: Jordan Testperson') == 'Invented Fund'
+    fields = {'agency': 'Invented Fund', 'role': 'Mentor to Jordan Testperson'}
+    assert _award_source(fields, 'Invented Fund\tPI: Jordan Testperson') == (
+        'Invented Fund (Mentor to Jordan Testperson)')
+
+
+@pytest.mark.parametrize('line, name', [
+    ('PI: Jordan Testperson, 2019-2021', 'Jordan Testperson'),
+    ('PI: Jordan Testperson (7/2019-6/2021)', 'Jordan Testperson'),
+    ('PI: Jordan Testperson; Mentor: Alex Inventedname', 'Jordan Testperson'),
+    ('PI: Jordan Testperson.   Invented Fund Two', 'Jordan Testperson'),
+    ('PI: Jordan Testperson | Invented Fund Two', 'Jordan Testperson'),
+    ('PI: Jordan Testperson “Invented Study”', 'Jordan Testperson'),
+    ('PI: Jordan Testperson, MD)', 'Jordan Testperson, MD'),
+    ('PI: Jordan Testperson (Invented Lab)', 'Jordan Testperson (Invented Lab)'),
+])
+def test_training_grant_rows_labelled_name_stops_where_the_name_ends(line, name):
+    assert _award_source({'agency': 'Invented Fund'}, f'Invented Fund\t{line}') == (
+        f'Invented Fund (PI: {name})')
+
+
+def test_training_grant_rows_name_each_labelled_person_once():
+    text = ('Invented Fund\tPI: Jordan Testperson\tPrimary Mentor to Jordan Testperson\t'
+            'Trainee: Sam Placeholder')
+    assert _award_source({'agency': 'Invented Fund'}, text) == (
+        'Invented Fund (PI: Jordan Testperson; Trainee: Sam Placeholder)')
+
+
+def test_training_grant_rows_read_the_record_line_over_the_entry_text():
+    """A record of a split entry reads only its own line for the person
+    (`record_line`); the entry's text, every sibling's line, still feeds the
+    Duration fallback (#2094)."""
+    text = 'PI: Sam Placeholder\tPI: Morgan Sample\nDuration of support: | 2 years'
+    rows = dict(_training_grant_rows({'agency': 'Invented Fund'}, text, 'PI: Morgan Sample'))
+    assert rows[_AWARD_SOURCE_LABEL] == 'Invented Fund (PI: Morgan Sample)'
+    assert rows['Duration of support (mm/yyyy-mm/yyyy):'] == '2 years'
+    assert _award_source({'agency': 'Invented Fund'}, 'PI: Sam Placeholder') == (
+        'Invented Fund (PI: Sam Placeholder)')
+    assert dict(_training_grant_rows({'agency': 'Invented Fund'}, text, ''))[
+        _AWARD_SOURCE_LABEL] == 'Invented Fund'
+
+
+# --- N2: an entry that is not a grant (#1710 residual 4) ---------------------------
+
+@pytest.mark.parametrize('fields, line', [
+    ({'grant_title': 'Invented Graduate Program'}, 'Invented Graduate Program'),
+    ({'agency': 'Invented University'}, 'Invented University'),
+    ({'agency': 'Invented University (Invented College)'},
+     'Invented University (Invented College)'),
+    ({'title': 'Ninth Street Invented Center'}, 'Ninth Street Invented Center'),
+    ({'grant_title': 'Invented Program', 'start_date': '2019', 'end_date': '2021'},
+     'Invented Program 2019-2021'),
+])
+def test_n2_entry_with_no_number_grant_word_or_funder_is_not_grant_shaped(fields, line):
+    assert _training_grant_is_not_grant_shaped(fields, line) is True
+
+
+@pytest.mark.parametrize('fields, line', [
+    ({'grant_title': 'Invented Program', 'grant_number': '0001'}, 'Invented Program 0001'),
+    ({'grant_title': 'Invented T32 Program'}, 'Invented T32 Program'),
+    ({'grant_title': 'Invented Training Grant'}, 'Invented Training Grant'),
+    ({'grant_title': 'Invented Award Program'}, 'Invented Award Program'),
+    ({'grant_title': 'Invented NRSA Program'}, 'Invented NRSA Program'),
+    ({'grant_title': 'Invented Program'}, 'Invented Program funding'),
+    ({'grant_title': 'Invented Program'}, 'Invented Program, NINDS'),
+    ({'grant_title': 'Invented Program'}, 'Invented Program, NIH'),
+    ({'grant_title': 'Invented Program'}, 'Invented Program $5,000'),
+    ({'grant_title': 'Invented Scholars Program'}, 'Invented Scholars Program'),
+    ({'grant_title': 'Invented Program'}, 'Invented Program, funded 2019'),
+    ({'grant_title': 'Invented Program', 'title': 'Invented Fellowship'}, 'Invented Program'),
+    ({'agency': 'Invented Foundation'}, 'Invented Foundation Invented Program'),
+    ({'grant_title': 'Invented Program', 'agency': 'Invented Program'}, 'Invented Program'),
+    ({'title': 'Invented Program', 'agency': 'Invented Program'}, 'Invented Program'),
+    ({'grant_title': 'Invented Program', 'role': 'Mentor'}, 'Invented Program'),
+    ({}, '  '),
+])
+def test_n2_entry_with_a_number_grant_word_or_funder_stays_a_grant(fields, line):
+    """Each inverse risk: a grant number; a grant word in the line, or in a
+    title the table does not show; a funder (an agency that is not the line
+    itself, or one with a title); a cell word the line does not hold, which
+    the line route would drop; or no line at all."""
+    assert _training_grant_is_not_grant_shaped(fields, line) is False
+
+
 # --- N1/N2: rendering into their template slots (#529) ---------------------------
 
 def _n1(**fields) -> dict:
@@ -1021,6 +1189,93 @@ def test_n2_table_renders_the_duration_line_span_from_the_entry_text():
     (table,) = gen.doc.tables
     assert [(r.cells[0].text, r.cells[1].text) for r in table.rows][2] == (
         'Duration of support (mm/yyyy-mm/yyyy):', '3 years')
+
+
+def test_n2_real_template_names_labelled_trainees_and_lines_a_program():
+    """#1710, through `_fill_mentoring`: a grant held for a trainee names the
+    trainee in Award Source as the line labels them; a program that is not
+    a grant renders as its own line in N2's slot, not a 3-row table; a
+    "Mentor:" name stays out of every cell. Title and Duration are as before."""
+    gen = _template_generator()
+    template_tables = len(gen.doc.tables)
+    entries_by_code = {'N2': [
+        _n2(agency='Invented Institute on Aging', grant_number='K01AG000000',
+            start_date='2019', end_date='2021',
+            text=('Invented Institute on Aging K01AG000000\t'
+                  'Primary Mentor to Jordan Testperson, PhD')),
+        _n2(grant_title='Invented Graduate Program', text='Invented Graduate Program'),
+        _n2(agency='Invented Fund', role='Postdoctoral Fellow', grant_title='Invented Study',
+            text='Invented Fund\tInvented Study\tPI: Riley Fictional, Postdoctoral Fellow\t'
+                 'Mentor: Alex Inventedname'),
+    ]}
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, N2_HEADING, 6) == [
+        ('p', N2_INSTRUCTION),
+        ('tbl', 'Invented Institute on Aging (K01AG000000) '
+                '(Primary Mentor to Jordan Testperson, PhD)'),
+        ('p', ''),
+        ('p', 'Invented Graduate Program'),
+        ('tbl', 'Invented Fund (PI: Riley Fictional, Postdoctoral Fellow)'),
+        ('p', ''),
+    ]
+    body = list(gen.doc.element.body)
+    instruction_idx = next(
+        i for i, el in enumerate(body) if el.tag == qn('w:p')
+        and Paragraph(el, gen.doc).text.strip() == N2_INSTRUCTION)
+    assert [[row.cells[1].text for row in Table(body[instruction_idx + offset], gen.doc).rows][1:]
+            for offset in (1, 4)] == [['', '2019-2021'], ['Invented Study', '']]
+    assert not any('Inventedname' in cell.text for t in gen.doc.tables
+                   for row in t.rows for cell in row.cells)
+    assert len(gen.doc.tables) == template_tables - 1 + 2
+    assert gen.stats['tables_populated'] == 2
+    assert gen.stats['entries_inserted'] == 3
+
+
+def _last_stage4_record(text: str, own_line: str | None, **fields) -> dict:
+    """The last of stage 4's records after fan-out: the parent's whole text,
+    its own line under `LAST_STAGE4_RECORD` (None when it has none)."""
+    return {'taxonomy_code': 'N2', 'text': text, 'extracted_fields': fields,
+            LAST_STAGE4_RECORD: {'key': 'records', 'index': 1, 'count': 2, OWN_TEXT_KEY: own_line}}
+
+
+def test_n2_split_record_reads_only_its_own_line():
+    """A fan-out's last record carries every sibling's line as its text. The
+    person it names and the line it renders as are its own line's; with no
+    line of its own it names nobody, never a sibling's person, and keeps
+    its table."""
+    gen = _new_generator()
+    gen.doc.add_paragraph(N2_HEADING)
+    whole = 'Invented Fund A\tPI: Sam Placeholder\tInvented Fund B\tPI: Morgan Sample'
+    entries = [
+        _last_stage4_record(whole, 'Invented Fund B\tPI: Morgan Sample', agency='Invented Fund B'),
+        _last_stage4_record(whole, None, agency='Invented Fund B'),
+        _last_stage4_record('Invented Program A\tInvented Program B', 'Invented Program B',
+                            grant_title='Invented Program B'),
+    ]
+
+    gen._fill_mentoring({'N2': entries})
+
+    assert _body_after(gen.doc, N2_HEADING, 5) == [
+        ('tbl', 'Invented Fund B (PI: Morgan Sample)'),
+        ('p', ''),
+        ('tbl', 'Invented Fund B'),
+        ('p', ''),
+        ('p', 'Invented Program B'),
+    ]
+
+
+def test_n2_sparse_entry_with_no_text_inserts_no_blank_line():
+    """The line route writes nothing for an entry with no text, as before
+    #1710 moved it below the route choice: no blank paragraph, no count."""
+    gen = _new_generator()
+    gen.doc.add_paragraph(N2_HEADING)
+
+    gen._fill_mentoring({'N2': [_n2(text='', role='Mentor')]})
+
+    assert len(gen.doc.paragraphs) == 1
+    assert gen.stats['entries_inserted'] == 0
 
 
 def test_n2_real_template_no_entries_leaves_the_region_unchanged():
