@@ -386,6 +386,17 @@ _COLLECTIVE_AUTHOR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A generational suffix closing one person's byline ("Doe AB Jr.", "Doe AB
+# III", "Doe AB 2nd"): the set stage 6's `_GENERATIONAL_SUFFIX` carries onto
+# PubMed's list. Read as a surname, an ordinal reordered "Doe AB 2nd" into
+# "2nd DA" (#1438). Kept after the normalised name, without its period.
+_GENERATIONAL_SUFFIX_RE = re.compile(r'^(?:Jr|Sr|II|III|IV|[2-9](?:nd|rd|th))\.?$')
+
+# A Roman-numeral suffix is also a pair of initials ("El Doe II" is Ivy I. El
+# Doe), so it is a suffix only after a name that already has its initials.
+_ROMAN_SUFFIX_RE = re.compile(r'^(?:II|III|IV)\.?$')
+_INITIALS_TOKEN_RE = re.compile(r'^(?:[A-Z]\.?)+,?$')
+
 # A balanced, non-nested parenthetical, e.g. the "(C. Roe)" credit after a group
 # name. Masked before the byline is split so the split never cuts inside it.
 _PARENTHETICAL_RE = re.compile(r'\([^()]*\)')
@@ -476,50 +487,10 @@ def normalize_authors_vancouver(authors_string: str) -> str:
             )
             continue
 
-        # Try to parse "LastName, FirstName MiddleName" format
-        # e.g., "Smith, John Albert" or "Smith, J. A." or "Smith, JA"
-        # Unicode-aware (not ASCII-only) so accented surnames (e.g. "Garcia"
-        # with an accent, "Muller" with an umlaut) and compound surnames with
-        # internal hyphens/apostrophes/spaces (e.g. "de la Cruz", "O'Brien",
-        # "Garcia-Lopez") match instead of silently falling through to the
-        # less-accurate "FirstName LastName" / cleanup paths below. `[^\W\d_]`
-        # is any Unicode letter; digits, underscore, and other punctuation
-        # stay excluded.
-        comma_match = re.match(
-            r"^([^\W\d_][^\W\d_\-'\s]*(?:[-'\s][^\W\d_]+)*),\s*(.+)$", author
-        )
-        if comma_match:
-            last_name = comma_match.group(1)
-            first_parts = comma_match.group(2)
-
-            # Extract initials from first/middle names
-            initials = extract_initials(first_parts)
-            if initials:
-                normalized_authors.append(f"{last_name} {initials}")
-                continue
-
-        # Try "FirstName LastName" format (less common in citations)
-        # e.g., "John A. Smith" or "John Albert Smith"
-        space_parts = author.split()
-        if len(space_parts) >= 2:
-            # Check if last part looks like a last name (not initials)
-            if (
-                len(space_parts[-1]) > 2
-                and not re.match(r'^[A-Z]+$', space_parts[-1])
-                and not _MIXED_CASE_INITIALS_RE.match(space_parts[-1])
-            ):
-                last_name = space_parts[-1]
-                first_parts = ' '.join(space_parts[:-1])
-                initials = extract_initials(first_parts)
-                if initials:
-                    normalized_authors.append(f"{last_name} {initials}")
-                    continue
-
-        # Already in "LastName AB" format or couldn't parse - clean up periods
-        cleaned = re.sub(r'\.(?=[A-Z]|\s|$)', '', author)  # Remove periods from initials
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()  # Normalize spaces
-        if cleaned:
-            normalized_authors.append(cleaned)
+        name, suffix = _split_generational_suffix(author)
+        normalized = _normalize_person_author(name)
+        if normalized:
+            normalized_authors.append(f"{normalized} {suffix}" if suffix else normalized)
 
     # Step 4: Rejoin with commas
     result = ', '.join(normalized_authors)
@@ -534,6 +505,66 @@ def normalize_authors_vancouver(authors_string: str) -> str:
         result += '.'  # et al. needs the period
 
     return result
+
+
+def _split_generational_suffix(author: str) -> tuple[str, str]:
+    """`author` less a closing generational suffix and the comma before it,
+    and that suffix without its period ("Doe A.B., Jr." -> ("Doe A.B.",
+    "Jr")), or (author, '') when it carries none."""
+    tokens = author.split()
+    name, last = tokens[:-1], tokens[-1]
+    if not name or not _GENERATIONAL_SUFFIX_RE.match(last):
+        return author, ''
+    if _ROMAN_SUFFIX_RE.match(last) and not any(_INITIALS_TOKEN_RE.match(t) for t in name):
+        return author, ''
+    return ' '.join(name).rstrip(','), last.rstrip('.')
+
+
+def _normalize_person_author(author: str) -> str:
+    """One person's byline as "LastName AB"; when it parses neither as
+    "LastName, Given" nor as "Given LastName", as written less the
+    initials' periods."""
+    # Try to parse "LastName, FirstName MiddleName" format
+    # e.g., "Smith, John Albert" or "Smith, J. A." or "Smith, JA"
+    # Unicode-aware (not ASCII-only) so accented surnames (e.g. "Garcia"
+    # with an accent, "Muller" with an umlaut) and compound surnames with
+    # internal hyphens/apostrophes/spaces (e.g. "de la Cruz", "O'Brien",
+    # "Garcia-Lopez") match instead of silently falling through to the
+    # less-accurate "FirstName LastName" / cleanup paths below. `[^\W\d_]`
+    # is any Unicode letter; digits, underscore, and other punctuation
+    # stay excluded.
+    comma_match = re.match(
+        r"^([^\W\d_][^\W\d_\-'\s]*(?:[-'\s][^\W\d_]+)*),\s*(.+)$", author
+    )
+    if comma_match:
+        last_name = comma_match.group(1)
+        first_parts = comma_match.group(2)
+
+        # Extract initials from first/middle names
+        initials = extract_initials(first_parts)
+        if initials:
+            return f"{last_name} {initials}"
+
+    # Try "FirstName LastName" format (less common in citations)
+    # e.g., "John A. Smith" or "John Albert Smith"
+    space_parts = author.split()
+    if len(space_parts) >= 2:
+        # Check if last part looks like a last name (not initials)
+        if (
+            len(space_parts[-1]) > 2
+            and not re.match(r'^[A-Z]+$', space_parts[-1])
+            and not _MIXED_CASE_INITIALS_RE.match(space_parts[-1])
+        ):
+            last_name = space_parts[-1]
+            first_parts = ' '.join(space_parts[:-1])
+            initials = extract_initials(first_parts)
+            if initials:
+                return f"{last_name} {initials}"
+
+    # Already in "LastName AB" format or couldn't parse - clean up periods
+    cleaned = re.sub(r'\.(?=[A-Z]|\s|$)', '', author)  # Remove periods from initials
+    return re.sub(r'\s+', ' ', cleaned).strip()  # Normalize spaces
+
 
 def extract_initials(name_parts: str) -> str:
     """
