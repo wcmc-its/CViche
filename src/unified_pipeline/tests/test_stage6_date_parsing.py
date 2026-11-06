@@ -1482,6 +1482,10 @@ def test_a_range_valued_date_breaks_ties_by_its_start():
     ({"date": {"start_date": "2016-03-02", "end_date": "2016-03-04"}}, (2016, 3, 2)),
     # A plain `date` beside an end date is the span's start.
     ({"date": "1995", "end_date": "present"}, (1995, 1, 1)),
+    # start_date outranks a plain `date` beside the end date.
+    ({"start_date": "2010", "date": "1995", "end_date": "2013"}, (2010, 1, 1)),
+    # An end date that holds no date does not make the row a span.
+    ({"year": "2014", "end_date": "unknown"}, (2014, 1, 1)),
     # A single-date row starts when it is dated.
     ({"date": "2014"}, (2014, 1, 1)),
     ({"year": "2004"}, (2004, 1, 1)),
