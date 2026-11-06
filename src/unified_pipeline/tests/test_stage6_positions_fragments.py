@@ -1154,6 +1154,62 @@ def test_an_unknown_element_index_never_separates():
     assert _separated_in_source(known, _position_entry(7, "", "", CONSULTING_HEADING), keys)
 
 
+def test_a_title_only_row_inherits_no_employer_across_other_code_rows():
+    """The residual of #2031: with the merge refused, the carry still gave the
+    title-only row Beta's employer across the three boards between them. It
+    now inherits nothing, and still renders as a row of its own."""
+    rows = _fill_all_three(_consulting_rows(with_interleaved=True))["D3"]
+
+    assert len(rows) == 3
+    by_title = {title: institution for title, institution, _dates in rows}
+    assert by_title["Several one-time projects"] == ""
+
+
+def test_a_record_of_another_code_naming_an_employer_stops_the_carry():
+    """MRJDWE's shape: an education record naming its school sits between an
+    employer row and a later title-only row under the same heading."""
+    employer = _position_entry(20, "", "Quexley College", CONSULTING_HEADING, "2001", "2009")
+    school = _position_entry(25, "", "Norvale Institute", CONSULTING_HEADING, "1995", "1999")
+    school["taxonomy_code"] = "C"
+    titled = _position_entry(31, "Research Fellow", "", CONSULTING_HEADING)
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [employer, titled], source_keys=_source_order_keys({"C": [school]}))
+
+    assert _institution_of(titled) == ""
+    assert INHERITED_INSTITUTION_KEY not in titled
+
+
+def test_a_dated_row_keeps_its_employer_across_a_leadership_role():
+    """A dated rank in one employer's list, with a leadership role at that
+    employer (coded elsewhere, naming it) listed between, still takes the
+    list's employer: only a row with no dates of its own is separated."""
+    employer = _position_entry(20, "Assistant Professor", "Quexley College",
+                               CONSULTING_HEADING, "2001", "2009")
+    chair = _position_entry(25, "Chair", "Quexley College", CONSULTING_HEADING, "2005", "2012")
+    chair["taxonomy_code"] = "O"
+    rank = _position_entry(31, "Professor", "", CONSULTING_HEADING, "2009", "present")
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [employer, rank], source_keys=_source_order_keys({"O": [chair]}))
+
+    assert _institution_of(rank) == "Quexley College"
+
+
+def test_another_code_record_naming_no_employer_leaves_the_carry_alone():
+    """Control for the test above: only an employer-naming record separates,
+    so a stray line coded elsewhere does not stop the carry."""
+    employer = _position_entry(20, "", "Quexley College", CONSULTING_HEADING, "2001", "2009")
+    stray = _position_entry(25, "", "", CONSULTING_HEADING)
+    stray["taxonomy_code"] = "T"
+    titled = _position_entry(31, "Lecturer", "", CONSULTING_HEADING)
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [employer, titled], source_keys=_source_order_keys({"T": [stray]}))
+
+    assert _institution_of(titled) == "Quexley College"
+
+
 # --- (f) no all-blank row, and no populated row dropped ----------------------
 
 def _fieldless_record(idx, text, hierarchy, code="D1"):

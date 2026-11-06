@@ -12,8 +12,8 @@ it is why the section is this long for an 85-line writer:
   so the institution has to be carried forward in document order, over D1, D2
   and D3 together. It stops at a source-structure boundary
   (`_crosses_source_boundary`), skips a row whose dates rule it out as the
-  parent (`_eligible_donor`, #1692), and records the parent it took each
-  institution from.
+  parent (`_eligible_donor`, #1692) or sits beyond another code's employer
+  (#2031), and records the parent it took each institution from.
 - `_merge_grouped_appointments` -- the same appointment arrives split into a
   title-less "employer + dates" row and one or more date-less "title only"
   rows. Rendered straight that produces blank-TITLE rows, which read as
@@ -670,12 +670,20 @@ def _copy_dates(src: dict, dst: dict) -> None:
         dst_f['end_date'] = src_f.get('end_date', '')
 
 
-def _eligible_donor(donors: list[dict], entry: dict) -> dict | None:
+def _eligible_donor(donors: list[dict], entry: dict,
+                    source_keys: list[tuple[float, float]]) -> dict | None:
     """The nearest of `donors` (in document order) that sits in `entry`'s
     source block and whose dates do not rule it out as `entry`'s parent, None
     when none qualifies (#1692). The block check is per donor: the list can
-    reach back past a heading change that no blank record sat on."""
+    reach back past a heading change that no blank record sat on.
+
+    Nor is a donor eligible with a record of `source_keys` (one naming an
+    employer of its own) between it and `entry` (`_separated_in_source`,
+    #2031): the merge refuses that pair, and the carry stops where the merge
+    does. Every earlier donor is then separated too, so the scan ends there."""
     for donor in reversed(donors):
+        if _separated_in_source(donor, entry, source_keys):
+            return None
         if _crosses_source_boundary(donor, entry):
             continue
         if not _dates_rule_out_donor(donor, entry):
@@ -901,7 +909,9 @@ class PositionsSection:
     """Section D writers, mixed into `WCMTemplateGenerator`."""
 
     @staticmethod
-    def _propagate_institution_to_subentries(entries: list[dict], verbose: bool = False) -> list[dict]:
+    def _propagate_institution_to_subentries(
+            entries: list[dict], verbose: bool = False,
+            source_keys: list[tuple[float, float]] | None = None) -> list[dict]:
         """Fill blank institutions from the nearest preceding entry that could be their parent.
 
         Source CVs often list sub-positions as indented bullets under a parent
@@ -926,9 +936,22 @@ class PositionsSection:
         nearest earlier one the dates allow, or nothing. And `_fill_positions`
         passes D1, D2 and D3 as ONE list, so an organization-only D3 row heading
         the D1 rows under it is the donor they see, not an older D1 employer.
+
+        Nor across a record of another code that names its own employer
+        (#2031): `source_keys`, from `_source_order_keys`, are what
+        `_eligible_donor` checks for one between donor and record (none given,
+        nothing separates). Only a record with no dates of its own is
+        separated: on the farm, every dated record a separation changed was a
+        dated rank in one employer's list with that employer's leadership
+        roles (coded O) listed between, and lost the right employer. So the
+        position rows in the keys never separate either: an undated record
+        takes the nearest donor in its block, and a dated-out donor the scan
+        passes over (#1692) is only ever passed over for a dated one. A record
+        that inherits nothing keeps its own fields and still renders.
         """
         if not entries:
             return entries
+        source_keys = source_keys or []
         # Sort by document order (element_idx_start) to ensure parent comes first
         ordered = sorted(entries, key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
         donors: list[dict] = []
@@ -949,7 +972,12 @@ class PositionsSection:
                 donors = []
                 stopped += 1
                 continue
-            donor = _eligible_donor(donors, entry)
+            # Only a row with no dates of its own is ever separated: that is
+            # the only row the merge's separation test governs, and a dated
+            # row in a list of one employer's appointments takes that
+            # employer past the leadership roles listed between (#2031).
+            separators = [] if fields.get('start_date') or fields.get('end_date') else source_keys
+            donor = _eligible_donor(donors, entry, separators)
             if donor is None:
                 refused += 1
                 continue
@@ -960,8 +988,8 @@ class PositionsSection:
         if verbose and stopped > 0:
             logger.info("Stopped institution propagation at %d source-structure boundaries", stopped)
         if verbose and refused > 0:
-            logger.info("Refused institution propagation to %d entries whose candidate parents ended before they began",
-                        refused)
+            logger.info("Refused institution propagation to %d entries whose candidate parents ended before "
+                        "they began or sat beyond another employer", refused)
         return entries
 
     # Title strings that field extraction sometimes emits when the source CV had
@@ -1200,9 +1228,12 @@ class PositionsSection:
         # the D1/D2 rows under it, which a per-code pass cannot see (#1692).
         # Then reassemble appointments that were fragmented into separate
         # title / employer+dates rows (see _merge_grouped_appointments).
-        self._propagate_institution_to_subentries(
-            d1_entries + d2_entries + d3_entries, verbose=self.verbose)
+        # The same keys before the carry as after it: a record that inherits
+        # names no employer of its own, so `_source_order_keys` skips it.
         source_keys = _source_order_keys(entries_by_code)
+        self._propagate_institution_to_subentries(
+            d1_entries + d2_entries + d3_entries, verbose=self.verbose,
+            source_keys=source_keys)
         for code, entry_list in zip(POSITION_TAXONOMY_CODES, (d1_entries, d2_entries, d3_entries)):
             merged = self._merge_grouped_appointments(entry_list, verbose=self.verbose,
                                                       source_keys=source_keys)
