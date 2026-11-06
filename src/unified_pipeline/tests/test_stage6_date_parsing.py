@@ -1409,3 +1409,142 @@ def test_card_date_closes_an_open_range_the_field_path_reads_as_running(
         slot, fields, source, expected):
     from unified_pipeline.stage6.formatting import card_date
     assert card_date(slot, fields, "K1", source) == expected
+
+
+# --- #2003: rows tied on the end date order by start date ------------------
+
+from unified_pipeline.stage6.sorting.chronological import (  # noqa: E402
+    _start_sort_date,
+    sort_entries_reverse_chronological,
+)
+
+
+def _labels_in_sorted_order(*field_sets):
+    entries = [{"extracted_fields": {"label": label, **fields}} for label, fields in field_sets]
+    return [e["extracted_fields"]["label"] for e in sort_entries_reverse_chronological(entries)]
+
+
+def test_two_present_rows_order_by_start_date_newest_first():
+    ordered = _labels_in_sorted_order(
+        ("since-2008", {"start_date": "2008", "end_date": "Present"}),
+        ("since-2024", {"start_date": "2024", "end_date": "Present"}),
+        ("since-2015", {"start_date": "2015", "end_date": "present"}),
+    )
+    assert ordered == ["since-2024", "since-2015", "since-2008"]
+
+
+def test_closed_ranges_ending_the_same_year_order_by_start_date():
+    ordered = _labels_in_sorted_order(
+        ("2010-2013", {"start_date": "2010", "end_date": "2013"}),
+        ("2013-2013", {"start_date": "2013", "end_date": "2013"}),
+        ("2007-2013", {"start_date": "2007", "end_date": "2013"}),
+    )
+    assert ordered == ["2013-2013", "2010-2013", "2007-2013"]
+
+
+def test_the_end_date_still_outranks_the_start_date():
+    ordered = _labels_in_sorted_order(
+        ("2020-2022", {"start_date": "2020", "end_date": "2022"}),
+        ("2001-2023", {"start_date": "2001", "end_date": "2023"}),
+    )
+    assert ordered == ["2001-2023", "2020-2022"]
+
+
+def test_rows_tied_on_both_dates_keep_source_order():
+    ordered = _labels_in_sorted_order(
+        ("first", {"start_date": "2015", "end_date": "Present"}),
+        ("second", {"start_date": "2015", "end_date": "Present"}),
+    )
+    assert ordered == ["first", "second"]
+
+
+def test_start_only_and_undated_rows_keep_source_order_among_themselves():
+    ordered = _labels_in_sorted_order(
+        ("undated-a", {}),
+        ("start-a", {"start_date": "2019"}),
+        ("undated-b", {"title": "no date here"}),
+        ("start-b", {"start_date": "2019"}),
+    )
+    assert ordered == ["start-a", "start-b", "undated-a", "undated-b"]
+
+
+def test_a_range_valued_date_breaks_ties_by_its_start():
+    ordered = _labels_in_sorted_order(
+        ("began-2016", {"date": {"start_date": "2016", "end_date": "2021"}}),
+        ("began-2019", {"date": {"start_date": "2019", "end_date": "2021"}}),
+    )
+    assert ordered == ["began-2019", "began-2016"]
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"start_date": "2008", "end_date": "Present"}, (2008, 1, 1)),
+    ({"start_date": "Aug. 2021", "end_date": "2023"}, (2021, 8, 1)),
+    ({"date": {"start_date": "2016-03-02", "end_date": "2016-03-04"}}, (2016, 3, 2)),
+    # A plain `date` beside an end date is the span's start.
+    ({"date": "1995", "end_date": "present"}, (1995, 1, 1)),
+    # start_date outranks a plain `date` beside the end date.
+    ({"start_date": "2010", "date": "1995", "end_date": "2013"}, (2010, 1, 1)),
+    # An end date that holds no date does not make the row a span.
+    ({"year": "2014", "end_date": "unknown"}, (2014, 1, 1)),
+    # A single-date row starts when it is dated.
+    ({"date": "2014"}, (2014, 1, 1)),
+    ({"year": "2004"}, (2004, 1, 1)),
+    ({"start_date": "2019"}, (2019, 1, 1)),
+    # No end: a point dated by its `year`; the finer start_date is not read.
+    ({"start_date": "2015-02-26", "year": "2015"}, (2015, 1, 1)),
+    ({}, (0, 0, 0)),
+    # A span with no readable start: unknown.
+    ({"end_date": "2013"}, None),
+    ({"start_date": "sometime", "end_date": "2013"}, None),
+    ({"end_date": "present"}, None),
+    ({"date": "ongoing"}, None),
+    ({"recertification_date": "present", "year_certified": "2015"}, None),
+])
+def test_start_sort_date_reads_the_start_of_the_row(fields, expected):
+    assert _start_sort_date({"extracted_fields": fields}) == expected
+
+
+def test_a_tied_row_with_no_start_keeps_its_place():
+    ordered = _labels_in_sorted_order(
+        ("since-2009", {"start_date": "2009", "end_date": "present"}),
+        ("no-start", {"end_date": "Current"}),
+        ("since-2019", {"start_date": "2019", "end_date": "present"}),
+        ("since-2015", {"start_date": "2015", "end_date": "present"}),
+    )
+    assert ordered == ["since-2019", "no-start", "since-2015", "since-2009"]
+
+
+def test_tie_runs_are_reordered_separately():
+    ordered = _labels_in_sorted_order(
+        ("2001-2010", {"start_date": "2001", "end_date": "2010"}),
+        ("2018-present", {"start_date": "2018", "end_date": "present"}),
+        ("2008-2010", {"start_date": "2008", "end_date": "2010"}),
+        ("2004-present", {"start_date": "2004", "end_date": "present"}),
+        ("undated", {}),
+    )
+    assert ordered == ["2018-present", "2004-present", "2008-2010", "2001-2010", "undated"]
+
+
+def test_a_single_date_row_sorts_above_a_span_ending_that_year():
+    ordered = _labels_in_sorted_order(
+        ("2009-2014", {"start_date": "2009", "end_date": "2014"}),
+        ("in-2014", {"date": "2014"}),
+    )
+    assert ordered == ["in-2014", "2009-2014"]
+
+
+def test_a_date_beside_an_end_date_breaks_ties_as_a_start():
+    ordered = _labels_in_sorted_order(
+        ("since-1984", {"start_date": "1984", "end_date": "present"}),
+        ("since-1996", {"date": "1996", "end_date": "present"}),
+        ("since-1992", {"start_date": "1992", "end_date": "present"}),
+    )
+    assert ordered == ["since-1996", "since-1992", "since-1984"]
+
+
+def test_a_point_row_with_a_finer_start_date_keeps_its_place_in_its_year():
+    ordered = _labels_in_sorted_order(
+        ("year-only", {"year": "2015"}),
+        ("with-meeting-day", {"start_date": "2015-02-26", "year": "2015"}),
+    )
+    assert ordered == ["year-only", "with-meeting-day"]

@@ -48,6 +48,7 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from ..fan_out import LAST_STAGE4_RECORD, OWN_TEXT_KEY, fallback_text
 from ..formatting import (
     _format_mentee_duration,
     _insert_after,
@@ -309,8 +310,130 @@ def _n3a_entry_has_ended(entry: Mapping[str, Any], current_year: int) -> bool:
     return last_year is not None and last_year < current_year
 
 
+#: A person an N2 grant's own line names under a label the CV writes, the
+#: value running to the end of its cell (#1710 residual 1): "PI:", "PI
+#: Name:", "Principal Investigator:", and the trainee labels, singular or
+#: plural, "(Pre|Post)doctoral" allowed in front. "PI" is matched in capitals
+#: only, so the word "pi" in prose is not a label. "Mentor:" is not one of
+#: them: on these rows it names the CV's owner, whom the role already gives.
+_N2_PERSON_LABEL_RE = re.compile(
+    r'(?<![\w-])(?P<label>'
+    r'(?:(?:pre|post)-?doctoral\s+)?(?:trainees?|mentees?|fellows?|scholars?|awardees?)'
+    r'|(?-i:PI)(?:\s*name)?|principal\s+investigator)'
+    r'\s*:\s*(?P<name>[^\t\n;|]{2,160})', re.I)
+
+#: Where a labelled name ends: a tab, semicolon, pipe or quote, a date
+#: ("7/01", "(10/2004", ", 2019"), or a run of spaces (the next column).
+_N2_NAME_STOP_RE = re.compile(
+    r'[\t\n;|“”"]|,?\s*\(?\d{1,2}/\d{1,4}|,?\s*\b(?:19|20)\d{2}\b|\s{2,}')
+
+#: Trailing punctuation stripped from a labelled name.
+_N2_NAME_TRIM = ' .,:;-'
+
+#: A word of a name: two or more letters. A labelled value needs one that
+#: starts with a capital to be a name ("N/A" and "n/a" are not).
+_N2_NAME_WORD_RE = re.compile(r'[^\W\d_]{2,}')
+
+#: A degree after a trainee's name, which belongs to the name ("Jo Doe, MD, PhD").
+#: It ends at a word's end, so "MSCI" is not cut to "MS".
+_N2_DEGREE = (r'(?:M\.?D|Ph\.?D|D\.?O|M\.?P\.?H|M\.?H\.?S|M\.?S\.?C\.?[IE]|M\.?S(?:c)?'
+              r'|Pharm\.?D|D\.?V\.?M|R\.?N|R\.?D|B\.?S\.?N|M\.?S\.?N|MBBS|M\.?B\.?A|M\.?A)'
+              r'\.?(?![A-Za-z])')
+
+#: Space within one cell: whitespace other than a tab or a line break.
+_N2_CELL_SPACE = r'[^\S\t\n]'
+
+#: The owner's role written with the trainee it serves: "(Primary |Co-)Mentor
+#: to/for <Name>" or "(Co-)Sponsor to/for <Name>". The name is capitalised
+#: words, at most four, then any degrees, all in one cell; a lower-case word
+#: after "to" or "for" ("Mentor for the program") names nobody.
+_N2_MENTOR_TO_RE = re.compile(
+    r'\b(?P<label>(?i:(?:primary\s+|co-?)?mentor|(?:co-?)?sponsor))'
+    r'\s+(?P<to>(?i:to|for))\s+'
+    rf"(?P<name>(?:Dr\.?{_N2_CELL_SPACE}+)?[A-Z][\w.'’-]+"
+    rf"(?:{_N2_CELL_SPACE}+[A-Z][\w.'’-]*){{0,3}}"
+    rf"(?:,{_N2_CELL_SPACE}*{_N2_DEGREE})*)")
+
+#: A word that makes an N2 row a grant (#1710 residual 4): grant, award,
+#: fellowship, scholar(ship), NRSA, funded/funding, an NIH mechanism code
+#: ("T32", "K08"), NIH or an NIH institute ("NIAID"; capitals only, so
+#: "Ninth" is not one), or a dollar amount.
+_N2_GRANT_WORD_RE = re.compile(
+    r'\bgrants?\b|\bawards?\b|\bfellowships?\b|\bscholar(?:s|ship)?\b|\bNRSA\b'
+    r'|\bfunded\b|\bfunding\b|\b[TKFRUPD]\d{2}\b|(?-i:\bNI[A-Z]{1,4}\b)|\$\s?\d', re.I)
+
+#: The fields, besides the row's own line, a grant word is looked for in.
+_N2_GRANT_WORD_FIELDS = ('grant_title', 'title', 'agency')
+
+
+def _own_record_line(entry: Mapping[str, Any]) -> str:
+    """The CV's own line for the one record `entry` stands for: its text,
+    or for the last of stage 4's records its own line (`fallback_text`).
+    '' when that record has no line of its own (`OWN_TEXT_KEY` None): its
+    text is then every sibling's line too, and a line built from its
+    fields is not the CV's words."""
+    marker = entry.get(LAST_STAGE4_RECORD)
+    if isinstance(marker, Mapping) and marker.get(OWN_TEXT_KEY) is None:
+        return ''
+    return fallback_text(entry)
+
+
+def _labelled_name(raw: str) -> str:
+    """A labelled name cut where it ends (`_N2_NAME_STOP_RE`), trailing
+    punctuation and an unopened ")" stripped; '' when no capitalised word
+    (`_N2_NAME_WORD_RE`) is left."""
+    name = _N2_NAME_STOP_RE.split(raw, maxsplit=1)[0].strip(_N2_NAME_TRIM)
+    if name.endswith(')') and '(' not in name:
+        name = name[:-1].strip(_N2_NAME_TRIM)
+    return name if any(word[0].isupper() for word in _N2_NAME_WORD_RE.findall(name)) else ''
+
+
+def _n2_labelled_people(text: str) -> list[tuple[str, str]]:
+    """(phrase, name) for each person `text` names under a label the CV
+    writes, the phrase in the CV's own words: "PI: <name>",
+    "Primary Mentor to <name>". Label-colon names come first."""
+    people = []
+    for match in _N2_PERSON_LABEL_RE.finditer(text):
+        name = _labelled_name(match.group('name'))
+        if name:
+            label = ' '.join(match.group('label').split())
+            people.append((f"{label}: {name}", name))
+    for match in _N2_MENTOR_TO_RE.finditer(text):
+        name = match.group('name').strip(' .,')
+        label = ' '.join(match.group('label').split())
+        people.append((f"{label} {match.group('to')} {name}", name))
+    return people
+
+
+def _role_with_labelled_people(role: str, text: str, shown: str) -> str:
+    """The Award Source role parenthetical (#1710 residual 1): `role`, plus
+    each person `text` names under a label the CV writes
+    (`_n2_labelled_people`) whom `shown`, the table's other cells, does not
+    already name, once each. The phrases replace `role` when they hold its
+    every word ("PI: <name>, Postdoctoral Fellow" for "Postdoctoral Fellow")
+    and follow it after "; " otherwise, so no word of the role is lost.
+
+    N2's 3-row table has no trainee row, and before this a grant held for a
+    trainee rendered with no trainee at all (UAURFU's 29 "Primary Mentor to
+    <name>" grants, CTWLTR's "PI Name:" rows)."""
+    shown_words = set(_outcome_words(shown))
+    phrases: list[str] = []
+    for phrase, name in _n2_labelled_people(text):
+        name_words = set(_outcome_words(name))
+        if name_words <= shown_words or any(name_words <= set(_outcome_words(p)) for p in phrases):
+            continue
+        phrases.append(phrase)
+    people = _LIST_VALUE_SEPARATOR.join(phrases)
+    if not people:
+        return role
+    if set(_outcome_words(role)) <= set(_outcome_words(people)):  # always so with no role
+        return people
+    return f"{role}{_LIST_VALUE_SEPARATOR}{people}"
+
+
 def _training_grant_rows(fields: Mapping[str, Any],
-                         source_text: str = '') -> list[tuple[str, str]]:
+                         source_text: str = '',
+                         record_line: str | None = None) -> list[tuple[str, str]]:
     """The three (label, value) rows of an N2 training-grant table, same
     labels as the template's own placeholder table (#529).
 
@@ -332,7 +455,12 @@ def _training_grant_rows(fields: Mapping[str, Any],
     has no `date` key, so the two agree in practice, but the claim that they
     are the same call was wrong. Both fall back to the grant's stated length
     through `with_duration_span` when there are no dates (#2094);
-    `source_text` is the entry's text, read only for that.
+    `source_text` is the entry's text, read for that.
+
+    The role parenthetical also names the person the grant's own line
+    labels (`_role_with_labelled_people`, #1710), read from `record_line`,
+    the line of the one record the entry stands for (`_own_record_line`),
+    else from `source_text`.
     """
     agency = str(fields.get('agency') or '').strip()
     grant_number = str(fields.get('grant_number') or '').strip()
@@ -341,12 +469,15 @@ def _training_grant_rows(fields: Mapping[str, Any],
     award_source = agency
     if grant_number and grant_number.casefold() not in award_source.casefold():
         award_source = f"{award_source} ({grant_number})" if award_source else grant_number
-    if role:
-        award_source = f"{award_source} ({role})" if award_source else f"({role})"
 
     title = (str(fields.get('grant_title') or '').strip()
              or str(fields.get('title') or '').strip()
              or str(fields.get('text') or '').strip())
+
+    people_line = source_text if record_line is None else record_line
+    role = _role_with_labelled_people(role, people_line, f"{award_source} {role} {title}")
+    if role:
+        award_source = f"{award_source} ({role})" if award_source else f"({role})"
 
     start = str(fields.get('start_date') or '').strip()
     end = str(fields.get('end_date') or '').strip()
@@ -393,6 +524,42 @@ def _training_grant_is_sparse(fields: Mapping[str, Any]) -> bool:
         fields.get('grant_title') or fields.get('title') or fields.get('text')
         or fields.get('agency') or fields.get('grant_number')
     )
+
+
+def _names_a_funder(fields: Mapping[str, Any], line_words: set[str]) -> bool:
+    """True when an N2 entry's agency is a funder: any agency, except one
+    that is the entry's whole line and comes with no title -- an institution
+    sub-heading the CV lists its programs under, not who paid."""
+    agency = _text(fields.get('agency')).strip()
+    if not agency:
+        return False
+    has_title = fields.get('grant_title') or fields.get('title')
+    return bool(has_title) or set(_outcome_words(agency)) != line_words
+
+
+def _training_grant_is_not_grant_shaped(fields: Mapping[str, Any], line: str) -> bool:
+    """True when an N2 entry is not a grant (#1710 residual 4): no grant
+    number, no grant word (`_N2_GRANT_WORD_RE`) in its title, agency or own
+    `line`, and no funder (`_names_a_funder`). WZSMUO's graduate programs
+    and research centres, eight of them, each rendered as a
+    3-row grant table with one cell filled; they take the plain-line route
+    sparse entries take, a sibling of `_training_grant_is_sparse`, whose
+    contract is unchanged. Only when the line holds every word the table's
+    fields would have shown, so the line route drops nothing; never with no
+    line (`_own_record_line` ''). A dated entry keeps its table: it fills the
+    title and the duration, and a training program the CV wrote into the
+    template's own labels ("Project title: ... Duration of support: ...")
+    reads as those labels on a line."""
+    line_words = set(_outcome_words(line))
+    if not line_words or _text(fields.get('grant_number')).strip():
+        return False
+    probe = ' '.join([*(_text(fields.get(key)) for key in _N2_GRANT_WORD_FIELDS), line])
+    if _N2_GRANT_WORD_RE.search(probe) or _names_a_funder(fields, line_words):
+        return False
+    (_, award_source), (_, title), (_, duration) = _training_grant_rows(fields)
+    if duration:
+        return False
+    return set(_outcome_words(f"{award_source} {title}")) <= line_words
 
 
 def _program_leadership_line(fields: Mapping[str, Any], text: str) -> str:
@@ -1208,7 +1375,9 @@ class MentoringSection:
 
         A sparse entry (no title, agency or grant number -- nothing a table
         would show) renders as a plain line instead; N2 has no other route
-        out of the Appendix, so it is never dropped. Missing-anchor
+        out of the Appendix, so it is never dropped. So does an entry that
+        is not a grant (`_training_grant_is_not_grant_shaped`, #1710), as
+        its own record's line. Missing-anchor
         fallback (only reached when there are entries to place) matches
         `_fill_program_leadership`.
         """
@@ -1231,12 +1400,16 @@ class MentoringSection:
 
         for entry in reversed(entries):
             fields = entry.get('extracted_fields') or {}
+            own_line = _own_record_line(entry)
             if _training_grant_is_sparse(fields):
                 text = _clean_inline_tabs((entry.get('text') or '').strip())
-                if text:
-                    self._insert_mentoring_line(text, anchor, entry)
+            elif _training_grant_is_not_grant_shaped(fields, own_line):
+                text = _clean_inline_tabs(own_line.strip())
+            else:
+                self._create_training_grant_table(fields, entry, anchor)
                 continue
-            self._create_training_grant_table(fields, entry, anchor)
+            if text:
+                self._insert_mentoring_line(text, anchor, entry)
 
     def _remove_training_grant_placeholder(self, anchor: BaseOxmlElement) -> None:
         """Remove the table after ``anchor`` only when its header row reads
@@ -1260,7 +1433,7 @@ class MentoringSection:
         no template table survives to clone) and placed directly after
         ``anchor`` with a spacer, exactly as `_create_mentee_table_with_spacing`
         does one heading over (#529)."""
-        rows = _training_grant_rows(fields, _text(entry.get('text')))
+        rows = _training_grant_rows(fields, _text(entry.get('text')), _own_record_line(entry))
         table = self.doc.add_table(rows=len(rows), cols=2)
         _set_table_border(table, color='808080', size=4)
 
