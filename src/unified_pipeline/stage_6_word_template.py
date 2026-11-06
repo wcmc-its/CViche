@@ -1042,13 +1042,28 @@ _M1_CREDIT_LABEL_RE = re.compile(
     r'|\brole\s*:|\bstudy title\s*:|\bPI\s*:', re.IGNORECASE)
 
 
+def _m1_fields_hold_record(fields: Mapping[str, Any]) -> bool:
+    """True when *fields* populate a field outside `_M1_PROSE_FIELDS`. The
+    `STAGE4_RECORDS_KEY` list is not a field: each record in it is judged the
+    same way. #1572 LPPQAJ-03: two prose entries split into narrative-only
+    records counted as records through that key, and the whole heading --
+    the owner's lead research interest with it -- went to the Appendix."""
+    for key, value in fields.items():
+        if key == STAGE4_RECORDS_KEY:
+            if isinstance(value, list) and any(
+                    _m1_fields_hold_record(record) for record in value if isinstance(record, Mapping)):
+                return True
+        elif value and key not in _M1_PROSE_FIELDS:
+            return True
+    return False
+
+
 def _is_m1_record(entry: Mapping[str, Any]) -> bool:
     """True when an M1 entry is a record (a position, a project) rather than
     research-statement prose: stage 4 extracted a populated field outside
-    `_M1_PROSE_FIELDS` (E27: CMTQDR 122, XWNZWW 184), or its text carries a
-    credit line (`_M1_CREDIT_LABEL_RE`)."""
-    fields = entry.get('extracted_fields') or {}
-    return (any(value for key, value in fields.items() if key not in _M1_PROSE_FIELDS)
+    `_M1_PROSE_FIELDS` (`_m1_fields_hold_record`; E27: CMTQDR 122, XWNZWW 184),
+    or its text carries a credit line (`_M1_CREDIT_LABEL_RE`)."""
+    return (_m1_fields_hold_record(entry.get('extracted_fields') or {})
             or bool(_M1_CREDIT_LABEL_RE.search(str(entry.get('text') or ''))))
 
 
