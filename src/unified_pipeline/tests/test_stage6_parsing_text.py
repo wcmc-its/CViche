@@ -1020,8 +1020,13 @@ def test_each_singular_supervisor_label_names_its_value(label):
     # whitespace collapsed, a trailing comma, semicolon or colon dropped.
     (f"{_POSITION}\tMentor:  Prof.  Orla   Vantreece, PharmD, BCPS;", "Prof. Orla Vantreece, PharmD, BCPS"),
     (f"{_POSITION}\tSupervisor: Orla Q. Vantreece,", "Orla Q. Vantreece"),
-    # A trailing period is kept: it may close "M.D.".
+    # A trailing period is kept when it closes an abbreviation ("M.D.", an
+    # initial, "Jr."), and dropped when it closes the sentence.
     (f"{_POSITION}\tAdvisor: Orla Vantreece, M.D.", "Orla Vantreece, M.D."),
+    (f"{_POSITION}\tAdvisor: Orla Vantreece.", "Orla Vantreece"),
+    (f"{_POSITION}\tAdvisor: Orla Vantreece, PhD.", "Orla Vantreece, PhD"),
+    (f"{_POSITION}\tAdvisor: Orla Q.", "Orla Q."),
+    (f"{_POSITION}\tAdvisor: Orla Vantreece Sr.", "Orla Vantreece Sr."),
     # The value ends at the label's cell: a tab, a line break or a pipe.
     (f"Mentor: Orla Vantreece\t{_POSITION}", "Orla Vantreece"),
     (f"Mentor: Orla Vantreece\n{_POSITION}", "Orla Vantreece"),

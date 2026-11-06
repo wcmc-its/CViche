@@ -1113,9 +1113,11 @@ _SUPERVISOR_LABEL_RE = re.compile(
 _PLURAL_SUPERVISOR_LABEL_RE = re.compile(
     rf'(?<![A-Za-z])(?:(?:{_SUPERVISOR_QUALIFIER})\s+)?(?:(?:{_SUPERVISOR_ROLE})s|{_SUPERVISOR_DIRECTOR}s)\s*:',
     re.IGNORECASE)
-#: What a label's value loses at its end. A trailing "." is kept: it may
-#: close "M.D.".
+#: What a label's value loses at its end. A trailing "." goes only when it
+#: closes the sentence (`_without_closing_period`).
 _SUPERVISOR_VALUE_TRAILING = ' ,;:'
+#: Last words whose own period a value keeps: "Jr.", "Sr.".
+_PERIOD_ABBREVIATIONS = ('Jr', 'Sr')
 #: The honorifics a name may open with, each with or without its period.
 SUPERVISOR_HONORIFICS = ('Dr', 'Prof', 'Professor', 'Sir')
 _HONORIFIC_RE = re.compile(rf"^(?:(?:{'|'.join(SUPERVISOR_HONORIFICS)})\.?\s+)+", re.IGNORECASE)
@@ -1157,11 +1159,25 @@ def supervisor_name(value: str) -> str:
     return core
 
 
+def _without_closing_period(value: str) -> str:
+    """`value` without the period that closes its sentence ("Orla Vantreece."
+    -> "Orla Vantreece", "..., PhD." -> "..., PhD"). The period stays when it
+    belongs to the last word: one holding another period ("M.D."), an
+    initial ("Q.") or `_PERIOD_ABBREVIATIONS`."""
+    if not value.endswith('.'):
+        return value
+    last = value.split()[-1][:-1]
+    if '.' in last or len(last) <= 1 or last in _PERIOD_ABBREVIATIONS:
+        return value
+    return value[:-1]
+
+
 def _supervisor_values(text: str) -> list[str]:
     """The value of every singular supervisor label in `text`, in order: the
     rest of the label's cell (to the next `_CELL_SEPARATOR_RE`), or, for a
     label opened by "(", the text up to its ")" ('' when none closes it),
-    whitespace collapsed and its end trimmed (`_SUPERVISOR_VALUE_TRAILING`)."""
+    whitespace collapsed and its end trimmed (`_SUPERVISOR_VALUE_TRAILING`,
+    `_without_closing_period`)."""
     values = []
     for match in _SUPERVISOR_LABEL_RE.finditer(text):
         rest = text[match.end():]
@@ -1171,7 +1187,7 @@ def _supervisor_values(text: str) -> list[str]:
         else:
             end = _CELL_SEPARATOR_RE.search(rest)
             value = rest[:end.start()] if end else rest
-        values.append(' '.join(value.split()).rstrip(_SUPERVISOR_VALUE_TRAILING))
+        values.append(_without_closing_period(' '.join(value.split()).rstrip(_SUPERVISOR_VALUE_TRAILING)))
     return values
 
 
