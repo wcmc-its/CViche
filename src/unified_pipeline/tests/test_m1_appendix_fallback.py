@@ -560,3 +560,58 @@ def test_long_low_coverage_m1_record_renders_whole_in_the_appendix_not_split_int
     text = _output_text(op)
     assert split_calls == [], "the M1 record was handed to the reconsider pass"
     assert text.count(tail) == 1, "the M1 record's tail was cut or routed elsewhere"
+
+
+# #1572 residual LPPQAJ-03 (AUTOPSY-MIX11-batch-2026-11-03): stage 4 split two
+# prose M1 entries into narrative-only `stage4_records`, and `_is_m1_record`
+# read that list as a populated record field. So both entries counted as
+# records, every entry under their heading followed them, and the owner's
+# lead research interest went to the Appendix. "Thrennick" and "Molvaster"
+# are invented.
+SPLIT_PROSE_TOKEN = "Thrennick"
+LEAD_INTEREST_TOKEN = "Molvaster"
+INTERESTS_HEADING = ["Research Interests"]
+
+
+def _split_prose_entry(records: list[dict]) -> dict:
+    return {"text": f"My {SPLIT_PROSE_TOKEN} work asks how widget gears wear. A second theme "
+                    "concerns lubricant chemistry under sustained cyclic loading in the field",
+            "taxonomy_code": "M1", "hierarchy": INTERESTS_HEADING, "element_idx_start": 50,
+            "extracted_fields": {"narrative": "how widget gears wear", "stage4_records": records}}
+
+
+def _lead_interest() -> dict:
+    return {"text": f"Our {LEAD_INTEREST_TOKEN} program studies widget surface fatigue across "
+                    "many operating regimes and gear materials",
+            "taxonomy_code": "M1", "hierarchy": INTERESTS_HEADING, "element_idx_start": 48,
+            "extracted_fields": {"narrative": "widget surface fatigue"}}
+
+
+def test_m1_prose_split_into_narrative_only_stage4_records_is_not_a_record(tmp_path):
+    """A `stage4_records` list whose records hold only prose fields is not a
+    record field: neither the split entry nor its heading sibling reaches the
+    Appendix; the generated summary carries them."""
+    narrative_only = [{"narrative": "how widget gears wear"}, {"narrative": "lubricant chemistry"}]
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    entries = _record_entries(_lead_interest(), _split_prose_entry(narrative_only))
+    text, diversions = _render_with_sidecar(tmp_path, entries, summary)
+    assert SUMMARY_TOKEN in text
+    for token in (SPLIT_PROSE_TOKEN, LEAD_INTEREST_TOKEN):
+        assert token not in text, f"a prose M1 entry ({token}) leaked to the Appendix"
+    assert diversions == []
+
+
+def test_m1_stage4_record_with_a_record_field_still_makes_the_entry_a_record(tmp_path):
+    """A record inside `stage4_records` that fills a field outside the prose
+    fields is judged as before: the entry is a record and its heading follows."""
+    dated = [{"narrative": "how widget gears wear", "start_date": "2004"},
+             {"narrative": "lubricant chemistry"}]
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    entries = _record_entries(_lead_interest(), _split_prose_entry(dated))
+    text, diversions = _render_with_sidecar(tmp_path, entries, summary)
+    assert text.count(SPLIT_PROSE_TOKEN) == 1, "the dated split M1 entry rendered nowhere, or twice"
+    assert text.count(LEAD_INTEREST_TOKEN) == 1, "its heading sibling rendered nowhere, or twice"
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "m1_record_not_in_summary", 2)]
