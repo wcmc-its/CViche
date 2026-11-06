@@ -622,11 +622,11 @@ def _source_order_keys(entries_by_code: Mapping[str, list[dict]]) -> list[tuple[
     Only those: a stray heading fragment or a line of duties between an
     employer row and its roles is noise stage 2 cut out of the same block
     (I5NKUG's "EXPERIENCE" line, #156), not a nearer parent. A record with no
-    known element index is left out too: it has no place in the order."""
-    keys = (element_idx_sort_key(entry.get('element_idx_start'))
-            for entries in entries_by_code.values() for entry in entries
-            if _names_own_employer(entry))
-    return sorted(key for key in keys if not math.isinf(key[0]))
+    known element index keys to infinity and sorts last, where it can never
+    fall strictly between two known positions."""
+    return sorted(element_idx_sort_key(entry.get('element_idx_start'))
+                  for entries in entries_by_code.values() for entry in entries
+                  if _names_own_employer(entry))
 
 
 def _separated_in_source(first: dict, second: dict,

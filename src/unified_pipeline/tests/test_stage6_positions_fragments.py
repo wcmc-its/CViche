@@ -1122,6 +1122,17 @@ def test_a_record_naming_no_employer_does_not_separate():
     assert not _separated_in_source(header, role, keys)
 
 
+def test_a_record_that_inherited_its_employer_does_not_separate():
+    """A sibling role whose employer was carried down from the header names no
+    employer of its own, so it is not a nearer parent between the two."""
+    header = _position_entry(7, "", "Quexley College", CONSULTING_HEADING, "2013", "present")
+    sibling = _position_entry(8, "Tutor", "Quexley College", CONSULTING_HEADING)
+    sibling["institution_propagated_from"] = 7
+    role = _position_entry(9, "Lecturer", "", CONSULTING_HEADING)
+    keys = _source_order_keys({"D2": [header, role], "Q2": [sibling]})
+    assert not _separated_in_source(header, role, keys)
+
+
 def test_a_non_string_employer_on_another_code_separates_and_does_not_raise():
     """Every code's records are read, and a G record can carry a list of
     organizations; the keys must not assume a string."""
