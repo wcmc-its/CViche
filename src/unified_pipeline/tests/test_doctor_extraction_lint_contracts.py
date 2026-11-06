@@ -1791,6 +1791,16 @@ def test_offschema_a_rendered_field_outside_both_schemas_is_not_reported(monkeyp
     assert len(_offschema(_anchored("I", {"region": "Local"}))) == 1
 
 
+def test_offschema_n2_award_phrase_fields_are_read_by_the_n2_table():
+    """#1710: N2's table prints M2's `pi_name`, `total_funding` and `notes`
+    (`fan_out._RENDERED_FIELDS['N2']`), so they are no longer reported. M2's
+    other names for a PI or an amount, which it does not read, still are."""
+    entry = _fields_entry("N2", {"grant_title": "Invented Program", "pi_name": "Riley Fictional",
+                                 "total_funding": "60000", "notes": "Invented remark",
+                                 "pi": "Casey Madeup", "amount": "5000"})
+    assert sorted(f["message"].split("`")[1] for f in _offschema(entry)) == ["amount", "pi"]
+
+
 def test_offschema_one_finding_per_code_and_key_sorted_with_capped_evidence():
     entries = [_anchored("N3B", {"outcome": f"result {i}"}, idx=i)
                for i in range(FIELD_EVIDENCE_MAX_VALUES + 2)]

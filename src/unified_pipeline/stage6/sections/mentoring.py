@@ -50,6 +50,7 @@ except ImportError as exc:
 
 from ..fan_out import LAST_STAGE4_RECORD, OWN_TEXT_KEY, fallback_text
 from ..formatting import (
+    _format_currency,
     _format_mentee_duration,
     _insert_after,
     _set_cell_vertical_alignment,
@@ -62,6 +63,7 @@ from ..formatting import (
 from ..normalization import _clean_inline_tabs
 from ..parsing import _is_mentee_record, _is_mentoring_outcome
 from ..parsing.dates import _parse_date_components
+from ..resolution import _get_cv_owner_name, _is_cv_owner
 
 logger = logging.getLogger(__name__)
 
@@ -365,6 +367,42 @@ _N2_GRANT_WORD_RE = re.compile(
 #: The fields, besides the row's own line, a grant word is looked for in.
 _N2_GRANT_WORD_FIELDS = ('grant_title', 'title', 'agency')
 
+#: N2's taxonomy code: its entries' key in `entries_by_code`, and its key in
+#: `DATE_FORMATS` (mm/yyyy, the template's own label, #1710).
+_N2_CODE = 'N2'
+
+#: The fields an N2 grant's Award Source reads beyond N2's schema (#1710,
+#: owner ruling 2026-11-06): the PI, the total award and a remark, under the
+#: names M2's grant table reads them by (and the widened N2 schema the paid
+#: round tried). The 3-row table has no row for any of them, so they join
+#: the role parenthetical (`_n2_award_phrases`). `fan_out._RENDERED_FIELDS`
+#: lists them for N2.
+N2_PI_NAME_FIELD = 'pi_name'
+N2_TOTAL_FUNDING_FIELD = 'total_funding'
+N2_NOTES_FIELD = 'notes'
+N2_AWARD_PHRASE_FIELDS = frozenset({N2_PI_NAME_FIELD, N2_TOTAL_FUNDING_FIELD, N2_NOTES_FIELD})
+
+#: The label a `pi_name` is written under: "PI: <name>".
+N2_PI_LABEL = 'PI'
+
+#: The label of a total the grant's line gives no colon label of its own:
+#: M2's "Total award:" row label, without its colon.
+N2_TOTAL_AWARD_LABEL = 'Total award'
+
+#: A colon label right before an amount, in one cell of a grant's line:
+#: "Total Grant Amount: $60,000". The label is 2 to 41 letters, spaces and
+#: "./&()%-", starting with a letter; the amount a digit, then two or more
+#: digits and commas, then any cents.
+_N2_AMOUNT_LABEL_RE = re.compile(
+    r'(?P<label>[A-Za-z][A-Za-z ./&()%-]{1,40}?)\s*:\s*\$?\s?(?P<amount>\d[\d,]{2,})(?:\.\d+)?')
+
+#: Where a cell of a grant's line ends: a tab, a pipe, a semicolon or a line break.
+_N2_CELL_BREAK_RE = re.compile(r'[\t|;\n]')
+
+#: A run of digits; anything that is not a digit.
+_DIGIT_RUN_RE = re.compile(r'\d+')
+_NOT_A_DIGIT_RE = re.compile(r'\D')
+
 
 def _own_record_line(entry: Mapping[str, Any]) -> str:
     """The CV's own line for the one record `entry` stands for: its text,
@@ -431,9 +469,61 @@ def _role_with_labelled_people(role: str, text: str, shown: str) -> str:
     return f"{role}{_LIST_VALUE_SEPARATOR}{people}"
 
 
+def _amount_digits(amount: str) -> str:
+    """The digits of `amount` before any cents: "60000" for "$60,000.50"."""
+    return _NOT_A_DIGIT_RE.sub('', amount.split('.')[0])
+
+
+def _n2_amount_label(line: str, digits: str) -> str:
+    """The colon label `line` writes right before the amount whose digits
+    are `digits`, in one cell (`_N2_AMOUNT_LABEL_RE`): "Total Grant Amount"
+    for "Total Grant Amount: $60,000"; '' when it writes none."""
+    for cell in _N2_CELL_BREAK_RE.split(line):
+        for match in _N2_AMOUNT_LABEL_RE.finditer(cell):
+            if _NOT_A_DIGIT_RE.sub('', match.group('amount')) == digits:
+                return ' '.join(match.group('label').split())
+    return ''
+
+
+def _n2_award_phrases(fields: Mapping[str, Any], shown: str, line: str,
+                      owner_name: str) -> list[str]:
+    """What an N2 grant's Award Source adds for M2's `pi_name`,
+    `total_funding` and `notes` (#1710), in that order, each only when it is
+    not held already, so no value appears twice:
+
+    - "PI: <pi_name>", unless it names the CV owner, `owner_name`
+      (`_is_cv_owner`), whom the role already gives;
+    - "<label>: <total>", the total as `_format_currency` writes it, under
+      the label `line` (the grant's own line) writes right before it
+      (`_n2_amount_label`), else `N2_TOTAL_AWARD_LABEL`;
+    - `notes` verbatim, however long.
+
+    A name or a note is held when `shown` (the table's cells and the role
+    parenthetical so far) or an earlier phrase holds every word of it; a
+    total when its digits are a number `shown` writes."""
+    phrases: list[str] = []
+
+    def holds(value: str) -> bool:
+        return set(_outcome_words(value)) <= set(_outcome_words(' '.join([shown, *phrases])))
+
+    pi_name = _plain_text(fields.get(N2_PI_NAME_FIELD))
+    if pi_name and not _is_cv_owner(pi_name, owner_name) and not holds(pi_name):
+        phrases.append(f"{N2_PI_LABEL}: {pi_name}")
+    total = _format_currency(fields.get(N2_TOTAL_FUNDING_FIELD))
+    digits = _amount_digits(total)
+    shown_numbers = _DIGIT_RUN_RE.findall(shown.replace(',', ''))
+    if total and digits not in shown_numbers:
+        phrases.append(f"{_n2_amount_label(line, digits) or N2_TOTAL_AWARD_LABEL}: {total}")
+    notes = _plain_text(fields.get(N2_NOTES_FIELD))
+    if notes and not holds(notes):
+        phrases.append(notes)
+    return phrases
+
+
 def _training_grant_rows(fields: Mapping[str, Any],
                          source_text: str = '',
-                         record_line: str | None = None) -> list[tuple[str, str]]:
+                         record_line: str | None = None,
+                         owner_name: str = '') -> list[tuple[str, str]]:
     """The three (label, value) rows of an N2 training-grant table, same
     labels as the template's own placeholder table (#529).
 
@@ -448,19 +538,17 @@ def _training_grant_rows(fields: Mapping[str, Any],
 
     Duration calls `format_date_range` directly (not the `self`-bound
     `_format_grant_duration` research_support.py's grant table uses) so this
-    stays a pure, document-free function. Not exactly the same call (#529
-    round 2, F5): `_format_grant_duration` (research_support.py:889-900)
-    also falls back to `fields.get('date')` when `start_date` is absent, for
-    clinical-trial schemas that key duration off `date` instead. N2's schema
-    has no `date` key, so the two agree in practice, but the claim that they
-    are the same call was wrong. Both fall back to the grant's stated length
-    through `with_duration_span` when there are no dates (#2094);
-    `source_text` is the entry's text, read for that.
+    stays a pure, document-free function, with the same `source_text`, the
+    entry's text (#1710): a start with no end is that year alone unless the
+    text leaves it open (class 13), and a grant with no dates gets the length
+    its text states (`with_duration_span`, #2094). Only `_format_grant_duration`'s
+    `date` fallback is missing: N2's schema has no `date` key.
 
     The role parenthetical also names the person the grant's own line
     labels (`_role_with_labelled_people`, #1710), read from `record_line`,
     the line of the one record the entry stands for (`_own_record_line`),
-    else from `source_text`.
+    else from `source_text`, and then M2's PI, total and notes when stage 4
+    gives them (`_n2_award_phrases`), never the CV owner, `owner_name`, as PI.
     """
     agency = str(fields.get('agency') or '').strip()
     grant_number = str(fields.get('grant_number') or '').strip()
@@ -474,14 +562,18 @@ def _training_grant_rows(fields: Mapping[str, Any],
              or str(fields.get('title') or '').strip()
              or str(fields.get('text') or '').strip())
 
-    people_line = source_text if record_line is None else record_line
-    role = _role_with_labelled_people(role, people_line, f"{award_source} {role} {title}")
-    if role:
-        award_source = f"{award_source} ({role})" if award_source else f"({role})"
-
     start = str(fields.get('start_date') or '').strip()
     end = str(fields.get('end_date') or '').strip()
-    duration = with_duration_span(format_date_range(start, end, 'N2'), fields, source_text)
+    duration = with_duration_span(format_date_range(start, end, _N2_CODE, source_text),
+                                  fields, source_text)
+
+    people_line = source_text if record_line is None else record_line
+    role = _role_with_labelled_people(role, people_line, f"{award_source} {role} {title}")
+    extra = _n2_award_phrases(fields, f"{award_source} {role} {title} {duration}",
+                              people_line, owner_name)
+    role = _LIST_VALUE_SEPARATOR.join(part for part in (role, *extra) if part)
+    if role:
+        award_source = f"{award_source} ({role})" if award_source else f"({role})"
 
     return [
         ('Award Source (funding agency, type of grant):', award_source),
@@ -549,14 +641,18 @@ def _training_grant_is_not_grant_shaped(fields: Mapping[str, Any], line: str) ->
     line (`_own_record_line` ''). A dated entry keeps its table: it fills the
     title and the duration, and a training program the CV wrote into the
     template's own labels ("Project title: ... Duration of support: ...")
-    reads as those labels on a line."""
+    reads as those labels on a line. The cells are read without M2's PI,
+    total and notes (`N2_AWARD_PHRASE_FIELDS`), whose labels ("PI:", "Total
+    award:") are not the line's words, so this route is the one it was
+    before the table showed them (#1710)."""
     line_words = set(_outcome_words(line))
     if not line_words or _text(fields.get('grant_number')).strip():
         return False
     probe = ' '.join([*(_text(fields.get(key)) for key in _N2_GRANT_WORD_FIELDS), line])
     if _N2_GRANT_WORD_RE.search(probe) or _names_a_funder(fields, line_words):
         return False
-    (_, award_source), (_, title), (_, duration) = _training_grant_rows(fields)
+    table_fields = {key: value for key, value in fields.items() if key not in N2_AWARD_PHRASE_FIELDS}
+    (_, award_source), (_, title), (_, duration) = _training_grant_rows(table_fields)
     if duration:
         return False
     return set(_outcome_words(f"{award_source} {title}")) <= line_words
@@ -1182,6 +1278,8 @@ class MentoringSection:
         self,
         entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
         current_year: int | None = None,
+        cv_owner: dict | None = None,
+        document_uid: str = '',
     ) -> None:
         """Render section N: a table per mentee under "Current Mentees:" and
         "Past Mentees:", aggregate lines under the same headings, N4 outcome
@@ -1202,7 +1300,9 @@ class MentoringSection:
         `current_year` is the year an N3A period must end before to render
         under Past Mentees (`_n3a_entry_has_ended`). It defaults to the
         system clock, as `_fill_research_support`'s does; pass it to make
-        the boundary reproducible.
+        the boundary reproducible. `cv_owner` and `document_uid` name the CV
+        owner as they do for `_fill_research_support`: an N2 grant never
+        prints the owner as its PI (`_n2_award_phrases`).
         """
         if current_year is None:
             current_year = datetime.now().year
@@ -1211,7 +1311,8 @@ class MentoringSection:
         # entries (no N3A/N3B/N4) still renders instead of hitting the
         # partition's early return just below.
         self._fill_program_leadership(entries_by_code.get('N1', []))
-        self._fill_training_grants(entries_by_code.get('N2', []))
+        self._fill_training_grants(entries_by_code.get(_N2_CODE, []),
+                                   _get_cv_owner_name(cv_owner, document_uid))
 
         partition = _partition_mentoring_entries(entries_by_code, current_year=current_year)
         self._decline_award_title_mentees(partition.refused)
@@ -1359,7 +1460,8 @@ class MentoringSection:
             if line:
                 self._insert_mentoring_line(line, anchor, entry)
 
-    def _fill_training_grants(self, entries: Sequence[Mapping[str, Any]]) -> None:
+    def _fill_training_grants(self, entries: Sequence[Mapping[str, Any]],
+                              owner_name: str = '') -> None:
         """N2 ("Institutional Training Grants and Mentored Trainee Grants"):
         one 3-row table per entry, same shape as the template's own
         placeholder, inserted after the instruction paragraph ("Duplicate
@@ -1379,7 +1481,8 @@ class MentoringSection:
         is not a grant (`_training_grant_is_not_grant_shaped`, #1710), as
         its own record's line. Missing-anchor
         fallback (only reached when there are entries to place) matches
-        `_fill_program_leadership`.
+        `_fill_program_leadership`. `owner_name` is the CV owner's, whom no
+        table names as PI (`_n2_award_phrases`).
         """
         if not entries:
             return
@@ -1406,7 +1509,7 @@ class MentoringSection:
             elif _training_grant_is_not_grant_shaped(fields, own_line):
                 text = _clean_inline_tabs(own_line.strip())
             else:
-                self._create_training_grant_table(fields, entry, anchor)
+                self._create_training_grant_table(fields, entry, anchor, owner_name)
                 continue
             if text:
                 self._insert_mentoring_line(text, anchor, entry)
@@ -1428,12 +1531,14 @@ class MentoringSection:
         fields: Mapping[str, Any],
         entry: Mapping[str, Any],
         anchor: BaseOxmlElement,
+        owner_name: str = '',
     ) -> Table:
         """One N2 grant's 3-row label/value table, built fresh (Pattern B --
         no template table survives to clone) and placed directly after
         ``anchor`` with a spacer, exactly as `_create_mentee_table_with_spacing`
         does one heading over (#529)."""
-        rows = _training_grant_rows(fields, _text(entry.get('text')), _own_record_line(entry))
+        rows = _training_grant_rows(fields, _text(entry.get('text')), _own_record_line(entry),
+                                    owner_name)
         table = self.doc.add_table(rows=len(rows), cols=2)
         _set_table_border(table, color='808080', size=4)
 
