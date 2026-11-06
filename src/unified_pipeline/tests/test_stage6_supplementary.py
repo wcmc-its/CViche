@@ -448,6 +448,42 @@ def test_plan_gives_an_entry_naming_no_degree_no_sub_point(fields, planned):
     assert not sp._names_degree(entry)
 
 
+def test_every_off_schema_thesis_title_key_is_a_degree_cell_field():
+    """#1245: the education writer prints the thesis title under each of
+    `THESIS_TITLE_FIELDS`; the schema's is a rendered field, and the
+    off-schema one is counted here, so a fragment restating the title is
+    not offered again."""
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+    from unified_pipeline.stage6.sections.education import THESIS_TITLE_FIELDS
+
+    assert "thesis_title" in _RENDERED_FIELDS["B1"]
+    off_schema = set(THESIS_TITLE_FIELDS) - _RENDERED_FIELDS["B1"]
+    assert off_schema == {"dissertation_title"}
+    assert off_schema <= set(sp._DEGREE_CELL_FIELDS)
+
+
+_THESIS_TITLE = "Sediment Transport Across Estuarine Tidal Channels"
+
+
+@pytest.mark.parametrize("key", ["thesis_title", "dissertation_title"])
+def test_plan_offers_no_line_restating_a_degrees_thesis_title(key):
+    # #1245 (CMTQDR 10, web05 24): the row now prints the stored title, so
+    # its line is the row reformatted. Without the key it is the degree's
+    # prose, as before.
+    line = f"Thesis: {_THESIS_TITLE}"
+    table, lines = _degree_rows(["M.S., Example Marine Studies", "Norvale University", "2001"])
+
+    def plan(entry):
+        return sp.plan_subpoints({"B1": [entry]}, _haystack(), lines, {"B1": sp.SectionSpan(0, None)},
+                                 rows_written=lambda e: [table.rows[0]._tr])
+
+    text = f"M.S., Example Marine Studies, Norvale University, 2001\t{line}"
+    assert [p.paragraphs for p in plan(_master(text))] == [(line,)]
+    entry = _master(text)
+    entry["extracted_fields"][key] = _THESIS_TITLE
+    assert plan(entry) == []
+
+
 def test_every_off_schema_advisor_name_is_a_degree_cell_field():
     """#1245: the education writer prints the advisor under each of
     `ADVISOR_LABELS`' keys; those `_RENDERED_FIELDS` cannot list are counted
@@ -1279,6 +1315,7 @@ def test_the_training_row_fields_are_the_writers_cells_and_its_other_fields():
     assert postdoc_training.POSTDOC_FIELD_OF_STUDY_FIELDS is sp.POSTDOC_FIELD_OF_STUDY_FIELDS
     assert postdoc_training.POSTDOC_DATE_FIELDS is sp.POSTDOC_DATE_FIELDS
     assert postdoc_training.first_field_value is sp.first_field_value
+    assert postdoc_training.training_mentor is sp.training_mentor
     assert sp.FALLBACK_LOCATION_FIELD is institution.FALLBACK_LOCATION_FIELD
 
 
@@ -1388,6 +1425,59 @@ def test_a_training_line_holding_a_year_outside_its_rows_span_offers_none(line, 
     entry = _training(line, start_date=start, end_date=end)
     assert sp._own_training_line(entry) == (line if offered else "")
     assert bool(_plan_training(entry)) is offered
+
+
+# --- #1245 (ruling 2026-11-06 Q2): the supervisor a training line labels ------
+
+_SUPERVISOR_VALUE = "Dr. Orla Vantreece Halberd, PharmD"
+_SUPERVISOR_LINE = f"Research Mentor: {_SUPERVISOR_VALUE}"
+_SUPERVISED_TEXT = f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t{_SUPERVISOR_LINE}"
+
+
+def test_a_training_lines_labelled_supervisor_is_what_its_row_prints():
+    entry = _training(_SUPERVISED_TEXT)
+    assert sp.training_mentor(entry) == _SUPERVISOR_VALUE
+    assert {"vantreece", "halberd", "pharmd"} <= sp._value_tokens(entry, "C")
+    # Another code's line is not read for one.
+    assert not {"vantreece"} & sp._value_tokens(dict(entry, taxonomy_code="H"), "H")
+
+
+@pytest.mark.parametrize("change", [
+    # One record fanned out of a list: the last keeps the parent's whole line.
+    lambda e: e.update({FANNED_OUT_FROM: {"key": "stage4_records", "index": 0, "count": 2}}),
+    lambda e: e.update({LAST_STAGE4_RECORD: {"key": "stage4_records", "index": 1, "count": 2, "text": None}}),
+    # Stage 4 listed positions under one of its fields.
+    lambda e: e["extracted_fields"].update(
+        {"positions": [{"training_type": "Example Surgical Internship", "institution": "Kestrel Institute"}]}),
+    # A year outside the span the row prints: the label may be another position's.
+    lambda e: e.update(text=f"{_SUPERVISED_TEXT}\tExample Fellowship, 2011-2013"),
+    lambda e: e["extracted_fields"].update(start_date="", end_date=""),
+], ids=["fanned_out", "last_record", "listed_positions", "year_outside_span", "no_span"])
+def test_a_line_that_may_be_another_positions_names_no_supervisor(change):
+    entry = _training(_SUPERVISED_TEXT)
+    change(entry)
+    assert sp.training_mentor(entry) == ""
+    assert not {"vantreece", "halberd"} & sp._value_tokens(entry, "C")
+
+
+@pytest.mark.parametrize("fields", [None, ["Example Pharmacy Residency"]])
+def test_a_training_position_whose_fields_are_not_a_mapping_reads_its_line_for_a_supervisor(fields):
+    # Its row prints no dates, so a line holding a year is another's.
+    entry = {"taxonomy_code": "C", "text": f"{_RESIDENCY}\t{_SUPERVISOR_LINE}", "extracted_fields": fields}
+    assert sp.training_mentor(entry) == _SUPERVISOR_VALUE
+    assert sp.training_mentor(dict(entry, text=_SUPERVISED_TEXT)) == ""
+    assert sp.training_mentor({"taxonomy_code": "C", "text": None}) == ""
+
+
+def test_plan_offers_no_line_restating_a_training_positions_supervisor():
+    # #1245 (KHXOUF 78, QTATUP 78, web06 44): the row now prints the
+    # labelled supervisor, so the label line is the row reformatted. A line
+    # the rule does not read (not one person) is still the position's prose.
+    assert _plan_training(_training(_SUPERVISED_TEXT)) == []
+    unread = "Research Mentor: Dr. Orla Vantreece Halberd, PharmD, Department of Zymology"
+    entry = _training(f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t{unread}")
+    assert sp.training_mentor(entry) == ""
+    assert [p.paragraphs for p in _plan_training(entry)] == [(unread,)]
 
 
 def test_plan_offers_no_prose_of_a_training_position_the_pii_pass_withheld():

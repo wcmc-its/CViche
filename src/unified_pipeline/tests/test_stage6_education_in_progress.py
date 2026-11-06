@@ -987,3 +987,52 @@ class TestDegreeAdvisor:
         gen = _generator()
         gen._fill_education([{"text": "x", "extracted_fields": {"mentor": "Q. Example"}}])
         assert _education_rows(gen) == []
+
+
+class TestDegreeThesis:
+    """#1245 (owner ruling 2026-11-06 Q1; CMTQDR 10): the stored thesis or
+    dissertation title follows the degree, its field and honors, labelled
+    'Thesis', before any advisor; before, no column read it. Synthetic values."""
+
+    _TITLE = "On Example Ferments of the Quill Estuary"
+
+    @staticmethod
+    def _render(**fields):
+        return TestDisciplineAndStringDates._render(**fields)
+
+    @pytest.mark.parametrize("key", ["thesis_title", "dissertation_title"])
+    def test_each_thesis_key_follows_the_degree_labelled_thesis(self, key):
+        row = self._render(degree="PhD", discipline="Zymology", honors="with distinction", **{key: self._TITLE})
+        assert row.cells[0].text == f"PhD, Zymology (with distinction); Thesis: {self._TITLE}"
+        assert row.cells[1].text.startswith("Quillfeather University")
+
+    def test_the_thesis_comes_before_the_advisor(self):
+        row = self._render(degree="PhD", thesis_title=self._TITLE, mentor="Q. Example")
+        assert row.cells[0].text == f"PhD; Thesis: {self._TITLE}; Mentor: Q. Example"
+
+    def test_the_schema_key_wins_over_the_off_schema_one(self):
+        row = self._render(degree="PhD", thesis_title=self._TITLE, dissertation_title="Another Title")
+        assert row.cells[0].text == f"PhD; Thesis: {self._TITLE}"
+
+    @pytest.mark.parametrize("junk", ["null", "NULL", " None ", "n/a", "N/A", "na", "", "  ", None,
+                                      ["A Listed Title"], {"title": "A Mapped Title"}])
+    def test_an_unusable_thesis_title_renders_nothing_and_yields_to_the_next_key(self, junk):
+        assert self._render(degree="PhD", thesis_title=junk).cells[0].text == "PhD"
+        row = self._render(degree="PhD", thesis_title=junk, dissertation_title=self._TITLE)
+        assert row.cells[0].text == f"PhD; Thesis: {self._TITLE}"
+
+    def test_a_title_the_degree_cell_already_holds_is_not_repeated(self):
+        row = self._render(degree=f"PhD ({self._TITLE.upper()})", dissertation_title=self._TITLE)
+        assert row.cells[0].text == f"PhD ({self._TITLE.upper()})"
+
+    def test_a_title_on_a_degree_less_row_stands_alone(self):
+        assert self._render(thesis_title=self._TITLE).cells[0].text == f"Thesis: {self._TITLE}"
+
+    def test_a_thesis_alone_does_not_create_a_row(self):
+        gen = _generator()
+        gen._fill_education([{"text": "x", "extracted_fields": {"thesis_title": self._TITLE}}])
+        assert _education_rows(gen) == []
+
+    def test_a_b1_title_is_never_read_as_the_thesis(self):
+        """Both farm B1 `title` values are a mentee's thesis citation coded B1."""
+        assert self._render(degree="PhD", title=self._TITLE).cells[0].text == "PhD"
