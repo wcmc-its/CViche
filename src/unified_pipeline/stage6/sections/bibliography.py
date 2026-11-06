@@ -62,7 +62,7 @@ from unified_pipeline.core.text_norm import is_placeholder_title, norm
 from unified_pipeline.log_redaction import redacted_error_label
 
 from ..fan_out import fallback_text
-from ..formatting import _format_citation, _set_font, with_event_status
+from ..formatting import _format_citation, _set_font, event_status_note, presentation_type_note
 from ..normalization import split_fused_citation_entries
 from ..normalization.owner_alias import (
     OwnerAlias,
@@ -80,19 +80,25 @@ logger = logging.getLogger(__name__)
 
 # The bibliography subsections whose entries are talks or posters at an event,
 # so a "postponed"/"canceled" note on the source line is part of the citation
-# (#1436). An article or chapter has no event to postpone.
+# (#1436), and so is the line's own "Poster presentation" (#1570). An article
+# or chapter has no event to postpone and was not given as a poster.
 _EVENT_STATUS_CODES = frozenset({'S8'})
 
 
 def _with_abstract_status(code: str, citation: str, pub: Mapping) -> str:
-    """`citation` with its source line's event-status note (`with_event_status`)
-    when `code` is an event subsection. A multi-line source is a fused block
-    of several citations (#208) whose note may belong to another of them, so
-    it is left as the citation reads."""
+    """`citation` with its source line's presentation type
+    (`presentation_type_note`, #1570) and then its event-status note
+    (`event_status_note`, #1436), each in parentheses, when `code` is an event
+    subsection. The type is checked against the citation and the note, so
+    one that either already prints is not added again. A multi-line source is
+    a fused block of several citations (#208) whose type or note may belong
+    to another of them, so it is left as the citation reads."""
     source = fallback_text(pub)
     if code not in _EVENT_STATUS_CODES or '\n' in source.strip():
         return citation
-    return with_event_status(citation, source)
+    status = event_status_note(source, citation)
+    kind = presentation_type_note(source, resolve_publication(pub).title, f"{citation} {status}")
+    return " ".join([citation, *(f"({note})" for note in (kind, status) if note)])
 
 
 # #1573 (NECRGC): a source heading that says the owner is not an author of

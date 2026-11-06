@@ -1478,11 +1478,12 @@ def _abstract_paragraphs(code, source_line, citation_body):
 
 def test_an_s8_postponed_note_dropped_by_the_citation_is_appended():
     # NDMRSO SYWZJA 557's shape: the note is a bare sentence, 5d dropped it.
+    # The line's "Oral presentation" is kept too, before the note (#1570).
     source = ("19. Doe J, Roe R. (2020, March). Widget calibration. Oral presentation at "
               "the Widget Society Conference, Springfield. Postponed due to COVID-19.")
     body = "Doe J, Roe R. Widget calibration. Widget Society Conference; 2020 Mar; Springfield."
     assert _abstract_paragraphs("S8", source, body) == \
-        [f"1. {body} (Postponed due to COVID-19)"]
+        [f"1. {body} (Oral presentation) (Postponed due to COVID-19)"]
 
 
 def test_an_s8_citation_that_kept_its_status_is_unchanged():
@@ -1511,6 +1512,68 @@ def test_a_fused_multi_line_s8_source_is_left_as_the_citation_reads():
               "Doe J. Gadget tuning. Gadget Meeting, 2020. Postponed due to COVID-19.")
     body = "Doe J. Widget calibration. Widget Society Conference; 2020."
     assert _abstract_paragraphs("S8", source, body) == [f"1. {body}"]
+
+
+# --- #1570: an S8 line's own presentation type survives into the citation ---
+
+
+def test_an_s8_presentation_type_dropped_by_the_citation_is_appended():
+    # LPPQAJ 208's shape: 5d's citation lost the line's "Poster presentation".
+    source = ("Doe J, Roe R. Widget calibration. Poster presentation, Widget Society "
+              "Conference, Springfield, 2020.")
+    body = "Doe J, Roe R. Widget calibration. Widget Society Conference; 2020; Springfield."
+    assert _abstract_paragraphs("S8", source, body) == [f"1. {body} (Poster presentation)"]
+
+
+@pytest.mark.parametrize("code,source,body", [
+    # Only S8 is a talk or a poster at an event.
+    ("S1", "Doe J. Widget calibration (oral). J Widgets. 2020;1:1-2.",
+     "Doe J. Widget calibration. J Widgets. 2020;1:1-2."),
+    # The citation already prints the type.
+    ("S8", "Doe J. Widget calibration. Poster session, Widget Society Conference, 2020.",
+     "Doe J. Widget calibration [poster]. Widget Society Conference; 2020."),
+    # A #208 fused block: the type may be another of its citations'.
+    ("S8", "Doe J. Widget calibration. Widget Society Conference, 2020.\n"
+           "Doe J. Gadget tuning. Poster presentation, Gadget Meeting, 2020.",
+     "Doe J. Widget calibration. Widget Society Conference; 2020."),
+])
+def test_an_s8_presentation_type_is_added_only_where_it_is_missing(code, source, body):
+    assert _abstract_paragraphs(code, source, body) == [f"1. {body}"]
+
+
+def test_an_s8_presentation_type_the_status_note_prints_is_not_appended():
+    # SYWZJA 616's line with a citation that dropped the note: the note it
+    # gets back already says "Poster".
+    source = "Doe J. Widget calibration [Poster session canceled]. Widget Society Conference."
+    body = "Doe J. Widget calibration. Widget Society Conference; 2020."
+    assert _abstract_paragraphs("S8", source, body) == [f"1. {body} (Poster session canceled)"]
+
+
+def test_an_s8_presentation_type_the_stored_title_names_is_not_appended():
+    gen = _generator()
+    body = "Doe J. Widget calibration. Widget Society Conference; 2020."
+    entry = _citation_entry(body, "Doe J", 2020)
+    entry["extracted_fields"]["title"] = "Widget posters: Poster calibration"
+    entry["text"] = "Doe J. Widget calibration. Poster session, Widget Society Conference, 2020."
+    gen._fill_bibliography({"S8": [entry]}, cv_owner={}, document_uid="")
+    assert [p.text for p in gen.doc.paragraphs if p.text.startswith("1. ")] == [f"1. {body}"]
+
+
+def test_an_s8_fallback_line_keeps_its_month_and_its_presentation_type():
+    # No 5d citation: the stage-4 meeting trailer prints the month the line
+    # writes beside a bare stored year, and the type follows the citation.
+    gen = _generator()
+    entry = {
+        "text": ("Doe J. Widget calibration. Poster presentation, Widget Society Conference, "
+                 "Springfield, 12-14 October 2020."),
+        "extracted_fields": {"authors": "Doe J", "title": "Widget calibration",
+                             "conference_name": "Widget Society Conference",
+                             "location": "Springfield", "year": "2020", "target_name": "Doe J"},
+    }
+    gen._fill_bibliography({"S8": [entry]}, cv_owner={}, document_uid="")
+    assert [p.text for p in gen.doc.paragraphs if p.text.startswith("1. ")] == [
+        "1. Doe J. Widget calibration. Widget Society Conference; 2020 October 12-14; "
+        "Springfield. (Poster presentation)"]
 
 
 def test_citation_note_is_a_comment_on_a_stub_citation_even_with_comments_off():

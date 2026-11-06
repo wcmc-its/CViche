@@ -685,14 +685,59 @@ def test_abstract_number_resolves_only_when_its_line_writes_it(value, text, expe
     ('2023-10', 'A Talk. October 2022.', ''),
     # A month name inside a longer word is not the month.
     ('2023-05', 'A Talk. Dismay 2023.', ''),
-    ('2023', 'A Talk. October 2023.', ''),
-    (2023, 'A Talk. October 2023.', ''),
     (None, 'A Talk. October 2023.', ''),
+    # A stored month keeps this path: no day range, and only its own month.
+    ('2008-10-21', 'A Talk. Larchmere, 21-24 October 2008.', '2008 October'),
 ])
 def test_meeting_date_is_the_month_and_day_its_line_writes(year, text, expected):
     entry = {'text': text, 'extracted_fields': {'year': year}}
 
     assert resolve_publication(entry).meeting_date == expected
+
+
+@pytest.mark.parametrize('year,text,expected', [
+    # #1570 round 3: stage 4 stored the line's "October 2015" as "2015".
+    ('2015', 'Rook J. A Talk. Larks Day, Larchmere, October 2015.', '2015 October'),
+    (2015, 'Rook J. A Talk. Larks Day, Larchmere, October 2015.', '2015 October'),
+    # The day, or the range of days, as the line writes it, on either side.
+    ('2018', 'A Talk. Larks Day, Larchmere, 15 Feb. 2018.', '2018 Feb 15'),
+    ('2025', 'A Talk. Larks Day, April 17, 2025, Larchmere.', '2025 April 17'),
+    ('2008', 'A Talk. Larks Day, Larchmere, 21-24 October 2008.', '2008 October 21-24'),
+    ('2008', 'A Talk. Larks Day, Larchmere, 21 – 24 October 2008.', '2008 October 21 – 24'),
+    ('2017', 'A Talk. Larks Day, May 3-5, 2017, Larchmere.', '2017 May 3-5'),
+    # The same month written twice is one month; the first is printed.
+    ('2015', 'A Talk. Larks Day, 3 October 2015. Updated October 2015.', '2015 October 3'),
+    # A month written with another year is not this year's.
+    ('2016', 'A Talk. Larks Day, October 2015; Larchmere, March 2016.', '2016 March'),
+])
+def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expected):
+    entry = {'text': text, 'extracted_fields': {'year': year}}
+
+    assert resolve_publication(entry).meeting_date == expected
+
+
+@pytest.mark.parametrize('year,text', [
+    # No month beside the year, or a month name inside a longer word.
+    ('2015', 'A Talk. Larks Day, Larchmere, 2015.'),
+    ('2015', 'A Talk. Larks Day, Dismay 2015.'),
+    ('2015', 'A Talk. Larks Day, December 11-13, Larchmere 2015.'),
+    # The end of a range that began in another month: the meeting began then.
+    ('2012', 'A Talk. Larks Day, September 30 - October 3, 2012.'),
+    ('2012', 'A Talk. Larks Day, 30 September – 3 October 2012.'),
+    # Right after a journal locator: the issue's month, not the meeting's.
+    ('2008', 'A Talk. Larks Day. Biol Larks 177: A116, Jun 2008.'),
+    ('2008', 'A Talk. Larks Day. Biol Larks 12(3):45-67. June 2008.'),
+    # Two months written for the year: which one is the meeting's is not said.
+    ('2015', 'A Talk. Larks Day, October 2015; Wren Day, November 2015.'),
+    ('2015', 'A Talk. Larks Day, September 30, 2015 - October 3, 2015.'),
+    # Not a bare year: a season, or a range, keeps its stored value.
+    ('Fall 2015', 'A Talk. Larks Day, October 2015.'),
+    ('2015-2016', 'A Talk. Larks Day, October 2015.'),
+])
+def test_a_bare_year_keeps_no_month_its_line_does_not_pin_down(year, text):
+    entry = {'text': text, 'extracted_fields': {'year': year}}
+
+    assert resolve_publication(entry).meeting_date == ''
 
 
 # ---------------------------------------------------------------------------

@@ -459,6 +459,70 @@ def with_event_status(text: str, source_text: str, shown_text: str = '') -> str:
     return f"{text} ({note})".lstrip() if note else text
 
 
+# The presentation type an S8 line states: "Poster presentation", "Oral
+# session", "(oral)". No S8 schema field holds it, so stage 4 drops it, 5d's
+# citation often does too, and a poster then reads the same as a talk
+# (LPPQAJ 208, 210, 219, 255, #1570).
+_POSTER_HEAD = r'(?:e-?)?poster'
+_SPOKEN_HEAD = r'oral|podium|platform|plenary'
+_POSTER_KIND = r'presentation|session|discussion|abstract|talk'
+_SPOKEN_KIND = r'presentation|session|talk|abstract'
+#: A type as the line writes it. A poster may stand alone; a spoken type
+#: needs its kind ("Oral presentation") or brackets of its own ("(oral)"),
+#: because a bare "oral" is as often the subject ("Oral health").
+_PRESENTATION_TYPE_RE = re.compile(
+    rf'(?<![\w-])(?:{_POSTER_HEAD}(?:\s+(?:{_POSTER_KIND}))?'
+    rf'|(?:{_SPOKEN_HEAD})\s+(?:{_SPOKEN_KIND})'
+    rf'|(?<=[(\[])(?:{_SPOKEN_HEAD})(?=[)\]]))(?![\w-])', re.IGNORECASE)
+#: A type's head word as a word of its own, in a title or a citation.
+_PRESENTATION_HEAD_RE = re.compile(
+    rf'(?<![\w-])(?:{_POSTER_HEAD}|{_SPOKEN_HEAD})(?![\w-])', re.IGNORECASE)
+#: An award, a judging or a session role up to two words before a type
+#: ("Best poster", "Judges, poster session", "Moderator, oral session"): the
+#: type is then not how this work was given.
+_AWARD_OR_ROLE_BEFORE_RE = re.compile(
+    r'\b(?:best|outstanding|top|award|prize|winner|judge\w*|moderat\w*|chair\w*)'
+    r'\W+(?:\w+\W+){0,2}$', re.IGNORECASE)
+#: An award right after a type: "Poster award", "Oral presentation competition".
+_AWARD_AFTER_RE = re.compile(r'\W*(?:award|prize|competition|winner|judg)', re.IGNORECASE)
+
+
+def _presentation_head(phrase: str) -> str:
+    """The type `phrase` names, one spelling per type: "eposter" for
+    "e-Poster session", "oral" for "Oral presentation"."""
+    return phrase.split()[0].casefold().replace('-', '')
+
+
+def _presentation_heads(text: str) -> set[str]:
+    """Every type `text` names as a word of its own."""
+    return {_presentation_head(word) for word in _PRESENTATION_HEAD_RE.findall(text)}
+
+
+def _is_award_or_role(text: str, match: re.Match[str]) -> bool:
+    """True when the type `match` found in `text` names an award, a judging
+    or a session role rather than how the work was given."""
+    return bool(_AWARD_OR_ROLE_BEFORE_RE.search(text, 0, match.start())
+                or _AWARD_AFTER_RE.match(text, match.end()))
+
+
+def presentation_type_note(source_text: str, title: str, shown_text: str) -> str:
+    """The presentation type `source_text` states ("Poster presentation",
+    "Oral"), as the line writes it with its first letter capitalised, or ''.
+
+    '' when the line states none, or two different types, outside an award,
+    judging or session-role context (`_is_award_or_role`): it then does not
+    say how this work was given. Also '' when the stored `title` or
+    `shown_text` -- what the row already prints, its event-status note
+    included -- names that type, so the type is never printed twice (#1570).
+    """
+    phrases = [match[0] for match in _PRESENTATION_TYPE_RE.finditer(source_text)
+               if not _is_award_or_role(source_text, match)]
+    heads = {_presentation_head(phrase) for phrase in phrases}
+    if len(heads) != 1 or heads & (_presentation_heads(title) | _presentation_heads(shown_text)):
+        return ''
+    return phrases[0][0].upper() + phrases[0][1:]
+
+
 #: A four-digit year inside a stored date value: "2005" in "2005-Summer" or
 #: "2006-06-21".
 _FOUR_DIGIT_YEAR_RE = re.compile(r'(?<!\d)\d{4}(?!\d)')

@@ -162,7 +162,8 @@ class ResolvedPublication:
     #: outside its leading CV list number (`_abstract_number`, #1570).
     abstract_number: str = ''
     #: An S8 meeting's date with the month, and the day, the entry's line
-    #: writes: "2023 October" for a stored "2023-10" (`_meeting_date`, #1570).
+    #: writes: "2023 October" for a stored "2023-10" (`_meeting_date`, #1570),
+    #: and "2008 October 21-24" for a stored "2008" whose line writes them.
     #: '' when the line names no such month; the meeting trailer then prints
     #: `year` as it always did.
     meeting_date: str = ''
@@ -238,6 +239,24 @@ _MONTH_WORD = '|'.join(_MONTH_NAME_TO_NUM)
 _WRITTEN_MONTH_DATE_RE = re.compile(
     rf'\b(?:(?P<day_before>\d{{1,2}})\s+)?(?P<month>{_MONTH_WORD})\.?\s+'
     r'(?:(?P<day_after>\d{1,2}),?\s+)?(?P<year>\d{4})(?!\d)', re.IGNORECASE)
+#: A day, or a range of days, written beside a month: "12", "21-24", "3 – 5".
+_WRITTEN_DAYS = r'\d{1,2}(?:\s*[-–]\s*\d{1,2})?'
+#: `_WRITTEN_MONTH_DATE_RE` with a range of days on either side, read for a
+#: stored bare year, which has no day of its own to check them against:
+#: "21-24 October 2008", "May 3-5, 2017".
+_WRITTEN_MONTH_DAYS_RE = re.compile(
+    rf'\b(?:(?P<day_before>{_WRITTEN_DAYS})\s+)?(?P<month>{_MONTH_WORD})\.?\s+'
+    rf'(?:(?P<day_after>{_WRITTEN_DAYS}),?\s+)?(?P<year>\d{{4}})(?!\d)', re.IGNORECASE)
+#: A stored year and nothing else: "2015", not "Fall 2015" or "2015-10".
+_BARE_YEAR_RE = re.compile(r'\d{4}')
+#: Text ending in a dash: a date right after it ends a range that began in
+#: another month ("September 30 - October 3, 2012").
+_RANGE_DASH_END_RE = re.compile(r'[-–]\s*$')
+#: Text ending in a journal locator ("177: A116, ", "12(3):45-67. "): a date
+#: right after it is the journal issue's, not the meeting's (GNONHA, #1570).
+_JOURNAL_LOCATOR_END_RE = re.compile(
+    r'\d+\s*(?:\([^)]*\))?\s*:\s*[A-Za-z]?\d+[A-Za-z]?'
+    r'(?:\s*[-–]\s*[A-Za-z]?\d+[A-Za-z]?)?\s*[,;.]?\s*$')
 
 
 def _abstract_number(value: object, source_text: str) -> str:
@@ -257,6 +276,30 @@ def _abstract_number(value: object, source_text: str) -> str:
     return number if re.search(rf'(?<!\w){re.escape(number)}(?!\w)', source_text) else ''
 
 
+def _bare_year_meeting_date(year: int, source_text: str) -> str:
+    """"<year> <Month>[ <days>]" as the entry's line writes them beside a
+    stored bare `year`, or '' when the line does not pin the month down.
+
+    Stage 4 stores "21-24 October 2008" as "2008" too, and the S8 fallback
+    then lost the month and days 5d's citation kept (QQGKXR 483, ECXGAT
+    980; #1570 round 3). Every month the line writes with that
+    year has to be the same month, because a line that writes two does not
+    say which is the meeting's. The first is printed, its day or days as the
+    line writes them, unless it ends a range that began in another month or
+    directly follows a journal locator, where the month is the issue's.
+    """
+    dates = [match for match in _WRITTEN_MONTH_DAYS_RE.finditer(source_text)
+             if int(match['year']) == year]
+    if len({_MONTH_NAME_TO_NUM[match['month'].lower()] for match in dates}) != 1:
+        return ''
+    first = dates[0]
+    if (_RANGE_DASH_END_RE.search(source_text, 0, first.start())
+            or _JOURNAL_LOCATOR_END_RE.search(source_text, 0, first.start())):
+        return ''
+    days = first['day_before'] or first['day_after']
+    return f"{year} {first['month']} {days}" if days else f"{year} {first['month']}"
+
+
 def _meeting_date(value: object, source_text: str) -> str:
     """Stage 4's `year`, as "<year> <Month>[ <day>]" with the month the
     entry's line writes, or '' when it holds no month the line names.
@@ -266,9 +309,14 @@ def _meeting_date(value: object, source_text: str) -> str:
     158/159, SQMWHM 425, #1570). The month is the line's own word, in the
     line's own spelling, so the fallback adds no word the CV lacks; the day
     is printed only when the line writes the same day next to that month.
-    The order is Vancouver's, the one stage 5d's S8 citations use.
+    The order is Vancouver's, the one stage 5d's S8 citations use. A stored
+    bare year takes the month the line writes beside it the same way
+    (`_bare_year_meeting_date`).
     """
-    year, month, day = _parse_date_components(_scalar_text(value))
+    stored = _scalar_text(value)
+    if _BARE_YEAR_RE.fullmatch(stored):
+        return _bare_year_meeting_date(int(stored), source_text)
+    year, month, day = _parse_date_components(stored)
     if not (year and month):
         return ''
     for match in _WRITTEN_MONTH_DATE_RE.finditer(source_text):
