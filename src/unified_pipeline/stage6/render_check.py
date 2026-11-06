@@ -1050,6 +1050,51 @@ def m1_record_rendered(text: str, haystack: str, line_token_sets: list[set],
                for line_tokens, line_pairs in zip(line_token_sets, line_pair_sets, strict=True))
 
 
+# Ordinal words that tell otherwise identical record lines apart: an edition,
+# a part, a place ("Third Edition" and "Sixth Edition" of one guide, #2055).
+# Each is five letters or more, so each is a `_RENDER_TOKEN_RE` token. An
+# output line vouches for a record line only when their ordinals do not
+# contradict (`_ordinals_contradict`): a missing ordinal alone is no evidence,
+# since a render may write "First Reader" in a cell of its own line, or drop
+# "first year" from a course row.
+_ORDINAL_WORDS = frozenset((
+    'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth',
+    'ninth', 'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth',
+    'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth'))
+
+
+def _ordinal_words(text: str) -> set[str]:
+    """The `_ORDINAL_WORDS` of a text (#2055)."""
+    return set(_RENDER_TOKEN_RE.findall(_norm(text))) & _ORDINAL_WORDS
+
+
+def _ordinals_contradict(ordinals: set[str], out_ordinals: set[str]) -> bool:
+    """Whether an output line's ordinal words contradict a record line's: each
+    holds one the other lacks ("sixth" against "third", #2055)."""
+    return bool(ordinals - out_ordinals) and bool(out_ordinals - ordinals)
+
+
+def _piece_rendered(line: str, haystack: str) -> bool:
+    """Whether one of `line`'s `record_pieces` sits in `haystack` on an output
+    line whose ordinal words do not contradict those of the fragment the
+    piece is cut from (#2055). A piece is the fragment's first
+    `RENDER_PIECE_WINDOW` characters, so "<guide title> Sixth Edition" shares
+    its piece with the rendered "<guide title>, Third Edition" row of another
+    entry. A squashed output line has no word boundaries, so its ordinals are
+    the ordinal words it contains."""
+    for fragment in entry_fragments(line):
+        if is_template_label_line(fragment):
+            continue
+        ordinals = _ordinal_words(fragment)
+        for piece in _entry_pieces(fragment):
+            if piece in haystack and (not ordinals or any(
+                    piece in out and not _ordinals_contradict(
+                        ordinals, {word for word in _ORDINAL_WORDS if word in out})
+                    for out in haystack.split("\x00"))):
+                return True
+    return False
+
+
 def _record_rendered(line: str, haystack: str,
                      line_token_sets: list[set]) -> bool | None:
     """Whether one record line surfaces in the output: verbatim piece first,
@@ -1057,15 +1102,22 @@ def _record_rendered(line: str, haystack: str,
     academic words scattered across unrelated sections can't vouch for a
     dropped record). Verbatim absence alone proves nothing — stage 6
     reformats dates/fields — so False requires a token-verifiable miss; a
-    line without enough distinctive tokens is None, not missing."""
-    if any(piece in haystack for piece in record_pieces(line)):
+    line without enough distinctive tokens is None, not missing.
+
+    Either way the vouching output line's ordinal words (`_ORDINAL_WORDS`)
+    must not contradict the line's: a line that differs from a rendered row
+    only in its edition or part shares most of its words and its opening
+    piece (#2055)."""
+    if _piece_rendered(line, haystack):
         return True
     rendered = None
     for chunk in record_chunks(line):
         tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
+        ordinals = tokens & _ORDINAL_WORDS
         if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
+               and not _ordinals_contradict(ordinals, line_tokens & _ORDINAL_WORDS)
                for line_tokens in line_token_sets):
             return True
         rendered = False

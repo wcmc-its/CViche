@@ -1972,6 +1972,42 @@ def test_answers_to_different_labels_need_not_share_one_output_line():
     assert _record_rendered(line, haystack, _output_line_tokens(*page)) is None
 
 
+_THIRD_EDITION_ROW = ("Example Guides to the Evaluation of Example Impairment, Third Edition "
+                      "(revised) proficient and instructor")
+_SIXTH_EDITION_LINE = "Example Guides to the Evaluation of Example Impairment Sixth Edition proficient"
+
+
+def test_a_row_of_another_edition_does_not_vouch_for_a_line():
+    """#2055: the line shares the row's opening piece and 10 of its 11
+    tokens, and differs only in its edition, so the row is not its render."""
+    assert _record_rendered(_SIXTH_EDITION_LINE, _squash_text(_THIRD_EDITION_ROW),
+                            _output_line_tokens(_THIRD_EDITION_ROW)) is False
+    # Token overlap alone, with no piece on the page: the edition still decides.
+    assert _record_rendered(_SIXTH_EDITION_LINE, "",
+                            _output_line_tokens(_THIRD_EDITION_ROW)) is False
+    same_edition = _THIRD_EDITION_ROW.replace("Third", "Sixth")
+    assert _record_rendered(_SIXTH_EDITION_LINE, _squash_text(same_edition),
+                            _output_line_tokens(same_edition)) is True
+    assert _record_rendered(_SIXTH_EDITION_LINE, "", _output_line_tokens(same_edition)) is True
+
+
+def test_a_piece_vouches_only_from_the_output_line_holding_the_ordinal():
+    """The piece and the ordinal must sit on ONE output line: the row's piece
+    on one line and "sixth" on an unrelated one do not add up to a render."""
+    page = [_THIRD_EDITION_ROW, "Sixth Annual Example Symposium"]
+    haystack = "\x00".join(_squash_text(line) for line in page)
+    assert _record_rendered(_SIXTH_EDITION_LINE, haystack, _output_line_tokens(*page)) is False
+
+
+def test_an_output_line_without_the_ordinal_still_vouches():
+    """A render that puts the ordinal in a cell of its own ("First Reader")
+    or drops it ("first year") leaves a line with no ordinal to contradict,
+    so the line still reads as rendered."""
+    line = "Quillon Marbury, Department of Example Studies. Role: Thesis First Reader, 2024"
+    row = "Quillon Marbury, Department of Example Studies, Thesis Reader"
+    assert _record_rendered(line, "", _output_line_tokens(row)) is True
+
+
 def _squash_text(text):
     from unified_pipeline.stage6.normalization import _squash
     return _squash(text)
