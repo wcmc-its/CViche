@@ -846,6 +846,14 @@ def _award_source(fields: dict, text: str) -> str:
     ('Primary  Mentor to Jordan Testperson', 'Primary Mentor to Jordan Testperson'),
     ('Mentor to Dr. Alex Bo Inventedname Madeup', 'Mentor to Dr. Alex Bo Inventedname Madeup'),
     ('Co-Mentor for Dr. Alex Inventedname', 'Co-Mentor for Dr. Alex Inventedname'),
+    ('Mentor to Jordan Testperson, MHS\t2019', 'Mentor to Jordan Testperson, MHS'),
+    ('Mentor to Jordan Testperson, RD, PhD', 'Mentor to Jordan Testperson, RD, PhD'),
+    ('Mentor to Jordan Testperson, BSN', 'Mentor to Jordan Testperson, BSN'),
+    ('Mentor to Jordan Testperson, MSCI', 'Mentor to Jordan Testperson, MSCI'),
+    ('Mentor to Jordan Testperson, MSN', 'Mentor to Jordan Testperson, MSN'),
+    ('Mentor to Jordan Testperson, MSc', 'Mentor to Jordan Testperson, MSc'),
+    ('Mentor to Jordan Testperson, MD, MBA', 'Mentor to Jordan Testperson, MD, MBA'),
+    ('Mentor to Jordan Testperson, MASS Invented', 'Mentor to Jordan Testperson'),
     ('Sponsor to Sam Placeholder.', 'Sponsor to Sam Placeholder'),
     ('PI Name: Riley Fictional', 'PI Name: Riley Fictional'),
     ('PI  Name: Riley Fictional', 'PI Name: Riley Fictional'),
@@ -959,8 +967,6 @@ def test_training_grant_rows_read_the_record_line_over_the_entry_text():
     ({'agency': 'Invented University (Invented College)'},
      'Invented University (Invented College)'),
     ({'title': 'Ninth Street Invented Center'}, 'Ninth Street Invented Center'),
-    ({'grant_title': 'Invented Program', 'start_date': '2019', 'end_date': '2021'},
-     'Invented Program 2019-2021'),
 ])
 def test_n2_entry_with_no_number_grant_word_or_funder_is_not_grant_shaped(fields, line):
     assert _training_grant_is_not_grant_shaped(fields, line) is True
@@ -983,13 +989,17 @@ def test_n2_entry_with_no_number_grant_word_or_funder_is_not_grant_shaped(fields
     ({'grant_title': 'Invented Program', 'agency': 'Invented Program'}, 'Invented Program'),
     ({'title': 'Invented Program', 'agency': 'Invented Program'}, 'Invented Program'),
     ({'grant_title': 'Invented Program', 'role': 'Mentor'}, 'Invented Program'),
+    ({'grant_title': 'Invented Program', 'start_date': '2019', 'end_date': '2021'},
+     'Invented Program 2019-2021'),
+    ({'grant_title': 'Invented Program', 'end_date': '2021'}, 'Invented Program 2021'),
     ({}, '  '),
 ])
 def test_n2_entry_with_a_number_grant_word_or_funder_stays_a_grant(fields, line):
     """Each inverse risk: a grant number; a grant word in the line, or in a
     title the table does not show; a funder (an agency that is not the line
-    itself, or one with a title); a cell word the line does not hold, which
-    the line route would drop; or no line at all."""
+    itself, or one with a title); a date, which fills the table's duration; a
+    cell word the line does not hold, which the line route would drop; or no
+    line at all."""
     assert _training_grant_is_not_grant_shaped(fields, line) is False
 
 

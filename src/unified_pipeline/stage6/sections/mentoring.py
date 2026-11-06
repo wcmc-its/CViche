@@ -335,7 +335,10 @@ _N2_NAME_TRIM = ' .,:;-'
 _N2_NAME_WORD_RE = re.compile(r'[^\W\d_]{2,}')
 
 #: A degree after a trainee's name, which belongs to the name ("Jo Doe, MD, PhD").
-_N2_DEGREE = r'(?:M\.?D|Ph\.?D|D\.?O|M\.?P\.?H|M\.?S(?:c)?|Pharm\.?D|D\.?V\.?M|R\.?N|MBBS|M\.?A)\.?'
+#: It ends at a word's end, so "MSCI" is not cut to "MS".
+_N2_DEGREE = (r'(?:M\.?D|Ph\.?D|D\.?O|M\.?P\.?H|M\.?H\.?S|M\.?S\.?C\.?[IE]|M\.?S(?:c)?'
+              r'|Pharm\.?D|D\.?V\.?M|R\.?N|R\.?D|B\.?S\.?N|M\.?S\.?N|MBBS|M\.?B\.?A|M\.?A)'
+              r'\.?(?![A-Za-z])')
 
 #: Space within one cell: whitespace other than a tab or a line break.
 _N2_CELL_SPACE = r'[^\S\t\n]'
@@ -543,15 +546,20 @@ def _training_grant_is_not_grant_shaped(fields: Mapping[str, Any], line: str) ->
     sparse entries take, a sibling of `_training_grant_is_sparse`, whose
     contract is unchanged. Only when the line holds every word the table's
     fields would have shown, so the line route drops nothing; never with no
-    line (`_own_record_line` '')."""
+    line (`_own_record_line` ''). A dated entry keeps its table: it fills the
+    title and the duration, and a training program the CV wrote into the
+    template's own labels ("Project title: ... Duration of support: ...")
+    reads as those labels on a line."""
     line_words = set(_outcome_words(line))
     if not line_words or _text(fields.get('grant_number')).strip():
         return False
     probe = ' '.join([*(_text(fields.get(key)) for key in _N2_GRANT_WORD_FIELDS), line])
     if _N2_GRANT_WORD_RE.search(probe) or _names_a_funder(fields, line_words):
         return False
-    cells = ' '.join(value for _, value in _training_grant_rows(fields))
-    return set(_outcome_words(cells)) <= line_words
+    (_, award_source), (_, title), (_, duration) = _training_grant_rows(fields)
+    if duration:
+        return False
+    return set(_outcome_words(f"{award_source} {title}")) <= line_words
 
 
 def _program_leadership_line(fields: Mapping[str, Any], text: str) -> str:
