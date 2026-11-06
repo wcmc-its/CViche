@@ -230,6 +230,9 @@ def test_plain_initials_and_real_surnames_unchanged_by_digraph_rule():
         ("Ann B. Doe Jr.", "Doe AB Jr"),
         ("Ann B. Doe III", "Doe AB III"),
         ("AB Doe II", "Doe AB II"),
+        ("Doe AB Sr.", "Doe AB Sr"),
+        ("Ann B. Doe Sr., Roe C", "Doe AB Sr, Roe C"),
+        ("G R Roe IV", "Roe GR IV"),
         # The comma before the suffix goes; "Doe JL," was read as a given-first name.
         ("Doe JL, 2nd, Roe C", "Doe JL 2nd, Roe C"),
         ("Ann B. Doe, 3rd, Roe C", "Doe AB 3rd, Roe C"),
@@ -245,6 +248,7 @@ def test_generational_suffix_stays_after_its_author(byline, expected):
         "Doe IV",               # surname with the initials I.V.
         "El Doe II, Roe C",     # compound surname with the initials I.I.
         "Ann Doe II",           # no initials before it: not read as a suffix
+        "Ann Doe III",
         "Doe AB, Jr",           # a suffix split off on its own has no name to follow
         "Doe AB, Roe C",
     ],
