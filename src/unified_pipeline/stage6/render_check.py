@@ -27,6 +27,7 @@ comment above them.
 """
 import re
 from collections import Counter
+from types import MappingProxyType
 from typing import NamedTuple
 
 from unified_pipeline.core.render_check import entry_fragments
@@ -856,7 +857,8 @@ def _only_twins_vouch(line: str, twins: list[str], haystack: str) -> bool:
 def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack: str,
                             line_token_sets: list[set],
                             record_token_sets: list[set],
-                            twins: list[str] | None = None) -> bool | None:
+                            twins: list[str] | None = None,
+                            line_value_sets: list[frozenset[int]] | None = None) -> bool | None:
     """`_record_rendered` for a record line of an entry that holds its sibling
     rows (`record_siblings`), counted one output line per row (#1230).
 
@@ -885,9 +887,10 @@ def sibling_record_rendered(line: str, siblings: list[set[str]] | None, haystack
 
     `twins` (`record_twins`) are rows no token tells apart from the line: a
     True turns False when every output line that vouches for the line is a
-    twin's row verbatim (`_only_twins_vouch`, #1956).
+    twin's row verbatim (`_only_twins_vouch`, #1956). `line_value_sets` are
+    the output lines' `distinguishing_values`, for `_record_rendered`.
     """
-    rendered = _record_rendered(line, haystack, line_token_sets)
+    rendered = _record_rendered(line, haystack, line_token_sets, line_value_sets)
     if not rendered or not (siblings or twins) or _squash(line) in haystack:
         return rendered
     if twins and _only_twins_vouch(line, twins, haystack):
@@ -1052,73 +1055,114 @@ def m1_record_rendered(text: str, haystack: str, line_token_sets: list[set],
 
 # Ordinal words that tell otherwise identical record lines apart: an edition,
 # a part, a place ("Third Edition" and "Sixth Edition" of one guide, #2055).
-# Each is five letters or more, so each is a `_RENDER_TOKEN_RE` token. An
-# output line vouches for a record line only when their ordinals do not
-# contradict (`_ordinals_contradict`): a missing ordinal alone is no evidence,
-# since a render may write "First Reader" in a cell of its own line, or drop
-# "first year" from a course row.
-_ORDINAL_WORDS = frozenset((
+# Each is five letters or more, so each is a `_RENDER_TOKEN_RE` token.
+_ORDINAL_WORDS = MappingProxyType({word: value for value, word in enumerate((
     'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth',
     'ninth', 'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth',
-    'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth'))
+    'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth'), start=1)})
+# The same value in digits: "6th Edition" is the "Sixth Edition".
+_NUMERIC_ORDINAL_RE = re.compile(r"\b(\d{1,3})(?:st|nd|rd|th)\b")
+# A number after a word that numbers a work: "Part IV", "Volume 2", "Phase
+# II/III", "Edition 3". A bare number elsewhere is a year, a page or a count,
+# and Roman numerals reach X-XX at most: "Vol 12, 345-350" reads 12 alone
+# (no comma joins a listing), "Edition 2015" nothing (no number of four
+# digits counts).
+_NUMBERED_WORK_NUMERAL = r"(?:\d{1,3}|[ivx]{1,5})"
+_NUMBERED_WORK_RE = re.compile(
+    r"\b(?:editions?|parts?|volumes?|vols?|books?|series|phases?)\.?\s*"
+    rf"({_NUMBERED_WORK_NUMERAL}(?:\s*(?:/|-|–|&|and)\s*{_NUMBERED_WORK_NUMERAL})*)\b")
+_ROMAN_DIGITS = MappingProxyType({'i': 1, 'v': 5, 'x': 10})
 
 
-def _ordinal_words(text: str) -> set[str]:
-    """The `_ORDINAL_WORDS` of a text (#2055)."""
-    return set(_RENDER_TOKEN_RE.findall(_norm(text))) & _ORDINAL_WORDS
+def _numeral_value(numeral: str) -> int:
+    """The value of a digit run or a lower-case Roman numeral of I, V, X."""
+    if numeral.isdigit():
+        return int(numeral)
+    digits = [_ROMAN_DIGITS[char] for char in numeral]
+    return sum(-digit if digit < after else digit
+               for digit, after in zip(digits, digits[1:] + [0], strict=True))
 
 
-def _ordinals_contradict(ordinals: set[str], out_ordinals: set[str]) -> bool:
-    """Whether an output line's ordinal words contradict a record line's: each
-    holds one the other lacks ("sixth" against "third", #2055)."""
-    return bool(ordinals - out_ordinals) and bool(out_ordinals - ordinals)
+def distinguishing_values(text: str) -> frozenset[int]:
+    """The numbers that tell a record from one otherwise worded the same: its
+    ordinal words and numeric ordinals ("Sixth", "6th") and the numerals
+    after a word that numbers a work (`_NUMBERED_WORK_RE`), as integers, read
+    on word boundaries of the unsquashed text (#2055)."""
+    norm = _norm(text)
+    words = {_ORDINAL_WORDS[word] for word in _RENDER_TOKEN_RE.findall(norm)
+             if word in _ORDINAL_WORDS}
+    ordinals = {int(number) for number in _NUMERIC_ORDINAL_RE.findall(norm)}
+    numbered = {_numeral_value(numeral) for listing in _NUMBERED_WORK_RE.findall(norm)
+                for numeral in re.findall(_NUMBERED_WORK_NUMERAL, listing)}
+    return frozenset(words | ordinals | numbered)
 
 
-def _piece_rendered(line: str, haystack: str) -> bool:
+def values_contradict(values: frozenset[int], out_values: frozenset[int]) -> bool:
+    """Whether an output line's `distinguishing_values` contradict a record
+    line's: each holds one the other lacks ("6" against "3", #2055). A
+    missing value alone is no evidence, since a render may write "First
+    Reader" in a cell of its own line, or drop "first year" from a course
+    row; and a line naming several ("Third and Sixth Editions") vouches for
+    each."""
+    return bool(values - out_values) and bool(out_values - values)
+
+
+def output_line_values(line_token_sets: list[set]) -> list[frozenset[int]]:
+    """`distinguishing_values` of output lines known only by their letter
+    tokens: their ordinal words alone."""
+    return [frozenset(_ORDINAL_WORDS[word] for word in tokens if word in _ORDINAL_WORDS)
+            for tokens in line_token_sets]
+
+
+def piece_rendered(line: str, haystack: str, line_value_sets: list[frozenset[int]]) -> bool:
     """Whether one of `line`'s `record_pieces` sits in `haystack` on an output
-    line whose ordinal words do not contradict those of the fragment the
-    piece is cut from (#2055). A piece is the fragment's first
+    line whose `distinguishing_values` do not contradict those of the
+    fragment the piece is cut from (#2055). A piece is the fragment's first
     `RENDER_PIECE_WINDOW` characters, so "<guide title> Sixth Edition" shares
     its piece with the rendered "<guide title>, Third Edition" row of another
-    entry. A squashed output line has no word boundaries, so its ordinals are
-    the ordinal words it contains."""
+    entry. `line_value_sets` are the values of the haystack's lines, in
+    order (a longer list's extra sets are not haystack lines)."""
+    out_lines = haystack.split("\x00")
     for fragment in entry_fragments(line):
         if is_template_label_line(fragment):
             continue
-        ordinals = _ordinal_words(fragment)
+        values = distinguishing_values(fragment)
         for piece in _entry_pieces(fragment):
-            if piece in haystack and (not ordinals or any(
-                    piece in out and not _ordinals_contradict(
-                        ordinals, {word for word in _ORDINAL_WORDS if word in out})
-                    for out in haystack.split("\x00"))):
+            if piece in haystack and (not values or any(
+                    piece in out and not values_contradict(values, out_values)
+                    for out, out_values in zip(out_lines, line_value_sets, strict=False))):
                 return True
     return False
 
 
-def _record_rendered(line: str, haystack: str,
-                     line_token_sets: list[set]) -> bool | None:
+def _record_rendered(line: str, haystack: str, line_token_sets: list[set],
+                     line_value_sets: list[frozenset[int]] | None = None) -> bool | None:
     """Whether one record line surfaces in the output: verbatim piece first,
-    then per-output-line token overlap (per-line, not pooled, so common
+    then per-output-line overlap of its DISTINCTIVE tokens (so generic
     academic words scattered across unrelated sections can't vouch for a
     dropped record). Verbatim absence alone proves nothing — stage 6
     reformats dates/fields — so False requires a token-verifiable miss; a
     line without enough distinctive tokens is None, not missing.
 
-    Either way the vouching output line's ordinal words (`_ORDINAL_WORDS`)
-    must not contradict the line's: a line that differs from a rendered row
-    only in its edition or part shares most of its words and its opening
-    piece (#2055)."""
-    if _piece_rendered(line, haystack):
+    Either way the vouching output line's `distinguishing_values` must not
+    contradict the line's (`values_contradict`): a line that differs from a
+    rendered row only in its edition or part shares most of its words and
+    its opening piece (#2055). `line_value_sets` are those values of each
+    output line, index-aligned with `line_token_sets`; without them, an
+    output line's values are its ordinal words (`output_line_values`)."""
+    if line_value_sets is None:
+        line_value_sets = output_line_values(line_token_sets)
+    if piece_rendered(line, haystack, line_value_sets):
         return True
     rendered = None
     for chunk in record_chunks(line):
         tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
-        ordinals = tokens & _ORDINAL_WORDS
+        values = distinguishing_values(chunk)
         if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
-               and not _ordinals_contradict(ordinals, line_tokens & _ORDINAL_WORDS)
-               for line_tokens in line_token_sets):
+               and not values_contradict(values, out_values)
+               for line_tokens, out_values in zip(line_token_sets, line_value_sets, strict=True)):
             return True
         rendered = False
     return rendered
