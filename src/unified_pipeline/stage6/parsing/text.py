@@ -1081,3 +1081,110 @@ def names_teaching_or_authorship_role(text: str) -> bool:
     return bool(TEACHING_ROLE_RE.search(text) or _QUOTED_TITLE_RE.search(text)
                 or _CITATION_MARKER_RE.search(text)
                 or len(_AUTHOR_NAME_RE.findall(text)) >= _AUTHOR_LIST_MIN_NAMES)
+
+
+# --- A training position's labelled supervisor (#1245, ruling 2026-11-06 Q2) --
+#
+# A Postdoctoral Training line can name the trainee's supervisor in a cell of
+# its own ("Mentor: Dr. A. Example"), and no stage-4 field holds it (the C
+# schema's `mentor` is extract:false): X6 RINASX 19/20, "the supervisor is not
+# extracted". `labelled_supervisor` reads it, and only when the line names one
+# person under it.
+
+#: The singular labels read, each before a colon: a role word, optionally
+#: qualified ("Research Mentor:", "Residency Supervisor:"), or the one director
+#: label that names a trainee's supervisor. The ruling names these; any other
+#: label ("PI:", "Program Director:") is not read.
+SUPERVISOR_LABEL_WORDS = ('Mentor', 'Supervisor', 'Advisor', 'Adviser', 'Preceptor')
+SUPERVISOR_LABEL_QUALIFIERS = ('Research', 'Residency')
+SUPERVISOR_DIRECTOR_LABEL = 'Fellowship Director'
+_SUPERVISOR_ROLE = '|'.join(SUPERVISOR_LABEL_WORDS)
+_SUPERVISOR_QUALIFIER = '|'.join(SUPERVISOR_LABEL_QUALIFIERS)
+_SUPERVISOR_DIRECTOR = r'\s+'.join(SUPERVISOR_DIRECTOR_LABEL.split())
+#: A singular label, its colon and the spaces after it, never a cell break:
+#: "Mentor:<tab>" ends its own cell, which names nobody. One opened by "("
+#: holds its value up to the matching ")".
+_SUPERVISOR_LABEL_RE = re.compile(
+    rf'(?<![A-Za-z])(?P<open>\(\s*)?'
+    rf'(?:(?:(?:{_SUPERVISOR_QUALIFIER})\s+)?(?:{_SUPERVISOR_ROLE})|{_SUPERVISOR_DIRECTOR})\s*:[^\S\t\n]*',
+    re.IGNORECASE)
+#: A plural label ("Mentors:"): a list of names, which the ruling does not
+#: format, so a line holding one names no single supervisor.
+_PLURAL_SUPERVISOR_LABEL_RE = re.compile(
+    rf'(?<![A-Za-z])(?:(?:{_SUPERVISOR_QUALIFIER})\s+)?(?:(?:{_SUPERVISOR_ROLE})s|{_SUPERVISOR_DIRECTOR}s)\s*:',
+    re.IGNORECASE)
+#: What a label's value loses at its end. A trailing "." is kept: it may
+#: close "M.D.".
+_SUPERVISOR_VALUE_TRAILING = ' ,;:'
+#: The honorifics a name may open with, each with or without its period.
+SUPERVISOR_HONORIFICS = ('Dr', 'Prof', 'Professor', 'Sir')
+_HONORIFIC_RE = re.compile(rf"^(?:(?:{'|'.join(SUPERVISOR_HONORIFICS)})\.?\s+)+", re.IGNORECASE)
+#: The post-nominals a name may close with, each after an optional comma: a
+#: pattern whose periods are optional ("MD", "M.D.", "Ph.D", "PharmD").
+SUPERVISOR_POSTNOMINALS = (
+    r'M\.?D', r'Ph\.?\s?D', r'D\.?O', r'M\.?P\.?H', r'M\.?S\.?c?', r'Sc\.?D', r'D\.?Phil', r'R\.?N',
+    r'Pharm\.?\s?D', 'BCCCP', 'BCPS', r'F\.?C\.?C\.?M', r'F\.?A\.?C\.?[A-Z]{1,3}', 'FRCP[A-Z]?', 'MBBS',
+    'MBChB', r'M\.?B\.?A', r'Psy\.?D', r'D\.?V\.?M', r'M\.?S\.?W', 'Jr', 'Sr', 'II', 'III', 'IV')
+_POSTNOMINALS_RE = re.compile(rf"(?:,?\s*(?:{'|'.join(SUPERVISOR_POSTNOMINALS)})\.?)+\s*$")
+#: The lower-case particles a name may hold ("van", "de la").
+SUPERVISOR_NAME_PARTICLES = ('de', 'da', 'del', 'della', 'di', 'du', 'van', 'von', 'der', 'den',
+                             'la', 'le', 'al', 'el', 'bin', 'ben', 'y')
+#: One word of a name: a capitalised word (hyphenated parts each capitalised),
+#: an initial or a run of initials, or a particle.
+_NAME_TOKEN_RE = re.compile(
+    r"^(?:[A-Z][a-z'’]+(?:-[A-Z][a-z'’]+)*|[A-Z]\.?|(?:[A-Z]\.){1,3}(?:[A-Z][a-z'’]+)?|"
+    rf"(?:{'|'.join(SUPERVISOR_NAME_PARTICLES)}))$")
+#: How many words one person's name has, honorifics and post-nominals aside.
+SUPERVISOR_NAME_MIN_WORDS = 2
+SUPERVISOR_NAME_MAX_WORDS = 5
+
+
+def supervisor_name(value: str) -> str:
+    """The name in `value` when the whole of it is one person's, else '':
+    optional honorifics (`SUPERVISOR_HONORIFICS`), then 2-5 name words
+    (`_NAME_TOKEN_RE`), at least one of them more than an initial or an
+    acronym, then optional post-nominals (`SUPERVISOR_POSTNOMINALS`). A
+    second name, an "and", an institution or any other word is not one
+    person."""
+    core = _POSTNOMINALS_RE.sub('', _HONORIFIC_RE.sub('', value.strip())).strip(' ,.')
+    words = core.split()
+    if not SUPERVISOR_NAME_MIN_WORDS <= len(words) <= SUPERVISOR_NAME_MAX_WORDS:
+        return ''
+    if not all(_NAME_TOKEN_RE.match(word) for word in words):
+        return ''
+    if not any(len(word.strip('.')) > 1 and not word.isupper() for word in words):
+        return ''
+    return core
+
+
+def _supervisor_values(text: str) -> list[str]:
+    """The value of every singular supervisor label in `text`, in order: the
+    rest of the label's cell (to the next `_CELL_SEPARATOR_RE`), or, for a
+    label opened by "(", the text up to its ")" ('' when none closes it),
+    whitespace collapsed and its end trimmed (`_SUPERVISOR_VALUE_TRAILING`)."""
+    values = []
+    for match in _SUPERVISOR_LABEL_RE.finditer(text):
+        rest = text[match.end():]
+        if match.group('open'):
+            close = rest.find(')')
+            value = rest[:close] if close >= 0 else ''
+        else:
+            end = _CELL_SEPARATOR_RE.search(rest)
+            value = rest[:end.start()] if end else rest
+        values.append(' '.join(value.split()).rstrip(_SUPERVISOR_VALUE_TRAILING))
+    return values
+
+
+def labelled_supervisor(text: str) -> str:
+    """The supervisor `text` names under a singular label
+    (`_SUPERVISOR_LABEL_RE`), as the CV writes it (`_supervisor_values`), or
+    '' unless that is the one person the text labels: every label's value is
+    one person's name (`supervisor_name`), all of them the same person, and
+    no plural label lists several (`_PLURAL_SUPERVISOR_LABEL_RE`)."""
+    if _PLURAL_SUPERVISOR_LABEL_RE.search(text):
+        return ''
+    values = _supervisor_values(text)
+    names = {supervisor_name(value).casefold() for value in values}
+    if len(names) != 1 or '' in names:
+        return ''
+    return values[0]

@@ -2767,7 +2767,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('researcher_profiles', frozenset({'S0'}), lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []) + self._a_researcher_profiles)),  # S0 section for ORCID, etc.; plus an A entry's ORCID (#817)
             ('education', frozenset({'B1'}), lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
             ('other_education', frozenset({'B2'}), lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
-            ('postdoc_training', frozenset({'C', 'C1', 'C2', 'C3'}), lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
+            ('postdoc_training', frozenset({'C', 'C1', 'C2', 'C3'}), lambda: self._fill_postdoc_training(entries_by_code, all_entries, cv_owner)),
             ('positions', frozenset({'D1', 'D2', 'D3'}), lambda: self._fill_positions(entries_by_code)),
             ('licensure', frozenset({'F1'}), lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
             ('board_certification', frozenset({'F2'}), lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification

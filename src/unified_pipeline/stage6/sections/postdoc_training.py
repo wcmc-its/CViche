@@ -47,14 +47,21 @@ boundary, so tabs become ", " rather than rendering as a run of whitespace.
 which is common once the tab join has run.
 A stage-4 `role` ("Chief Resident") trails the type cell the same way: the template has
 no role column, and the field was dropped from the row until #946.
+The supervisor the entry's own line labels ("Supervisor: Dr. A. Example") trails
+the type cell last, as "; Mentor: <name as the CV writes it>" whatever the label
+(owner ruling 2026-11-06, #1245): `supplementary.training_mentor` reads it, and
+`_with_mentor` leaves out the owner's own name and a name a cell already prints.
+The owner is per-run state, so it is passed in from `generate()`, never kept here.
 """
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ..formatting import format_date_range
 from ..normalization import _get_cleaned_institution_name
+from ..parsing.text import supervisor_name
 from ..resolution import (
     _get_institution_location,
     _location_already_in_institution,
@@ -66,6 +73,7 @@ from ..supplementary import (
     POSTDOC_FIELD_OF_STUDY_FIELDS,
     POSTDOC_TYPE_FIELDS,
     first_field_value,
+    training_mentor,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +110,16 @@ DEFAULT_TRAINING_TYPES = {
 }
 
 INSTITUTION_ENRICHMENT_REASON = "Institution Enrichment"
+
+# What the type cell calls a position's supervisor, whichever label the CV
+# gives it (Mentor, Supervisor, Advisor, Preceptor, Fellowship Director: owner
+# ruling 2026-11-06, #1245), and what separates it from the type, field and
+# role before it.
+MENTOR_LABEL = 'Mentor'
+MENTOR_SEPARATOR = '; '
+# A word of a name as `_with_mentor` compares names: two letters or more, so
+# an initial or a period never decides it.
+_NAME_WORD_RE = re.compile(r'[a-z]{2,}')
 
 
 @dataclass(frozen=True)
@@ -141,10 +159,45 @@ def _join_if_list(value: Any) -> str:
     return str(value or '')
 
 
+def _name_words(value: object) -> set[str]:
+    """The lowercased words of `value` (`_NAME_WORD_RE`); none for a value
+    that is not a string."""
+    return set(_NAME_WORD_RE.findall(value.lower())) if isinstance(value, str) else set()
+
+
+def _names_the_owner(name: str, cv_owner: Mapping[str, object] | None) -> bool:
+    """Whether `name` is the CV owner's: it holds every word of stage 4's
+    `last_name` and, when a `first_name` is known, a word of that. A line
+    labelling the owner names no supervisor. Preventive: no farm line does."""
+    owner = cv_owner or {}
+    last, first = _name_words(owner.get('last_name')), _name_words(owner.get('first_name'))
+    words = _name_words(name)
+    return bool(last) and last <= words and (not first or bool(first & words))
+
+
+def _with_mentor(training_type: str, entry: Mapping[str, Any], cells: Sequence[object],
+                 cv_owner: Mapping[str, object] | None) -> str:
+    """The type cell with the supervisor the entry's line labels
+    (`training_mentor`) after it, as `MENTOR_LABEL`: "Fellowship, Zymology;
+    Mentor: Dr. A. Example". Not when the name is the owner's
+    (`_names_the_owner`), nor when the row's `cells` already hold every word
+    of it (a stage-4 role that is the label line)."""
+    mentor = training_mentor(entry)
+    if not mentor:
+        return training_type
+    name = supervisor_name(mentor)
+    printed = set().union(*(_name_words(cell) for cell in cells))
+    if _names_the_owner(name, cv_owner) or _name_words(name) <= printed:
+        return training_type
+    labelled = f"{MENTOR_LABEL}: {mentor}"
+    return f"{training_type}{MENTOR_SEPARATOR}{labelled}" if training_type else labelled
+
+
 def _normalize_training_entry(
     entry: Mapping[str, Any],
     taxonomy_code: str,
     all_entries: Sequence[Mapping[str, Any]] | None = None,
+    cv_owner: Mapping[str, object] | None = None,
 ) -> PostdocTrainingRecord:
     """Resolve one raw stage-4 training dict into a typed record.
 
@@ -160,7 +213,7 @@ def _normalize_training_entry(
 
     `taxonomy_code` is passed in rather than read off the entry because
     `entries_by_code`'s key is the authoritative routing code -- see
-    `_resolve_postdoc_training`.
+    `_resolve_postdoc_training`. `cv_owner` is the run's, for `_with_mentor`.
     """
     fields = entry.get('extracted_fields') or {}
 
@@ -206,6 +259,8 @@ def _normalize_training_entry(
     location, location_is_enriched = _get_institution_location(entry)
     if _location_already_in_institution(location, institution):
         location = ''
+    # The labelled supervisor goes last, once every cell it is checked against is known.
+    training_type = _with_mentor(training_type, entry, (training_type, institution, location), cv_owner)
     start_date, end_date = (fields.get(name, '') for name in POSTDOC_DATE_FIELDS)
 
     return PostdocTrainingRecord(
@@ -224,6 +279,7 @@ def _normalize_training_entry(
 def _resolve_postdoc_training(
     entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
     all_entries: Sequence[Mapping[str, Any]] | None = None,
+    cv_owner: Mapping[str, object] | None = None,
 ) -> tuple[PostdocTrainingRecord, ...]:
     """Decide the whole of section C without touching a document.
 
@@ -234,7 +290,7 @@ def _resolve_postdoc_training(
     """
     return tuple(
         _normalize_training_entry(
-            entry, entry.get('taxonomy_code', GENERIC_TRAINING_CODE), all_entries)
+            entry, entry.get('taxonomy_code', GENERIC_TRAINING_CODE), all_entries, cv_owner)
         for entry in sort_entries_reverse_chronological(
             _gather_postdoc_entries(entries_by_code))
     )
@@ -303,6 +359,7 @@ class PostdocTrainingSection:
         self,
         entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
         all_entries: Sequence[Mapping[str, Any]] | None = None,
+        cv_owner: Mapping[str, object] | None = None,
     ) -> None:
         """Fill postdoctoral training table with track changes for enriched content.
 
@@ -342,7 +399,7 @@ class PostdocTrainingSection:
 
         for entry in sort_entries_reverse_chronological(training_entries):
             record = _normalize_training_entry(
-                entry, entry.get('taxonomy_code', GENERIC_TRAINING_CODE), all_entries)
+                entry, entry.get('taxonomy_code', GENERIC_TRAINING_CODE), all_entries, cv_owner)
             # Its comment hook records the row against `source_entry` (#534, #1205).
             self._add_table_row_with_mixed_content(
                 table,

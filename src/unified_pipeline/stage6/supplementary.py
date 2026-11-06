@@ -126,7 +126,7 @@ from unified_pipeline.core.template_boilerplate import (
 )
 
 from .dedup import _is_sibling_of
-from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
+from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments, is_split_record
 from .formatting import (
     PRESENTATION_DATE_FIELDS,
     PRESENTATION_END_DATE_FIELD,
@@ -157,6 +157,7 @@ from .parsing.text import (
     DATE_LED_MIN_RECORDS,
     _line_carries_record_date,
     _opens_dated_record,
+    labelled_supervisor,
 )
 from .pii_pass import PII_WITHHELD_KEY
 from .render_check import (
@@ -209,8 +210,9 @@ HONOR_CODES = frozenset({'H'})
 #: this one.
 MENTEE_CODES = frozenset({'N3A', 'N3B'})
 #: Academic degrees: the thesis or dissertation, a minor, a research topic.
-#: The degree's cell already prints its field, honors and advisor, so a
-#: fragment mostly restating them is not offered (`_DEGREE_CELL_FIELDS`). The
+#: The degree's cell already prints its field, honors, thesis title and
+#: advisor, so a fragment mostly restating them is not offered
+#: (`_DEGREE_CELL_FIELDS`). The
 #: education section writes each B1 entry as a row of
 #: its four-column table, so a sub-point is a deleted row under the degree's
 #: row. Only a row the education writer recorded for that entry can anchor
@@ -299,7 +301,8 @@ PRESENTATION_CODES = frozenset({'R'})
 #: study and a role folded in, the institution and its location, the dates),
 #: so a sub-point is a deleted row under the position's row. The row prints
 #: stage 4's off-schema type, field of study and location when the schema's
-#: (and stage 5b's) are empty (`_training_row_values`), which a line mostly
+#: (and stage 5b's) are empty, and the supervisor its line labels
+#: (`_training_row_values`, `training_mentor`), which a line mostly
 #: restating is not offered for. Only the one row
 #: the writer recorded for that entry can anchor it (`_own_rows`, the
 #: row-receipt ledger, taken with no word test): two residencies at one
@@ -653,14 +656,15 @@ _MENTEE_NAME_FIELDS = ('name', 'mentee_name')
 
 #: The fields the education writer prints in a degree's cell that
 #: `_RENDERED_FIELDS` cannot list, as its probe marks only schema fields:
-#: `major` or `field_of_study`, stage 4's off-schema `honors` (#817), and the
-#: advisor under its three off-schema names (#1245, `ADVISOR_LABELS`). A
+#: `major` or `field_of_study`, stage 4's off-schema `honors` (#817), the
+#: advisor under its three off-schema names (#1245, `ADVISOR_LABELS`), and the
+#: thesis title under its off-schema name (#1245, `THESIS_TITLE_FIELDS`). A
 #: fragment restating them is the degree's row reformatted
 #: (`_holds_field_values`). Literals, as `_MENTEE_NAME_FIELDS` are: importing
 #: `sections.education` here imports `sections.positions`, which imports this
 #: module.
 _DEGREE_CELL_FIELDS = ('major', 'field_of_study', 'honors', 'major_professor', 'mentor',
-                       'thesis_advisor')
+                       'thesis_advisor', 'dissertation_title')
 #: The fields the leadership writer reads a role's role cell and its
 #: institution cell from, each the first that holds text: the schema's, then
 #: stage 4's off-schema names. The writer reads them from here, so the row
@@ -1130,14 +1134,36 @@ def first_field_value(fields: Mapping, names: Sequence[str]) -> object:
     return next((fields[name] for name in names if fields.get(name)), None)
 
 
-def _training_row_values(fields: Mapping) -> list[object]:
+def training_mentor(entry: Mapping) -> str:
+    """The supervisor a training position's line labels
+    (`labelled_supervisor`), as the CV writes it, which its row prints in the
+    type cell (#1245), or '' when the label may be another position's: the
+    entry is not one record -- one fanned out of a list (`is_split_record`;
+    the last keeps the whole line), or one stage 4 listed positions under
+    (`_lists_records`) -- or its line holds a year outside the span the row
+    prints (`_dates_another_position`). The writer reads it from here, and
+    `_value_tokens` counts it."""
+    fields = entry.get('extracted_fields')
+    fields = fields if isinstance(fields, Mapping) else {}
+    text = str(entry.get('text') or '')
+    if (is_split_record(entry) or _lists_records(fields, _POSTDOC_RECORD_FIELDS)
+            or _dates_another_position(text, fields)):
+        return ''
+    return labelled_supervisor(text)
+
+
+def _training_row_values(entry: Mapping, fields: Mapping) -> list[object]:
     """The values a training position's row prints: of each aliased cell
     only the alias it prints (`first_field_value`), so a fragment restating
     one it does not print is not taken for the row, then the fields it
-    prints whatever the rest hold (`_POSTDOC_PLAIN_FIELDS`)."""
+    prints whatever the rest hold (`_POSTDOC_PLAIN_FIELDS`), and the
+    supervisor its line labels (`training_mentor`). One the row leaves out
+    (the owner's name, or a name a cell already prints) is counted too,
+    which errs toward offering less."""
     return [*(first_field_value(fields, names)
               for names in (POSTDOC_TYPE_FIELDS, POSTDOC_FIELD_OF_STUDY_FIELDS)),
-            *(fields.get(name) for name in _POSTDOC_PLAIN_FIELDS)]
+            *(fields.get(name) for name in _POSTDOC_PLAIN_FIELDS),
+            training_mentor(entry)]
 
 
 def membership_cell_value(fields: Mapping, names: Sequence[str]) -> str:
@@ -1239,7 +1265,7 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
     elif code in PRESENTATION_CODES:
         names = (*names, *_PRESENTATION_ROW_FIELDS)
     if code in POSTDOCTORAL_CODES:
-        values = _training_row_values(fields)
+        values = _training_row_values(entry, fields)
     elif code in MEMBERSHIP_CODES:
         values = _membership_row_values(fields)
     elif code in CLINICAL_LEADERSHIP_CODES:

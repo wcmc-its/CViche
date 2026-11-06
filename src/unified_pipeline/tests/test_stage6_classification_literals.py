@@ -21,6 +21,7 @@ Run with:
 """
 
 import dataclasses
+import json
 import sys
 from pathlib import Path
 
@@ -1327,3 +1328,111 @@ def test_normalize_role_stands_alone_when_the_tab_join_empties_the_type():
     assert _normalize_training_entry(
         {"extracted_fields": {"training_type": "\t", "role": "Chief Resident"}},
         "C2").training_type == "Chief Resident"
+
+
+
+# ---------------------------------------------------------------------------
+# 3c. #1245 (owner ruling 2026-11-06 Q2): the supervisor a training line labels
+#
+# "; Mentor: <the labelled value as the CV writes it>" trails the type cell,
+# after its field and role, whatever the CV's label. Which lines name one is
+# `parsing.text.labelled_supervisor` (tested there) and which entries are one
+# record dated by their row is `supplementary.training_mentor` (tested there);
+# the row's own guards -- the owner's name, a name a cell already prints -- are
+# pinned here. Invented names and text only.
+
+_SUPERVISED = ("Example Critical Care Fellowship\tKestrel Institute\t2010-2013\t"
+               "Supervisor: Dr. Orla Vantreece, PharmD")
+_SUPERVISED_FIELDS = {"training_type": "Fellowship", "specialty": "Zymology",
+                      "institution": "Kestrel Institute", "start_date": "2010-07", "end_date": "2013-06"}
+
+
+def _supervised(text=_SUPERVISED, **fields):
+    return {"taxonomy_code": "C", "text": text, "extracted_fields": {**_SUPERVISED_FIELDS, **fields}}
+
+
+def test_a_labelled_supervisor_trails_the_type_cell_after_its_field_and_role():
+    """End to end through the Word table: the label word is always 'Mentor';
+    the institution and dates cells are what they were without the label."""
+    (row,) = _render_postdoc({"C": [_supervised(role="Chief Fellow")]})
+    (unlabelled,) = _render_postdoc({"C": [_supervised(text="Example Critical Care Fellowship",
+                                                       role="Chief Fellow")]})
+    assert row[0] == "Fellowship, Zymology, Chief Fellow; Mentor: Dr. Orla Vantreece, PharmD"
+    assert unlabelled[0] == "Fellowship, Zymology, Chief Fellow"
+    assert row[1:] == unlabelled[1:]
+
+
+@pytest.mark.parametrize("owner, printed", [
+    # The owner's own name: every word of the last name and a first-name word.
+    ({"first_name": "Orla", "last_name": "Vantreece"}, False),
+    ({"first_name": "Orla Q.", "last_name": "Vantreece"}, False),
+    ({"last_name": "Vantreece"}, False),
+    # An initial never decides: a first name of initials alone is no first name.
+    ({"first_name": "O.", "last_name": "Vantreece"}, False),
+    # Someone else: another first name, another last name, or no owner known.
+    ({"first_name": "Ivo", "last_name": "Vantreece"}, True),
+    ({"first_name": "Orla", "last_name": "Halberd"}, True),
+    ({"first_name": "Orla", "last_name": "Vantreece-Halberd"}, True),
+    ({"first_name": None, "last_name": None}, True),
+    ({"first_name": 7, "last_name": ["Vantreece"]}, True),
+    ({}, True),
+    (None, True),
+])
+def test_a_supervisor_named_as_the_owner_is_not_printed(owner, printed):
+    record = _normalize_training_entry(_supervised(), "C", None, owner)
+    assert record.training_type == ("Fellowship, Zymology; Mentor: Dr. Orla Vantreece, PharmD"
+                                    if printed else "Fellowship, Zymology")
+
+
+@pytest.mark.parametrize("fields", [
+    # A stage-4 role that is the label line, or an institution holding every
+    # word of the name: the row already prints it.
+    {"role": "Supervisor: Dr. Orla Vantreece"},
+    {"specialty": "Zymology with O. Vantreece Orla"},
+    {"institution": "ORLA VANTREECE ZYMOLOGY CENTER"},
+    # The institution cell's location (stage 4's, as stage 5b found none).
+    {"location": "Orla Vantreece Pavilion, Springfield"},
+])
+def test_a_supervisor_a_cell_already_prints_is_not_repeated(fields):
+    record = _normalize_training_entry(_supervised(**fields), "C")
+    assert "Mentor:" not in record.training_type
+
+
+def test_a_supervisor_a_cell_holds_only_part_of_is_printed():
+    record = _normalize_training_entry(_supervised(institution="Vantreece Zymology Center"), "C")
+    assert record.training_type.endswith("; Mentor: Dr. Orla Vantreece, PharmD")
+
+
+def test_the_supervisor_stands_alone_when_the_tab_join_empties_the_type():
+    """No leading separator when the type cell is otherwise empty."""
+    record = _normalize_training_entry(_supervised(training_type="\t", specialty=""), "C2")
+    assert record.training_type == "Mentor: Dr. Orla Vantreece, PharmD"
+
+
+def test_resolve_postdoc_training_hands_the_owner_to_every_row():
+    labelled = _supervised()
+    rows = _resolve_postdoc_training({"C": [labelled]}, None, {"first_name": "Orla", "last_name": "Vantreece"})
+    assert [r.training_type for r in rows] == ["Fellowship, Zymology"]
+    assert [r.training_type for r in _resolve_postdoc_training({"C": [labelled]})] == [
+        "Fellowship, Zymology; Mentor: Dr. Orla Vantreece, PharmD"]
+
+
+def test_the_run_owner_reaches_the_postdoctoral_rows_through_generate(tmp_path):
+    """Wire test through the stage-6 entry point: `generate()` hands the run's
+    `cv_owner` to the Postdoctoral Training writer, so a line labelling the
+    owner prints no Mentor while another person's does."""
+    other = _supervised(text="Example Pharmacy Residency\tNorvale Hospital\t2007-2008\t"
+                             "Preceptor: Ivo Halberd, PharmD",
+                        training_type="Example Pharmacy Residency", specialty="",
+                        institution="Norvale Hospital", start_date="2007-07", end_date="2008-06")
+    own = _supervised(text="Example Critical Care Fellowship\tKestrel Institute\t2010-2013\t"
+                           "Mentor: Dr. Wren Quillfeather")
+    source, target = tmp_path / "in.json", tmp_path / "out.docx"
+    source.write_text(json.dumps({
+        "document_uid": "TESTAA", "cv_owner": {"first_name": "Wren", "last_name": "Quillfeather"},
+        "entries": [dict(other, element_idx_start=1), dict(own, element_idx_start=2)]}))
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+    first_cells = [row.cells[0].text for table in Document(str(target)).tables for row in table.rows]
+    assert "Example Pharmacy Residency; Mentor: Ivo Halberd, PharmD" in first_cells
+    assert "Fellowship, Zymology" in first_cells
+    assert not any("Quillfeather" in cell for cell in first_cells if "Mentor:" in cell)
