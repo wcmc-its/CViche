@@ -79,7 +79,10 @@ from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     _contact_block_appointments,
     _employers_match,
     _institution_from_raw_text,
+    _is_one_appointment,
     _position_row_cells,
+    _separated_in_source,
+    _source_order_keys,
     _tab_joined_child_fragments,
 )
 from unified_pipeline.stage6.supplementary import SubpointPlacement  # noqa: E402
@@ -1008,6 +1011,147 @@ def test_merge_still_joins_a_sub_position_that_inherited_its_employer():
     assert merged[0]["extracted_fields"]["title"] == "Attending Physician"
     assert merged[0]["extracted_fields"]["start_date"] == "2002-07"
     assert merged[0]["extracted_fields"]["end_date"] == "2006-12"
+
+
+# --- (e2) no merge across the source: #2031 -----------------------------------
+# Invented rows in the shape of the issue's reproduction: dated employer rows
+# under one heading, a title-only row at the end of it, and a dated row under
+# the next heading.
+
+CONSULTING_HEADING = ["CONSULTANT"]
+LEGAL_HEADING = ["LEGAL EXPERIENCE"]
+
+
+def _dates_of(entry):
+    fields = entry.get("extracted_fields") or {}
+    return fields.get("start_date") or "", fields.get("end_date") or ""
+
+
+def test_a_title_only_row_takes_no_dates_from_under_the_next_heading():
+    """The issue's second variant. The title-only row inherits the adviser
+    row's company, which is the carry's rule; rule 1 then used to merge it
+    with the dated row under the next heading, giving it that row's dates and
+    dropping the row. Every row now survives, and the title-only row stays
+    date-less."""
+    first = _position_entry(899, "", "Alpha Corporation", CONSULTING_HEADING, "2031", "2033")
+    second = _position_entry(901, "", "Beta", CONSULTING_HEADING, "2035", "2036")
+    adviser = _position_entry(904, "Adviser", "Gamma Pharma", CONSULTING_HEADING, "2037", "2039")
+    projects = _position_entry(905, "Several one-time projects", "", CONSULTING_HEADING)
+    legal = _position_entry(909, "", "Delta & Delta", LEGAL_HEADING, "2025", "2027")
+    entries = [first, second, adviser, projects, legal]
+    WCMTemplateGenerator._propagate_institution_to_subentries(entries)
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments(entries)
+
+    assert [e["element_idx_start"] for e in merged] == [899, 901, 904, 905, 909]
+    assert _dates_of(projects) == ("", "")
+    assert _dates_of(legal) == ("2025", "2027")
+
+
+def test_the_same_employer_under_two_headings_is_not_one_appointment():
+    """The rules alone would admit this pair (both name one employer); the
+    source boundary refuses it, as it refuses the institution carry."""
+    dated = _position_entry(1, "", "Quexley College", CONSULTING_HEADING, "2010", "2012")
+    titled = _position_entry(2, "Lecturer", "Quexley College", LEGAL_HEADING)
+    assert not _is_one_appointment(dated, titled)
+    titled["hierarchy"] = CONSULTING_HEADING
+    assert _is_one_appointment(dated, titled)
+
+
+def _consulting_rows(with_interleaved):
+    """D3 rows as the issue's first variant has them, and optionally the three
+    advisory-board rows coded elsewhere that sit between the last dated row and
+    the title-only one in the source."""
+    d3 = [_position_entry(899, "", "Alpha Corporation", CONSULTING_HEADING, "2031", "2033"),
+          _position_entry(901, "", "Beta", CONSULTING_HEADING, "2035", "2036"),
+          _position_entry(905, "Several one-time projects", "", CONSULTING_HEADING)]
+    boards = [_position_entry(idx, "", f"Board {idx}", CONSULTING_HEADING, "2037", "2039")
+              for idx in (902, 903, 904)]
+    return {"D3": d3, "Q2": boards} if with_interleaved else {"D3": d3}
+
+
+def test_a_dated_row_is_not_absorbed_by_a_row_other_records_sit_between():
+    """The issue's first variant. Rule 2 read the dated "Beta" row as the
+    header of the title-only row because the two are adjacent in the D3 list,
+    though three rows coded elsewhere, each naming its own board, sit between
+    them in the source; it gave
+    the title-only row Beta's dates and dropped Beta's row."""
+    rows = _fill_all_three(_consulting_rows(with_interleaved=True))["D3"]
+
+    assert len(rows) == 3
+    dates_by_title = {title: dates for title, _institution, dates in rows}
+    assert dates_by_title["Several one-time projects"] == ""
+    assert any(institution.startswith("Beta") and dates
+               for _title, institution, dates in rows)
+
+
+def test_the_same_rows_with_nothing_between_them_still_merge():
+    """Positive control for the test above: the separation is what refuses
+    the merge, not some other property of the rows."""
+    rows = _fill_all_three(_consulting_rows(with_interleaved=False))["D3"]
+
+    assert len(rows) == 2
+    dates_by_title = {title: dates for title, _institution, dates in rows}
+    assert dates_by_title["Several one-time projects"] != ""
+
+
+def test_a_header_with_consecutive_roles_merges_them_all():
+    """Rule 2 reads separation row to row, not header to each role: the
+    first role names the header's employer itself, so it sits between the
+    header and the second role, and that is not a separation."""
+    header = _position_entry(10, "", "Quexley College", CONSULTING_HEADING, "2001", "2009")
+    roles = [_position_entry(11, "Lecturer", "Quexley College", CONSULTING_HEADING),
+             _position_entry(12, "Senior Lecturer", "", CONSULTING_HEADING)]
+    entries = [header, *roles]
+    WCMTemplateGenerator._propagate_institution_to_subentries(entries)
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments(
+        entries, source_keys=_source_order_keys({"D2": entries}))
+
+    assert merged == roles
+    assert all(_dates_of(role) == ("2001", "2009") for role in roles)
+
+
+def test_a_record_naming_no_employer_does_not_separate():
+    """A stray heading line between an employer row and its roles (the #156
+    fixture's "EXPERIENCE") is not a nearer parent, so the roles still merge."""
+    header = _position_entry(7, "", "Quexley College", CONSULTING_HEADING, "2013", "present")
+    stray = _position_entry(8, "", "", CONSULTING_HEADING)
+    role = _position_entry(9, "Lecturer", "", CONSULTING_HEADING)
+    keys = _source_order_keys({"D2": [header, role], "T": [stray]})
+    assert not _separated_in_source(header, role, keys)
+
+
+def test_a_record_that_inherited_its_employer_does_not_separate():
+    """A sibling role whose employer was carried down from the header names no
+    employer of its own, so it is not a nearer parent between the two."""
+    header = _position_entry(7, "", "Quexley College", CONSULTING_HEADING, "2013", "present")
+    sibling = _position_entry(8, "Tutor", "Quexley College", CONSULTING_HEADING)
+    sibling["institution_propagated_from"] = 7
+    role = _position_entry(9, "Lecturer", "", CONSULTING_HEADING)
+    keys = _source_order_keys({"D2": [header, role], "Q2": [sibling]})
+    assert not _separated_in_source(header, role, keys)
+
+
+def test_a_non_string_employer_on_another_code_separates_and_does_not_raise():
+    """Every code's records are read, and a G record can carry a list of
+    organizations; the keys must not assume a string."""
+    header = _position_entry(1, "", "Quexley College", CONSULTING_HEADING, "2001", "2009")
+    role = _position_entry(3, "Lecturer", "", CONSULTING_HEADING)
+    listed = {"element_idx_start": 2, "taxonomy_code": "G",
+              "extracted_fields": {"organization": ["Norvale Society", "Quexley Board"]}}
+    keys = _source_order_keys({"D2": [header, role], "G": [listed]})
+    assert _separated_in_source(header, role, keys)
+
+
+def test_an_unknown_element_index_never_separates():
+    """No index, no place in the order: nothing can be shown to sit between."""
+    known = _position_entry(5, "", "Quexley College", CONSULTING_HEADING, "2001", "2009")
+    unknown = _position_entry(None, "Lecturer", "", CONSULTING_HEADING)
+    other = _position_entry(6, "", "Norvale", CONSULTING_HEADING)
+    keys = _source_order_keys({"D2": [known, unknown], "Q2": [other]})
+    assert not _separated_in_source(known, unknown, keys)
+    assert _separated_in_source(known, _position_entry(7, "", "", CONSULTING_HEADING), keys)
 
 
 # --- (f) no all-blank row, and no populated row dropped ----------------------
