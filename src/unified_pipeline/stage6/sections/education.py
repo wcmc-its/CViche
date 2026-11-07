@@ -26,8 +26,8 @@ its range is the Year Awarded fallback before any raw-text year (#1700).
 The degree cell is "Degree, field of study" as the template asks: `major` /
 `field_of_study`, then stage 4's `discipline`, each only when the text so far
 does not already hold it (#1187). Stage 4's off-schema `honors` follows in
-parentheses, under the same rule (#817), and the degree's advisor after
-that, labelled (`ADVISOR_LABELS`, #1245).
+parentheses, under the same rule (#817), then the degree's thesis title and its
+advisor, each labelled (`THESIS_TITLE_FIELDS`, `ADVISOR_LABELS`, #1245).
 
 `_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_PATTERN` vocabulary are
 here because a year in the "Year Awarded" column asserts the degree was
@@ -150,6 +150,44 @@ def _with_honors(degree: str, fields: Mapping) -> str:
     return f"{degree} ({honors})" if degree else honors
 
 
+# What separates a labelled segment of the degree cell (the thesis title, the
+# advisor) from the text before it.
+LABELLED_SEGMENT_SEPARATOR = '; '
+
+# The degree's thesis or dissertation title, under the B1 schema's
+# `thesis_title` or stage 4's off-schema `dissertation_title` (CMTQDR 10; owner
+# ruling 2026-11-06, #1245), labelled `THESIS_LABEL` whichever key holds it. No
+# column read either. The first key with a usable title wins. B1's `title` is
+# never read: the farm's two hold a mentee's thesis citation coded B1.
+THESIS_TITLE_FIELDS = ('thesis_title', 'dissertation_title')
+THESIS_LABEL = 'Thesis'
+# What stage 4 writes for no title (compared stripped and casefolded): one
+# farm record's `thesis_title` is the string 'null'.
+_NO_THESIS_TITLE = frozenset({'', 'null', 'none', 'n/a', 'na'})
+
+
+def _thesis_title(fields: Mapping) -> str:
+    """The first of `THESIS_TITLE_FIELDS` that holds a usable title,
+    stripped: a string other than `_NO_THESIS_TITLE`'s. '' when none does."""
+    for key in THESIS_TITLE_FIELDS:
+        value = fields.get(key)
+        title = value.strip() if isinstance(value, str) else ''
+        if title.casefold() not in _NO_THESIS_TITLE:
+            return title
+    return ''
+
+
+def _with_thesis(degree: str, fields: Mapping) -> str:
+    """The degree cell with the degree's thesis title after it, labelled
+    (`THESIS_LABEL`), before any advisor: "PhD, Zymology; Thesis: On Example
+    Ferments". Never repeated when the cell already holds the title."""
+    title = _thesis_title(fields)
+    if not title or _already_in(title, degree):
+        return degree
+    thesis = f"{THESIS_LABEL}: {title}"
+    return f"{degree}{LABELLED_SEGMENT_SEPARATOR}{thesis}" if degree else thesis
+
+
 # The degree's advisor, under the B1 schema's `advisor` or one of the three
 # off-schema names stage 4 also gives it, each with the label the CV's own
 # line uses ("Major professor: ...", X6 RINASX 15 and EQADVR 15; "Mentor:
@@ -161,7 +199,6 @@ ADVISOR_LABELS: tuple[tuple[str, str], ...] = (
     ('mentor', 'Mentor'),
     ('thesis_advisor', 'Thesis advisor'),
 )
-ADVISOR_SEPARATOR = '; '
 
 
 def _with_advisor(degree: str, fields: Mapping) -> str:
@@ -176,7 +213,7 @@ def _with_advisor(degree: str, fields: Mapping) -> str:
         if _already_in(name, degree):
             return degree
         advisor = f"{label}: {name}"
-        return f"{degree}{ADVISOR_SEPARATOR}{advisor}" if degree else advisor
+        return f"{degree}{LABELLED_SEGMENT_SEPARATOR}{advisor}" if degree else advisor
     return degree
 
 
@@ -364,7 +401,7 @@ class EducationSection:
 
             # After the skip test above: a discipline alone must not create a
             # row that was skipped before.
-            degree = _with_advisor(_with_honors(_with_discipline(degree, fields), fields), fields)
+            degree = _with_advisor(_with_thesis(_with_honors(_with_discipline(degree, fields), fields), fields), fields)
 
             # Location from enrichment
             location, location_is_enriched = _get_institution_location(entry)

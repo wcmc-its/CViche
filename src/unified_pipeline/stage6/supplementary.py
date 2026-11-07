@@ -126,7 +126,13 @@ from unified_pipeline.core.template_boilerplate import (
 )
 
 from .dedup import _is_sibling_of
-from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments
+from .fan_out import (
+    _RENDERED_FIELDS,
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
+    _segments,
+    is_split_record,
+)
 from .formatting import (
     PRESENTATION_DATE_FIELDS,
     PRESENTATION_END_DATE_FIELD,
@@ -157,6 +163,7 @@ from .parsing.text import (
     DATE_LED_MIN_RECORDS,
     _line_carries_record_date,
     _opens_dated_record,
+    labelled_supervisor,
 )
 from .pii_pass import PII_WITHHELD_KEY
 from .render_check import (
@@ -209,8 +216,9 @@ HONOR_CODES = frozenset({'H'})
 #: this one.
 MENTEE_CODES = frozenset({'N3A', 'N3B'})
 #: Academic degrees: the thesis or dissertation, a minor, a research topic.
-#: The degree's cell already prints its field, honors and advisor, so a
-#: fragment mostly restating them is not offered (`_DEGREE_CELL_FIELDS`). The
+#: The degree's cell already prints its field, honors, thesis title and
+#: advisor, so a fragment mostly restating them is not offered
+#: (`_DEGREE_CELL_FIELDS`). The
 #: education section writes each B1 entry as a row of
 #: its four-column table, so a sub-point is a deleted row under the degree's
 #: row. Only a row the education writer recorded for that entry can anchor
@@ -299,13 +307,16 @@ PRESENTATION_CODES = frozenset({'R'})
 #: study and a role folded in, the institution and its location, the dates),
 #: so a sub-point is a deleted row under the position's row. The row prints
 #: stage 4's off-schema type, field of study and location when the schema's
-#: (and stage 5b's) are empty (`_training_row_values`), which a line mostly
+#: (and stage 5b's) are empty, and the supervisor its line labels
+#: (`_training_row_values`, `training_mentor`), which a line mostly
 #: restating is not offered for. Only the one row
 #: the writer recorded for that entry can anchor it (`_own_rows`, the
 #: row-receipt ledger, taken with no word test): two residencies at one
 #: hospital, or a residency and the combined residency-and-fellowship row
 #: above it, share their rows' words. The last of stage 4's records offers
-#: only its own segment of the line, and a line holding several dated
+#: only its own segment of the line; on a line whose parts do not pair with
+#: the records, each record offers the undated parts after the part naming
+#: it alone (`_record_leftover`). A line holding several dated
 #: records offers none, nor does an entry stage 4 listed positions under,
 #: nor a line holding a year outside the span its row prints
 #: (`_own_training_line`). The section is found by the
@@ -333,7 +344,9 @@ POSTDOCTORAL_CODES = frozenset({'C'})
 #: share their rows' words, and an entry the writer parses into several
 #: memberships, a row each, holds several records. A line holding another
 #: membership offers none (`_own_membership_line`): the last of stage 4's
-#: records offers only its own segment, and a line holding several dated
+#: records offers only its own segment (on a line whose parts do not pair
+#: with the records, each record the parts after the part naming it alone,
+#: `_record_leftover`), and a line holding several dated
 #: records, or naming another society, offers nothing, nor does an entry
 #: stage 4 listed memberships under. The entry's records the #221 recovery
 #: reads stay the recovery's, dated or not (`RECOVERY_RECORD_CODES`): dev
@@ -653,14 +666,15 @@ _MENTEE_NAME_FIELDS = ('name', 'mentee_name')
 
 #: The fields the education writer prints in a degree's cell that
 #: `_RENDERED_FIELDS` cannot list, as its probe marks only schema fields:
-#: `major` or `field_of_study`, stage 4's off-schema `honors` (#817), and the
-#: advisor under its three off-schema names (#1245, `ADVISOR_LABELS`). A
+#: `major` or `field_of_study`, stage 4's off-schema `honors` (#817), the
+#: advisor under its three off-schema names (#1245, `ADVISOR_LABELS`), and the
+#: thesis title under its off-schema name (#1245, `THESIS_TITLE_FIELDS`). A
 #: fragment restating them is the degree's row reformatted
 #: (`_holds_field_values`). Literals, as `_MENTEE_NAME_FIELDS` are: importing
 #: `sections.education` here imports `sections.positions`, which imports this
 #: module.
 _DEGREE_CELL_FIELDS = ('major', 'field_of_study', 'honors', 'major_professor', 'mentor',
-                       'thesis_advisor')
+                       'thesis_advisor', 'dissertation_title')
 #: The fields the leadership writer reads a role's role cell and its
 #: institution cell from, each the first that holds text: the schema's, then
 #: stage 4's off-schema names. The writer reads them from here, so the row
@@ -1130,14 +1144,36 @@ def first_field_value(fields: Mapping, names: Sequence[str]) -> object:
     return next((fields[name] for name in names if fields.get(name)), None)
 
 
-def _training_row_values(fields: Mapping) -> list[object]:
+def training_mentor(entry: Mapping) -> str:
+    """The supervisor a training position's line labels
+    (`labelled_supervisor`), as the CV writes it, which its row prints in the
+    type cell (#1245), or '' when the label may be another position's: the
+    entry is not one record -- one fanned out of a list (`is_split_record`;
+    the last keeps the whole line), or one stage 4 listed positions under
+    (`_lists_records`) -- or its line holds a year outside the span the row
+    prints (`_dates_another_position`). The writer reads it from here, and
+    `_value_tokens` counts it."""
+    fields = entry.get('extracted_fields')
+    fields = fields if isinstance(fields, Mapping) else {}
+    text = str(entry.get('text') or '')
+    if (is_split_record(entry) or _lists_records(fields, _POSTDOC_RECORD_FIELDS)
+            or _dates_another_position(text, fields)):
+        return ''
+    return labelled_supervisor(text)
+
+
+def _training_row_values(entry: Mapping, fields: Mapping) -> list[object]:
     """The values a training position's row prints: of each aliased cell
     only the alias it prints (`first_field_value`), so a fragment restating
     one it does not print is not taken for the row, then the fields it
-    prints whatever the rest hold (`_POSTDOC_PLAIN_FIELDS`)."""
+    prints whatever the rest hold (`_POSTDOC_PLAIN_FIELDS`), and the
+    supervisor its line labels (`training_mentor`). One the row leaves out
+    (the owner's name, or a name a cell already prints) is counted too,
+    which errs toward offering less."""
     return [*(first_field_value(fields, names)
               for names in (POSTDOC_TYPE_FIELDS, POSTDOC_FIELD_OF_STUDY_FIELDS)),
-            *(fields.get(name) for name in _POSTDOC_PLAIN_FIELDS)]
+            *(fields.get(name) for name in _POSTDOC_PLAIN_FIELDS),
+            training_mentor(entry)]
 
 
 def membership_cell_value(fields: Mapping, names: Sequence[str]) -> str:
@@ -1239,7 +1275,7 @@ def _value_tokens(entry: Mapping, code: str) -> set[str]:
     elif code in PRESENTATION_CODES:
         names = (*names, *_PRESENTATION_ROW_FIELDS)
     if code in POSTDOCTORAL_CODES:
-        values = _training_row_values(fields)
+        values = _training_row_values(entry, fields)
     elif code in MEMBERSHIP_CODES:
         values = _membership_row_values(fields)
     elif code in CLINICAL_LEADERSHIP_CODES:
@@ -1800,8 +1836,70 @@ def _dates_another_position(line: str, fields: Mapping) -> bool:
     return any(not first <= year <= last for year in years)
 
 
-def _own_training_line(entry: Mapping) -> str:
-    """The text a training position's prose is read from (`_own_record_line`),
+def _stage4_records_of(entry: Mapping,
+                       entries_by_code: Mapping[str, list[Mapping]]) -> list[Mapping] | None:
+    """Every record of the stage-4 records list `entry` is one of, in list
+    order, the last (`LAST_STAGE4_RECORD`, which keeps the line's whole
+    text) included, when that line's tab parts do not pair with them
+    (`_own_segment`); None otherwise, or when one of them is not among
+    `entries_by_code` (a row fan-out folded away, a record dedup dropped):
+    which part is whose cannot then be read."""
+    last = entry if LAST_STAGE4_RECORD in entry else next(
+        (other for group in entries_by_code.values() for other in group
+         if LAST_STAGE4_RECORD in other and FANNED_OUT_FROM in entry and _is_sibling_of(entry, other)),
+        None)
+    if last is None or _own_segment(last) is not None:
+        return None
+    count = last[LAST_STAGE4_RECORD].get('count')
+    earlier = {other[FANNED_OUT_FROM].get('index'): other for group in entries_by_code.values()
+               for other in group if FANNED_OUT_FROM in other and _is_sibling_of(other, last)}
+    if not isinstance(count, int) or sorted(earlier) != list(range(count - 1)):
+        return None
+    return [*(earlier[index] for index in range(count - 1)), last]
+
+
+def _record_leftover(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
+    """The parts of the line stage 4 split into `entry`'s records list that
+    are the entry's own record's detail, joined by tabs: each part naming no
+    record that follows the part naming the entry's record alone. A part
+    names a record when it holds one of the record's distinctive words
+    (`_tokens` of its fields' strings) that not every record of the line
+    holds. None when the entry is no record of a line whose parts do not
+    pair with its records (`_stage4_records_of`): its own text is read.
+
+    RSRRUF 28 and 93 (#1205 comment 6621530896): a residency's three roles,
+    and a society's section after the society, each followed by an undated
+    bullet of its own. Read whole, the line's bullets would go under the
+    last record's row, whichever record they are of; before, no record
+    offered them, and they were in neither document. A part after a part
+    naming several records is no one's."""
+    records = _stage4_records_of(entry, entries_by_code)
+    if records is None:
+        return None
+    words = [_tokens(' '.join(_field_strings(record.get('extracted_fields') or {}))) for record in records]
+    distinct = [own - set.intersection(*words) for own in words]
+    owner, kept = None, []
+    for part in _segments(records[-1].get('text')):
+        named = [record for record, own in zip(records, distinct, strict=True) if own & _tokens(part)]
+        if named:
+            owner = named[0] if len(named) == 1 else None
+        elif owner is entry:
+            kept.append(part)
+    return '\t'.join(kept)
+
+
+def _own_fanned_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """`_own_record_line`, or for a record of a line whose parts do not pair
+    with its records, that record's own detail (`_record_leftover`), and
+    nothing when it holds several dated records (`_holds_dated_records`)."""
+    leftover = _record_leftover(entry, entries_by_code)
+    if leftover is None:
+        return _own_record_line(entry)
+    return '' if _holds_dated_records(leftover) else leftover
+
+
+def _own_training_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a training position's prose is read from (`_own_fanned_line`),
     and nothing when it holds another position than the one its row prints,
     as that position's text would be offered as this one's prose, under its
     row:
@@ -1818,7 +1916,7 @@ def _own_training_line(entry: Mapping) -> str:
       rendered."""
     fields = entry.get('extracted_fields')
     fields = fields if isinstance(fields, Mapping) else {}
-    own = _own_record_line(entry)
+    own = _own_fanned_line(entry, entries_by_code)
     if _lists_records(fields, _POSTDOC_RECORD_FIELDS) or _dates_another_position(own, fields):
         return ''
     return own
@@ -1848,8 +1946,8 @@ def _names_another_society(line: str, own_name: set[str], own_type: Collection[s
                              for match in _SOCIETY_NAME_RE.finditer(line)))
 
 
-def _own_membership_line(entry: Mapping) -> str:
-    """The text a membership's prose is read from (`_own_record_line`), and
+def _own_membership_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a membership's prose is read from (`_own_fanned_line`), and
     nothing when it holds another membership than the one its row prints,
     as that membership's text would be offered as this one's prose, under
     its row:
@@ -1868,7 +1966,7 @@ def _own_membership_line(entry: Mapping) -> str:
     "<name> Guild")."""
     fields = entry.get('extracted_fields')
     fields = fields if isinstance(fields, Mapping) else {}
-    own = _own_record_line(entry)
+    own = _own_fanned_line(entry, entries_by_code)
     membership_type, organization = membership_cell_values(fields)
     if (_lists_records(fields, MEMBERSHIP_ORGANIZATION_FIELDS)
             or _names_another_society(own, _tokens(organization), _tokens(membership_type))):
@@ -1949,9 +2047,9 @@ def _prose_text(code: str, entry: Mapping,
     if code in PRESENTATION_CODES:
         return _own_talk_line(entry, code)
     if code in POSTDOCTORAL_CODES:
-        return _own_training_line(entry)
+        return _own_training_line(entry, entries_by_code)
     if code in MEMBERSHIP_CODES:
-        return _own_membership_line(entry)
+        return _own_membership_line(entry, entries_by_code)
     if code in PUBLICATION_SUBPOINT_CODES:
         return _own_citation_line(entry)
     if code in _OWN_ROW_CODES:

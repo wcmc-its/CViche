@@ -734,6 +734,8 @@ def test_grant_pin_survives_the_reasoning_pass_and_takes_its_status_from_the_dat
     ("Elected Fellow, Example Association of Examples, 2031", ("Awards, Honors",)),
     ("2031 Fellow, Example College of Medical Examples (ECME)", ("Professional Honors & Recognition", "National")),
     ("2031-present Example Society (elected Fellow)", ("Professional Memberships",)),
+    # "<ACRONYM> Fellow" under an honors-only heading (NZTOHX 1536)
+    ("EXSA Fellow, June 2031", ("HONORS",)),
 ])
 def test_a_fellowship_the_decision_makes_an_honor_is_recoded_h_at_any_confidence(text, hierarchy):
     (out,), n = apply_header_pin([_row("I", text, confidence=0.95, hierarchy=hierarchy)], TaxonomyContext())
@@ -757,6 +759,9 @@ def test_a_fellowship_the_decision_makes_an_honor_is_recoded_h_at_any_confidence
          hierarchy=("Professional Memberships",)),
     _row("I", "2031 Elected to the Fellowship Committee, Example College of Examples",
          hierarchy=("Professional Memberships",)),
+    # "<ACRONYM> Fellow" off an honors-only heading (IZIXVF 335's shape)
+    _row("I", "EXSA Fellow, June 2031", hierarchy=("7. Professional Societies",)),
+    _row("I", "EXSA Fellow, June 2031", hierarchy=("Awards, Honors and Membership in Honorary Societies",)),
     # already H, or another code
     _row("H", "Elected Fellow, Example Society", hierarchy=("Honors",)),
     _row("Q1", "Elected Fellow, Example Society", hierarchy=("Service",)),
@@ -2203,6 +2208,50 @@ def test_a_bare_role_a_seat_or_a_public_body_is_not_consulting(entry):
     _service("Q2", "Example Society Annual Meeting, 2031", "Meetings Attended", "National Committees"),
 ])
 def test_advocacy_a_part_played_or_another_leaf_is_no_attended_meeting(entry):
+    assert non_seat_pin_code(entry) is None
+
+
+@pytest.mark.parametrize("entry", [
+    # an advisory or liaison role under an industry or corporate heading, the company named
+    # with no company word (2100 2341-2359, SBPHNA 138, web227 611)
+    _service("Q2", "Scientific Advisory Board       2031- 2032 Examplecorp", "INDUSTRY BOARDS"),
+    _service("Q2", "Regulatory Liaison         2031-2032 Example Neurovascular", "INDUSTRY BOARDS"),
+    _service("Q2", "2031 Examplex Advisory Board", "D. PUBLIC AND PROFESSIONAL SERVICE", "Corporate Advisory Boards"),
+    _service("P", "2031-present Examplegen Expert Advisory Panel on Example Tumors",
+             "Research Review Committee", "Industry Advisory Panel"),
+    _service("Q2", "Speakers bureau, Examplepharm, 2031", "Industry Relationships"),
+    # a company's panel under a work-experience or employment heading (RSRRUF 88)
+    _service("Q2", "Example Physician Panel, Example City, 2031 - Present. Serve as a liaison providing product "
+             "advice and feedback to the company", "ADDITIONAL WORK EXPERIENCE"),
+    _service("Q2", "Example Physician Panel, liaison to the company, 2031", "Employment"),
+    _service("Q2", "Example Physician Panel, product advice to the company, 2031", "Work Experience"),
+])
+def test_an_advisory_role_under_an_industry_or_employment_heading_is_another_position(entry):
+    assert non_seat_pin_code(entry)[0] == "D3"
+
+
+@pytest.mark.parametrize("entry", [
+    # a company's board of directors, trustees or governors is a seat (2100 2331, BNYLDF 268/278)
+    _service("Q2", "Board of Directors, Observer       2031- Present Examplecorp", "INDUSTRY BOARDS"),
+    _service("Q2", "Board of Directors and Scientific Advisory Board, Examplecorp, 2031", "INDUSTRY BOARDS"),
+    _service("Q2", "2031 Examplecorp Medical Advisory Board",
+             "BOARDS OF DIRECTORS (For Medical Related Corporations)"),
+    # a seat on the employer's own committee or working group names no advisory role (GGXYHC 11/15/16)
+    _service("Q2", "Member of Example Working Group", "Education", "Industry experience"),
+    _service("Q2", "Chair of protocol review committee for example pharmacology", "Industry experience"),
+    # a public body on the line or the heading
+    _service("Q2", "Example Society Industry Advisory Board, 2031", "Industry Boards"),
+    _service("Q2", "Advisory Board, Examplecorp, 2031", "Industry and Government Advisory Boards"),
+    # under an employment heading: a line naming no company, a P row, or a public body
+    _service("Q2", "Example Physician Panel, 2031", "ADDITIONAL WORK EXPERIENCE"),
+    _service("P", "Example Physician Panel, liaison to the company, 2031", "Employment"),
+    _service("Q2", "Advisory Board, Example Devices Inc. and Example University, 2031", "Employment"),
+    # an employment heading a level up does not count (the leaf names committees)
+    _service("Q2", "Example Physician Panel, liaison to the company, 2031", "Employment", "Committees"),
+    # the owner's decision on #1580 still keeps its activities in the committee tables
+    _service("Q2", "Volunteer advisor, Examplecorp community day, 2031", "Industry Service"),
+])
+def test_a_seat_a_public_body_or_a_row_off_those_headings_stays(entry):
     assert non_seat_pin_code(entry) is None
 
 

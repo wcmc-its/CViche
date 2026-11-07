@@ -105,9 +105,11 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     heading_names_teaching_role,
     is_label_only_record,
     is_membership_date_part,
+    labelled_supervisor,
     names_teaching_or_authorship_role,
     split_appointment_title,
     split_date_led_records,
+    supervisor_name,
 )
 
 # --- item 1: the strip is a guess and lives at the call site (#665) --------
@@ -996,3 +998,114 @@ def test_an_all_null_record_of_column_labels_is_label_only(text):
 ])
 def test_a_record_with_a_value_or_a_content_cell_is_not_label_only(fields, text):
     assert not is_label_only_record(fields, text, _BOARD_LABELS)
+
+
+# --- #1245 (ruling 2026-11-06 Q2): a training line's labelled supervisor ------
+# Invented names and text throughout.
+
+_POSITION = "Example Critical Care Fellowship\tKestrel Institute\t2010-2013"
+
+
+@pytest.mark.parametrize("label", [
+    "Mentor", "Supervisor", "Advisor", "Adviser", "Preceptor", "Fellowship Director",
+    "Research Mentor", "Research Advisor", "Residency Supervisor", "Residency Preceptor",
+    "research mentor", "MENTOR",
+])
+def test_each_singular_supervisor_label_names_its_value(label):
+    assert labelled_supervisor(f"{_POSITION}\t{label}: Dr. Orla Vantreece") == "Dr. Orla Vantreece"
+
+
+@pytest.mark.parametrize("text, value", [
+    # The value as the CV writes it: honorific and post-nominals kept,
+    # whitespace collapsed, a trailing comma, semicolon or colon dropped.
+    (f"{_POSITION}\tMentor:  Prof.  Orla   Vantreece, PharmD, BCPS;", "Prof. Orla Vantreece, PharmD, BCPS"),
+    (f"{_POSITION}\tSupervisor: Orla Q. Vantreece,", "Orla Q. Vantreece"),
+    # A trailing period is kept when it closes an abbreviation ("M.D.", an
+    # initial, "Jr."), and dropped when it closes the sentence.
+    (f"{_POSITION}\tAdvisor: Orla Vantreece, M.D.", "Orla Vantreece, M.D."),
+    (f"{_POSITION}\tAdvisor: Orla Vantreece.", "Orla Vantreece"),
+    (f"{_POSITION}\tAdvisor: Orla Vantreece, PhD.", "Orla Vantreece, PhD"),
+    (f"{_POSITION}\tAdvisor: Orla Q.", "Orla Q."),
+    (f"{_POSITION}\tAdvisor: Orla Vantreece Sr.", "Orla Vantreece Sr."),
+    # The value ends at the label's cell: a tab, a line break or a pipe.
+    (f"Mentor: Orla Vantreece\t{_POSITION}", "Orla Vantreece"),
+    (f"Mentor: Orla Vantreece\n{_POSITION}", "Orla Vantreece"),
+    (f"Mentor: Orla Vantreece | {_POSITION}", "Orla Vantreece"),
+    # A label opened by "(" runs to its ")".
+    (f"{_POSITION} (Research Mentor: Dr. Orla van der Vantreece) 2011", "Dr. Orla van der Vantreece"),
+    (f"{_POSITION} (Residency Supervisor: Orla Vantreece) 2011", "Orla Vantreece"),
+    (f"{_POSITION} (Fellowship Director: Orla Vantreece) 2011", "Orla Vantreece"),
+    # Two labels naming the same person name one supervisor.
+    (f"{_POSITION}\tMentor: Dr. Orla Vantreece\tSupervisor: Orla Vantreece, MD", "Dr. Orla Vantreece"),
+    (f"{_POSITION}\tMentor: Orla de Vantreece\tSupervisor: Orla De Vantreece", "Orla de Vantreece"),
+    # A hyphenated surname, initials, a particle, Jr.
+    (f"{_POSITION}\tPreceptor: O. R. Vantreece-Halberd Jr.", "O. R. Vantreece-Halberd Jr."),
+])
+def test_the_labelled_value_is_kept_as_the_cv_writes_it(text, value):
+    assert labelled_supervisor(text) == value
+
+
+@pytest.mark.parametrize("text", [
+    # No ruling label, or no colon: not read.
+    _POSITION,
+    f"{_POSITION}\tPI: Dr. Orla Vantreece",
+    f"{_POSITION}\tProgram Director: Dr. Orla Vantreece",
+    f"{_POSITION}\tMentor Dr. Orla Vantreece",
+    f"{_POSITION}\twith Dr. Orla Vantreece",
+    # A label word inside another word is no label.
+    f"{_POSITION}\tComentor: Dr. Orla Vantreece",
+    # A plural label lists names, which the ruling does not format.
+    f"{_POSITION}\tMentors: Dr. Orla Vantreece",
+    f"{_POSITION}\tMentor: Dr. Orla Vantreece\tResearch Supervisors: Dr. Orla Vantreece",
+    f"{_POSITION}\tFellowship Directors: Orla Vantreece",
+    f"{_POSITION}\tMentor: Orla Vantreece\tresearch mentors: Orla Vantreece",
+    f"{_POSITION}\tMentor: Orla Vantreece\tFellowship Directors: Orla Vantreece, Ivo Halberd",
+    # The value is not one person: two names, "and", "&", an institution or prose.
+    f"{_POSITION}\tMentor: Orla Vantreece and Ivo Halberd",
+    f"{_POSITION}\tMentor: Orla Vantreece & Ivo Halberd",
+    f"{_POSITION}\tMentor: Orla Vantreece, Ivo Halberd",
+    f"{_POSITION}\tMentor: Dr. Orla Vantreece, Department of Zymology",
+    f"{_POSITION}\tMentor: Dr. Orla Vantreece, Chair of Zymology",
+    f"{_POSITION}\tSupervisor: studied example ferments in depth",
+    # Too few or too many name words, or initials and acronyms alone.
+    f"{_POSITION}\tMentor: Dr. Vantreece",
+    f"{_POSITION}\tMentor: Orla Ivo Wren Quill Vantreece Halberd",
+    f"{_POSITION}\tMentor: O. R. V.",
+    f"{_POSITION}\tMentor: ORLA VANTREECE",
+    # An empty cell (the next cell is not the label's), or a parenthesis no
+    # ")" closes.
+    f"{_POSITION}\tMentor:\tDr. Orla Vantreece",
+    f"{_POSITION}\tMentor: \nDr. Orla Vantreece",
+    f"{_POSITION}\tMentor:",
+    f"{_POSITION} (Mentor: Dr. Orla Vantreece",
+    # Two labelled people.
+    f"{_POSITION}\tMentor: Dr. Orla Vantreece\tAdvisor: Dr. Ivo Halberd",
+    # One labelled value is not one person, whatever the others are.
+    f"{_POSITION}\tMentor: Dr. Orla Vantreece\tSupervisor: the ferment team",
+])
+def test_a_line_naming_no_single_labelled_person_names_no_supervisor(text):
+    assert labelled_supervisor(text) == ""
+
+
+@pytest.mark.parametrize("value, name", [
+    ("Dr. Orla Vantreece", "Orla Vantreece"),
+    ("Professor Sir Orla Vantreece", "Orla Vantreece"),
+    ("Orla Vantreece, MD, PhD", "Orla Vantreece"),
+    ("Orla Vantreece MD", "Orla Vantreece"),
+    ("Orla Vantreece, Ph.D.", "Orla Vantreece"),
+    ("O. Vantreece", "O. Vantreece"),
+    ("Orla de la Vantreece", "Orla de la Vantreece"),
+    ("DR. Orla Vantreece", "Orla Vantreece"),
+    ("Orla Vantreece Jr.", "Orla Vantreece"),
+    ("Orla Vantreece.", "Orla Vantreece"),
+    ("Orla Q Vantreece", "Orla Q Vantreece"),
+    ("O.R. Vantreece", "O.R. Vantreece"),
+    ("Orla Ivo Wren de Vantreece", "Orla Ivo Wren de Vantreece"),
+    ("Orla", ""),
+    ("O. y V.", ""),
+    ("O.R. V.", ""),
+    ("Orla Vantreece of Kestrel Institute", ""),
+    ("", ""),
+])
+def test_supervisor_name_is_the_name_without_its_honorifics_and_post_nominals(value, name):
+    assert supervisor_name(value) == name

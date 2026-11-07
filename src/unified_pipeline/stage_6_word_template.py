@@ -1042,13 +1042,28 @@ _M1_CREDIT_LABEL_RE = re.compile(
     r'|\brole\s*:|\bstudy title\s*:|\bPI\s*:', re.IGNORECASE)
 
 
+def _m1_fields_hold_record(fields: Mapping[str, Any]) -> bool:
+    """True when *fields* populate a field outside `_M1_PROSE_FIELDS`. The
+    `STAGE4_RECORDS_KEY` list is not a field: each record in it is judged the
+    same way. #1572 LPPQAJ-03: two prose entries split into narrative-only
+    records counted as records through that key, and the whole heading --
+    the owner's lead research interest with it -- went to the Appendix."""
+    for key, value in fields.items():
+        if key == STAGE4_RECORDS_KEY:
+            if isinstance(value, list) and any(
+                    _m1_fields_hold_record(record) for record in value if isinstance(record, Mapping)):
+                return True
+        elif value and key not in _M1_PROSE_FIELDS:
+            return True
+    return False
+
+
 def _is_m1_record(entry: Mapping[str, Any]) -> bool:
     """True when an M1 entry is a record (a position, a project) rather than
     research-statement prose: stage 4 extracted a populated field outside
-    `_M1_PROSE_FIELDS` (E27: CMTQDR 122, XWNZWW 184), or its text carries a
-    credit line (`_M1_CREDIT_LABEL_RE`)."""
-    fields = entry.get('extracted_fields') or {}
-    return (any(value for key, value in fields.items() if key not in _M1_PROSE_FIELDS)
+    `_M1_PROSE_FIELDS` (`_m1_fields_hold_record`; E27: CMTQDR 122, XWNZWW 184),
+    or its text carries a credit line (`_M1_CREDIT_LABEL_RE`)."""
+    return (_m1_fields_hold_record(entry.get('extracted_fields') or {})
             or bool(_M1_CREDIT_LABEL_RE.search(str(entry.get('text') or ''))))
 
 
@@ -2767,7 +2782,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('researcher_profiles', frozenset({'S0'}), lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []) + self._a_researcher_profiles)),  # S0 section for ORCID, etc.; plus an A entry's ORCID (#817)
             ('education', frozenset({'B1'}), lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
             ('other_education', frozenset({'B2'}), lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
-            ('postdoc_training', frozenset({'C', 'C1', 'C2', 'C3'}), lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
+            ('postdoc_training', frozenset({'C', 'C1', 'C2', 'C3'}), lambda: self._fill_postdoc_training(entries_by_code, all_entries, cv_owner)),
             ('positions', frozenset({'D1', 'D2', 'D3'}), lambda: self._fill_positions(entries_by_code)),
             ('licensure', frozenset({'F1'}), lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
             ('board_certification', frozenset({'F2'}), lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
