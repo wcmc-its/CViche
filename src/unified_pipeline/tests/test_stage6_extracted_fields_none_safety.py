@@ -458,8 +458,8 @@ def test_ended_current_mentee_renders_its_year_under_past_mentees():
 
 
 def test_fill_mentoring_without_a_year_reads_the_clock_as_the_dispatcher_does():
-    """Production's section dispatch calls `_fill_mentoring(entries_by_code)`
-    with no year (stage_6_word_template.py), so the clock default is the live
+    """Production's section dispatch calls `_fill_mentoring` with no year
+    (stage_6_word_template.py), so the clock default is the live
     path. A lone year long past renders under "Past Mentees:" and a lone year
     far ahead stays under "Current Mentees:", whenever the test runs."""
     gen = _mentoring_doc()

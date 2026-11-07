@@ -24,4 +24,4 @@ from .institution import (  # noqa: F401
     _location_remainder,
     _recover_institution_from_nearby_entries,
 )
-from .owner import _get_cv_owner_name  # noqa: F401
+from .owner import _get_cv_owner_name, _is_cv_owner  # noqa: F401

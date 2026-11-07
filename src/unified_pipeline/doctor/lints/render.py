@@ -62,10 +62,12 @@ from unified_pipeline.stage6.pii_pass import run_pii_pass
 from unified_pipeline.stage6.render_check import (
     _record_tokens,
     _whole_record_rendered,
+    distinguishing_values,
+    piece_rendered,
     record_chunks,
-    record_pieces,
     segment_already_rendered,
     segment_held_by_fields,
+    values_contradict,
 )
 from unified_pipeline.stage6.sections.appendix import (
     _TRUNCATION_MARKER,
@@ -580,6 +582,7 @@ class RenderedLines(NamedTuple):
     tokens: list[set[str]]      # distinctive 5+-letter tokens per line
     years: list[set[str]]       # years per line, for the date-agreement check
     ubiquitous: frozenset[str]  # tokens on RENDER_UBIQUITOUS_LINE_SHARE+ of lines
+    values: list[frozenset[int]]  # `distinguishing_values` per line (#2055)
 
 
 def _ubiquitous_tokens(line_token_sets: list[set[str]]) -> frozenset[str]:
@@ -594,13 +597,14 @@ def _ubiquitous_tokens(line_token_sets: list[set[str]]) -> frozenset[str]:
 
 
 def _rendered_lines(blocks: list[tuple[str, str]]) -> RenderedLines:
-    """The per-line token sets, per-line year sets and ubiquitous-token set
-    of the rendered output, built once per document."""
+    """The per-line token sets, year sets and distinguishing values, and the
+    ubiquitous-token set, of the rendered output, built once per document."""
     lines = [line for _, text in blocks for line in str(text).split("\n")
              if line.strip()]
     tokens = [_long_word_tokens(line) for line in lines]
     years = [set(_YEAR_RE.findall(line)) for line in lines]
-    return RenderedLines(tokens, years, _ubiquitous_tokens(tokens))
+    return RenderedLines(tokens, years, _ubiquitous_tokens(tokens),
+                         [distinguishing_values(line) for line in lines])
 
 
 def _line_vouches(tokens: set[str], record_years: set[str],
@@ -625,8 +629,13 @@ def _record_rendered(line: str, haystack: str,
     output's ubiquitous tokens left out) on a line whose year does not
     contradict the record's. Verbatim absence alone proves nothing (stage 6
     reformats dates/fields), so False requires a token-verifiable miss; a
-    line without enough distinctive tokens is None, not missing."""
-    if any(piece in haystack for piece in record_pieces(line)):
+    line without enough distinctive tokens is None, not missing.
+
+    Either way the vouching line's `distinguishing_values` must not
+    contradict the record's, as in stage 6's `_record_rendered`: a record
+    that differs from a rendered row only in its edition or part shares
+    its opening piece and most of its words (#2055)."""
+    if piece_rendered(line, haystack, output.values):
         return True
     record_years = set(_YEAR_RE.findall(line))
     rendered = None
@@ -634,8 +643,11 @@ def _record_rendered(line: str, haystack: str,
         tokens = _long_word_tokens(chunk) - output.ubiquitous
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
+        values = distinguishing_values(chunk)
         if any(_line_vouches(tokens, record_years, line_tokens, line_years)
-               for line_tokens, line_years in zip(output.tokens, output.years)):
+               and not values_contradict(values, line_values)
+               for line_tokens, line_years, line_values
+               in zip(output.tokens, output.years, output.values, strict=True)):
             return True
         rendered = False
     return rendered
