@@ -6188,8 +6188,12 @@ _INTERNSHIP_PROSE = ("Rotated through the trauma, burns and vascular services un
      [("Example Surgical Internship", _INTERNSHIP_PROSE)]),
     ([_INTERNSHIP_LINE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}"],
      [(_TRAINING_TYPE, f"Chief resident, {_RESIDENCY_LINE}. {_TRAINING_PROSE}")]),
-    # They do not: which position the prose is about cannot be told, so neither takes it.
-    ([_INTERNSHIP_LINE, _TRAINING_PROSE, _RESIDENCY_LINE], []),
+    # They do not: the prose goes under the position whose part it follows
+    # (#1205 comment 6621530896 item 2), and a part before every position's
+    # is no one's.
+    ([_INTERNSHIP_LINE, _TRAINING_PROSE, _RESIDENCY_LINE],
+     [("Example Surgical Internship", _TRAINING_PROSE)]),
+    ([_TRAINING_PROSE, _INTERNSHIP_LINE, _RESIDENCY_LINE], []),
 ])
 def test_prose_on_a_line_of_several_positions_goes_under_its_own_or_none(segments, offered):
     """A sub-point is read from the whole tab segment: one that holds the

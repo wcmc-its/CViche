@@ -41,8 +41,9 @@ A reviewer pin (#1413) recodes an unsure Q4C journal name to Q4D when the
 "Reviewer for the following journals:" line heading its list went to the model
 in an earlier batch.
 `non_seat_pin_code` (#1580) recodes a Q2 or P row that is no seat on a body:
-consulting, a company's advisory board and expert work in litigation are D3,
-and a meeting the owner attended is B2.
+consulting, a company's advisory board, expert work in litigation and a row
+under an industry heading (or a company's under an employment heading) are
+D3, and a meeting the owner attended is B2.
 `credential_pin_code` (#1577 shape 3) recodes a credential coded as the wrong
 one of licence, board certification and other education
 (`core.credential_lines.misfiled_credential_home`): a permit, an exam, a
@@ -659,7 +660,20 @@ _REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for thes
 #   Committees > Committees", is a seat. A company named without a company word
 #   ("Scientific Advisory Board, <Startup>", UVZNIC 105) cannot be told from an
 #   academic program's board ("<University Program>, Advisory Board", EJPAIA
-#   181), so it stays Q2.
+#   181), so it stays Q2;
+# - its nearest heading names industry or corporate work (2100 2341-2359,
+#   SBPHNA 138, web227 611: "Industry Boards", "Corporate Advisory Boards",
+#   "Industry Advisory Panel"), its line names an advisory, consulting,
+#   liaison, panel or speaker role, and neither the heading nor the line
+#   names a public body or a board of directors, trustees or governors: a
+#   company's board seat stays Q2 (2100 2331/2339, BNYLDF 268), and so does
+#   a seat on the employer's own committee or working group under "Industry
+#   experience" (GGXYHC 11/15/16), which names no advisory role;
+# - it is a Q2 under a nearest heading that names work experience or
+#   employment, and its line names such a role and a company, and no public
+#   body or directors' seat (RSRRUF 88, a company's physician panel under
+#   "Additional Work Experience"). Here a panel or board on the line is the
+#   company's, so no `_SEAT_BODY` veto applies.
 # Testimony and the other activities of the owner's decision on #1580
 # (2026-10-27) stay Q2 or P (`_names_stay_activity`), and so does "Consultant,
 # <Society> Ethics Committee": a seat, as is "Consulting Editor, <Journal>".
@@ -695,6 +709,10 @@ _PUBLIC_BODY = re.compile(
     r"|institutes?|societ(?:y|ies)|associations?|foundations?|academ(?:y|ies)|colleges?|universit(?:y|ies)"
     r"|schools?|departments?|councils?|commissions?|hospitals?|cent(?:er|re)|trust|fund"
     r"|program(?:me)?|network|alliances?|coalitions?|consorti(?:um|a)|blood\s+banks?)\b", re.I)
+_INDUSTRY_HEADING = re.compile(r"\bindustr(?:y|ies|ial)\b|\bcorporat(?:e|ions?)\b", re.I)
+_EMPLOYMENT_HEADING = re.compile(r"\bwork\s+experiences?\b|\bemployment\b", re.I)
+_DIRECTORS_SEAT = re.compile(r"\bboards?\s+of\s+(?:directors|trustees|governors)\b", re.I)
+_ADVISORY_ROLE = re.compile(r"\badvis\w*|\bconsult\w*|\bliaison\b|\bpanels?\b|\bspeakers?\b", re.I)
 _LITIGATION = re.compile(r"\blitigations?\b|\b(?:law|legal)\s+firms?\b", re.I)
 _EXPERT_OR_CONSULTING = re.compile(r"\bexpert\b|\bconsult", re.I)
 _TESTIMONY = re.compile(r"\btestif(?:y|ied|ies|ying|ier)\b|\btestimon(?:y|ies)\b", re.I)
@@ -789,7 +807,22 @@ def _is_consulting(code: str, text: str, levels: list[str]) -> bool:
         return True
     if _LITIGATION.search(text) and _EXPERT_OR_CONSULTING.search(text):
         return True
+    if _is_company_heading_row(code, text, leaf):
+        return True
     return company and bool(_CONSULTING_WORD.search(leaf)) and not _SEAT_BODY.search(text)
+
+
+def _is_company_heading_row(code: str, text: str, leaf: str) -> bool:
+    """An advisory, consulting, liaison, panel or speaker row under an industry
+    or corporate heading, or such a Q2 naming a company under a
+    work-experience or employment heading, that names no public body and no
+    directors' seat (#1580)."""
+    if (not _ADVISORY_ROLE.search(text) or _PUBLIC_BODY.search(text) or _PUBLIC_BODY.search(leaf)
+            or _DIRECTORS_SEAT.search(f"{leaf} {text}")):
+        return False
+    if _INDUSTRY_HEADING.search(leaf):
+        return True
+    return code == _BOARD_SERVICE_CODE and bool(_EMPLOYMENT_HEADING.search(leaf)) and bool(_COMPANY.search(text))
 
 
 def _names_only_the_role(text: str) -> bool:

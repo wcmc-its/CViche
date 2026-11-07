@@ -126,7 +126,13 @@ from unified_pipeline.core.template_boilerplate import (
 )
 
 from .dedup import _is_sibling_of
-from .fan_out import _RENDERED_FIELDS, LAST_STAGE4_RECORD, _segments, is_split_record
+from .fan_out import (
+    _RENDERED_FIELDS,
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
+    _segments,
+    is_split_record,
+)
 from .formatting import (
     PRESENTATION_DATE_FIELDS,
     PRESENTATION_END_DATE_FIELD,
@@ -309,7 +315,9 @@ PRESENTATION_CODES = frozenset({'R'})
 #: row-receipt ledger, taken with no word test): two residencies at one
 #: hospital, or a residency and the combined residency-and-fellowship row
 #: above it, share their rows' words. The last of stage 4's records offers
-#: only its own segment of the line, and a line holding several dated
+#: only its own segment of the line; on a line whose parts do not pair with
+#: the records, each record offers the undated parts after the part naming
+#: it alone (`_record_leftover`). A line holding several dated
 #: records offers none, nor does an entry stage 4 listed positions under,
 #: nor a line holding a year outside the span its row prints
 #: (`_own_training_line`). The section is found by the
@@ -337,7 +345,9 @@ POSTDOCTORAL_CODES = frozenset({'C'})
 #: share their rows' words, and an entry the writer parses into several
 #: memberships, a row each, holds several records. A line holding another
 #: membership offers none (`_own_membership_line`): the last of stage 4's
-#: records offers only its own segment, and a line holding several dated
+#: records offers only its own segment (on a line whose parts do not pair
+#: with the records, each record the parts after the part naming it alone,
+#: `_record_leftover`), and a line holding several dated
 #: records, or naming another society, offers nothing, nor does an entry
 #: stage 4 listed memberships under. The entry's records the #221 recovery
 #: reads stay the recovery's, dated or not (`RECOVERY_RECORD_CODES`): dev
@@ -1831,8 +1841,70 @@ def _dates_another_position(line: str, fields: Mapping) -> bool:
     return any(not first <= year <= last for year in years)
 
 
-def _own_training_line(entry: Mapping) -> str:
-    """The text a training position's prose is read from (`_own_record_line`),
+def _stage4_records_of(entry: Mapping,
+                       entries_by_code: Mapping[str, list[Mapping]]) -> list[Mapping] | None:
+    """Every record of the stage-4 records list `entry` is one of, in list
+    order, the last (`LAST_STAGE4_RECORD`, which keeps the line's whole
+    text) included, when that line's tab parts do not pair with them
+    (`_own_segment`); None otherwise, or when one of them is not among
+    `entries_by_code` (a row fan-out folded away, a record dedup dropped):
+    which part is whose cannot then be read."""
+    last = entry if LAST_STAGE4_RECORD in entry else next(
+        (other for group in entries_by_code.values() for other in group
+         if LAST_STAGE4_RECORD in other and FANNED_OUT_FROM in entry and _is_sibling_of(entry, other)),
+        None)
+    if last is None or _own_segment(last) is not None:
+        return None
+    count = last[LAST_STAGE4_RECORD].get('count')
+    earlier = {other[FANNED_OUT_FROM].get('index'): other for group in entries_by_code.values()
+               for other in group if FANNED_OUT_FROM in other and _is_sibling_of(other, last)}
+    if not isinstance(count, int) or sorted(earlier) != list(range(count - 1)):
+        return None
+    return [*(earlier[index] for index in range(count - 1)), last]
+
+
+def _record_leftover(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str | None:
+    """The parts of the line stage 4 split into `entry`'s records list that
+    are the entry's own record's detail, joined by tabs: each part naming no
+    record that follows the part naming the entry's record alone. A part
+    names a record when it holds one of the record's distinctive words
+    (`_tokens` of its fields' strings) that not every record of the line
+    holds. None when the entry is no record of a line whose parts do not
+    pair with its records (`_stage4_records_of`): its own text is read.
+
+    RSRRUF 28 and 93 (#1205 comment 6621530896): a residency's three roles,
+    and a society's section after the society, each followed by an undated
+    bullet of its own. Read whole, the line's bullets would go under the
+    last record's row, whichever record they are of; before, no record
+    offered them, and they were in neither document. A part after a part
+    naming several records is no one's."""
+    records = _stage4_records_of(entry, entries_by_code)
+    if records is None:
+        return None
+    words = [_tokens(' '.join(_field_strings(record.get('extracted_fields') or {}))) for record in records]
+    distinct = [own - set.intersection(*words) for own in words]
+    owner, kept = None, []
+    for part in _segments(records[-1].get('text')):
+        named = [record for record, own in zip(records, distinct, strict=True) if own & _tokens(part)]
+        if named:
+            owner = named[0] if len(named) == 1 else None
+        elif owner is entry:
+            kept.append(part)
+    return '\t'.join(kept)
+
+
+def _own_fanned_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """`_own_record_line`, or for a record of a line whose parts do not pair
+    with its records, that record's own detail (`_record_leftover`), and
+    nothing when it holds several dated records (`_holds_dated_records`)."""
+    leftover = _record_leftover(entry, entries_by_code)
+    if leftover is None:
+        return _own_record_line(entry)
+    return '' if _holds_dated_records(leftover) else leftover
+
+
+def _own_training_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a training position's prose is read from (`_own_fanned_line`),
     and nothing when it holds another position than the one its row prints,
     as that position's text would be offered as this one's prose, under its
     row:
@@ -1849,7 +1921,7 @@ def _own_training_line(entry: Mapping) -> str:
       rendered."""
     fields = entry.get('extracted_fields')
     fields = fields if isinstance(fields, Mapping) else {}
-    own = _own_record_line(entry)
+    own = _own_fanned_line(entry, entries_by_code)
     if _lists_records(fields, _POSTDOC_RECORD_FIELDS) or _dates_another_position(own, fields):
         return ''
     return own
@@ -1879,8 +1951,8 @@ def _names_another_society(line: str, own_name: set[str], own_type: Collection[s
                              for match in _SOCIETY_NAME_RE.finditer(line)))
 
 
-def _own_membership_line(entry: Mapping) -> str:
-    """The text a membership's prose is read from (`_own_record_line`), and
+def _own_membership_line(entry: Mapping, entries_by_code: Mapping[str, list[Mapping]]) -> str:
+    """The text a membership's prose is read from (`_own_fanned_line`), and
     nothing when it holds another membership than the one its row prints,
     as that membership's text would be offered as this one's prose, under
     its row:
@@ -1899,7 +1971,7 @@ def _own_membership_line(entry: Mapping) -> str:
     "<name> Guild")."""
     fields = entry.get('extracted_fields')
     fields = fields if isinstance(fields, Mapping) else {}
-    own = _own_record_line(entry)
+    own = _own_fanned_line(entry, entries_by_code)
     membership_type, organization = membership_cell_values(fields)
     if (_lists_records(fields, MEMBERSHIP_ORGANIZATION_FIELDS)
             or _names_another_society(own, _tokens(organization), _tokens(membership_type))):
@@ -1980,9 +2052,9 @@ def _prose_text(code: str, entry: Mapping,
     if code in PRESENTATION_CODES:
         return _own_talk_line(entry, code)
     if code in POSTDOCTORAL_CODES:
-        return _own_training_line(entry)
+        return _own_training_line(entry, entries_by_code)
     if code in MEMBERSHIP_CODES:
-        return _own_membership_line(entry)
+        return _own_membership_line(entry, entries_by_code)
     if code in PUBLICATION_SUBPOINT_CODES:
         return _own_citation_line(entry)
     if code in _OWN_ROW_CODES:
