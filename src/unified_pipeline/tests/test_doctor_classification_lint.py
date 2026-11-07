@@ -584,6 +584,9 @@ def test_elected_fellowship_coded_as_membership_is_reported_under_any_heading_15
     "Invented College Fellow 2004",
     "Invented Academy Fellow 2004",
     "Invented Institute Fellow 2004",
+    # "<ACRONYM> Fellow" under an honors-only path (NZTOHX 1536)
+    "INVA Fellow, June 2012",
+    "AHA Fellow",
 ])
 def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
     """MVUREJ 44: the honors word may sit on a parent heading."""
@@ -619,10 +622,10 @@ def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
     ("2015 Fellow Travel Award, Invented Society of Examples", "I", ("Honors and Awards",)),
     ("Fellow - Invented Leadership Programme, 2012", "I", ("Honors and Awards",)),
     # An acronym before "Fellow": a training or funding fellowship as often
-    # as an honorific one.
-    ("NIH Fellow 1998", "I", ("Honors and Awards",)),
-    ("AHA Fellow", "I", ("Honors and Awards",)),
-    ("INVA Fellow, June 2012", "I", ("Honors and Awards",)),
+    # as an honorific one, so only an honors-only heading makes it an honor.
+    ("NIH Fellow 1998", "I", ("Elected Memberships",)),
+    ("AHA Fellow", "I", ("Professional Societies",)),
+    ("INVA Fellow, June 2012", "I", ("Awards, Honors, and Membership in Honorary Societies",)),
     # Already Honors, or a different code.
     ("Elected Fellow, Invented Society of Examples", "H", ("Honors",)),
     ("Elected Fellow, Invented Society of Examples", "Q1", ("Service",)),

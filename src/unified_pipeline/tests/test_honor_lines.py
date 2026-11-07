@@ -201,12 +201,37 @@ def test_a_fellowship_title_under_an_honors_heading_is_an_honor(text):
     "Fellowship - Invented Leadership Programme, 2031",
     "Fellow Travel Award, Invented Society of Examples",
     "Fellow Example Leadership Programme, 2031",
-    # an acronym before "Fellow": a training or funding fellowship as often as an honorific one
-    "NIH Fellow 1998",
-    "INVA Fellow, June 2031",
+    # an acronym before "Fellow" and an award or programme word, or "Fellow" later in the line
+    "2031 INVA Fellow Scholarship to the Annual Meeting",
+    "INVA Fellow Award, 2031",
+    "INVA Fellow Travel Grant 2031",
+    "Invented Society (INVA Fellow), 2031",
+    "2031 INVA Fellowship",
 ])
 def test_lines_that_are_no_fellowship_title_are_not_an_honor(text):
     assert not is_honorific_fellowship(text, ("Honors and Awards",))
+
+
+@pytest.mark.parametrize("text", ["INVA Fellow, June 2031", "2031 INVA Fellow", "• IN&VA Fellow 2031"])
+def test_an_acronym_fellow_under_an_honors_only_heading_is_an_honor(text):
+    """NZTOHX 1536: "<ACRONYM> Fellow" listed under honors (#1577 / #1580 $0 pins)."""
+    assert is_honorific_fellowship(text, ("HONORS",))
+    assert is_honorific_fellowship(text, ("Professional Honors & Recognition", "National"))
+
+
+@pytest.mark.parametrize("heading_path", [
+    # an acronym names a training or funding fellowship as often as an honorific one: only an
+    # honors-only heading makes it an honor, not an election heading, a mixed or a membership one
+    ("Elected Memberships",),
+    ("Awards, Honors, and Membership in Honorary Societies",),
+    ("Honors and Awards", "Memberships"),
+    ("Professional Societies",),
+    ("Postdoctoral Training",),
+    (),
+])
+def test_an_acronym_fellow_off_an_honors_only_heading_is_not_an_honor(heading_path):
+    assert not is_honorific_fellowship("INVA Fellow, June 2031", heading_path)
+    assert not is_honorific_fellowship("NIH Fellow 1998", heading_path)
 
 
 @pytest.mark.parametrize("heading_path", [

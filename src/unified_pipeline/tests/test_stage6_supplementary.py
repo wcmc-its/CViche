@@ -1375,7 +1375,7 @@ def test_a_training_line_holding_several_dated_records_offers_none():
 def test_a_list_of_positions_under_a_field_offers_none(fields, listed):
     text = f"{_RESIDENCY} July 2009-June 2010\tNorvale General Hospital\t{PROSE}"
     entry = _training(text, **fields)
-    assert sp._own_training_line(entry) == ("" if listed else text)
+    assert sp._own_training_line(entry, {}) == ("" if listed else text)
     assert [p.paragraphs for p in _plan_training(entry)] == ([] if listed else [(PROSE,)])
     # Only a training position reads its fields for listed positions.
     assert sp._prose_text("O", dict(entry, taxonomy_code="O"), {}) == text
@@ -1387,8 +1387,8 @@ def test_a_training_position_whose_fields_are_not_a_mapping_reads_its_own_line(f
     # prints (`_dates_another_position`).
     text = f"{_RESIDENCY}\tNorvale General Hospital\t{PROSE}"
     entry = {"taxonomy_code": "C", "text": text, "extracted_fields": fields}
-    assert sp._own_training_line(entry) == text
-    assert sp._own_training_line(dict(entry, text=f"{text}\t2009-2010")) == ""
+    assert sp._own_training_line(entry, {}) == text
+    assert sp._own_training_line(dict(entry, text=f"{text}\t2009-2010"), {}) == ""
 
 
 _FELLOWSHIP = "Example Critical Care Fellowship, Kestrel Institute"
@@ -1423,9 +1423,86 @@ def test_a_training_line_holding_a_year_outside_its_rows_span_offers_none(line, 
     # position offered as this one's prose would be in the accepted document
     # nowhere (#1205 review).
     entry = _training(line, start_date=start, end_date=end)
-    assert sp._own_training_line(entry) == (line if offered else "")
+    assert sp._own_training_line(entry, {}) == (line if offered else "")
     assert bool(_plan_training(entry)) is offered
 
+
+
+# --- #1205 comment 6621530896 item 2: records of a line whose parts do not pair
+
+def _line_records(code, text, records):
+    """The records fan-out made of one line whose tab parts outnumber them:
+    every earlier record with its own fields and a line built of them, the
+    last keeping the whole line (`LAST_STAGE4_RECORD`)."""
+    count = len(records)
+    entries = []
+    for index, fields in enumerate(records):
+        marker = {"key": "stage4_records", "index": index, "count": count}
+        last = index == count - 1
+        entry = dict(_entry(text if last else ", ".join(fields.values()), code=code, **fields),
+                     element_idx_start=7)
+        if last:
+            entry[LAST_STAGE4_RECORD] = {**marker, "text": None}
+        else:
+            entry[FANNED_OUT_FROM] = marker
+        entries.append(entry)
+    return entries
+
+
+_ROLES = ("Chief Resident", "Founder of the Quillmark Outreach Chapter",
+          "Representative to the Graduate Education Committee")
+_ROLE_DETAIL = ("Coordinated the overnight radiology coverage rotation schedules",
+                "Redesigned the departmental residency website and curriculum pages")
+
+
+def _residency_roles():
+    """Three roles of one residency, each a record, on one line: the
+    position, then each role followed by its own undated detail but the
+    last."""
+    text = "\t".join([f"{_RESIDENCY}, Norvale General Hospital, 2009-2013",
+                      _ROLES[0], _ROLE_DETAIL[0], _ROLES[1], _ROLE_DETAIL[1], _ROLES[2]])
+    return _line_records("C", text, [{"training_type": _RESIDENCY, "institution": "Norvale General Hospital",
+                                      "start_date": "2009-07", "end_date": "2013-06", "role": role}
+                                     for role in _ROLES])
+
+
+def test_each_record_of_a_line_whose_parts_do_not_pair_reads_its_own_detail():
+    # Before, none of the records read any of it: the last's parts do not
+    # pair with them, and the others read the line built of their fields.
+    entries = _residency_roles()
+    by_code = {"C": entries}
+    assert [sp._own_training_line(entry, by_code) for entry in entries] == [*_ROLE_DETAIL, ""]
+    # Without its records, the last reads none of the line, as before.
+    assert sp._own_training_line(entries[-1], {}) == ""
+    rows = [[f"{_RESIDENCY}, {role}", "Norvale General Hospital", "07/09-06/13"] for role in _ROLES]
+    table, lines = _training_rows(*rows)
+    planned = sp.plan_subpoints(by_code, _haystack(*(" ".join(row) for row in rows)), lines,
+                                {"C": sp.SectionSpan(0, None)},
+                                rows_written=lambda e: [table.rows[entries.index(e)]._tr])
+    assert [(p.anchor, p.paragraphs) for p in planned] == [
+        (lines[1], (_ROLE_DETAIL[0],)), (lines[2], (_ROLE_DETAIL[1],))]
+
+
+def test_a_part_naming_several_records_leaves_what_follows_it_to_no_record():
+    entries = _residency_roles()
+    entries[-1]["text"] = entries[-1]["text"].replace(_ROLES[1], f"{_ROLES[1]}, {_ROLES[2]}")
+    assert [sp._own_training_line(entry, {"C": entries}) for entry in entries] == [_ROLE_DETAIL[0], "", ""]
+
+
+@pytest.mark.parametrize("missing", [0, 1])
+def test_a_line_one_of_whose_records_is_gone_offers_none_of_its_parts(missing):
+    # A record fan-out folded into another's row, or dedup dropped: which
+    # part is whose cannot be read. The earlier record left reads the line
+    # built of its fields, as before.
+    entries = _residency_roles()
+    kept = {"C": [entry for index, entry in enumerate(entries) if index != missing]}
+    assert [sp._own_training_line(entry, kept) for entry in kept["C"]] == [kept["C"][0]["text"], ""]
+
+
+def test_a_records_detail_holding_a_year_outside_its_span_offers_none():
+    entries = _residency_roles()
+    entries[-1]["text"] = entries[-1]["text"].replace(_ROLE_DETAIL[1], f"{_ROLE_DETAIL[1]}, 2015")
+    assert [sp._own_training_line(entry, {"C": entries}) for entry in entries] == [_ROLE_DETAIL[0], "", ""]
 
 # --- #1245 (ruling 2026-11-06 Q2): the supervisor a training line labels ------
 
@@ -1704,7 +1781,7 @@ def test_a_membership_line_naming_another_society_offers_none():
     listed = (f"Member of the {_SOCIETY}, the Kestrel Statistical Association, and the Norvale "
               "Academy of Tidal Studies.")
     entry = _membership(f"{listed}\t{PROSE}")
-    assert sp._own_membership_line(entry) == ""
+    assert sp._own_membership_line(entry, {}) == ""
     assert _plan_membership(entry) == []
     # The same prose on a line naming only its own society is offered.
     assert [p.paragraphs for p in _plan_membership(_membership())] == [(PROSE,)]
@@ -1729,7 +1806,7 @@ def test_a_membership_line_holding_its_own_type_after_a_tab_offers_its_prose():
     own = "Norvale Association of Limnologists"
     entry = _membership(f"{own}\tAssociate Member, 2004-2016\t{PROSE}", organization=own,
                         membership_type="Associate Member", start_date="2004", end_date="2016")
-    assert sp._own_membership_line(entry) == entry["text"]
+    assert sp._own_membership_line(entry, {}) == entry["text"]
     assert [p.paragraphs for p in _plan_membership(entry, [f"Associate Member, {own}", "2004-2016"])] \
         == [(PROSE,)]
 
@@ -1748,7 +1825,7 @@ def test_a_membership_line_naming_another_college_of_its_place_offers_none():
     own = "Norvale College of Cardiology"
     other = "Norvale College of Physicians, elected to its ethics and professionalism council"
     entry = _membership(f"Member, {own}, 2009-2014\t{other}", organization=own)
-    assert sp._own_membership_line(entry) == ""
+    assert sp._own_membership_line(entry, {}) == ""
     assert _plan_membership(entry, [f"Member, {own}", "2009-2014"]) == []
 
 
@@ -1763,7 +1840,7 @@ def test_a_membership_line_naming_another_college_of_its_place_offers_none():
 ], ids=["organization", "alias", "date_spans", "strings"])
 def test_a_list_of_memberships_under_a_field_offers_none(fields, listed):
     entry = _membership(**fields)
-    assert sp._own_membership_line(entry) == ("" if listed else entry["text"])
+    assert sp._own_membership_line(entry, {}) == ("" if listed else entry["text"])
     assert [p.paragraphs for p in _plan_membership(entry)] == ([] if listed else [(PROSE,)])
 
 
@@ -1772,9 +1849,27 @@ def test_a_membership_whose_fields_are_not_a_mapping_reads_its_own_line(fields):
     # It names no organization, so a society its line names is another's.
     text = f"Member, ESEE\t{PROSE}"
     entry = {"taxonomy_code": "I", "text": text, "extracted_fields": fields}
-    assert sp._own_membership_line(entry) == text
-    assert sp._own_membership_line(dict(entry, text=f"Member, {_SOCIETY}\t{PROSE}")) == ""
+    assert sp._own_membership_line(entry, {}) == text
+    assert sp._own_membership_line(dict(entry, text=f"Member, {_SOCIETY}\t{PROSE}"), {}) == ""
 
+
+
+def test_a_membership_record_of_a_line_whose_parts_do_not_pair_reads_its_own_detail():
+    # A society, then its section, then the section's undated bullet.
+    section = "Trainee Section, Coastal Imaging Pathways Committee"
+    text = f"Member of {_SOCIETY} since 2009\t{section}, Class of 2010 member\t{OTHER_PROSE}"
+    entries = _line_records("I", text, [
+        {"organization": _SOCIETY, "membership_type": "Member", "start_date": "2009", "end_date": "present"},
+        {"organization": section, "membership_type": "Class of 2010 Member", "start_date": "2010",
+         "end_date": "present"}])
+    by_code = {"I": entries}
+    assert [sp._own_membership_line(entry, by_code) for entry in entries] == ["", OTHER_PROSE]
+    assert sp._own_membership_line(entries[-1], {}) == ""
+    table, lines = _membership_rows([f"Member, {_SOCIETY}", "2009-Present"],
+                                    [f"Class of 2010 Member, {section}", "2010-Present"])
+    (planned,) = sp.plan_subpoints(by_code, _haystack(), lines, {"I": sp.SectionSpan(0, None)},
+                                   rows_written=lambda e: [table.rows[entries.index(e)]._tr])
+    assert (planned.anchor, planned.paragraphs) == (lines[2], (OTHER_PROSE,))
 
 @pytest.mark.parametrize("segments, index, read", [
     # The last of two records, its line's two segments pairing with them: its own.

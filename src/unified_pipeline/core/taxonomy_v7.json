@@ -94,7 +94,8 @@
         "Postdoctoral Fellow / Clinical Fellow / Research Fellow (trainee position)": "C - Training position where CV owner is the trainee",
         "Graduate Fellow / Pre-doctoral Fellow / Doctoral Fellowship (multi-year funding tied to enrollment)": "C - Training funding, not an honor",
         "Fellowship, School of X (multi-year institutional funding for graduate study)": "C - Doctoral training support",
-        "FACP / FAHA / Fellow of [Professional Society] (membership status)": "I - Ongoing membership/fellowship in professional society",
+        "FACP / FAHA / Fellow of [Professional Society] under a memberships heading (a grade members apply for)": "I - Ongoing membership/fellowship grade in professional society",
+        "Elected Fellow of [Society], or Fellow of [Society] listed under an honors heading": "H - An elected or honors-listed fellowship is an honor",
         "Fellow, National Academy of Sciences / National Academy of Medicine (rare elected honor)": "H - Pure honor, elected recognition",
         "Honorary Fellow / Honorary Research Fellow (external, no duties)": "H - Pure honor with no employment relationship",
         "Travel Award / Conference Fellowship (one-time)": "H - One-time award, not training"
@@ -185,7 +186,7 @@
         "Volunteer, [Organization]": "P or Q2 - Service role",
         "Member, [Community Committee/Board]": "Q2 - External committee service",
         "Grants written on behalf of [community organization]": "P or Q2 - Service (NOT M2, since CV owner is providing service, not receiving funding)",
-        "Pro bono consulting": "Q2 - External professional service",
+        "Pro bono consulting for a community organization": "Q2 - External professional service (consulting for a company is D3)",
         "Community advisory board": "Q2 - External committee service"
       },
       "key_distinction": "Grants written FOR community organizations (as service) are P/Q2. Grants received BY the CV owner (as funding) are M2."
@@ -593,7 +594,7 @@
       "family": "I",
       "group": "Professional Activities",
       "purpose": "Capture ongoing memberships and fellowship status in professional societies.",
-      "description": "Membership and fellowship status in professional organizations, including post-nominal designations that indicate ongoing affiliation.",
+      "description": "Membership in professional organizations, and the fellowship grades members apply for (post-nominal designations such as FACP or FACS) listed under a memberships, societies, associations or certification heading. An elected fellowship, or one listed under an honors heading, is an honor (H).",
       "typical_entries": [
         "Member, American Medical Association, 2010–present",
         "Fellow, American College of Physicians (FACP), since 2015",
