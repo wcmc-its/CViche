@@ -814,8 +814,8 @@ def parse_reclassified_segments(
     return segments or None
 
 
-def _vouch_for_lines(lines: list[str], haystack: str,
-                     t_line_token_sets: list[set], line_token_sets: list[set]) -> str:
+def _vouch_for_lines(lines: list[str], haystack: str, t_line_token_sets: list[set],
+                     line_token_sets: list[set], line_value_sets: list[frozenset[int]]) -> str:
     """Count recovered `lines` as rendered, so a near-identical variant in
     another pre-dedup entry (trailing period, 'Sep' vs 'Sept') is verified
     rendered instead of inserted a second time. Returns the new haystack."""
@@ -823,6 +823,7 @@ def _vouch_for_lines(lines: list[str], haystack: str,
         haystack += "\x00" + _squash(line)
         t_line_token_sets.append(_record_tokens(line))
         line_token_sets.append(set(_RENDER_TOKEN_RE.findall(_norm(line))))
+        line_value_sets.append(render_check.distinguishing_values(line))
     return haystack
 
 
@@ -851,12 +852,13 @@ def _tab_part_recovered(line: str, part_token_sets: list[set]) -> bool:
 
 class RecoveryView(NamedTuple):
     """The document as the #221 recovery checks a record line against it:
-    its lines squashed and joined (`haystack`), each line's letter tokens,
-    and the `_record_tokens` of each line the Appendix cap left whole and of
+    its lines squashed and joined (`haystack`), each line's letter tokens
+    and `distinguishing_values` (#2055), and the `_record_tokens` of each line the Appendix cap left whole and of
     each it cut (#1230). The recovery adds each line it re-emits
     (`_vouch_for_lines`, `_vouch_for_tab_parts`)."""
     haystack: str
     line_token_sets: list[set]
+    line_value_sets: list[frozenset[int]]
     t_line_token_sets: list[set]
     t_cut_token_sets: list[set]
 
@@ -871,6 +873,7 @@ def _recovery_view(out_lines: list[str], entries_by_code: dict[str, list[dict]])
     return RecoveryView(
         "\x00".join(_squash(line) for line in out_lines),
         [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in out_lines],
+        [render_check.distinguishing_values(line) for line in out_lines],
         [_record_tokens(line) for line in out_lines
          if not line.endswith(APPENDIX_TRUNCATION_MARKER)],
         [_record_tokens(line) for line in out_lines if line.endswith(APPENDIX_TRUNCATION_MARKER)]
@@ -930,7 +933,7 @@ def _record_line_lost(line: str, code: str, entry: dict, records: EntryRecords,
     else:
         rendered = render_check.sibling_record_rendered(
             line, records.siblings.get(line), view.haystack, view.line_token_sets,
-            view.t_line_token_sets, records.twins.get(line))
+            view.t_line_token_sets, records.twins.get(line), view.line_value_sets)
     # A mentee's tab parts are details of the one mentee its fields hold (#1243).
     one_record = code in _MENTEE_CODES
     if rendered is None and line in records.tab_parts:
@@ -4925,7 +4928,7 @@ Now analyze the text above:"""
                         else:
                             view = view._replace(haystack=_vouch_for_lines(
                                 [line], view.haystack, view.t_line_token_sets,
-                                view.line_token_sets))
+                                view.line_token_sets, view.line_value_sets))
                     _vouch_for_tab_parts(deferred, view.t_line_token_sets, part_token_sets)
 
             # Unconsumed A-coded orphans (#316) are part of the SAME record-

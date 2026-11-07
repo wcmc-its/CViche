@@ -233,7 +233,9 @@ HOME_ONLY_IMPORTS = {
                                              "record_siblings", "record_twins",
                                              "short_tab_part_words",
                                              "sibling_record_rendered", "_OPEN_TERM_WORDS",
-                                             "_field_strings", "dated_clause_lines", "extracted_clause"),
+                                             "_field_strings", "dated_clause_lines", "extracted_clause",
+                                             "distinguishing_values", "piece_rendered",
+                                             "values_contradict"),
 }
 
 _RELOCATED_CASES = [

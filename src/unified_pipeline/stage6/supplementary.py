@@ -173,6 +173,7 @@ from .render_check import (
     _field_strings,
     _norm,
     _record_rendered,
+    distinguishing_values,
 )
 from .resolution.institution import FALLBACK_LOCATION_FIELD
 
@@ -1134,6 +1135,9 @@ class _Haystack(NamedTuple):
     """The rendered document as `_record_rendered` reads it."""
     text: str
     line_tokens: list[set[str]]
+    # `distinguishing_values` of each `line_tokens` set (#2055); None reads
+    # only their ordinal words (`_record_rendered`)
+    line_values: list[frozenset[int]] | None = None
 
 
 def first_field_value(fields: Mapping, names: Sequence[str]) -> object:
@@ -1444,7 +1448,8 @@ def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack,
     fragments = [fragment for fragment in prose_fragments(entry.get('text') or '' if text is None else text)
                  if not _restates_row(fragment, code, value_tokens)
                  and not (publication and _is_bibliography_matter(fragment, authors))
-                 and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
+                 and _record_rendered(fragment, haystack.text, haystack.line_tokens,
+                                     haystack.line_values) is False]
     if publication and any(_cites_another_paper(fragment, entry) for fragment in fragments):
         return []
     return fragments
@@ -2525,10 +2530,11 @@ def rendered_haystack(lines: list[str], doc: Document) -> _Haystack:
     the grant's funder, number and role is rendered though no single row
     holds most of its tokens (YUYVIG DYLJXC: a "<funder> award (<number>),
     <role> <years>" line, rendered as its own grant table)."""
-    token_sets = [_tokens(line) for line in lines]
-    token_sets += [_tokens(' '.join(t.text or '' for t in tbl.iter(qn('w:t'))))
-                   for tbl in doc.element.body.iter(qn('w:tbl')) if _is_label_table(tbl)]
-    return _Haystack("\x00".join(_squash(line) for line in lines), token_sets)
+    tables = [' '.join(t.text or '' for t in tbl.iter(qn('w:t')))
+              for tbl in doc.element.body.iter(qn('w:tbl')) if _is_label_table(tbl)]
+    return _Haystack("\x00".join(_squash(line) for line in lines),
+                     [_tokens(text) for text in lines + tables],
+                     [distinguishing_values(text) for text in lines + tables])
 
 
 # --- writing -----------------------------------------------------------------

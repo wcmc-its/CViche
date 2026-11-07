@@ -63,6 +63,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _record_tokens,
     _whole_record_rendered,
     dated_clause_lines,
+    distinguishing_values,
     extracted_clause,
     record_chunks,
     record_pieces,
@@ -1970,6 +1971,140 @@ def test_answers_to_different_labels_need_not_share_one_output_line():
             "Your percent (%) effort: | 1%"]
     haystack = _squash_text("\n".join(page))
     assert _record_rendered(line, haystack, _output_line_tokens(*page)) is None
+
+
+_THIRD_EDITION_ROW = ("Example Guides to the Evaluation of Example Impairment, Third Edition "
+                      "(revised) proficient and instructor")
+_SIXTH_EDITION_LINE = "Example Guides to the Evaluation of Example Impairment Sixth Edition proficient"
+
+
+def test_a_row_of_another_edition_does_not_vouch_for_a_line():
+    """#2055: the line shares the row's opening piece and 10 of its 11
+    tokens, and differs only in its edition, so the row is not its render."""
+    assert _record_rendered(_SIXTH_EDITION_LINE, _squash_text(_THIRD_EDITION_ROW),
+                            _output_line_tokens(_THIRD_EDITION_ROW)) is False
+    # Token overlap alone, with no piece on the page: the edition still decides.
+    assert _record_rendered(_SIXTH_EDITION_LINE, "",
+                            _output_line_tokens(_THIRD_EDITION_ROW)) is False
+    same_edition = _THIRD_EDITION_ROW.replace("Third", "Sixth")
+    assert _record_rendered(_SIXTH_EDITION_LINE, _squash_text(same_edition),
+                            _output_line_tokens(same_edition)) is True
+    assert _record_rendered(_SIXTH_EDITION_LINE, "", _output_line_tokens(same_edition)) is True
+
+
+def test_a_piece_vouches_only_from_the_output_line_holding_the_ordinal():
+    """The piece and the ordinal must sit on ONE output line: the row's piece
+    on one line and "sixth" on an unrelated one do not add up to a render."""
+    page = [_THIRD_EDITION_ROW, "Sixth Annual Example Symposium"]
+    haystack = "\x00".join(_squash_text(line) for line in page)
+    assert _record_rendered(_SIXTH_EDITION_LINE, haystack, _output_line_tokens(*page)) is False
+
+
+def test_an_output_line_without_the_ordinal_still_vouches():
+    """A render that puts the ordinal in a cell of its own ("First Reader")
+    or drops it ("first year") leaves a line with no ordinal to contradict,
+    so the line still reads as rendered."""
+    line = "Quillon Marbury, Department of Example Studies. Role: Thesis First Reader, 2024"
+    row = "Quillon Marbury, Department of Example Studies, Thesis Reader"
+    assert _record_rendered(line, "", _output_line_tokens(row)) is True
+
+
+def _output_line_values(*lines):
+    return [distinguishing_values(line) for line in lines]
+
+
+def _vouches(line, *page):
+    """`_record_rendered` of `line` against the output lines `page`, each
+    line's `distinguishing_values` read from its text."""
+    haystack = "\x00".join(_squash_text(out) for out in page)
+    return _record_rendered(line, haystack, _output_line_tokens(*page), _output_line_values(*page))
+
+
+_GUIDE = "Example Guides to the Evaluation of Example Impairment"
+
+
+@pytest.mark.parametrize("line,row", [
+    (f"{_GUIDE} 6th Edition proficient", f"{_GUIDE}, 3rd Edition (revised) proficient and instructor"),
+    (f"{_GUIDE} Part IV proficient", f"{_GUIDE} Part III proficient and instructor"),
+    (f"{_GUIDE} Volume 2 proficient", f"{_GUIDE} Volume 3 proficient and instructor"),
+    (f"{_GUIDE} Sixth Edition proficient", f"{_GUIDE}, 3rd Edition (revised) proficient and instructor"),
+])
+def test_a_row_numbering_another_edition_part_or_volume_does_not_vouch(line, row):
+    """#2055 review: a numeric ordinal, a Roman numeral after "Part" and a
+    number after "Volume" tell the rows apart as an ordinal word does, on
+    the piece side and on the token side alike."""
+    assert _vouches(line, row) is False
+    assert _record_rendered(line, "", _output_line_tokens(row), _output_line_values(row)) is False
+    assert _vouches(line, row.replace("3rd", "6th").replace("III", "IV").replace("3", "2")) is True
+
+
+def test_an_ordinal_in_words_and_in_digits_is_one_value():
+    """"Sixth Edition" and "6th Edition" are one edition, either way round."""
+    assert _vouches(f"{_GUIDE} Sixth Edition proficient", f"{_GUIDE}, 6th Edition proficient") is True
+    assert _vouches(f"{_GUIDE} 6th Edition proficient", f"{_GUIDE}, Sixth Edition proficient") is True
+
+
+def test_an_output_line_naming_several_editions_vouches_for_each():
+    line = f"{_GUIDE} Sixth Edition proficient"
+    assert _vouches(line, f"{_GUIDE}, Third and Sixth Editions, proficient") is True
+    assert _record_rendered(line, "", _output_line_tokens(f"{_GUIDE}, Third and Sixth Editions, proficient"),
+                            _output_line_values(f"{_GUIDE}, Third and Sixth Editions, proficient")) is True
+
+
+def test_an_ordinal_inside_a_longer_word_is_no_ordinal():
+    """"Contenthouse" holds "tenth" only once squashed: the output line names
+    no edition, so it vouches."""
+    row = f"{_GUIDE} proficient, Contenthouse Press"
+    assert _vouches(f"{_GUIDE} Sixth Edition proficient", row) is True
+    assert _record_rendered(f"{_GUIDE} Sixth Edition proficient", _squash_text(row),
+                            _output_line_tokens(row)) is True
+
+
+@pytest.mark.parametrize("text,values", [
+    ("Edition 2015, Vol 12, 345-350", {12}),
+    ("our 1000th patient", set()),
+    ("Phase II/III trial, Parts IV and 6", {4, 6}),
+    ("Vol. 2", {2}),
+    ("Parts I/II/III", {1, 2, 3}),
+    ("Book XIV, Series ix", {14, 9}),
+    ("May 3rd, 2015, the first course", {1, 3}),
+    ("Department 3, room 412, 2019-2021", set()),
+])
+def test_distinguishing_values_read_no_year_or_page(text, values):
+    """A number counts only after a word that numbers a work, in three
+    digits or fewer, and a listing joins by "/", "-", "&" or "and", never
+    by a comma: no year, page or room number is a value."""
+    assert distinguishing_values(text) == values
+
+
+def test_the_recovery_pass_reads_the_edition_of_each_output_line():
+    """The wire: `_recover_unrendered_records` builds the output lines'
+    values (`RecoveryView.line_value_sets`), so a line whose edition no
+    output line carries is recovered though its opening piece is on the
+    page."""
+    gen = _generator()
+    gen.doc.add_paragraph(f"{_GUIDE}, 3rd Edition (revised) proficient and instructor")
+    lost = f"{_GUIDE}, 6th Edition | proficient"
+    entry = {"taxonomy_code": "Q1", "element_idx_start": 9,
+             "text": f"{lost}\nMarbury Quillon Workshop on Example Methods | Instructor | Norvale",
+             "extracted_fields": {}}
+    gen._recover_unrendered_records({"Q1": [entry]})
+    assert any(lost.split(" |")[0] in text for text in _bulleted_texts(gen.doc.paragraphs))
+
+
+def test_a_recovered_line_vouches_only_for_its_own_edition():
+    """A line the recovery re-emits joins the page with its values
+    (`_vouch_for_lines`): another entry's line of another edition is still
+    recovered, though its opening piece is now on the page."""
+    gen = _generator()
+    gen.doc.add_paragraph("Unrelated rendered line")
+    third, sixth = (f"{_GUIDE}, {edition} Edition | proficient" for edition in ("3rd", "6th"))
+    entries = [{"taxonomy_code": "Q1", "element_idx_start": idx, "extracted_fields": {},
+                "text": f"{line}\nMarbury Quillon Workshop on Example Methods {idx} | Instructor | Norvale"}
+               for idx, line in ((9, third), (12, sixth))]
+    gen._recover_unrendered_records({"Q1": entries})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert all(any(line.split(" |")[0] in text for text in bullets) for line in (third, sixth))
 
 
 def _squash_text(text):

@@ -1162,6 +1162,26 @@ def test_record_rendered_ignores_tokens_ubiquitous_in_the_output():
     assert _record_rendered(short, "", out) is None
 
 
+_GUIDE_ROW = ("Example Guides to the Evaluation of Example Impairment, 3rd Edition "
+              "(revised) proficient and instructor")
+
+
+def test_record_rendered_rejects_a_row_of_another_edition():
+    """#2055: the doctor reads a record as stage 6 does. A row that differs
+    only in its edition shares the record's opening piece and most of its
+    words, but not its edition, so it vouches neither verbatim nor by
+    overlap; a row of the same edition, or one naming several, does."""
+    from unified_pipeline.doctor.shared import squash
+    record = "Example Guides to the Evaluation of Example Impairment Sixth Edition proficient"
+    out = _rendered_lines([("p", _GUIDE_ROW)])
+    assert _record_rendered(record, squash(_GUIDE_ROW), out) is False
+    assert _record_rendered(record, "", out) is False
+    for row in (_GUIDE_ROW.replace("3rd", "6th"), _GUIDE_ROW.replace("3rd Edition", "Third and Sixth Editions")):
+        same = _rendered_lines([("p", row)])
+        assert _record_rendered(record, squash(row), same) is True
+        assert _record_rendered(record, "", same) is True
+
+
 def test_passage_key_keeps_non_ascii_letters_and_ascii_unchanged():
     """#541: non-ASCII letters no longer fold to whitespace; ASCII keys are
     byte-identical to the old [^a-z0-9] fold."""
