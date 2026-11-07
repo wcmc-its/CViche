@@ -44,7 +44,7 @@ renderer:
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
 
@@ -129,6 +129,14 @@ class PubMedEnrichment(TypedDict, total=False):
     pubmed_pages: str
 
 
+class WrittenDate(NamedTuple):
+    """A month as an entry's line writes it beside a stored bare year, with
+    that year ("2008 October"), and the day or days it writes beside the
+    month ("21-24", '' for none)."""
+    year_month: str = ''
+    days: str = ''
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedPublication:
     """One publication entry, resolved: every field is the text to print.
@@ -162,11 +170,15 @@ class ResolvedPublication:
     #: outside its leading CV list number (`_abstract_number`, #1570).
     abstract_number: str = ''
     #: An S8 meeting's date with the month, and the day, the entry's line
-    #: writes: "2023 October" for a stored "2023-10" (`_meeting_date`, #1570),
-    #: and "2008 October 21-24" for a stored "2008" whose line writes them.
+    #: writes: "2023 October" for a stored "2023-10" (`_meeting_date`, #1570).
     #: '' when the line names no such month; the meeting trailer then prints
     #: `year` as it always did.
     meeting_date: str = ''
+    #: The month, and the day or days, the entry's line writes beside a
+    #: stored bare year: ("2008 October", "21-24") for a stored "2008"
+    #: (`_bare_year_date`, #1570). Empty for any other stored year; the
+    #: meeting trailer then prints `year`, or `meeting_date`.
+    bare_year_date: WrittenDate = WrittenDate()
     #: The entry's own line, which the S8 fallback checks its abstract number
     #: and meeting month against so it prints no word twice (#1570).
     source_text: str = ''
@@ -252,11 +264,21 @@ _BARE_YEAR_RE = re.compile(r'\d{4}')
 #: Text ending in a dash: a date right after it ends a range that began in
 #: another month ("September 30 - October 3, 2012").
 _RANGE_DASH_END_RE = re.compile(r'[-–]\s*$')
-#: Text ending in a journal locator ("177: A116, ", "12(3):45-67. "): a date
-#: right after it is the journal issue's, not the meeting's (GNONHA, #1570).
-_JOURNAL_LOCATOR_END_RE = re.compile(
-    r'\d+\s*(?:\([^)]*\))?\s*:\s*[A-Za-z]?\d+[A-Za-z]?'
-    r'(?:\s*[-–]\s*[A-Za-z]?\d+[A-Za-z]?)?\s*[,;.]?\s*$')
+#: A journal locator ("177: A116", "12(3):45-67"): a date anywhere after one
+#: may be the journal issue's, not the meeting's (GNONHA, #1570; BLBVPD
+#: 2126: a volume, issue and page, then the meeting in brackets).
+_JOURNAL_LOCATOR_RE = re.compile(r'\d+\s*(?:\([^)]*\))?\s*:\s*[A-Za-z]?\d')
+#: Words that number a part of a journal, a book or a meeting. A number
+#: right after one is not a day: "Part 2 MAR 8 2006" printed "2006 MAR 2"
+#: (web204 2363's shape, #1570), and "No. 5 April 2010" and "Board 12 May 2015"
+#: read the same way.
+_NUMBERING_WORDS = ('part', 'vol', 'volume', 'no', 'number', 'issue', 'suppl',
+                    'supplement', 'session', 'abstract', 'board')
+#: Text ending in a numbering word ("Part ", "No. ", "#").
+_NUMBERING_WORD_END_RE = re.compile(
+    rf"(?:\b(?:{'|'.join(_NUMBERING_WORDS)})\.?|#)\s*$", re.IGNORECASE)
+#: The days a month has at most: a larger number beside it is not a day.
+_LAST_DAY_OF_MONTH = 31
 
 
 def _abstract_number(value: object, source_text: str) -> str:
@@ -276,28 +298,47 @@ def _abstract_number(value: object, source_text: str) -> str:
     return number if re.search(rf'(?<!\w){re.escape(number)}(?!\w)', source_text) else ''
 
 
-def _bare_year_meeting_date(year: int, source_text: str) -> str:
-    """"<year> <Month>[ <days>]" as the entry's line writes them beside a
-    stored bare `year`, or '' when the line does not pin the month down.
+def _plausible_days(source_text: str, match: re.Match[str], group: str) -> str:
+    """The day or days `match`'s `group` writes, or '' when they are not
+    plausibly days: a number outside 1-31, or one written right after a
+    numbering word (`_NUMBERING_WORDS`)."""
+    days = match[group]
+    if not days or _NUMBERING_WORD_END_RE.search(source_text, 0, match.start(group)):
+        return ''
+    numbers = [int(number) for number in re.findall(r'\d+', days)]
+    return days if all(1 <= number <= _LAST_DAY_OF_MONTH for number in numbers) else ''
+
+
+def _bare_year_date(value: object, source_text: str) -> WrittenDate:
+    """The month, and the day or days, the entry's line writes beside a
+    stored bare year (`WrittenDate`), or an empty one when the year is not
+    bare or the line does not pin the month down.
 
     Stage 4 stores "21-24 October 2008" as "2008" too, and the S8 fallback
     then lost the month and days 5d's citation kept (QQGKXR 483, ECXGAT
-    980; #1570 round 3). Every month the line writes with that
-    year has to be the same month, because a line that writes two does not
-    say which is the meeting's. The first is printed, its day or days as the
-    line writes them, unless it ends a range that began in another month or
-    directly follows a journal locator, where the month is the issue's.
+    980; #1570 round 3). Every month the line writes with that year has to
+    be the same month, because a line that writes two does not say which is
+    the meeting's. The first is taken, unless it ends a range that began in
+    another month, or a journal locator stands anywhere before it, where the
+    month may be the issue's. Its days are taken as the line writes them
+    when they stand on one side of the month and are plausibly days
+    (`_plausible_days`); days on both sides leave which is the meeting's
+    open ("12 October 12 2016"), so only the month is taken.
     """
+    stored = _scalar_text(value)
+    if not _BARE_YEAR_RE.fullmatch(stored):
+        return WrittenDate()
     dates = [match for match in _WRITTEN_MONTH_DAYS_RE.finditer(source_text)
-             if int(match['year']) == year]
+             if match['year'] == stored]
     if len({_MONTH_NAME_TO_NUM[match['month'].lower()] for match in dates}) != 1:
-        return ''
+        return WrittenDate()
     first = dates[0]
     if (_RANGE_DASH_END_RE.search(source_text, 0, first.start())
-            or _JOURNAL_LOCATOR_END_RE.search(source_text, 0, first.start())):
-        return ''
-    days = first['day_before'] or first['day_after']
-    return f"{year} {first['month']} {days}" if days else f"{year} {first['month']}"
+            or _JOURNAL_LOCATOR_RE.search(source_text, 0, first.start())):
+        return WrittenDate()
+    before = _plausible_days(source_text, first, 'day_before')
+    after = _plausible_days(source_text, first, 'day_after')
+    return WrittenDate(f"{stored} {first['month']}", '' if before and after else before or after)
 
 
 def _meeting_date(value: object, source_text: str) -> str:
@@ -309,14 +350,9 @@ def _meeting_date(value: object, source_text: str) -> str:
     158/159, SQMWHM 425, #1570). The month is the line's own word, in the
     line's own spelling, so the fallback adds no word the CV lacks; the day
     is printed only when the line writes the same day next to that month.
-    The order is Vancouver's, the one stage 5d's S8 citations use. A stored
-    bare year takes the month the line writes beside it the same way
-    (`_bare_year_meeting_date`).
+    The order is Vancouver's, the one stage 5d's S8 citations use.
     """
-    stored = _scalar_text(value)
-    if _BARE_YEAR_RE.fullmatch(stored):
-        return _bare_year_meeting_date(int(stored), source_text)
-    year, month, day = _parse_date_components(stored)
+    year, month, day = _parse_date_components(_scalar_text(value))
     if not (year and month):
         return ''
     for match in _WRITTEN_MONTH_DATE_RE.finditer(source_text):
@@ -510,6 +546,7 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         location=_text(fields.get('location')),
         abstract_number=_abstract_number(fields.get('abstract_number'), source_text),
         meeting_date=_meeting_date(fields.get('year'), source_text),
+        bare_year_date=_bare_year_date(fields.get('year'), source_text),
         source_text=source_text,
         volume=(_scalar_text(enrichment.get('pubmed_volume'))
                 or _scalar_text(fields.get('volume'))),

@@ -685,6 +685,9 @@ def test_abstract_number_resolves_only_when_its_line_writes_it(value, text, expe
     ('2023-10', 'A Talk. October 2022.', ''),
     # A month name inside a longer word is not the month.
     ('2023-05', 'A Talk. Dismay 2023.', ''),
+    # A bare year has no month of its own: `bare_year_date` reads its line.
+    ('2023', 'A Talk. October 2023.', ''),
+    (2023, 'A Talk. October 2023.', ''),
     (None, 'A Talk. October 2023.', ''),
     # A stored month keeps this path: no day range, and only its own month.
     ('2008-10-21', 'A Talk. Larchmere, 21-24 October 2008.', '2008 October'),
@@ -709,11 +712,44 @@ def test_meeting_date_is_the_month_and_day_its_line_writes(year, text, expected)
     ('2015', 'A Talk. Larks Day, 3 October 2015. Updated October 2015.', '2015 October 3'),
     # A month written with another year is not this year's.
     ('2016', 'A Talk. Larks Day, October 2015; Larchmere, March 2016.', '2016 March'),
+    # A journal locator AFTER the date is the line's journal, not its date.
+    ('2017', 'A Talk. Larks Day 17 Jun 2017, Larchmere. Biol Larks 34(2):151-152.',
+     '2017 Jun 17'),
+    # A number after a numbering word is not a day; the day after the month
+    # is (web204 2363's shape).
+    ('2006', 'A Talk. Biol Larks 31 (2), A140 Part 2 MAR 8 2006.', '2006 MAR 8'),
+    ('2010', 'A Talk. Biol Larks Vol. 31 No. 5 April 2010, p 12.', '2010 April'),
+    ('2014', 'A Talk. Biol Larks V28:No.9 September 2014.', '2014 September'),
+    ('2015', 'A Talk. Larks Day, Board 12 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, poster #12 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Session 3 October 2015.', '2015 October'),
+    ('2015', 'A Talk. Larks Day, Suppl. 2 October 2015.', '2015 October'),
+    ('2015', 'A Talk. Larks Day, Abstract 7 October 2015.', '2015 October'),
+    ('2015', 'A Talk. Biol Larks Vol 3 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Biol Larks Volume 3 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Biol Larks Number 3 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Biol Larks Issue 3 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Biol Larks Supplement 2 October 2015.', '2015 October'),
+    # A number before the month that no numbering word precedes is a day.
+    ('2015', 'A Talk. Larks Day, Larchmere 12 October 2015.', '2015 October 12'),
+    ('2015', 'A Talk. Larks Day, Partial 12 October 2015.', '2015 October 12'),
+    ('2015', 'A Talk. Larks Day, Counterpart 12 October 2015.', '2015 October 12'),
+    # A day on both sides of the month: which is the meeting's is not said.
+    ('2016', 'A Talk. Larks Day. First Online: 12 October 12 2016.', '2016 October'),
+    ('2007', 'A Talk. Larks Day, 2 November 1, 2007.', '2007 November'),
+    # A number no month has that many days of is no day either.
+    ('2010', 'A Talk. Larks Day, page 45 May 2010.', '2010 May'),
+    ('2010', 'A Talk. Larks Day, May 12-45, 2010.', '2010 May'),
+    ('2013', 'A Talk. Larks Day, March 21-32, 2013.', '2013 March'),
+    ('2015', 'A Talk. Larks Day, 0 May 2015.', '2015 May'),
+    # The last day a month has is a day.
+    ('2015', 'A Talk. Larks Day, October 31, 2015.', '2015 October 31'),
 ])
 def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expected):
     entry = {'text': text, 'extracted_fields': {'year': year}}
 
-    assert resolve_publication(entry).meeting_date == expected
+    written = resolve_publication(entry).bare_year_date
+    assert " ".join(part for part in written if part) == expected
 
 
 @pytest.mark.parametrize('year,text', [
@@ -724,9 +760,16 @@ def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expect
     # The end of a range that began in another month: the meeting began then.
     ('2012', 'A Talk. Larks Day, September 30 - October 3, 2012.'),
     ('2012', 'A Talk. Larks Day, 30 September – 3 October 2012.'),
-    # Right after a journal locator: the issue's month, not the meeting's.
+    # After a journal locator, right after it or further on: the month may
+    # be the issue's, not the meeting's (BLBVPD 2126's shape).
     ('2008', 'A Talk. Larks Day. Biol Larks 177: A116, Jun 2008.'),
     ('2008', 'A Talk. Larks Day. Biol Larks 12(3):45-67. June 2008.'),
+    ('1993', 'A Talk. Clin Larks 17(3):212A, 1993 (presented at Larks Day, '
+             'Larchmere, May 9, 1993).'),
+    ('2006', 'A Talk. Biol Larks 7: S41-S41 Suppl. 2 JUL 2006.'),
+    ('2004', 'A Talk. Larks Day. Biol Larks 28(6):S111-S112 Larchmere, May 2004.'),
+    ('2006', 'A Talk. Biol Larks 212 (9): 450 Suppl. S OCT 30 2006.'),
+    ('2008', 'A Talk. Biol Larks 12(3) : 45-67, Larks Day, May 2008.'),
     # Two months written for the year: which one is the meeting's is not said.
     ('2015', 'A Talk. Larks Day, October 2015; Wren Day, November 2015.'),
     ('2015', 'A Talk. Larks Day, September 30, 2015 - October 3, 2015.'),
@@ -737,7 +780,9 @@ def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expect
 def test_a_bare_year_keeps_no_month_its_line_does_not_pin_down(year, text):
     entry = {'text': text, 'extracted_fields': {'year': year}}
 
-    assert resolve_publication(entry).meeting_date == ''
+    resolved = resolve_publication(entry)
+    assert resolved.bare_year_date == ('', '')
+    assert resolved.meeting_date == ''
 
 
 # ---------------------------------------------------------------------------

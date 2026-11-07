@@ -117,6 +117,7 @@ from .publication import (  # noqa: F401
     PublicationFields,
     PubMedEnrichment,
     ResolvedPublication,
+    WrittenDate,
     resolve_publication,
 )
 from .records import (  # noqa: F401
