@@ -2063,7 +2063,9 @@ def test_an_ordinal_inside_a_longer_word_is_no_ordinal():
 @pytest.mark.parametrize("text,values", [
     ("Edition 2015, Vol 12, 345-350", {12}),
     ("our 1000th patient", set()),
-    ("Phase II/III trial, Parts IV and 6", {2, 3, 4, 6}),
+    ("Phase II/III trial, Parts IV and 6", {4, 6}),
+    ("Vol. 2", {2}),
+    ("Parts I/II/III", {1, 2, 3}),
     ("Book XIV, Series ix", {14, 9}),
     ("May 3rd, 2015, the first course", {1, 3}),
     ("Department 3, room 412, 2019-2021", set()),

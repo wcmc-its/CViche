@@ -1062,14 +1062,17 @@ _ORDINAL_WORDS = MappingProxyType({word: value for value, word in enumerate((
     'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth'), start=1)})
 # The same value in digits: "6th Edition" is the "Sixth Edition".
 _NUMERIC_ORDINAL_RE = re.compile(r"\b(\d{1,3})(?:st|nd|rd|th)\b")
-# A number after a word that numbers a work: "Part IV", "Volume 2", "Phase
-# II/III", "Edition 3". A bare number elsewhere is a year, a page or a count,
+# A number after a word that numbers a work: "Part IV", "Volume 2", "Parts
+# II/III", "Edition 3". Not "Phase": an SBIR Phase I and Phase II grant share
+# their project title, and a sub-point their prose lost is anchored by title,
+# so telling them apart moved Phase I goals into the Phase II table (web241,
+# #2055 residual). A bare number elsewhere is a year, a page or a count,
 # and Roman numerals reach X-XX at most: "Vol 12, 345-350" reads 12 alone
 # (no comma joins a listing), "Edition 2015" nothing (no number of four
 # digits counts).
 _NUMBERED_WORK_NUMERAL = r"(?:\d{1,3}|[ivx]{1,5})"
 _NUMBERED_WORK_RE = re.compile(
-    r"\b(?:editions?|parts?|volumes?|vols?|books?|series|phases?)\.?\s*"
+    r"\b(?:editions?|parts?|volumes?|vols?|books?|series)\.?\s*"
     rf"({_NUMBERED_WORK_NUMERAL}(?:\s*(?:/|-|–|&|and)\s*{_NUMBERED_WORK_NUMERAL})*)\b")
 _ROMAN_DIGITS = MappingProxyType({'i': 1, 'v': 5, 'x': 10})
 
