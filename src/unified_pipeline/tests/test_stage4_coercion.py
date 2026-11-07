@@ -218,6 +218,45 @@ def test_plain_initials_and_real_surnames_unchanged_by_digraph_rule():
     assert normalize_authors_vancouver("Ann JBh") == "JBh A"
 
 
+# --- #1438: a generational suffix stays after its author ------------------
+
+@pytest.mark.parametrize(
+    "byline,expected",
+    [
+        # Before the fix the ordinal was read as a surname: "2nd DA".
+        ("Doe AB, Roe C, Doe AB 2nd", "Doe AB, Roe C, Doe AB 2nd"),
+        ("Roe C, Doe JD 4th", "Roe C, Doe JD 4th"),
+        ("Doe AB Jr., Roe C", "Doe AB Jr, Roe C"),
+        ("Ann B. Doe Jr.", "Doe AB Jr"),
+        ("Ann B. Doe III", "Doe AB III"),
+        ("AB Doe II", "Doe AB II"),
+        ("Doe AB Sr.", "Doe AB Sr"),
+        ("Ann B. Doe Sr., Roe C", "Doe AB Sr, Roe C"),
+        ("G R Roe IV", "Roe GR IV"),
+        # The comma before the suffix goes; "Doe JL," was read as a given-first name.
+        ("Doe JL, 2nd, Roe C", "Doe JL 2nd, Roe C"),
+        ("Ann B. Doe, 3rd, Roe C", "Doe AB 3rd, Roe C"),
+    ],
+)
+def test_generational_suffix_stays_after_its_author(byline, expected):
+    assert normalize_authors_vancouver(byline) == expected
+
+
+@pytest.mark.parametrize(
+    "byline",
+    [
+        "Doe IV",               # surname with the initials I.V.
+        "El Doe II, Roe C",     # compound surname with the initials I.I.
+        "Ann Doe II",           # no initials before it: not read as a suffix
+        "Ann Doe III",
+        "Doe AB, Jr",           # a suffix split off on its own has no name to follow
+        "Doe AB, Roe C",
+    ],
+)
+def test_roman_numeral_after_a_name_without_initials_is_left_alone(byline):
+    assert normalize_authors_vancouver(byline) == byline
+
+
 # --- #1705: collective and parenthesised authors pass through verbatim ----
 
 @pytest.mark.parametrize("byline", [

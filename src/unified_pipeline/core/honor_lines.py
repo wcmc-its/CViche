@@ -179,8 +179,9 @@ _BODY = r"(?:association|society|college|academy|institute)"
 #: <programme>" are no title. A bare "Fellowship" at the end ("<Society>
 #: Fellowship") is a programme or an award, not this shape. "<ACRONYM>
 #: Fellow" is not matched: "NIH Fellow 1998" and "AHA Fellow" name a training
-#: or funding fellowship as often as an honorific one (SQMWHM 1536 "NATA
-#: Fellow" is the one corpus line it costs).
+#: or funding fellowship as often as an honorific one, so an election heading
+#: does not make one an honor. An honors-only heading does
+#: (`_ACRONYM_FELLOW_RE`, NZTOHX 1536).
 _FELLOW_TITLE_RE = re.compile(
     r"^[\W\d]*(?:(?i:present)\W*)?"
     r"(?:(?i:distinguished|founding|honorary|associate)\s+)?(?i:fellow)\b"
@@ -191,6 +192,14 @@ _FELLOW_TITLE_RE = re.compile(
     r"|\b(?i:" + _BODY + r")(?:\s+(?i:of)\s+[\w&'\u2019-]+){0,2}\s+(?i:fellow)\b"
     r"|\b(?i:" + _BODY + r")\b[^,;|\t\n]{0,60},\s*(?i:fellow)\b(?!\s+(?i:travel|award|program))"
     r"|\b(?i:fellow(?:ship)?)\s+(?i:of|in)\s+(?:(?i:the)\s+)?(?:[\w&'\u2019-]+\s+){0,4}(?i:" + _BODY + r")\b")
+#: A line that opens, after an optional date or bullet, with "<ACRONYM>
+#: Fellow" ("<ACRONYM> Fellow, June 2031", NZTOHX 1536). Listed under an
+#: honors-only heading it is an honor; "<ACRONYM> Fellow Award", "...
+#: Scholarship", "... Travel", "... Program" or "... Teaching" name an award
+#: or a programme, and "Fellowship" is not this shape.
+_ACRONYM_FELLOW_RE = re.compile(
+    r"^[\W\d]*[A-Z][A-Z&]{1,7}\s+(?i:fellow)\b"
+    r"(?!\s+(?i:travel|awards?|scholar\w*|programs?|programmes?|teaching|grants?)\b)")
 
 
 def heading_names_honors(heading: str) -> bool:
@@ -241,14 +250,15 @@ def is_honorific_fellowship(text: str, heading_path: Sequence[str]) -> bool:
     True when the line opens with an election to a fellowship; or states the
     election later and is no membership row (`_is_membership_row`); or names a
     fellowship as its title under a heading that says its rows were elected,
-    or that lists it under honors (`_lists_under_honors`). The code the line
-    was given is the caller's to check.
+    or that lists it under honors (`_lists_under_honors`); or opens with
+    "<ACRONYM> Fellow" under a heading that lists it under honors. The code
+    the line was given is the caller's to check.
     """
     if _ELECTED_FELLOW_LEAD_RE.search(text):
         return True
     if _ELECTED_FELLOW_CLAUSE_RE.search(text) and not _is_membership_row(text):
         return True
     if not _FELLOW_TITLE_RE.search(text):
-        return False
+        return bool(_ACRONYM_FELLOW_RE.search(text)) and _lists_under_honors(heading_path)
     return (any(_ELECTED_HEADING_RE.search(level) for level in heading_path)
             or _lists_under_honors(heading_path))
