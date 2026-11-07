@@ -799,6 +799,91 @@ def test_co_first_authors_listed_the_other_way_round_stay_across_lists() -> None
     assert _indexes(grouped) == [10, 50] and decisions == []
 
 
+# #446 review (YME2VA 828/602): copies whose PMCIDs both exist and differ are
+# two records, like two PMIDs, in two lists too.
+
+@pytest.mark.parametrize("codes", [("S1", "S2"), ("S2", "S4")])
+@pytest.mark.parametrize("second_pmcid, one_paper", [("PMC4099999", False), ("PMC4012345", True),
+                                                     ("", True)])
+def test_copies_in_two_lists_with_two_pmcids_stay(codes: tuple, second_pmcid: str,
+                                                  one_paper: bool) -> None:
+    first = _paper(codes[0], 10, doi="10.1234/widget.5", pmcid="PMC4012345")
+    second = _paper(codes[1], 50, doi="10.1234/widget.5", pmcid=second_pmcid, volume="12")
+    grouped, decisions, _ = _run([first, second])
+    assert len(_indexes(grouped)) == (1 if one_paper else 2)
+    assert len(decisions) == (1 if one_paper else 0)
+
+
+# #446 review (GLC5JG 577/578): a pair only shape A or B makes keeps both
+# copies when the copy it would drop prints a year, or a month, that the kept
+# copy's row does not print.
+
+def _dated_typo(code: str, idx: int, date: str) -> dict:
+    """A CV line with a misspelled title, whose 5d citation prints `date`."""
+    citation = f"Quenby A, Norvale B. Widget flux in quneby cells. J Widget Res. {date};12(3):E2."
+    return _split_half(code, idx, citation, citation=citation, title="Widget flux in quneby cells",
+                       authors="Quenby A, Norvale B", journal="J Widget Res", year="2031",
+                       pmid="31234567")
+
+
+def _pubmed_fragment(code: str, idx: int, year: str) -> dict:
+    """A PMID-only stage-2 fragment PubMed completed: it prints PubMed's title
+    and the year stage 4 read off the fragment."""
+    fragment = _entry(code, idx, "PMID 31234567", pmid="31234567", authors="Quenby A, Norvale B",
+                      journal="J Widget Res", volume="12", issue="3", pages="E2", year=year)
+    fragment["enrichment_status"] = "enriched"
+    fragment["enrichment_data"] = {"pubmed_title": "Widget flux in quenby cells."}
+    return fragment
+
+
+@pytest.mark.parametrize("fragment_year, one_paper", [
+    ("", False),          # GLC5JG 577: the year and month print only in the typo copy
+    ("2031", False),      # the month alone
+    ("2031 Mar", True),   # the kept row prints the same date
+])
+def test_a_slip_pair_in_two_article_lists_keeps_a_date_only_the_dropped_copy_prints(
+        fragment_year: str, one_paper: bool) -> None:
+    grouped, decisions, _ = _run([_dated_typo("S2", 577, "2031 Mar"),
+                                  _pubmed_fragment("S1", 578, fragment_year)])
+    assert _indexes(grouped) == ([578] if one_paper else [577, 578])
+    assert [d["metric"] for d in decisions] == (["record=paper_identifier"] if one_paper else [])
+
+
+def test_an_article_pair_dev_makes_still_drops_a_date_only_the_dropped_copy_prints() -> None:
+    """The titles agree with no slip forgiven: dev's PMID pair, left as it was."""
+    typo = _dated_typo("S2", 577, "2031 Mar")
+    typo["extracted_fields"]["title"] = "Widget flux in quenby cells"
+    grouped, decisions, _ = _run([typo, _pubmed_fragment("S1", 578, "")])
+    assert _indexes(grouped) == [578]
+    assert decisions[0]["metric"] == "record=paper_identifier"
+
+
+@pytest.mark.parametrize("review_year, one_paper", [("", False), ("2031", True)])
+def test_a_twin_keeps_both_when_the_dropped_copy_alone_prints_a_year(
+        review_year: str, one_paper: bool) -> None:
+    """RLADNC's shape: the chapter copy goes to the review only when the
+    review's row prints the chapter's year too."""
+    chapter = _paper("S4", 10, volume="12", pages="1-9")
+    review = _paper("S2", 50, year=review_year)
+    grouped, decisions, _ = _run([review, chapter])
+    assert _indexes(grouped) == ([50] if one_paper else [10, 50])
+    assert [d["metric"] for d in decisions] == (["record=cross_code_twin"] if one_paper else [])
+
+
+def test_a_split_twin_whose_kept_half_prints_the_date_in_its_citation_drops() -> None:
+    """VGHNZD-07 1915/1916: the kept head stores no year; its 5d citation
+    prints the tail's "Nov." date, so the drop loses nothing."""
+    citation = "Quenby A, Norvale B. Widget flux in quenby cells. Quenby Newsletter. 2031 Nov."
+    head = _split_half("S9", 1915, "(25) Quenby A, Norvale B. Widget flux in quenby cells.",
+                       citation=citation, title="Widget flux in quenby cells",
+                       authors="Quenby A, Norvale B")
+    tail = _split_half("S5", 1916, "Quenby Newsletter, November 2031.", citation=citation,
+                       title="Widget flux in quenby cells", year="2031-11")
+    grouped, decisions, _ = _run([tail, head])
+    assert _indexes(grouped) == [1915]
+    assert decisions[0]["metric"] == "record=cross_code_twin"
+
+
 def test_the_twin_codes_are_the_bibliography_lists_but_the_profile() -> None:
     assert TWIN_CODES == ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9")
 

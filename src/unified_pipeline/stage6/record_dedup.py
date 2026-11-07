@@ -35,8 +35,10 @@ from .dedup import (
     _citation_identity_keys,
     _citations_conflict,
     _decision_fields,
+    _drops_a_printed_date,
     _entry_signature_words,
     _first_author,
+    _identity_drop_loses_a_date,
     _is_subsequence,
     _is_word_run,
     _ordered_words,
@@ -242,12 +244,19 @@ def _same_paper(first: dict, second: dict) -> dict | None:
     """The less full copy (`dedup._citation_fullness`) when two article
     records share a PMID, a DOI, a PMCID or a whole 5d citation with nothing
     apart (`_agreeing_kinds`): the bibliography-group rule of
-    `dedup._drop_citation_copies`, asked across codes, with its exemptions.
+    `dedup._drop_citation_copies`, asked across codes, with its exemptions:
+    a pair only shape A makes keeps both copies when the dropped one alone
+    prints a date (`dedup._identity_drop_loses_a_date`, GLC5JG 577/578).
     An equal pair drops `second`."""
     copies = (first, resolve_publication(first)), (second, resolve_publication(second))
-    if not _agreeing_kinds(*copies, _CROSS_LIST_KEY_KINDS):
+    agreeing = _agreeing_kinds(*copies, _CROSS_LIST_KEY_KINDS)
+    if not agreeing:
         return None
-    return first if _citation_fullness(*copies[0]) < _citation_fullness(*copies[1]) else second
+    dropped, kept = (copies if _citation_fullness(*copies[0]) < _citation_fullness(*copies[1])
+                     else copies[::-1])
+    if _identity_drop_loses_a_date(agreeing, dropped, kept):
+        return None
+    return dropped[0]
 
 
 def _same_honor(first: dict, second: dict) -> dict | None:
@@ -470,11 +479,13 @@ def _twin_to_drop(first: _Listing, second: _Listing) -> _Listing | None:
     """The copy to drop when two listings under two codes are one paper;
     None otherwise. They pair on one whole 5d citation, or, when both codes
     are in `_IDENTIFIER_TWIN_CODES`, on a PMID, DOI or PMCID too, with
-    nothing apart (`_agreeing_kinds`). Two article lists' copies were judged
-    the same way by `_same_paper`, so none of their pairs is left to pair
-    here. An equal pair drops `second`."""
+    nothing apart (`_agreeing_kinds`). Two article lists' copies are
+    `_same_paper`'s to judge, so a pair it kept on the page is not paired
+    here. Every drop here is #446's, so it is refused when the dropped copy
+    alone prints a date (`dedup._drops_a_printed_date`, #446 review). An
+    equal pair drops `second`."""
     codes = {first.code, second.code}
-    if len(codes) == 1:
+    if len(codes) == 1 or codes <= set(PUBLISHED_ARTICLE_CODES):
         return None
     kinds = _CROSS_LIST_KEY_KINDS if codes <= _IDENTIFIER_TWIN_CODES else _CITATION_KEY_KINDS
     agreeing = _agreeing_kinds((first.entry, first.pub), (second.entry, second.pub), kinds)
@@ -482,7 +493,10 @@ def _twin_to_drop(first: _Listing, second: _Listing) -> _Listing | None:
         return None
     by_identifier = bool(agreeing - _CITATION_KEY_KINDS)
     kept = min((first, second), key=lambda listing: _twin_keep_order(listing, by_identifier))
-    return second if kept is first else first
+    dropped = second if kept is first else first
+    if _drops_a_printed_date(dropped.entry, kept.entry):
+        return None
+    return dropped
 
 
 def _twin_drops(entries_by_code: dict[str, list[dict]],
