@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
     _GROUP_HEADER_RE,
+    _TITLE_SLIP_MIN_LETTERS,
     DEDUP_UNNAMED_SHORT_MAX_WORDS,
     SPLIT_SIBLING_METRIC,
     _ad_hoc_apart,
@@ -64,6 +65,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _standalone_numerals,
     _teaching_parts_apart,
     _title_only_fragment,
+    _titles_disagree,
     _undated_split_record_absorbs_date,
     _under_another_year_head,
     _unlabelled_beside_class_award,
@@ -2530,6 +2532,154 @@ def test_two_cv_chapter_titles_under_one_pubmed_record_keep_both():
                        "Yields of a gadget club.", chapter_title="Two routes into a sprocket club",
                        year=2020)
     assert deduplicate_entries([first, second], code="S5") == [first, second]
+
+
+# #446, SLIMGK-04: one review listed twice in one list, the copies sharing only
+# a PMCID, one copy's title misspelled.
+
+_PMCID = "PMC4012345"
+_TITLE = "Widget fidelity of quenby rotor assembly"
+
+
+def _pmcid_copy(text, title, **fields):
+    return _pub(text, **{"title": title, "pmcid": _PMCID, "authors": "Quill A, Brandt B",
+                         "year": 2014, **fields})
+
+
+def test_a_misspelled_title_drops_on_a_shared_pmcid():
+    # Five significant words, one misspelled: 4/6 shared words (0.67) on dev.
+    enriched = _enriched("Quill A, Brandt B. Widget fidelity of quenby rotor assembly. "
+                         "Toy Biochem. 2014;53:1-9.", "24700001", _TITLE + ".",
+                         title=_TITLE, pmcid=_PMCID, doi="10.9999/toy.1",
+                         authors="Quill A, Brandt B", year=2014)
+    typo = _pmcid_copy("Quill A, Brandt B. Widget fideity of quenby rotor assembly. Toy Biochem. "
+                       "2014.", "Widget fideity of quenby rotor assembly")
+    typo["enrichment_status"] = "title_check_failed"
+    decisions = []
+    assert deduplicate_entries([typo, enriched], decisions=decisions, code="S2") == [enriched]
+    assert decisions[0]["metric"] == "citation_pmcid"
+
+
+@pytest.mark.parametrize("shared, metric", [
+    ({"pmid": "24700001"}, "citation_pmid"),
+    ({"doi": "10.9999/toy.1"}, "citation_doi"),
+    ({}, "citation_pmcid"),
+])
+def test_a_pair_matched_on_another_key_too_keeps_that_keys_metric(shared, metric):
+    # The PMCID is tried last: a pair dev matched on its PMID or DOI is
+    # recorded as before.
+    a = _pmcid_copy("first source line", _TITLE, **shared)
+    b = _pmcid_copy("second source line, longer", _TITLE, **shared)
+    decisions = []
+    assert len(deduplicate_entries([a, b], decisions=decisions, code="S1")) == 1
+    assert decisions[0]["metric"] == metric
+
+
+@pytest.mark.parametrize("first, second, one_paper", [
+    # The CV's PMCID column says "pending"; PubMed gave the enriched copy one.
+    ({"pmcid": "pending", "enrichment_data": {"pubmed_pmcid": _PMCID}}, {"pmcid": _PMCID}, True),
+    ({"pmcid": "pmc 4012345"}, {"pmcid": _PMCID}, True),        # case and a space
+    ({"pmcid": "PMCID: PMC4012345"}, {"pmcid": _PMCID}, True),  # a label before it
+    # The CV's own PMCID first, PubMed's only when the CV's names none.
+    ({"pmcid": _PMCID, "enrichment_data": {"pubmed_pmcid": "PMC4099999"}}, {"pmcid": _PMCID}, True),
+    ({"pmcid": "4012345"}, {"pmcid": "4012345"}, False),        # a bare number names no PMCID
+    ({"pmcid": "In Process"}, {"pmcid": "In Process"}, False),
+    ({"pmcid": "NIHMS561234"}, {"pmcid": "NIHMS561234"}, False),
+    ({"pmcid": "PMC123"}, {"pmcid": "PMC123"}, False),          # too short to be one
+])
+def test_only_a_pmc_shaped_value_is_a_pmcid_key(first, second, one_paper):
+    copies = []
+    for text, extra in (("first source line", first), ("second source line, longer", second)):
+        extra = dict(extra)
+        enrichment = extra.pop("enrichment_data", None)
+        copy = _pmcid_copy(text, _TITLE, **extra)
+        if enrichment:
+            copy["enrichment_data"] = enrichment
+        copies.append(copy)
+    kept = deduplicate_entries(copies, code="S1")
+    assert len(kept) == (1 if one_paper else 2)
+
+
+@pytest.mark.parametrize("first_title, second_title", [
+    (_TITLE + ", part I", _TITLE + ", part II"),
+    (_TITLE + ", Pt 1", _TITLE + ", Pt 2"),
+    (_TITLE + ", Pt. I", _TITLE + ", Pt. II"),
+])
+def test_two_parts_under_one_pmcid_keep_both(first_title, second_title):
+    a = _pmcid_copy("first source line", first_title)
+    b = _pmcid_copy("second source line, longer", second_title)
+    assert deduplicate_entries([a, b], code="S1") == [a, b]
+
+
+@pytest.mark.parametrize("first, second", [
+    ({"year": 2014}, {"year": 2015}),                     # an e-pub and a print year
+    ({"pmid": "24700001"}, {"pmid": "24700002"}),         # two PubMed records
+    ({"authors": "Quill A"}, {"authors": "Pike S"}),      # another first author
+])
+def test_a_shared_pmcid_with_a_conflict_keeps_both(first, second):
+    a = _pmcid_copy("first source line", _TITLE, **first)
+    b = _pmcid_copy("second source line, longer", _TITLE, **second)
+    assert deduplicate_entries([a, b], code="S1") == [a, b]
+
+
+@pytest.mark.parametrize("second_title, one_paper", [
+    ("Rotor mechanisms of quenby widgets", True),         # a plural: 3/5 words on dev
+    ("Rotor mechansm of quenby widgets", True),           # a letter dropped
+    ("Rotor mehcanism of quenby widgets", True),          # two neighbours swapped
+    ("Rotor mechanism of quenby widgets", True),          # the same title
+    ("Rotor machinery of quenby widgets", False),         # another word
+    ("Rotor mechanisms across barrow gears", False),      # one slip, the rest apart: 2/7
+])
+def test_a_title_word_one_slip_off_agrees_on_a_shared_identifier(second_title, one_paper):
+    a = _pub("first source line", pmid="31234567", title="Rotor mechanism of quenby widgets",
+             year=2019)
+    b = _pub("second source line, longer", pmid="31234567", title=second_title, year=2019)
+    assert len(deduplicate_entries([a, b], code="S1")) == (1 if one_paper else 2)
+
+
+@pytest.mark.parametrize("first, second, disagree", [
+    ("tumor", "tumour", False),         # five letters: a slip
+    ("tumor", "tumr", True),            # one of the two under five letters
+    ("tumr", "tumor", True),
+    ("cyst", "cyts", True),             # four letters: often another word
+    ("covid19", "covid91", True),       # a slip by a digit is another number
+    ("rotors", "rotors2", True),        # a digit added
+])
+def test_only_a_long_word_of_letters_is_a_slip(first, second, disagree):
+    shared = {"renal", "growth"}
+    assert _titles_disagree(shared | {first}, shared | {second}, forgive_slips=True) is disagree
+    assert _TITLE_SLIP_MIN_LETTERS == 5
+
+
+def test_a_title_word_is_one_slips_twin_once():
+    # "widgets" and "widgat" are each one slip off "widget", which counts
+    # once: 2 shared of 3 words, under the agreement.
+    assert _titles_disagree({"rotor", "widgets", "widgat"}, {"rotor", "widget"},
+                            forgive_slips=True)
+    # Without `forgive_slips` a slip is a word apart, as on dev.
+    assert not _titles_disagree({"rotor", "mechanism", "quenby"},
+                                {"rotor", "mechanisms", "quenby"}, forgive_slips=True)
+    assert _titles_disagree({"rotor", "mechanism", "quenby"}, {"rotor", "mechanisms", "quenby"})
+
+
+def test_titles_sharing_exactly_the_agreement_agree():
+    # 4 of 5 words is 0.8, `_CITATION_TITLE_AGREEMENT` itself: not under it.
+    words = {"rotor", "mechanism", "quenby", "widgets"}
+    assert not _titles_disagree(words | {"barrow"}, words)
+    assert not _titles_disagree(words | {"barrow"}, words, forgive_slips=True)
+    assert _titles_disagree(words | {"barrow", "gears"}, words, forgive_slips=True)
+
+
+def test_a_title_journal_year_match_does_not_forgive_a_slip():
+    # No identifier: PubMed printed one title on both, the CV's own titles
+    # are one slip apart. Only an identifier forgives the slip.
+    a = _enriched("first source line", "", "Widget fidelity of quenby rotor assembly.",
+                  title="Widget fidelity of quenby rotor assembly", journal="Toy Biochem",
+                  year=2014)
+    b = _enriched("second source line, longer", "", "Widget fidelity of quenby rotor assembly.",
+                  title="Widget fideity of quenby rotor assembly", journal="Toy Biochem",
+                  year=2014)
+    assert deduplicate_entries([a, b], code="S1") == [a, b]
 
 
 def test_the_copy_filling_more_fields_is_kept_over_the_longer_line():

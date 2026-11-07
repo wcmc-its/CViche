@@ -19,6 +19,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM  # noqa: E402
 from unified_pipeline.stage6.record_dedup import (  # noqa: E402
     PUBLISHED_ARTICLE_CODES,
+    TWIN_CODES,
     deduplicate_record_groups,
 )
 from unified_pipeline.stage_5_pubmed_enrichment import (  # noqa: E402
@@ -627,6 +628,194 @@ def test_stage6_dedup_drops_a_paper_listed_in_two_article_lists() -> None:
         gen._group_entries_by_code([sparse, full]))
     assert [e["element_idx_start"] for e in grouped.get("S1", []) + grouped.get("S2", [])] == [50]
     assert any(d["metric"] == "record=paper_identifier" for d in decisions)
+
+
+def test_a_misspelled_title_in_two_article_lists_pairs_on_its_pmcid() -> None:
+    """#446 (LFFKVV, SLIMGK-04 across lists): the copies share only a PMCID,
+    and one title word is one slip off its twin."""
+    first = _paper("S1", 10, pmid="", pmcid="PMC4012345", title="Rotor mechanism of quenby widgets")
+    second = _paper("S2", 50, pmid="", pmcid="PMC4012345", title="Rotor mechanisms of quenby widgets",
+                    volume="12", pages="1-9")
+    grouped, decisions, _ = _run([first, second])
+    assert _indexes(grouped) == [50]
+    assert decisions[0]["metric"] == "record=paper_identifier"
+
+
+_ROTOR = "Rotor mechanism of quenby widgets"
+
+
+@pytest.mark.parametrize("first, second", [
+    ({"title": _ROTOR + ", Pt 1"}, {"title": _ROTOR + ", Pt 2"}),  # two parts
+    ({}, {"authors": "Pike S"}),                                    # another first author
+    ({}, {"title": "Rotor machinery of quenby widgets"}),           # another word, not a slip
+])
+def test_article_copies_under_one_pmcid_that_disagree_stay(first: dict, second: dict) -> None:
+    fields = {"pmid": "", "pmcid": "PMC4012345", "title": _ROTOR}
+    grouped, decisions, _ = _run([_paper("S1", 10, **{**fields, **first}),
+                                  _paper("S2", 50, **{**fields, **second})])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+# #446: one paper under two bibliography codes that are not both article lists.
+# A stage-2 split whose halves 5d completed into one citation (VGHNZD-07), or
+# one article listed again under Chapters (RLADNC).
+
+@pytest.mark.parametrize("head_code, tail_code", [("S9", "S5"), ("S7", "S8"), ("S3", "S9"),
+                                                  ("S9", "S1")])  # a citation pair: source order
+def test_a_split_citation_under_two_other_codes_renders_once(head_code: str, tail_code: str) -> None:
+    head = _split_half(head_code, 1915, "Quenby A, Norvale B. Widget flux in quenby cells. J Widget",
+                       title="Widget flux in quenby cells", authors="Quenby A, Norvale B")
+    tail = _split_half(tail_code, 1916, "Res Clin 2031;12(1):1-9.", title="Res Clin",
+                       volume="12", pages="1-9", year="2031", authors="Clin")
+    grouped, decisions, dropped = _run([tail, head])
+    assert _indexes(grouped) == [1915]                    # the copy the CV lists first
+    assert dropped == {id(tail)}
+    assert decisions[0]["metric"] == "record=cross_code_twin"
+    assert (decisions[0]["code"], decisions[0]["kept_code"]) == (tail_code, head_code)
+
+
+def test_one_pmid_under_reviews_and_chapters_keeps_the_review() -> None:
+    """RLADNC: one article under Reviews (S2) and again under Chapters (S4).
+    The article-list copy is kept although the chapter copy comes first and
+    is the fuller one."""
+    chapter = _paper("S4", 10, volume="12", pages="1-9", issue="3")
+    review = _paper("S2", 50)
+    grouped, decisions, dropped = _run([review, chapter])
+    assert _indexes(grouped) == [50] and dropped == {id(chapter)}
+    assert (decisions[0]["metric"], decisions[0]["code"], decisions[0]["kept_code"]) == (
+        "record=cross_code_twin", "S4", "S2")
+
+
+@pytest.mark.parametrize("first_idx, second_idx, kept", [
+    (10, 50, 10),         # neither copy in an article list: the first in source order
+    (50, 10, 10),
+    ("10.2", "9.1", "9.1"),   # table-row indexes order as numbers, not as text
+])
+def test_a_book_and_a_chapter_under_one_doi_keep_the_first_listed(first_idx, second_idx, kept) -> None:
+    first = _paper("S3", first_idx, pmid="", doi="10.1234/widget.5", volume="12", pages="1-9")
+    second = _paper("S4", second_idx, pmid="", doi="10.1234/widget.5")
+    grouped, _decisions, _ = _run([first, second])
+    assert [e["element_idx_start"] for group in grouped.values() for e in group] == [kept]
+
+
+@pytest.mark.parametrize("sparse_first", [True, False])
+def test_twins_at_one_index_keep_the_fuller_copy_and_an_equal_pair_keeps_the_first(
+        sparse_first: bool) -> None:
+    sparse, full = _paper("S3", 10), _paper("S5", 10, volume="12", pages="1-9")
+    grouped, _decisions, _ = _run([sparse, full] if sparse_first else [full, sparse])
+    assert grouped["S3"] == [] and grouped["S5"] == [full]
+    grouped, _decisions, _ = _run([_paper("S5", 10), _paper("S3", 10)])
+    assert grouped["S3"] and not grouped["S5"]           # S3 listed first in TWIN_CODES
+
+
+@pytest.mark.parametrize("code", ["S7", "S8", "S9"])
+def test_an_abstract_or_media_piece_carrying_its_papers_pmid_stays(code: str) -> None:
+    """web056: an abstract under its paper's PMID is a record of its own."""
+    grouped, decisions, _ = _run([_paper("S1", 10), _paper(code, 50, doi="10.1234/widget.5",
+                                                             pmcid="PMC4012345")])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_researcher_profile_line_never_pairs() -> None:
+    """S0 is the profile list, not a citation: its citation never pairs."""
+    profile = _split_half("S0", 10, "Widget flux in quenby cells", title="Widget flux in quenby cells")
+    paper = _split_half("S5", 50, "Widget flux in quenby cells", title="Widget flux in quenby cells")
+    grouped, decisions, _ = _run([profile, paper])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+_PART = "Widget flux in quenby cells: Part "
+
+
+@pytest.mark.parametrize("first, second", [
+    ({}, {"authors": "Lee C, Norvale B"}),                  # another first author
+    ({"title": _PART + "I"}, {"title": _PART + "II"}),      # another part
+    ({}, {"title": "Gizmo drift in barrow tissue"}),        # another paper
+    ({}, {"year": "2032"}),                                 # another year
+    ({}, {"pmid": "39999999"}),                             # another PMID under the DOI
+    ({}, {"title": ""}),                                    # no title: a note on the paper
+])
+def test_twins_that_disagree_stay(first: dict, second: dict) -> None:
+    grouped, decisions, _ = _run([_paper("S2", 10, doi="10.1234/widget.5", **first),
+                                  _paper("S4", 50, doi="10.1234/widget.5", **second)])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+@pytest.mark.parametrize("exempt", [{"in_press_superseded": True},
+                                    {FANNED_OUT_FROM: {"key": "k", "count": 2}}])
+def test_a_superseded_or_fanned_out_twin_is_never_dropped(exempt: dict) -> None:
+    chapter = {**_paper("S4", 10), **exempt}
+    grouped, decisions, _ = _run([chapter, _paper("S2", 50)])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_copy_an_article_rule_dropped_is_not_paired_again() -> None:
+    """The S1 copy goes to the fuller S2 one (paper_identifier); the S4 copy
+    then goes to the S2 copy, and the S1 copy is neither dropped twice nor
+    keeps the S4 one."""
+    sparse, full, chapter = _paper("S1", 10), _paper("S2", 50, volume="12"), _paper("S4", 5)
+    grouped, decisions, _ = _run([sparse, full, chapter])
+    assert _indexes(grouped) == [50]
+    assert [(d["metric"], d["code"], d["kept_code"]) for d in decisions] == [
+        ("record=paper_identifier", "S1", "S2"), ("record=cross_code_twin", "S4", "S2")]
+
+
+def test_a_chain_of_twins_keeps_the_first_listed_copy() -> None:
+    """The chapter shares a PMID with the book and a DOI with the report,
+    which share nothing: pairs are judged in listing order, so the book goes
+    to the chapter and the chapter to the report."""
+    book = _paper("S3", 30, doi="")
+    chapter = _paper("S4", 20, doi="10.1234/widget.5")
+    report = _paper("S5", 10, pmid="", doi="10.1234/widget.5")
+    grouped, decisions, _ = _run([book, chapter, report])
+    assert _indexes(grouped) == [10]
+    assert [(d["code"], d["kept_code"]) for d in decisions] == [("S3", "S4"), ("S4", "S5")]
+
+
+def test_three_copies_under_one_pmid_drop_each_copy_once() -> None:
+    grouped, decisions, _ = _run([_paper("S3", 30), _paper("S4", 20), _paper("S5", 10)])
+    assert _indexes(grouped) == [10]
+    assert [(d["code"], d["kept_code"]) for d in decisions] == [("S3", "S4"), ("S4", "S5")]
+
+
+def test_a_copy_already_dropped_is_not_dropped_again() -> None:
+    """The report shares a PMID with the book and a DOI with the chapter,
+    which share nothing. It goes to the book; the chapter, listed after the
+    book, does not drop it a second time."""
+    book = _paper("S3", 10, doi="")
+    chapter = _paper("S4", 5, pmid="", doi="10.1234/widget.5")
+    report = _paper("S5", 30, doi="10.1234/widget.5")
+    grouped, decisions, _ = _run([book, chapter, report])
+    assert _indexes(grouped) == [5, 10]
+    assert [(d["code"], d["kept_code"]) for d in decisions] == [("S5", "S3")]
+
+
+def test_co_first_authors_listed_the_other_way_round_stay_across_lists() -> None:
+    """`_lists_disagree` reads the first author's first word across lists,
+    stricter than `dedup._citations_conflict` (#446 review)."""
+    first = _paper("S1", 10)
+    second = _paper("S2", 50, authors="Norvale B, Quenby A", volume="12")
+    grouped, decisions, _ = _run([first, second])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_the_twin_codes_are_the_bibliography_lists_but_the_profile() -> None:
+    assert TWIN_CODES == ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9")
+
+
+def test_stage6_dedup_drops_a_split_citation_under_two_other_codes() -> None:
+    """The wire: `_dedup_grouped_entries` keeps one copy of an S9/S5 split
+    pair and writes its decision for the sidecar."""
+    gen = WCMTemplateGenerator(verbose=False)
+    head = _split_half("S9", 1915, "Quenby A, Norvale B. Widget flux in quenby cells. J Widget",
+                       title="Widget flux in quenby cells", authors="Quenby A, Norvale B")
+    tail = _split_half("S5", 1916, "Res Clin 2031;12(1):1-9.", title="Res Clin", volume="12",
+                       pages="1-9", year="2031", authors="Clin")
+    grouped, _pre_dedup, decisions = gen._dedup_grouped_entries(
+        gen._group_entries_by_code([head, tail]))
+    rendered = [e["element_idx_start"] for code in ("S5", "S9") for e in grouped.get(code, [])]
+    assert rendered == [1915]
+    assert any(d["metric"] == "record=cross_code_twin" for d in decisions)
 
 
 # #666 (RSRRUF 28): stage 4 fanned one residency line out into one record per

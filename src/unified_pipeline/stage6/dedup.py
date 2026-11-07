@@ -222,10 +222,10 @@ def _counts(text: str) -> set[tuple[str, str]]:
             for n, unit in _COUNT_RE.findall(text)}
 
 
-def _part_numbers(text: str) -> set[str]:
-    """Every part number the text names, Roman numerals as digits."""
+def _part_numbers(text: str, pattern: re.Pattern[str] = _PART_NUMBER_RE) -> set[str]:
+    """Every part number the text names (`pattern`), Roman numerals as digits."""
     return {_ROMAN_NUMERALS.get(n.lower(), n.lstrip('0') or n)
-            for group in _PART_NUMBER_RE.findall(text)
+            for group in pattern.findall(text)
             for n in re.findall(_PART_NUMERAL, group, re.IGNORECASE)}
 
 
@@ -1752,6 +1752,12 @@ def recovered_row_already_rendered(entry: dict, rendered_lines: list[str]) -> bo
 _CITATION_CODE_RE = re.compile(r'S[1-9]')
 _DOI_PREFIX_RE = re.compile(r'^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)', re.IGNORECASE)
 _DOI_SHAPE_RE = re.compile(r'10\.\d{4,}/\S+')
+# A PubMed Central ID as PMC writes it ("PMC4018061"). A CV's PMCID column
+# also holds "pending", "In Process", an NIHMS number or a bare number (a PMID
+# typed in the wrong column on the #1243 farm), so only the PMC form names a
+# paper (#446, SLIMGK-04: one review listed twice, the copies sharing nothing
+# but their PMCID).
+_PMCID_RE = re.compile(r'PMC\s*(\d{4,})', re.IGNORECASE)
 # Two titles of one paper share at least this share of their significant words
 # (Jaccard): a source typo or a PubMed spelling still agrees, and two abstracts
 # under one supplement DOI (0.04-0.10 on the farm) or two protocol reports
@@ -1778,13 +1784,26 @@ def _citation_year(pub: ResolvedPublication) -> str:
     return match.group(0) if match else ''
 
 
+def _citation_pmcid(entry: dict, pub: ResolvedPublication) -> str:
+    """The PMCID's digits (`_PMCID_RE`): the CV's own, else the one PubMed
+    gave an enriched copy whose CV column holds none ("pending"); '' when
+    neither is PMC-shaped."""
+    enrichment = entry.get('enrichment_data') or {}
+    for value in (pub.pmcid, enrichment.get('pubmed_pmcid')):
+        match = _PMCID_RE.search(str(value or ''))
+        if match:
+            return match.group(1)
+    return ''
+
+
 def _citation_identity_keys(entry: dict, pub: ResolvedPublication) -> set[tuple[str, str]]:
-    """Keys that name one paper: its PMID, its DOI, its normalized title +
-    journal + year, and its whole 5d citation when that names a title. Every
-    text key needs a real title (not a 5d placeholder), so two thin fragments
-    never share one by accident."""
+    """Keys that name one paper: its PMID, its DOI, its PMCID, its
+    normalized title + journal + year, and its whole 5d citation when that
+    names a title. Every text key needs a real title (not a 5d placeholder),
+    so two thin fragments never share one by accident."""
     keys = {('pmid', pmid) for pmid in (_citation_pmid(pub),) if pmid}
     keys |= {('doi', doi) for doi in (_citation_doi(pub),) if doi}
+    keys |= {('pmcid', pmcid) for pmcid in (_citation_pmcid(entry, pub),) if pmcid}
     title = _alnum(pub.title)
     if not title or is_placeholder_title(pub.title, entry.get('text') or ''):
         return keys
@@ -1805,9 +1824,11 @@ def _first_author(pub: ResolvedPublication) -> str:
 
 # The key kinds that name a paper by an identifier. A titled commentary carries
 # the paper's own DOI or PMID ("Editorial: <its title>", by another author),
-# and a Part I and Part II can share one DOI, so on these two kinds the first
-# author and the part number still tell two records apart (#446).
-_IDENTIFIER_KEY_KINDS = frozenset({'pmid', 'doi'})
+# and a Part I and Part II can share one DOI, so on these kinds the first
+# author and the part number still tell two records apart (#446). An
+# identifier match also forgives a title word one slip off its twin
+# (`_titles_disagree`'s `forgive_slips`).
+_IDENTIFIER_KEY_KINDS = frozenset({'pmid', 'doi', 'pmcid'})
 
 # Where one author ends and the next begins in an author list: a comma or
 # semicolon, or an "and" / "&" before the next author.
@@ -1888,15 +1909,25 @@ def _first_authors_differ(first: ResolvedPublication, second: ResolvedPublicatio
         _names_an_author(lists[0][0], lists[1]) or _names_an_author(lists[1][0], lists[0]))
 
 
+# A citation title's part number, "Part II" or abbreviated "Pt 2" / "Pt. II".
+# Read only between two copies that share an identifier (`_part_numbers_differ`):
+# elsewhere a "PT 2" is as likely a physical-therapy year as a part (#446).
+_TITLE_PART_NUMBER_RE = re.compile(
+    rf'\b(?:parts?|pts?\.?)\s*({_PART_NUMERAL}(?:\s*(?:/|-|&|,|and)\s*{_PART_NUMERAL})*)\b',
+    re.IGNORECASE)
+
+
 def _part_numbers_differ(first: tuple[dict, ResolvedPublication],
                          second: tuple[dict, ResolvedPublication]) -> bool:
     """Both printed titles, or both of the CV's own titles, name a part number
-    (`_part_numbers`), and the numbers differ: a Part I and a Part II under one
-    DOI. A title that names no part says nothing about which part it is."""
+    (`_TITLE_PART_NUMBER_RE`), and the numbers differ: a Part I and a Part II
+    under one DOI. A title that names no part says nothing about which part it is."""
     (first_entry, first_pub), (second_entry, second_pub) = first, second
+    titles = ((first_pub.title, second_pub.title),
+              (_source_title(first_entry), _source_title(second_entry)))
     return any(a and b and a != b for a, b in (
-        (_part_numbers(first_pub.title), _part_numbers(second_pub.title)),
-        (_part_numbers(_source_title(first_entry)), _part_numbers(_source_title(second_entry)))))
+        (_part_numbers(one, _TITLE_PART_NUMBER_RE), _part_numbers(other, _TITLE_PART_NUMBER_RE))
+        for one, other in titles))
 
 
 def _source_title(entry: dict) -> str:
@@ -1912,10 +1943,42 @@ def _source_title_words(entry: dict) -> set[str]:
     return _significant_words(_source_title(entry))
 
 
-def _titles_disagree(first: set[str], second: set[str]) -> bool:
-    """Both titles known, and sharing under `_CITATION_TITLE_AGREEMENT` of their words."""
-    return bool(first and second
-                and len(first & second) / len(first | second) < _CITATION_TITLE_AGREEMENT)
+# A title word one slip off a word of the other title (`_one_slip_apart`) is
+# that word misspelled ("fideity", SLIMGK-04) or inflected ("analyses") only
+# when both are letters alone and at least this long: between short words one
+# slip is often another word ("rats" and "mats"), and a slip by a digit is
+# another number.
+_TITLE_SLIP_MIN_LETTERS = 5
+
+
+def _slip_word(word: str) -> bool:
+    """A word long enough, and of letters alone, to be read as a slip."""
+    return word.isalpha() and len(word) >= _TITLE_SLIP_MIN_LETTERS
+
+
+def _slipped_word_count(first: set[str], second: set[str]) -> int:
+    """How many words of `first` not in `second` are one slip off a word of
+    `second` not in `first` (`_slip_word`, `_one_slip_apart`), each word of
+    `second` matched once."""
+    unmatched = sorted(word for word in second - first if _slip_word(word))
+    count = 0
+    for word in sorted(word for word in first - second if _slip_word(word)):
+        twin = next((other for other in unmatched if _one_slip_apart(word, other)), None)
+        if twin is not None:
+            unmatched.remove(twin)
+            count += 1
+    return count
+
+
+def _titles_disagree(first: set[str], second: set[str], forgive_slips: bool = False) -> bool:
+    """Both titles known, and sharing under `_CITATION_TITLE_AGREEMENT` of their
+    words. With `forgive_slips`, a word one slip off a word of the other title
+    counts as shared (`_slipped_word_count`): a copy matched on an identifier
+    may misspell its title (#446, SLIMGK-04)."""
+    if not (first and second):
+        return False
+    shared = len(first & second) + (_slipped_word_count(first, second) if forgive_slips else 0)
+    return shared / (len(first) + len(second) - shared) < _CITATION_TITLE_AGREEMENT
 
 
 def _occasions_apart(first_text: str, second_text: str) -> bool:
@@ -1944,8 +2007,10 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
     one title by different groups, and a letter and its reply share a title,
     journal and year (farm replay, 63 runs). A PMID or DOI match ignores those
     three: a CV's own volume typo or author spelling is not a second paper
-    (RXYBVF). It still refuses when neither copy's first author is an author
-    of the other copy (`_first_authors_differ`) or the part numbers differ
+    (RXYBVF), nor is a title word one slip off its twin (SLIMGK-04,
+    `_titles_disagree`'s `forgive_slips`). It still refuses when neither
+    copy's first author is an author of the other copy
+    (`_first_authors_differ`) or the part numbers differ
     (`_part_numbers_differ`): a titled commentary by another author under the
     paper's DOI, or a Part I and Part II under one DOI (#446). A shared title,
     journal and year also refuses when the two CV lines each date their
@@ -1955,8 +2020,11 @@ def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
     if kind == 'citation':
         return False
     (first_entry, first_pub), (second_entry, second_pub) = first, second
-    if (_titles_disagree(_significant_words(first_pub.title), _significant_words(second_pub.title))
-            or _titles_disagree(_source_title_words(first_entry), _source_title_words(second_entry))):
+    forgive = kind in _IDENTIFIER_KEY_KINDS
+    if (_titles_disagree(_significant_words(first_pub.title), _significant_words(second_pub.title),
+                         forgive)
+            or _titles_disagree(_source_title_words(first_entry), _source_title_words(second_entry),
+                                forgive)):
         return True
     pairs = [(_citation_pmid(first_pub), _citation_pmid(second_pub)),
              (_citation_doi(first_pub), _citation_doi(second_pub)),
@@ -2009,6 +2077,14 @@ def _citation_decision(kind: str, dropped: dict, kept: dict, code: str | None) -
             "kept_fields": _decision_fields(kept, code)}
 
 
+def _key_try_order(key: tuple[str, str]) -> tuple[bool, tuple[str, str]]:
+    """The order `_drop_citation_copies` tries two copies' shared keys in: by
+    kind, the PMCID last, so a pair that also shares a PMID, DOI, title or
+    citation is recorded under that key's metric as it was before the PMCID
+    was a key (#446)."""
+    return key[0] == 'pmcid', key
+
+
 def _drop_citation_copies(entries: list[dict], code: str | None,
                           decisions: list[dict] | None,
                           dropped_ids: set[int]) -> list[dict]:
@@ -2029,7 +2105,7 @@ def _drop_citation_copies(entries: list[dict], code: str | None,
         if entry.get(FANNED_OUT_FROM) or entry.get('in_press_superseded') is True:
             continue
         keys = _citation_identity_keys(entry, pubs[index])
-        match = next(((key, kept_by_key[key]) for key in sorted(keys)
+        match = next(((key, kept_by_key[key]) for key in sorted(keys, key=_key_try_order)
                       if key in kept_by_key and kept_by_key[key] not in dropped
                       and not _citations_conflict(key[0], (entry, pubs[index]),
                                                   (entries[kept_by_key[key]],
@@ -2149,8 +2225,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
     drop in any later group, and two identical copies keep exactly one.
 
     A bibliography code (S1-S9) first keeps one copy of each citation by
-    identity (`_drop_citation_copies`, #446): PMID, DOI, title + journal +
-    year, or the whole 5d citation.
+    identity (`_drop_citation_copies`, #446): PMID, DOI, PMCID, title +
+    journal + year, or the whole 5d citation.
 
     Pairwise and order-dependent by design, not clustered: entries are
     compared left-to-right and a drop removes that index from further

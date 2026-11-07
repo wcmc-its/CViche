@@ -218,6 +218,7 @@ HOME_ONLY_IMPORTS = {
                                       "_citation_identity_keys", "_citations_conflict", "_first_author",
                                       "_first_author_names", "_one_slip_apart",
                                       "_author_name_sets",
+                                      "_titles_disagree", "_TITLE_SLIP_MIN_LETTERS",
                                       "_field_dates_text", "_split_record_family",
                                       "_is_sibling_of",
                                       "_undated_split_record_absorbs_date",
