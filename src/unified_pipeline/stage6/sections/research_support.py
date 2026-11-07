@@ -86,7 +86,7 @@ from ..normalization import (
     grant_status_says_running,
 )
 from ..parsing.dates import grant_end_date, grant_has_ended
-from ..resolution import _get_cv_owner_name
+from ..resolution import _get_cv_owner_name, _is_cv_owner
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -1067,8 +1067,6 @@ _QUALIFIED_PI_PHRASE_RE = re.compile(
     r"(?<![^\W\d_])(?:co|sub|subcontract|site|multiple|multi|m)[\s-]*" + _PI_PHRASE
     + r"|" + _PI_PHRASE + r"\s+of\s+(?:an?\s+|the\s+)?sub-?contract",
     re.IGNORECASE)
-_NAME_JOINER_RE = re.compile(r" (?:&|and) ")
-_NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
 # Words that name a sponsor, an award, a programme or a role, never a person.
 # A label capture holding one is the text before the owner's own "(PI)" or
 # ", Principal Investigator" label: "Society. Research Scholar Award (PI)",
@@ -1145,37 +1143,6 @@ def _in_own_title(name: str, fields: GrantFields) -> bool:
         title = pattern.sub(' ', title)
     words = r'(?<!\w)' + re.escape(name.casefold()) + r'(?!\w)'
     return re.search(words, title.casefold()) is not None
-
-
-def _surname_parts(name: str) -> frozenset[str]:
-    """The casefolded parts of the surname in "First M. Last".
-
-    A hyphenated surname contributes each part ("Rivera-Ortiz" gives both), so
-    "Ana Rivera" still reads as the owner "Ana Rivera-Ortiz". Any comma means a
-    list of names ("[PIs Lee, Park]"): no label pattern captures "Last, First",
-    and `_get_cv_owner_name` builds "First Last", so a comma never marks a
-    surname. Empty for a list or no name.
-    """
-    if ',' in name:
-        return frozenset()
-    words = _NAME_WORD_RE.findall(name)
-    return frozenset(words[-1].casefold().split('-')) if words else frozenset()
-
-
-def _is_cv_owner(pi_name: str, owner_name: str) -> bool:
-    """True when `pi_name` is one person whose surname is the CV owner's surname.
-
-    "Lee (PI)" names the CV owner "Ann Lee" by surname; the owner's full name is
-    the better cell, and it is what the owner auto-fill rendered before the label
-    was read. Surname only: a shared first name ("PI: Ann Smith" on Ann Lee's
-    CV) or a given name that is another person's surname ("PI: Mark Hale" on
-    Tom Mark Lee's CV) is someone else. A joined pair ("Lee & Park") or a list
-    ("Lee, Park") is never replaced, since dropping the other name would lose a
-    PI.
-    """
-    if not owner_name or _NAME_JOINER_RE.search(pi_name):
-        return False
-    return bool(_surname_parts(pi_name) & _surname_parts(owner_name))
 
 
 # A role a grant heading gives the owner on every grant under it: "Principal

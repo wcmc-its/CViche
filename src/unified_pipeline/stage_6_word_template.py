@@ -2793,7 +2793,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('research_support', frozenset({'M2A', 'M2B', 'M2C'}), lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
             # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
             ('patents', frozenset({'M2D'}), lambda: self._fill_patents(entries_by_code.get('M2D', []))),
-            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B', 'N4'}), lambda: self._fill_mentoring(entries_by_code)),
+            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B', 'N4'}), lambda: self._fill_mentoring(entries_by_code, cv_owner=cv_owner, document_uid=document_uid)),
             ('clinical_practice', frozenset({'L1', 'L2', 'L3'}), lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
             ('leadership', frozenset({'O'}), lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
             ('administrative_activities', frozenset({'P'}), lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees

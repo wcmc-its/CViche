@@ -484,6 +484,11 @@ def _rendered_body(tmp_path, code, fields):
 # on three corpus CVs as new sub-points.
 _KEPT_THOUGH_UNRENDERED = {'M2B': {'percent_effort'}}
 
+# Fields the map lists although the code's schema does not name them, so the
+# probe marks them too: N2's Award Source prints M2's PI, total and notes
+# (`mentoring.N2_AWARD_PHRASE_FIELDS`, #1710).
+_RENDERED_OFF_SCHEMA = {'N2': frozenset({'notes', 'pi_name', 'total_funding'})}
+
 
 @pytest.mark.parametrize('code', sorted(fan_out._RENDERED_FIELDS))
 def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
@@ -492,7 +497,20 @@ def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
     coverage test pass on content the output drops (web240's `institution`),
     and one it omits would needlessly keep entries whole."""
     expected = set(fan_out._RENDERED_FIELDS[code]) - _KEPT_THOUGH_UNRENDERED.get(code, set())
-    assert _rendered_markers(tmp_path, code) == (expected, False)
+    assert _rendered_markers(tmp_path, code, _RENDERED_OFF_SCHEMA.get(code, frozenset())) == (
+        expected, False)
+
+
+def test_the_off_schema_fields_the_map_lists_are_n2s_award_phrase_fields_alone():
+    """#1710: N2's Award Source prints M2's `notes`, `pi_name` and
+    `total_funding`, which N2's schema does not name yet. Once it does, this
+    allowance goes."""
+    from unified_pipeline.stage6.sections.mentoring import N2_AWARD_PHRASE_FIELDS
+
+    assert list(_RENDERED_OFF_SCHEMA) == ['N2']
+    assert _RENDERED_OFF_SCHEMA['N2'] == N2_AWARD_PHRASE_FIELDS
+    assert fan_out._RENDERED_FIELDS['N2'] >= N2_AWARD_PHRASE_FIELDS
+    assert not N2_AWARD_PHRASE_FIELDS & set(FIELD_SCHEMAS['N2']['fields'])
 
 
 def _offschema_date_fields(code):
@@ -576,7 +594,7 @@ def test_a_text_rendered_entry_with_a_record_list_is_left_whole():
 
 def test_the_renderer_map_names_only_schema_fields_and_never_narrative():
     for code, names in fan_out._RENDERED_FIELDS.items():
-        assert names <= set(FIELD_SCHEMAS[code]['fields']), code
+        assert names - _RENDERED_OFF_SCHEMA.get(code, frozenset()) <= set(FIELD_SCHEMAS[code]['fields']), code
         assert 'narrative' not in names, code
 
 

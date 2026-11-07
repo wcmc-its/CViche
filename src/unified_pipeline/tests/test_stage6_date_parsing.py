@@ -1393,6 +1393,42 @@ def test_a_range_whose_start_has_a_month_or_end_has_none_is_unchanged(start, end
     assert format_date_range(start, end, code) == expected
 
 
+# --- #1710: N2's Duration prints mm/yyyy, as its template label says ----------------
+
+def test_n2_dates_are_mm_yyyy():
+    """The N2 table's label reads "Duration of support (mm/yyyy-mm/yyyy)", and
+    the owner ruled its cell prints that way (#1710); before, N2 had no entry
+    and fell to 'yyyy'."""
+    from unified_pipeline.stage6.formatting import DATE_FORMATS
+    assert DATE_FORMATS["N2"] == "mm/yyyy"
+
+
+@pytest.mark.parametrize("start, end, expected", [
+    ("2000-11", "2002-06", "11/2000-06/2002"),          # both months stated
+    ("November 2000", "June 2002", "11/2000-06/2002"),
+    ("2019-07", "present", "07/2019-Present"),
+    ("2019-07", "2019-07", "07/2019"),
+    ("2016-03", "2018", "03/2016-2018"),                # an end with no month keeps none
+    # A stored year never gains a month: a year range stays years, and a year
+    # start prints its month end as a year (`_end_at_start_precision`).
+    ("2018", "2021", "2018-2021"),
+    ("2016", "2018-06", "2016-2018"),
+    ("2018", "2018-06", "2018"),
+])
+def test_n2_range_prints_the_months_it_is_given_and_invents_none(start, end, expected):
+    assert format_date_range(start, end, "N2") == expected
+
+
+def test_n2_start_alone_is_a_term_its_text_can_close():
+    """A training grant is a term, not an occasion, so N2 is no point-in-time
+    code: with no text its lone start still reads as running, and the text
+    its table passes (#1710) decides it, as for any code (class 13)."""
+    assert "N2" not in POINT_IN_TIME_CODES
+    assert format_date_range("2014", "", "N2") == "2014-Present"
+    assert format_date_range("2014-09", "", "N2", "Invented Fund\t09/2014") == "09/2014"
+    assert format_date_range("2014-09", "", "N2", "Invented Fund\t09/2014-") == "09/2014-Present"
+
+
 
 # --- card_date: an entry card's date slot (#2019) ----------------------------------
 

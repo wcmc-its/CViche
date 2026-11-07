@@ -140,6 +140,7 @@ DATE_FORMATS = MappingProxyType({
     'M2B': 'mm/yy',
     'M2C': 'mm/yy',
     'M2D': 'mm/yyyy',     # Patents: filing/issue dates; template specifies no format
+    'N2': 'mm/yyyy',      # Training Grants: Duration of support (mm/yyyy-mm/yyyy) (#1710)
     'N3A': 'yyyy',        # Mentoring
     'N3B': 'yyyy',
     'O': 'yyyy',          # Leadership
@@ -369,7 +370,7 @@ def with_duration_span(date_range: str, fields: Mapping[str, Any],
 # years) or a string of ranges under `additional_date_ranges` (UYFRTL 33's
 # three teaching terms, RCBKFG), and one more span as a start/end pair
 # (HZGJFM 190's 1994-present committee term). No schema names them, so `fan_out._RENDERED_FIELDS` (which
-# may hold schema fields only) does not either; the doctor's offschema_fields
+# holds schema fields, and three M2 names N2's table reads) does not either; the doctor's offschema_fields
 # lint grades them against the record's own line instead.
 EXTRA_SPAN_LIST_KEYS = ('additional_dates', 'additional_periods', 'additional_date_ranges')
 EXTRA_SPAN_START_KEY = 'additional_period_start'
