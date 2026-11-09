@@ -18,8 +18,8 @@ does not count.
 
 Recording happens in two places. `_add_entry_comments` is the shared hook
 that most renderers already call with the entry for the row they just wrote,
-so it records with the entry in hand, as the presentations and licensure
-writers do themselves (`wrote` with its entry). Renderers that write rows
+so it records with the entry in hand, as the presentations, licensure and
+researcher-profile writers do themselves (`wrote` with its entry). Renderers that write rows
 without that hook (honors, the Q service tables, leadership, administrative
 activities, board certification) mark the entry they are on with
 `begin_entry`, and their row writers record against it. Each such renderer calls `end_entry` when its loop ends, and the
@@ -45,9 +45,13 @@ BODY_TAG = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body"
 # listed only once every path that writes one of its entries records a
 # receipt, measured on the stored corpus (see the PR that added this); the
 # others still get a receipt in the sidecar, flagged `linted: false`, so their
-# numbers are visible without being acted on.
+# numbers are visible without being acted on. Licensure and Board Certification
+# record since #2084; on the 460-run farm they lost 2 entries, one of them an
+# NPI line a verbatim-copied E block prints, which that copy now receipts.
 LINTED_SECTIONS = frozenset({
+    "board_certification",
     "honors",
+    "licensure",
     "memberships",
     "mentoring",
     "service",
@@ -184,7 +188,8 @@ class RowReceiptLedger:
 
     def set_aside(self, entry: Mapping[str, object]) -> None:
         """Record that a renderer deliberately writes no row for `entry` (a
-        source column-header row, a withheld record): not a loss."""
+        source column-header row, a withheld record), or that a verbatim
+        copy of a source block prints it outside its section: not a loss."""
         self._set_aside.append(entry)
 
     def elements_for(self, entry: Mapping[str, object]) -> list[_Element]:

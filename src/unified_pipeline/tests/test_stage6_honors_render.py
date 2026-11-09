@@ -803,12 +803,26 @@ def test_a_date_only_fragment_keeps_an_empty_name_cell():
     assert rows == [["", "", "1971-1972"]]
 
 
-def test_534_an_entry_the_header_check_skips_is_lost_on_the_receipt():
-    """An entry the header check skips renders no row, and the receipt
-    reports it lost instead of excusing it as a header (#534). CKDDEG entry
-    90's shape, a space-separated "year  award, organization" line, used to
-    be skipped that way; it now renders (#1930). The empty entry with
-    nothing to render and the withheld one (#892) are not lost."""
+def _receipt_after_fill_honors(entries):
+    """The honors receipt after `_fill_honors` writes `entries` into a
+    one-header-row table, and the award cells it wrote."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("H. HONORS AND AWARDS")
+    table = gen.doc.add_table(rows=1, cols=3)
+    gen._row_receipts.begin_section("honors")
+    gen._fill_honors(entries)
+    receipt, = gen._row_receipts.receipts({"honors": entries})
+    return receipt, [r.cells[0].text for r in table.rows[1:]]
+
+
+def test_534_a_header_row_the_check_skips_is_set_aside_on_the_receipt():
+    """An entry the header check skips renders no row. When its text holds
+    no year it is the source table's own column-header row, so the receipt
+    sets it aside instead of reporting it lost (#534). CKDDEG entry 90's
+    shape, a space-separated "year  award, organization" line, used to be
+    skipped that way; it now renders (#1930). The empty entry with nothing
+    to render and the withheld one (#892) are not lost either."""
     skipped = {"taxonomy_code": "H", "element_idx_start": 90,
                "text": "Name of award\tOrganization\tDate awarded",
                "extracted_fields": {}}
@@ -844,8 +858,34 @@ def test_534_an_entry_the_header_check_skips_is_lost_on_the_receipt():
     assert [r.cells[0].text for r in table.rows[1:]] == ["Teaching Award", "Pretend Award"]
     receipt, = gen._row_receipts.receipts(
         {"honors": [skipped, dated, written, empty, withheld]})
-    assert (receipt.given, receipt.written) == (5, 2)
-    assert [lost.element_idx_start for lost in receipt.lost] == [90]
+    assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (5, 2, 3, ())
+
+
+def test_534_a_skipped_entry_that_holds_a_year_stays_lost():
+    """The inverse: the header check also matches this invented award line,
+    which holds a year, so it is a real award the check drops (web056's
+    shape), not a column-header row. It is still skipped, as before, and
+    the receipt keeps it lost so the doctor reports it."""
+    award = {"taxonomy_code": "H", "element_idx_start": 204, "extracted_fields": {},
+             "text": "Pretend Honor Award, Organization of Invented Things (1999)"}
+    header = {"taxonomy_code": "H", "element_idx_start": 7, "extracted_fields": {},
+              "text": "Award\tOrganization\tYear"}
+    receipt, rows = _receipt_after_fill_honors([award, header])
+    assert rows == []
+    assert (receipt.elsewhere, [lost.element_idx_start for lost in receipt.lost]) == (1, [204])
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Name of award\tOrganization\tDate awarded", True),
+    ("Award\tOrganization\tCode 12015", True),   # no year: a digit runs into it
+    ("Award\tOrganization\tCode 20155", True),   # no year: a digit follows it
+    ("Award\tOrganization\tDate awarded (2008)", False),
+    ("Honor Award, Organization 1999", False),
+    ("Fictional Prize for Imaginary Work", False),  # no header shape at all
+])
+def test_534_a_header_entry_is_excused_only_when_it_holds_no_year(text, expected):
+    from unified_pipeline.stage6.sections.honors import _is_yearless_header_entry
+    assert _is_yearless_header_entry(text) is expected
 
 
 def test_534_a_row_written_after_the_honors_loop_is_not_the_last_entrys():

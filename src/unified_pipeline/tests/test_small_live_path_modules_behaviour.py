@@ -255,6 +255,39 @@ def test_returns_without_writing_when_neither_anchor_heading_exists(tmp_path):
     assert gen.stats["entries_inserted"] == 0
 
 
+def _s0_entries() -> list[dict]:
+    return [{"text": "[S0] ORCID\t0000-0002-1111-2222", "taxonomy_code": "S0", "element_idx_start": 4},
+            {"text": "Invented Scholar profile page", "taxonomy_code": "S0", "element_idx_start": 5}]
+
+
+def test_534_each_bullet_records_its_entrys_row_receipt():
+    """#534: each S0 bullet the writer inserts is recorded against the entry
+    it renders, so the researcher_profiles receipt reads written, not lost."""
+    gen, entries = _s6_generator(), _s0_entries()
+    gen._row_receipts.begin_section("researcher_profiles")
+    gen._fill_researcher_profiles(entries)
+    receipt, = gen._row_receipts.receipts({"researcher_profiles": entries})
+    assert (receipt.given, receipt.written, receipt.elsewhere, receipt.lost) == (2, 2, 0, ())
+    assert [[_all_run_text(p) for p in gen.doc.paragraphs if p._p is element]
+            for entry in entries for element in gen._row_receipts.elements_for(entry)] == [
+        ["ORCID: 0000-0002-1111-2222"], ["Invented Scholar profile page"]]
+
+
+def test_534_entries_with_no_anchor_heading_stay_lost_on_the_receipt(tmp_path):
+    """The inverse: with neither anchor heading the writer inserts nothing,
+    so nothing is recorded and both entries read lost."""
+    gen = WCMTemplateGenerator(verbose=False)
+    doc = Document()
+    doc.add_paragraph("Nothing relevant in this document")
+    doc.save(tmp_path / "no_anchor.docx")
+    gen.doc = Document(tmp_path / "no_anchor.docx")
+    entries = _s0_entries()
+    gen._row_receipts.begin_section("researcher_profiles")
+    gen._fill_researcher_profiles(entries)
+    receipt, = gen._row_receipts.receipts({"researcher_profiles": entries})
+    assert (receipt.written, [lost.element_idx_start for lost in receipt.lost]) == (0, [4, 5])
+
+
 # =============================================================================
 # research_summary.ResearchSummarySection._fill_research_summary
 # =============================================================================

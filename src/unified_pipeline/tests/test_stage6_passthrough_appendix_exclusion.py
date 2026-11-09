@@ -730,3 +730,78 @@ def test_a_copied_block_consumes_only_its_own_sections_entries(tmp_path):
              "hierarchy": ["COMMUNITY SERVICE"], "extracted_fields": {}, "element_idx_start": 7}
     doc, _ = _render(tmp_path, [*_passthrough_entries(), stray], original_doc_path=_wcm_source(tmp_path, _E_LINES))
     assert "Name of Current Employer DISTINCTIVE_E_EMPLOYER" in _appendix_text(doc)
+
+
+# --- #534: a copied E/G block that prints another section's entry is its receipt
+
+_PRINTED_NPI_LINE = "NPI Number 1234567893"
+_LICENCE_LINE = "Imaginary State Medical License 765432"
+
+
+def _f1_entries() -> list[dict]:
+    """Two NPI lines whose number stage 4 put under a key the licensure writer
+    does not read (XAXVYB 57's shape), so it writes no row and sets neither
+    aside, and a licence it writes a row for."""
+    npis = [{"text": text, "taxonomy_code": "F1", "hierarchy": ["LICENSURE, BOARD CERTIFICATION"],
+             "extracted_fields": {"npi_number": text.split()[-1]}, "element_idx_start": idx}
+            for idx, text in ((30, _PRINTED_NPI_LINE), (31, "NPI Number 2345678903"))]
+    licence = {"text": _LICENCE_LINE, "taxonomy_code": "F1", "hierarchy": ["LICENSURE, BOARD CERTIFICATION"],
+               "extracted_fields": {"state": "Imaginary State", "license_number": "765432"},
+               "element_idx_start": 32}
+    return [*npis, licence]
+
+
+def _licensure_receipt(sidecar: dict) -> tuple[int, int, int, list]:
+    receipt, = (r for r in sidecar["row_receipts"] if r["section"] == "licensure")
+    return (receipt["given"], receipt["written"], receipt["elsewhere"],
+            [lost["element_idx_start"] for lost in receipt["lost"]])
+
+
+def test_534_a_copied_block_that_prints_another_sections_entry_is_its_receipt(tmp_path):
+    """LDPDKA 31's shape: an F1 line the licensure writer drops prints inside
+    the verbatim-copied E block, so its receipt reads elsewhere (never
+    written). The NPI line no copy prints stays lost, and the licence its
+    own row renders stays written although the block prints it too."""
+    lines = [*_E_LINES, _PRINTED_NPI_LINE, _LICENCE_LINE]
+    doc, sidecar = _render(tmp_path, [*_passthrough_entries(), *_f1_entries()],
+                           original_doc_path=_wcm_source(tmp_path, lines))
+    assert _PRINTED_NPI_LINE in _full_text(doc) and _PRINTED_NPI_LINE not in _appendix_text(doc)
+    assert _licensure_receipt(sidecar) == (3, 1, 1, [31])
+
+
+@pytest.mark.parametrize("extra_lines, with_source", [
+    ([], True),                                               # the copy prints neither NPI line
+    ([_PRINTED_NPI_LINE, "Date of Birth: 01/02/1970"], True),  # protected data: the block is not copied
+    ([_PRINTED_NPI_LINE], False),                              # no source document: nothing is copied
+])
+def test_534_an_entry_no_copied_block_prints_stays_lost(tmp_path, extra_lines, with_source):
+    source = _wcm_source(tmp_path, [*_E_LINES, *extra_lines]) if with_source else None
+    _, sidecar = _render(tmp_path, [*_passthrough_entries(), *_f1_entries()], original_doc_path=source)
+    assert _licensure_receipt(sidecar) == (3, 1, 0, [30, 31])
+
+
+def test_534_only_an_entry_of_neither_copied_section_is_receipted_by_the_copy():
+    """The copy's own entries (E's or G's, by heading or code) are consumed by
+    it (#1463); the receipt rule is for every other entry the block prints."""
+    from unified_pipeline.stage6.sections.passthrough import _copy_prints_foreign_entry
+    copied = {"E": {"npi", "number", "1234567893"}}
+    other = {"text": _PRINTED_NPI_LINE, "taxonomy_code": "F1", "hierarchy": ["LICENSURE"]}
+    assert _copy_prints_foreign_entry(other, copied)
+    assert not _copy_prints_foreign_entry({**other, "hierarchy": ["EMPLOYMENT STATUS"]}, copied)
+    assert not _copy_prints_foreign_entry({**other, "taxonomy_code": "G"}, copied)
+    assert not _copy_prints_foreign_entry({**other, "text": "NPI Number 2345678903"}, copied)
+    assert not _copy_prints_foreign_entry(other, {})
+    # The share is inclusive: 4 of 5 tokens printed is exactly the 0.8 floor.
+    assert _copy_prints_foreign_entry({**other, "text": f"{_PRINTED_NPI_LINE} Pretend Clinic"},
+                                      {"E": {"npi", "number", "1234567893", "pretend"}})
+    # A line with no token ("of an") is printed by no block.
+    assert not _copy_prints_foreign_entry({**other, "text": "of an"}, copied)
+
+
+def test_a_copied_blocks_own_entry_it_does_not_print_still_reaches_the_appendix(tmp_path):
+    """The copy consumes only the E entries whose text it prints: an E line
+    the source block does not hold is not in the document, so it stays in the Appendix."""
+    unprinted = {"text": "Favorite Hobby: DISTINCTIVE_E_UNPRINTED", "taxonomy_code": "T",
+                 "hierarchy": ["EMPLOYMENT STATUS"], "extracted_fields": {}, "element_idx_start": 8}
+    doc, _ = _render(tmp_path, [*_passthrough_entries(), unprinted], original_doc_path=_wcm_source(tmp_path, _E_LINES))
+    assert "DISTINCTIVE_E_UNPRINTED" in _appendix_text(doc)

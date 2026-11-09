@@ -466,12 +466,33 @@ def _passthrough_letter(text: str) -> str | None:
     return None
 
 
+def _belongs_to(entry: dict, letter: str) -> bool:
+    """`entry` is `letter`'s section's, by its heading or its code."""
+    return (_passthrough_letter(' '.join(entry.get('hierarchy', []))) == letter
+            or entry.get('taxonomy_code') == letter)
+
+
+def _block_prints(entry: dict, block_tokens: set[str]) -> bool:
+    """At least `_COPIED_ENTRY_TOKEN_COVERAGE` of `entry`'s tokens are in a copied block's."""
+    tokens = set(_ENTRY_TOKEN_RE.findall(str(entry.get('text') or '').lower()))
+    return bool(tokens) and len(tokens & block_tokens) >= _COPIED_ENTRY_TOKEN_COVERAGE * len(tokens)
+
+
 def _copied_block_covers(entry: dict, letter: str, block_tokens: set[str]) -> bool:
     """`entry` belongs to `letter` (by heading or code) and its text is in the copied block."""
-    belongs = (_passthrough_letter(' '.join(entry.get('hierarchy', []))) == letter
-               or entry.get('taxonomy_code') == letter)
-    tokens = set(_ENTRY_TOKEN_RE.findall(str(entry.get('text') or '').lower()))
-    return belongs and bool(tokens) and len(tokens & block_tokens) >= _COPIED_ENTRY_TOKEN_COVERAGE * len(tokens)
+    return _belongs_to(entry, letter) and _block_prints(entry, block_tokens)
+
+
+def _copy_prints_foreign_entry(entry: dict, copied: dict[str, set[str]]) -> bool:
+    """A copied block prints `entry`, which belongs to neither copied letter (#534).
+
+    The copy consumes its own section's entries (`_copied_block_covers`). Any
+    other entry it prints is printed outside its own section: the row receipt
+    counts it elsewhere, never written, so a line its own writer dropped is
+    not reported lost while the copy shows it (LDPDKA entry 31, an NPI line
+    inside a copied E block). `copied` holds only the blocks actually copied."""
+    return (any(_block_prints(entry, tokens) for tokens in copied.values())
+            and not any(_belongs_to(entry, letter) for letter in _VERBATIM_LETTERS))
 
 
 class PassthroughSection:
@@ -491,7 +512,10 @@ class PassthroughSection:
 
         A WCM-format source's own E/G block is copied verbatim instead
         (#1463, `_copy_source_blocks`); that letter's writer then doesn't run.
-        J's never is (#2028): `_fill_percent_effort` always runs.
+        J's never is (#2028): `_fill_percent_effort` always runs. An entry of
+        another section that a copied block prints is set aside on the row
+        receipt (#534, `_copy_prints_foreign_entry`); it is not returned, so
+        where it renders does not change.
 
         Args:
             all_entries: All entries from the pipeline (to search by hierarchy)
@@ -515,6 +539,9 @@ class PassthroughSection:
                 consumed += [e for e in all_entries if _copied_block_covers(e, letter, copied[letter])]
             else:
                 consumed += writer(all_entries)
+        for entry in all_entries:
+            if _copy_prints_foreign_entry(entry, copied):
+                self._row_receipts.set_aside(entry)  # printed by the copy: elsewhere, never written (#534)
         return consumed
 
     def _copy_source_blocks(self, original_doc_path: str | None) -> dict[str, set[str]]:

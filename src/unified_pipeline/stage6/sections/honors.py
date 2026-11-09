@@ -19,6 +19,8 @@ is testable on strings alone.
                                     before _entry_parts sees it (#828, #924)
     _is_honors_header_entry         whether the whole entry is the source
                                     CV's own column-header row
+    _is_yearless_header_entry       whether such an entry holds no year, so
+                                    its row receipt sets it aside (#534)
     _parse_honor_lines              one pass over those parts, sorting them
                                     into award cells and loose year cells
     _split_award_year               peels a leading or trailing year off a
@@ -635,6 +637,23 @@ def _is_honors_header_entry(text: str) -> bool:
     cells = [cell.strip() for cell in _CELL_SPLIT_RE.split(text or '')]
     return not any(_is_date_column(cell) or _LEADING_YEAR_RE.match(cell)
                    for cell in cells if cell)
+
+
+# A 19xx or 20xx year anywhere in an entry's text, not part of a longer run of
+# digits. A column-header row names its date column and never holds a date, so
+# an entry the header check matches that holds one is not a header row (#534).
+_ANY_YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
+
+
+def _is_yearless_header_entry(text: str) -> bool:
+    """Is this a column-header row the row receipt sets aside (#534)?
+
+    `_is_honors_header_entry` matched it and its text holds no year
+    (`_ANY_YEAR_RE`). The header check has misfired on real data, and the
+    misfires seen held a year: CKDDEG entry 90 (#1930) and web056 entry 204,
+    a real award. A matched entry that holds a year is still skipped, but its
+    receipt keeps it lost, where the doctor reports it."""
+    return _is_honors_header_entry(text) and not _ANY_YEAR_RE.search(text)
 
 
 def _looks_like_column_header(line: str) -> bool:
@@ -1420,15 +1439,14 @@ class HonorsSection:
             original_text = entry.get('text', '')
             self._row_receipts.begin_entry(entry)
 
-            # Skip table header entries that were mistakenly extracted as data
-            # Common patterns: "Name of award\tOrganization\tDate awarded" or similar
-            # Not set aside on the receipt (#534): this check has misfired
-            # on real data before (a space-separated "year  award,
-            # organization" line, #1930), so a skip here is reported as a
-            # lost entry rather than excused.
+            # Skip a table header row mistakenly extracted as data ("Name of
+            # award\tOrganization\tDate awarded"). The check has misfired on
+            # real awards (#1930), so only a yearless skip is set aside (#534).
             if _is_honors_header_entry(original_text):
                 if self.verbose:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
+                if _is_yearless_header_entry(original_text):
+                    self._row_receipts.set_aside(entry)
                 continue
 
             if 'award_name' in entry.get(PII_DROPPED_FIELDS_KEY, ()):
