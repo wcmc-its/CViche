@@ -320,6 +320,16 @@ _NAME_PAREN_MAX = 60
 _MARRIED_PARENTHETICAL = r"married \s* \( [^()\n]{1,%d} \)" % _NAME_PAREN_MAX
 _CHILD_COUNT = r"(?: \d{1,2} | one | two | three | four | five | six | seven | eight | nine | ten )"
 _CHILD_NOUN = r"(?: children | child | kids | sons? | daughters? )"
+#: #847: a family's head count -- a number word or ONE digit, never two ("40
+#: children" is a study's). Every row it opens is fragment-initial, so a count
+#: glued to a word, a range or a grant number ("R01-2 children") opens nothing.
+_FAMILY_HEAD_COUNT = r"(?: one | two | three | four | five | six | seven | eight | nine | ten | [1-9] )"
+#: The words the Children label row opens on (`WITHHOLD_POLICY`). #1391: the
+#: singular "Child:" and "Kids:" too -- never the journal title "Child: Care,
+#: Health and Development".
+_CHILDREN_LABEL_WORDS = r"""(?: children (?: [’'] s \s* names? )?
+                       | child (?! \s* : \s* care \b ) (?: [’'] s \s* names? )?
+                       | kids | dependents? )"""
 #: One to four name tokens before "born", on one line. A birth statement with
 #: no name before it ("Born on January 2, 1970") is the colon-less date-of-birth
 #: row's, which keeps its own category. The run may only open at the start of a
@@ -363,14 +373,28 @@ _BARE_BIRTH_LABEL_RE = re.compile(_BARE_BIRTH_LABEL, re.X | re.I)
 # stop at "Married:", which opens mid-fragment and so matches nothing itself:
 # the cut would shrink and the spouse's name render. As shapes they match
 # where a label would, and every cut that ran over them still does.
+#
+# #847 (BLBVPD, R1): two Children labels the Children row does not open, a
+# shape for the same reason: a head count as the label ("Two sons: <names>",
+# "One child: <name>"), and the children joined to a marital status
+# ("Marital Status and Children: <...>"), which the marital-status row misses
+# because it needs its colon right after "status".
 _MARRIED_STEM = r"married"
 _GRANDCHILDREN_STEM = r"(?: great \s* [-–—]? \s* )* grand \s* children"
+_MARITAL_STATUS_AND = r"marital \s* status \s* (?: & | and | / | , ) \s*"
+_COUNTED_CHILD = _FAMILY_HEAD_COUNT + r" \s+ " + _CHILD_NOUN
+_COUNTED_CHILDREN_STEM = (r"(?: names? \s+ of \s+ )? (?: "
+                          + _MARITAL_STATUS_AND + r" (?: " + _CHILDREN_LABEL_WORDS + r" | " + _COUNTED_CHILD + r" )"
+                          + r" | " + _COUNTED_CHILD + r" )")
 #: (category, stem) of each label-shaped family row; the colon form is a row of
 #: the table, the dash form joins `_family_dash_matches`.
 _FAMILY_SHAPE_STEMS: tuple[tuple[str, str], ...] = (
     (CAT_SPOUSE, _MARRIED_STEM),
     (CAT_CHILDREN, _GRANDCHILDREN_STEM),
+    (CAT_CHILDREN, _COUNTED_CHILDREN_STEM),
 )
+#: #847 (R1): the counted-children row's colon form.
+_COUNTED_CHILDREN_LABEL = _STEM_GUARD + _COUNTED_CHILDREN_STEM + r" \s* :"
 
 # #1391: the spouse words a spouse label opens on. Plurals ("Husbands:",
 # "Wives:") and the partner labels that name nothing but a person ("Domestic
@@ -592,6 +616,45 @@ _RELIGIOUS_ORGANIZATION_LINE = (
 )
 
 
+# --- a statement of the owner's children, no label (#847, BLBVPD) ----------
+# "One child - <name> <name>", "Two sons, <name> (<year>) and <name> (<year>)",
+# "3 children born <date>, <date> and <date>": a head count, a child noun, then
+# nothing but the children -- names, initials, whole dates, birth years, the
+# pre-LLM placeholder, "born", "b.", "and", "Jr"/"Sr" -- to the end of the
+# fragment (`_FRAGMENT_END_AHEAD`). The item exists only to state a child, so
+# the whole of it is withheld, not only the name beside the date. Anything else
+# ends the run, and the run must then end the fragment: a lowercase word ("two
+# children with asthma were enrolled"), a full stop or colon inside it ("Two
+# Sons - The Memoir. Example Press, 2001"), or a number that is neither a whole
+# date nor a 19xx/20xx year ("Two children - R01 HD012345") never matches. A
+# line of nothing but capitalised words and years after a count of children
+# read as a family line in every corpus hit (#847 scope); a title made of
+# nothing else would be withheld, with the notice. Fragment-initial
+# (`anchored`), like the bare child count row. Each token and separator is
+# taken possessively, once, so the scan stays linear.
+#: A 19xx or 20xx year standing alone, never part of a longer number.
+_BIRTH_YEAR = r"(?<!\d)(?:19|20)\d{2}(?!\d)"
+#: A capitalised name token, case-sensitive inside the case-insensitive policy.
+_CHILD_STATEMENT_NAME = r"(?-i:[A-Z][a-z][\w'’-]*)"
+_CHILD_STATEMENT_ADJECTIVE = r"(?: adult | grown | young | minor )"
+_GRANDCHILD_NOUN = r"(?: great \s* [-–—]? \s* )* grand \s* (?: children | child | sons? | daughters? )"
+_CHILD_STATEMENT_NOUN = (r"(?: " + _CHILD_STATEMENT_ADJECTIVE + r" \s+ )?"
+                         r"(?: " + _CHILD_NOUN + r" | " + _GRANDCHILD_NOUN + r" )")
+#: "Jr"/"Sr" come before a name: a name holds no full stop, and a run that
+#: took "Jr" as a name would end at its dot.
+_CHILD_STATEMENT_TOKEN = (r"(?: " + _FULL_DATE_VALUE + r" | " + re.escape(PRE_LLM_PLACEHOLDER)
+                          + r" | " + _BIRTH_YEAR + r" | (?: jr | sr ) (?: \. | \b ) | " + _CHILD_STATEMENT_NAME
+                          + r" | " + _NAME_INITIAL + r" | born | b\. | and )")
+_CHILD_STATEMENT_SEPARATOR = r"[ ,()&–—-]"
+#: After the noun: a dash, colon, comma or parenthesis, or a space before "born".
+_CHILD_STATEMENT_OPENER = r"(?: [ ]* [-–—:,(] | (?= [ ]+ born \b ) ) [ ]*"
+_CHILD_STATEMENT_SHAPE = (
+    _FAMILY_HEAD_COUNT + r" [ ]+ " + _CHILD_STATEMENT_NOUN + _CHILD_STATEMENT_OPENER
+    + _CHILD_STATEMENT_TOKEN + r"(?: " + _CHILD_STATEMENT_SEPARATOR + r"++ " + _CHILD_STATEMENT_TOKEN
+    + r" )*+ [ .)]*" + _FRAGMENT_END_AHEAD
+)
+
+
 #: THE table. Row order is match-priority order within a scope: the engine
 #: tries every row and merges overlapping spans, keeping the category of
 #: the leftmost (then first-listed) match, so "Birth date and birth place:"
@@ -685,13 +748,11 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"salary | honorarium"),
     # --- ambiguous as a title word: A-coded and Appendix-bound only ---------
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"born"),
-    # #1391: the singular "Child:" and "Kids:" open the same label -- never
-    # the journal title "Child: Care, Health and Development".
+    # #1391: the singular "Child:" and "Kids:" open the same label (see
+    # `_CHILDREN_LABEL_WORDS`).
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  label=r"""(?: names? \s+ of \s+ )?
-                     (?: children (?: [’'] s \s* names? )?
-                       | child (?! \s* : \s* care \b ) (?: [’'] s \s* names? )?
-                       | kids | dependents? )"""),
+                     """ + _CHILDREN_LABEL_WORDS),
     # #1041: a bare child count that is its OWN fragment ("Marital Status:
     # <status>; <n> Children" -- the `;` hard split leaves it behind the
     # marital-status cut, and it rendered in the Appendix). The count must
@@ -734,10 +795,23 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_STEM_GUARD + _GRANDCHILDREN_STEM + r" \s* :", anchored=True,
                  render_only=True),
+    # #847 (BLBVPD): "Two sons: <names>", "Marital Status and Children: <...>"
+    # (`_COUNTED_CHILDREN_STEM`). The pre-LLM child-item walks run after it
+    # too (`_children_label_spans`).
+    WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_COUNTED_CHILDREN_LABEL, anchored=True, render_only=True),
     # #1391: "Partner: <person's name>" (see `_BARE_PARTNER_SHAPE`).
     WithholdRule(CAT_SPOUSE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_BARE_PARTNER_SHAPE, anchored=True, render_only=True),
     WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"family"),
+    # #847 (BLBVPD): a child statement with no label (see
+    # `_CHILD_STATEMENT_SHAPE`). CAT_CHILDREN is a #820 withhold-with-notice
+    # category already, so this covers more of it and adds no category.
+    # Render-time only, like the family rows: its span runs to the next hard
+    # delimiter. The pre-LLM scrub reads its dates through
+    # `_child_statement_date_spans` instead.
+    WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_CHILD_STATEMENT_SHAPE, anchored=True, render_only=True),
     # #1223: "Family Information:" and "Family Data:" open a family block too.
     # Render-time only, like the shape rows above: this row's span runs to the
     # next hard delimiter, so a DOB or SSN in the same fragment ("Family
@@ -1303,6 +1377,14 @@ def _merge_matches(spans: list[PiiMatch]) -> list[PiiMatch]:
     return merged
 
 
+def _rule_matches(text: str, rule: WithholdRule, pattern: re.Pattern) -> list[PiiMatch]:
+    """One row's own spans of `text`, unmerged: a label or anchored row's
+    fragments (`_label_spans`), else every match of the row's shape."""
+    if rule.label is not None or rule.anchored:
+        return [PiiMatch(s, e, rule.category) for s, e in _label_spans(text, pattern, rule.category)]
+    return [PiiMatch(m.start(), m.end(), rule.category) for m in pattern.finditer(text)]
+
+
 def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
                  for_pre_llm_scrub: bool = False, personal_data: bool = False) -> list[PiiMatch]:
     """Every protected-data span of `text` under the rows in force at
@@ -1324,12 +1406,7 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
     for rule, pattern in _rules_for_scope(scope):
         if for_pre_llm_scrub and rule.render_only:
             continue
-        if rule.label is not None or rule.anchored:
-            found.extend(PiiMatch(s, e, rule.category)
-                         for s, e in _label_spans(text, pattern, rule.category))
-        else:
-            found.extend(PiiMatch(m.start(), m.end(), rule.category)
-                         for m in pattern.finditer(text))
+        found.extend(_rule_matches(text, rule, pattern))
     if scope == SCOPE_PERSONAL_AND_APPENDIX and not for_pre_llm_scrub:
         found.extend(_family_dash_matches(text, personal_data=personal_data))
         if personal_data:
@@ -1409,14 +1486,27 @@ _PRE_LLM_VALUE_RE_FULL_DATE_ONLY: dict[str, re.Pattern] = {
 _CHILD_BIRTH_KEYWORD = r"(?i:born|b\.|d\.?o\.?b\.?)\s*:?"
 _CHILD_DATE = r"(?i:" + _WHOLE_DATE_VALUE + r")"
 _CHILD_ITEM_END = r"(?=[ \t]*(?:[,;]|and\b|$))"
-# Case-sensitive on purpose: the given name must be capitalised.
+# #847 (R4): a child named in one to three tokens ("Ann", "Ann B. Example",
+# "Ann Example, Jr.") with a born/b./DOB keyword before its whole date or its
+# birth year, bare after an optional comma or semicolon ("Ann Example; b.
+# 2001") or in parentheses ("Ann Example (born 2001)"). The keyword is what
+# makes a bare year a birth year; without one a year stays (a title's
+# publication year, `test_redact_pre_llm_values_children_label_bare_year_is_untouched`).
+_CHILD_KEYWORD_NAME_RUN = r"[A-Z][a-z'’-]+(?:\s+(?:[A-Z][a-z'’-]+|[A-Z]\.)){0,2}(?:,?\s*(?:[JjSs]r)\.?)?"
+_CHILD_KEYWORD_VALUE = r"(?:" + _CHILD_DATE + r"|" + _BIRTH_YEAR + r")"
+# Case-sensitive on purpose: the given name must be capitalised. Items are
+# joined by a comma, a semicolon, "and" or (#847) "&". The keyword items come
+# after the earlier alternatives, which therefore match exactly what they did.
 _CHILD_ITEM_RE = re.compile(
-    r"[\s,;]*(?:and\s+)?(?:[A-Z][a-z'’-]+\s*"
+    r"[\s,;&]*(?:(?:and|&)\s+)?(?:[A-Z][a-z'’-]+\s*"
     r"(?:\(\s*(?:" + _CHILD_BIRTH_KEYWORD + r"\s*)?(?P<paren>" + _CHILD_DATE + r")\s*\)"
     r"|,?\s*" + _CHILD_BIRTH_KEYWORD + r"\s*(?P<keyword>" + _CHILD_DATE + r"))"
+    r"|" + _CHILD_KEYWORD_NAME_RUN + r",?\s*(?:\(\s*" + _CHILD_BIRTH_KEYWORD
+    + r"\s*(?P<keyword_paren>" + _CHILD_KEYWORD_VALUE + r")\s*\)"
+    r"|[,;]?\s*" + _CHILD_BIRTH_KEYWORD + r"\s*(?P<keyword_value>" + _CHILD_KEYWORD_VALUE + r"))"
     r"|(?P<bare>" + _CHILD_DATE + r")" + _CHILD_ITEM_END + r")"
 )
-_CHILD_ITEM_GROUPS = ("paren", "keyword", "bare")
+_CHILD_ITEM_GROUPS = ("paren", "keyword", "keyword_paren", "keyword_value", "bare")
 
 #: The one Children/Dependents label row, compiled -- walked on its own
 #: (`_child_label_date_spans`) because `_merge_matches` folds a Children
@@ -1425,6 +1515,18 @@ _CHILD_ITEM_GROUPS = ("paren", "keyword", "bare")
 #: child-item rule then never ran on it.
 _CHILDREN_LABEL_RE = next(pattern for rule, pattern in _COMPILED_POLICY
                           if rule.category == CAT_CHILDREN and rule.label is not None)
+#: #847 (R1): the counted-children row ("Two sons:", "Marital Status and
+#: Children:"), compiled as the table compiles it, walked the same way.
+_COUNTED_CHILDREN_LABEL_RE = next(pattern for rule, pattern in _COMPILED_POLICY
+                                  if rule.shape == _COUNTED_CHILDREN_LABEL)
+
+
+def _children_label_spans(text: str) -> list[tuple[int, int]]:
+    """(start, fragment end) of every Children label of `text`
+    (`_label_spans`): the label row's and, #847, the counted-children row's
+    -- two separate walks, so the first finds everything it found before."""
+    return sorted(_label_spans(text, _CHILDREN_LABEL_RE, CAT_CHILDREN)
+                  + _label_spans(text, _COUNTED_CHILDREN_LABEL_RE, CAT_CHILDREN))
 
 
 def _child_list_date_spans(text: str, label_start: int) -> list[tuple[int, int]]:
@@ -1471,17 +1573,101 @@ def _known_field_child_date_spans(text: str, label_start: int, frag_end: int) ->
     return [m.span() for m in _PRE_LLM_FULL_DATE_ONLY_RE.finditer(text, value_start, stop)]
 
 
+# #847 (R6): a child list that goes on over the lines after its Children label
+# ("Children:\n<name> <date>\n<name> <date>") -- the pre-LLM half of #1223's
+# render-time list continuation (`pii_pass._absorb_list_lines`). A line is
+# part of the list only when the WHOLE line is a child-list run: capitalised
+# names, initials, whole dates, 19xx/20xx years, the placeholder, a birth
+# keyword, "and"/"&", "Jr"/"Sr", joined by blanks or `,;()` and dashes, with an
+# optional full stop. The list must reach a later line and hold two or more
+# dated values: a one-line Children line never qualifies, so every
+# single-line shape is left exactly as the item walk above leaves it.
+#: A capitalised name token. Unlike `_CHILD_STATEMENT_NAME` it may hold a full
+#: stop: a list line is read only after a Children label, never on its own.
+_CHILD_LIST_NAME = r"(?-i:[A-Z][a-z][\w'’.-]*)"
+_CHILD_LIST_TOKEN = (r"(?: " + _WHOLE_DATE_VALUE + r" | " + re.escape(PRE_LLM_PLACEHOLDER) + r" | " + _BIRTH_YEAR
+                     + r" | " + _CHILD_LIST_NAME + r" | " + _NAME_INITIAL
+                     + r" | born | b\. | d\.?o\.?b\.? :? | and | & | jr\.? | sr\.? )")
+_CHILD_LIST_SEPARATOR = r"[ \t,;()–—-]"
+_CHILD_LIST_RUN_RE = re.compile(
+    _CHILD_LIST_SEPARATOR + r"* " + _CHILD_LIST_TOKEN + r" (?: " + _CHILD_LIST_SEPARATOR + r"++ "
+    + _CHILD_LIST_TOKEN + r" )*+ [ \t.,;)]*", re.X | re.I)
+_CHILD_LIST_VALUE_RE = re.compile(r"(?:" + _WHOLE_DATE_VALUE + r")|" + _BIRTH_YEAR, re.I)
+#: The most lines after the label's own that one child list is followed over.
+CHILD_LIST_MAX_LINES = 12
+#: Dated values a list continued onto a later line needs to be a child list.
+_CHILD_LIST_MIN_VALUES = 2
+
+
+def _child_list_lines(text: str, label_start: int) -> list[tuple[int, int]]:
+    """(start, end) of the rest of the line of the Children label opening at
+    `label_start`, then of each WHOLE line after it that is a child-list run
+    (`_CHILD_LIST_RUN_RE`, which a blank line never is), stopping at the
+    first that is not or after `CHILD_LIST_MAX_LINES`. [] when the label's own line goes
+    on with anything but a child-list run, or is the last line."""
+    colon = text.index(":", label_start) + 1
+    end = text.find("\n", colon)
+    if end < 0:
+        return []
+    rest = text[colon:end]
+    if rest.strip() and _CHILD_LIST_RUN_RE.fullmatch(rest) is None:
+        return []
+    lines = [(colon, end)]
+    while end < len(text) and len(lines) <= CHILD_LIST_MAX_LINES:
+        start = end + 1
+        end = text.find("\n", start)
+        end = len(text) if end < 0 else end
+        if _CHILD_LIST_RUN_RE.fullmatch(text[start:end]) is None:
+            break
+        lines.append((start, end))
+    return lines
+
+
+def _child_list_continuation_spans(text: str, label_start: int) -> list[tuple[int, int]]:
+    """Every whole date and year of the child list after the Children label
+    at `label_start` (`_child_list_lines`) when it runs past the label's own
+    line, holds `_CHILD_LIST_MIN_VALUES` or more of them, and at least one is
+    on a later line; [] otherwise."""
+    lines = _child_list_lines(text, label_start)
+    if len(lines) < 2:
+        return []
+    values = [m.span() for start, end in lines for m in _CHILD_LIST_VALUE_RE.finditer(text, start, end)]
+    on_a_later_line = any(start >= lines[1][0] for start, _ in values)
+    return values if len(values) >= _CHILD_LIST_MIN_VALUES and on_a_later_line else []
+
+
+#: The child-statement row (`_CHILD_STATEMENT_SHAPE`), compiled as the table
+#: compiles it, for the pre-LLM scrub.
+_CHILD_STATEMENT_RE = next(pattern for rule, pattern in _COMPILED_POLICY
+                           if rule.shape == _CHILD_STATEMENT_SHAPE)
+
+
+def _child_statement_date_spans(text: str) -> list[tuple[int, int]]:
+    """#847 (R2): every whole date and year inside a child statement
+    (`_CHILD_STATEMENT_SHAPE`, "Two sons, <name> (<year>) and <name>
+    (<year>)"): the render withholds the whole statement, so the LLM sees
+    none of its dates either. Its only digits are whole dates and years."""
+    return [m.span() for start, end in _label_spans(text, _CHILD_STATEMENT_RE, CAT_CHILDREN)
+            for m in _PRE_LLM_DATE_RE.finditer(text, start, end)]
+
+
 def _pre_llm_child_date_spans(text: str) -> list[tuple[int, int]]:
     """Every child's birth date or year `redact_pre_llm_values` withholds:
-    the child items after each Children/Dependents label
-    (`_child_list_date_spans`), every whole date after one that follows
-    another known field (`_known_field_child_date_spans`). A child's birth
-    year in unlabelled prose is not taken: every rule tried also cut years
-    out of publication titles ("... two children born 1998. Clin Pediatr")."""
+    the child items after each Children/Dependents label, a counted one
+    included (`_children_label_spans`, `_child_list_date_spans`), every
+    whole date after one that follows another known field
+    (`_known_field_child_date_spans`), the dates of a
+    child list that goes on over the next lines (#847,
+    `_child_list_continuation_spans`), and those of a child statement (#847,
+    `_child_statement_date_spans`). A child's birth year in other unlabelled
+    prose is not taken: every rule tried also cut years out of publication
+    titles ("... two children born 1998. Clin Pediatr")."""
     spans: list[tuple[int, int]] = []
-    for label_start, frag_end in _label_spans(text, _CHILDREN_LABEL_RE, CAT_CHILDREN):
+    for label_start, frag_end in _children_label_spans(text):
         spans.extend(_child_list_date_spans(text, label_start))
         spans.extend(_known_field_child_date_spans(text, label_start, frag_end))
+        spans.extend(_child_list_continuation_spans(text, label_start))
+    spans.extend(_child_statement_date_spans(text))
     return spans
 
 
@@ -1547,15 +1733,54 @@ def _pre_llm_fragment_value_spans(text: str, m: PiiMatch, value_re: re.Pattern) 
     return spans
 
 
+#: #847 (R3): the rows whose value the pre-LLM scrub reads (date of birth,
+#: birth, SSN), each also read on its own: a merged span keeps the leftmost
+#: span's category, so a DOB label or a "born <date>" that a Children span
+#: swallowed, or the second and third "DOB:" of one fragment, had its value
+#: read by nothing.
+_PRE_LLM_VALUE_POLICY = tuple((rule, pattern) for rule, pattern in _COMPILED_POLICY
+                              if not rule.render_only and rule.category in _PRE_LLM_VALUE_RE)
+
+
 def _pre_llm_label_value_spans(text: str) -> list[tuple[int, int]]:
     """The value spans of every DOB/SSN label fragment of `text`
-    (`_pre_llm_fragment_value_spans`)."""
+    (`_pre_llm_fragment_value_spans`): each merged span `_pii_matches`
+    finds, as before, then each DOB/birth/SSN row's own span that is not one
+    of them (#847, `_PRE_LLM_VALUE_POLICY`) -- a union, so a superset."""
+    merged = _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX, for_pre_llm_scrub=True)
+    own = {m for rule, pattern in _PRE_LLM_VALUE_POLICY for m in _rule_matches(text, rule, pattern)}
     spans: list[tuple[int, int]] = []
-    for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX, for_pre_llm_scrub=True):
+    for m in [*merged, *sorted(own - set(merged))]:
         value_re = _PRE_LLM_VALUE_RE.get(m.category)
         if value_re is not None:
             spans.extend(_pre_llm_fragment_value_spans(text, m, value_re))
     return spans
+
+
+def _merged_edits(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """`spans` in order, each one that starts inside the one before merged
+    into their union. #847: such a span used to be dropped whole, so the
+    part of it past the earlier one's end still reached the LLM."""
+    edits: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if edits and start < edits[-1][1]:
+            edits[-1] = (edits[-1][0], max(edits[-1][1], end))
+        else:
+            edits.append((start, end))
+    return edits
+
+
+def _with_placeholders(text: str, spans: list[tuple[int, int]]) -> str:
+    """`text` with every span of `spans` (`_merged_edits`) replaced by
+    `PRE_LLM_PLACEHOLDER`."""
+    out: list[str] = []
+    pos = 0
+    for start, end in _merged_edits(spans):
+        out.append(text[pos:start])
+        out.append(PRE_LLM_PLACEHOLDER)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def redact_pre_llm_values(text: str | None) -> str:
@@ -1582,24 +1807,35 @@ def redact_pre_llm_values(text: str | None) -> str:
     2020): 01/02/1970" no longer spends the one value on 2020
     (`_pre_llm_fragment_value_spans`).
     Children's dates and birth years come from
-    `_pre_llm_child_date_spans`."""
+    `_pre_llm_child_date_spans`. Overlapping spans are replaced as their
+    union (`_merged_edits`)."""
     text = str(text or "")
     if not text:
         return text
-    edits: list[tuple[int, int]] = []
-    for span in sorted(_pre_llm_label_value_spans(text) + _pre_llm_child_date_spans(text)):
-        if not edits or span[0] >= edits[-1][1]:
-            edits.append(span)
-    if not edits:
-        return text
-    out: list[str] = []
-    pos = 0
-    for start, end in edits:
-        out.append(text[pos:start])
-        out.append(PRE_LLM_PLACEHOLDER)
-        pos = end
-    out.append(text[pos:])
-    return "".join(out)
+    return _with_placeholders(text, _pre_llm_label_value_spans(text) + _pre_llm_child_date_spans(text))
+
+
+def redact_pre_llm_child_list_paragraphs(paragraphs: list[str]) -> list[str]:
+    """#847 (R6) for a reader that holds a child list as separate paragraphs
+    ("Children:" then "<name> <date>" then "<name> <date>"), which
+    `redact_pre_llm_values` sees one at a time: `paragraphs` joined by
+    newlines, every value of each Children label's list there
+    (`_child_list_continuation_spans`) replaced by `PRE_LLM_PLACEHOLDER`, and
+    split back into the same paragraphs. Unchanged unless a value lies past
+    the first paragraph: one paragraph's own list is that paragraph's scrub."""
+    joined = "\n".join(paragraphs)
+    spans = [span for label_start, _ in _children_label_spans(joined)
+             for span in _child_list_continuation_spans(joined, label_start)]
+    if not any(start > len(paragraphs[0]) for start, _ in spans):
+        return list(paragraphs)
+    scrubbed: list[str] = []
+    offset = 0
+    for paragraph in paragraphs:
+        own = [(start - offset, end - offset) for start, end in spans
+               if offset <= start < offset + len(paragraph)]
+        scrubbed.append(_with_placeholders(paragraph, own))
+        offset += len(paragraph) + 1
+    return scrubbed
 
 
 #: What may precede a cross-boundary value (`redact_pre_llm_value_of_category`

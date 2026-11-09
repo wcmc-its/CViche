@@ -72,9 +72,11 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     WITHHOLD_POLICY,
     WithheldItem,
     _is_unlabelled_home_address,
+    _merged_edits,
     _pii_fragments,
     _pii_matches,
     pre_llm_bare_label_category,
+    redact_pre_llm_child_list_paragraphs,
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
@@ -3084,3 +3086,534 @@ def test_1859_a_dated_label_never_reaches_the_rendered_document(tmp_path):
     assert "DISTINCTIVE_KEPT_T" in xml, "the render did not include the entries at all"
     for _text, value in _1859_DATED:
         assert value not in xml, f"{value!r} reached the rendered document"
+
+
+# --------------------------------------------------------------------------
+# #847 (BLBVPD): a child's name rendered beside a withheld child date, and the
+# child-date shapes chosen with it. Every name and date below is invented.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Two sons: Kim Example, Lee Example",
+    "One child: Kim",
+    "3 children: Kim, Lee, Bob",
+    "Two daughters:\tKim Example\tLee Example",
+    "Marital Status and Children: Married; Kim (2001), Lee (2003)",
+    "Marital Status & Children: Married, Kim Example",
+    "Marital Status / Children: Married, Kim, Lee",
+    "Marital Status, Children: Married, Kim, Lee",
+    # the Children row's "Names of" opener
+    "Names of Two Sons: Kim, Lee",
+    # the list goes on over the next line (#1223's list lines)
+    "Two sons: Kim Example (2001)\nLee Example (2003)",
+])
+def test_847_a_child_count_or_a_marital_status_prefix_opens_the_children_label(text):
+    """R1: "Two sons:" and "Marital Status and Children:" open the Children
+    label, so the names after them are withheld in the Personal Data block and
+    the Appendix. A routed content entry still keeps them (the label rows'
+    #473 scope)."""
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert "Kim" not in residual and "Lee" not in residual, code
+        assert [item.category for item in withheld] == [CAT_CHILDREN], code
+    assert not _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text", [
+    "Two sons - Kim Example, a student at Example University",
+    "Two Sons - A Memoir of Example Town",
+])
+def test_847_a_count_label_s_dash_form_is_withheld_where_the_children_row_s_is(text):
+    """R1 keeps the Children row's dash form (#1223): withheld in the Personal
+    Data block, which holds no titles; kept in an Appendix entry with no
+    Family label ahead of it, where it may be a title."""
+    residual, withheld = _withheld_residual(text, code=A)
+    assert (residual, [item.category for item in withheld]) == ("", [CAT_CHILDREN])
+    assert _withheld_residual(text, code=APPENDIX) == (text, [])
+    assert not _denied(text, CONTENT)
+
+
+def test_847_a_count_label_s_dash_form_after_a_family_label_is_withheld_in_the_appendix():
+    residual, withheld = _withheld_residual(
+        "Family: Pat Example (wife); Two sons - Kim Example, a student at Example University", code=APPENDIX)
+    assert residual == ""
+    assert CAT_CHILDREN in [item.category for item in withheld]
+
+
+@pytest.mark.parametrize("text", [
+    "40 children: a cohort study of asthma",
+    "10 children: outcomes of a pilot program",
+    "Enrolled 2 children: Kim and Lee",
+    "Grant R01-2 children: Example Study",
+    "Two children's hospitals: a survey",
+])
+def test_847_a_study_count_or_prose_does_not_open_the_children_label(text):
+    """R1's count is one digit or a number word, fragment-initial, with a
+    colon after the child word: a study's count, a count inside a sentence
+    or a count glued to a grant number opens nothing."""
+    for code in (A, APPENDIX, CONTENT):
+        assert not _denied(text, code), (text, code)
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("Room 2   Children: Kim, Lee", "Room 2"),
+    ("Room 2   Children: Kim (01/02/2001), Lee (03/04/2003)", "Room 2"),
+    ("Home Address:   12 Example St Apt 2 Children: Kim", "Children: Kim"),
+    ("Home Address:   12 Example St Unit 2 Sons: Kim", ""),
+])
+def test_847_a_count_before_a_children_label_takes_nothing_dev_withheld(text, kept):
+    """R1 is a row of its own, kept out of the known-field vocabulary like
+    "Married:" (`_FAMILY_SHAPE_STEMS`): a count that opens no label of its
+    own neither hides the "Children:" after it nor shortens a home-address
+    cut. Each residual is origin/dev's."""
+    for code in (A, APPENDIX):
+        assert _withheld_residual(text, code=code)[0] == kept, code
+    assert redact_pre_llm_values("Room 2   Children: Kim (01/02/2001), Lee (03/04/2003)") == (
+        f"Room 2   Children: Kim ({PRE_LLM_PLACEHOLDER}), Lee ({PRE_LLM_PLACEHOLDER})")
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Two sons: Kim (01/02/2001), Lee (03/04/2003), both at home",
+     f"Two sons: Kim ({PRE_LLM_PLACEHOLDER}), Lee ({PRE_LLM_PLACEHOLDER}), both at home"),
+    ("Marital Status & Children: Kim (01/02/2001), Lee (03/04/2003), both at home",
+     f"Marital Status & Children: Kim ({PRE_LLM_PLACEHOLDER}), Lee ({PRE_LLM_PLACEHOLDER}), both at home"),
+])
+def test_847_the_child_items_after_a_count_label_lose_their_dates_before_the_llm(text, expected):
+    """R1 pre-LLM: the child-item walk runs after the counted-children label
+    too (a lowercase word keeps the child-statement row out of it)."""
+    assert redact_pre_llm_values(text) == expected
+
+
+#: R2: a count, a child noun, then nothing but the children to the fragment end.
+_847_CHILD_STATEMENTS = [
+    "One child - Kim Lee Example",
+    "Two sons, Kim (2001) and Lee (2003)",
+    "3 children born 01/02/2001, 03/04/2003 and 05/06/2005",
+    "Two grown daughters - Kim and Lee Example",
+    "Two grandchildren - Kim, Lee",
+    "One son (Kim Example, b. 2001)",
+    "Two sons - Kim Example Jr. and Lee B. Example.",
+    "Two sons - Kim & Lee Example",
+    f"One child - Kim Example ({PRE_LLM_PLACEHOLDER})",
+    "Two adult sons - Kim Example and Lee Example",
+    "One young daughter, Kim (2019)",
+    "One minor child - Kim",
+    "Two great-grandchildren - Kim, Lee",
+    "Two sons - Kim Sr and Lee",
+    "Two sons - Kim J. Example and Lee",
+    "One child - Kim (01/02/2019)",
+]
+
+
+@pytest.mark.parametrize("text", _847_CHILD_STATEMENTS)
+def test_847_a_child_statement_is_withheld_whole(text):
+    """R2 (the BLBVPD rule): the item exists only to state a child, so all of
+    it goes, the name beside the date included. A routed content entry never
+    gets the row (a "born <date>" there is the every-code DOB row's)."""
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert residual == "", code
+        assert [item.category for item in withheld] == [CAT_CHILDREN], code
+    assert CAT_CHILDREN not in [m.category for m in _probe_matches(text, CONTENT)]
+
+
+def test_847_blbvpd_a_child_statement_after_a_heading_leaves_only_the_heading():
+    """BLBVPD's shape (invented values): a heading label, then the child
+    statement whose date the pre-LLM scrub already replaced. The name rendered
+    beside the notice; now only the heading does."""
+    text = f"PERSONAL: One child - Kim Lee Example ({PRE_LLM_PLACEHOLDER})"
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert residual == "PERSONAL:", code
+        assert [item.category for item in withheld] == [CAT_CHILDREN], code
+
+
+@pytest.mark.parametrize("text", [
+    "Two children with asthma were enrolled in the pilot",
+    "Two Sons - The Memoir. Example Press, 2001",
+    "Two children - R01 HD012345, 2001-2006",
+    "Three Sons Award - Example Foundation, 2005",
+    "One Child Policy: Example Review",
+    "Symposium for Dr. Example's 70th Birthday - Two Sons Hall, 2019",
+    "Studied 2 children - Kim and Lee",
+])
+def test_847_titles_grants_awards_and_events_are_not_child_statements(text):
+    """R2's inverse cases, kept in an Appendix entry: a lowercase word, a full
+    stop inside the run, a number that is not a whole date or year, a word
+    between the child noun and the dash, or a count that does not open the
+    fragment."""
+    assert _withheld_residual(text, code=APPENDIX) == (text, [])
+    assert not _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Two sons, Kim (2001) and Lee (2003)",
+     f"Two sons, Kim ({PRE_LLM_PLACEHOLDER}) and Lee ({PRE_LLM_PLACEHOLDER})"),
+    ("One child - Kim Lee Example (01/02/2001)",
+     f"One child - Kim Lee Example ({PRE_LLM_PLACEHOLDER})"),
+    ("PERSONAL: Two daughters - Kim, b. 2001, Lee, b. 2003",
+     f"PERSONAL: Two daughters - Kim, b. {PRE_LLM_PLACEHOLDER}, Lee, b. {PRE_LLM_PLACEHOLDER}"),
+])
+def test_847_a_child_statement_s_dates_and_years_go_before_the_llm(text, expected):
+    """R2 pre-LLM: every whole date and year inside a child statement."""
+    assert redact_pre_llm_values(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Two children with asthma were enrolled in 2001",
+    "Two Sons - The Memoir. Example Press, 2001",
+    "Studied 2 children - Kim (2001) and Lee (2003)",
+])
+def test_847_a_year_outside_a_child_statement_stays(text):
+    assert redact_pre_llm_values(text) == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    # every DOB of a family line, not just the first: the Family label's span
+    # swallowed the DOB labels after it, and its category has no value search
+    ("Family: Pat Example DOB: 01/02/1974, Kim DOB: 03/04/2001, Lee DOB: 05/06/2003",
+     f"Family: Pat Example DOB: {PRE_LLM_PLACEHOLDER}, Kim DOB: {PRE_LLM_PLACEHOLDER}, "
+     f"Lee DOB: {PRE_LLM_PLACEHOLDER}"),
+    # a second "DOB:" in one fragment (its span merged into the first)
+    ("DOB: 01/02/1974, DOB: 03/04/1972",
+     f"DOB: {PRE_LLM_PLACEHOLDER}, DOB: {PRE_LLM_PLACEHOLDER}"),
+])
+def test_847_a_dob_label_inside_another_span_has_its_value_scrubbed(text, expected):
+    """R3: each date-of-birth, birth and SSN row's own span is read too."""
+    assert redact_pre_llm_values(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Children: Kim; Date of Appointment: 03/04/2005",
+    "Spouse: Pat Example, Date of Appointment: 03/04/2005",
+    # a marriage date is not a date of birth (G6: render-time only)
+    "Family: Pat Example (wife), married 01/02/1995, Example City",
+    "Family: Kim, DOB: pending",
+])
+def test_847_a_date_inside_another_span_that_no_dob_birth_or_ssn_row_reads_stays(text):
+    """R3's inverse: only the date-of-birth, birth and SSN rows' own spans are
+    added, so another field's date in a family span reaches the LLM as before."""
+    assert redact_pre_llm_values(text) == text
+
+
+def test_847_overlapping_pre_llm_spans_are_replaced_as_their_union():
+    """R3: a span that starts inside the one before used to be dropped whole."""
+    assert _merged_edits([(5, 15), (0, 10), (20, 25), (21, 23)]) == [(0, 15), (20, 25)]
+    assert _merged_edits([(0, 4), (4, 8)]) == [(0, 4), (4, 8)]
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Children: Kim Lee Example, b. 2001; Lee Example (born 2003)",
+     f"Children: Kim Lee Example, b. {PRE_LLM_PLACEHOLDER}; Lee Example (born {PRE_LLM_PLACEHOLDER})"),
+    ("Children: Kim Example Jr., born 01/02/2001 & Lee Example, DOB 03/04/2003",
+     f"Children: Kim Example Jr., born {PRE_LLM_PLACEHOLDER} & Lee Example, DOB {PRE_LLM_PLACEHOLDER}"),
+    ("Children: Kim (b. 2001), Lee (b. 2003)",
+     f"Children: Kim (b. {PRE_LLM_PLACEHOLDER}), Lee (b. {PRE_LLM_PLACEHOLDER})"),
+    ("Children: Kim Example; b. 2001, Lee Example; b. 2003",
+     f"Children: Kim Example; b. {PRE_LLM_PLACEHOLDER}, Lee Example; b. {PRE_LLM_PLACEHOLDER}"),
+    ("Children: Kim Example (b. 2001) & Lee Example (b. 2003)",
+     f"Children: Kim Example (b. {PRE_LLM_PLACEHOLDER}) & Lee Example (b. {PRE_LLM_PLACEHOLDER})"),
+    ("Children: Kim Example, Jr., born 2001; Lee Example (b. 2003)",
+     f"Children: Kim Example, Jr., born {PRE_LLM_PLACEHOLDER}; Lee Example (b. {PRE_LLM_PLACEHOLDER})"),
+])
+def test_847_a_child_named_with_a_birth_keyword_loses_its_date_or_year(text, expected):
+    """R4: one to three name tokens, then born/b./DOB, then a whole date or a
+    birth year. The keyword is what makes a bare year a birth year."""
+    assert redact_pre_llm_values(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Children: Kim Example, 2001",                     # no keyword: a bare year stays
+    "Children: Healthy Eating Trial, 2016",
+    "Children: Born 2016: A Memoir",
+    "Children: Kim Example, Appointed 2016",
+    "Children: Example Hospital Annual Report, 2016",
+])
+def test_847_a_name_and_a_year_with_no_birth_keyword_keep_the_year(text):
+    assert redact_pre_llm_values(text) == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Children:\nKim Example 01/02/2001\nLee Example 03/04/2003",
+     f"Children:\nKim Example {PRE_LLM_PLACEHOLDER}\nLee Example {PRE_LLM_PLACEHOLDER}"),
+    ("Two sons: Kim Example, 2001\nLee Example, 2003\nCitizenship: US",
+     f"Two sons: Kim Example, {PRE_LLM_PLACEHOLDER}\nLee Example, {PRE_LLM_PLACEHOLDER}\nCitizenship: US"),
+    ("Children:\nKim Example - 1/2/2001\nLee Example - 3/4/2003\n\nEducation 2005",
+     f"Children:\nKim Example - {PRE_LLM_PLACEHOLDER}\nLee Example - {PRE_LLM_PLACEHOLDER}\n\nEducation 2005"),
+    ("Children:\nKim Example, born 2001\nLee Example, born 2003",
+     f"Children:\nKim Example, born {PRE_LLM_PLACEHOLDER}\nLee Example, born {PRE_LLM_PLACEHOLDER}"),
+    # initials, a DOB keyword, Jr/Sr, "&" and a closing full stop
+    ("Children:\nKim J. Example, DOB: 01/02/2001\nLee Example Jr. - 03/04/2003 & Bob Example Sr. (2005).",
+     f"Children:\nKim J. Example, DOB: {PRE_LLM_PLACEHOLDER}\nLee Example Jr. - {PRE_LLM_PLACEHOLDER}"
+     f" & Bob Example Sr. ({PRE_LLM_PLACEHOLDER})."),
+    # a lowercase "jr."/"sr." after a name
+    ("Children:\nKim Example jr., born 2001\nLee Example sr. 2003",
+     f"Children:\nKim Example jr., born {PRE_LLM_PLACEHOLDER}\nLee Example sr. {PRE_LLM_PLACEHOLDER}"),
+    # a line whose date the scrub already replaced is still a list line
+    (f"Two sons:\nKim Example b. 2001\nLee Example {PRE_LLM_PLACEHOLDER}, born 2003",
+     f"Two sons:\nKim Example b. {PRE_LLM_PLACEHOLDER}\nLee Example {PRE_LLM_PLACEHOLDER}, born {PRE_LLM_PLACEHOLDER}"),
+])
+def test_847_a_child_list_continued_on_the_next_lines_loses_its_dates(text, expected):
+    """R6: a Children label, then whole lines that are child-list runs."""
+    assert redact_pre_llm_values(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    # one line only: never a continued list (G2, a #847 open question)
+    "Children: Kim Example 2001, Lee Example 2003",
+    # one dated value only
+    "Children:\nKim Example 2001\nLee Example",
+    # the label line goes on in prose
+    "Children: two, both grown\nKim Example 2001\nLee Example 2003",
+    # the next line is not a list line: a lowercase word, a label, a grant number
+    "Children: Kim (2001)\nawarded the Example Prize, 2005",
+    "Children: Kim (2001)\nCitizenship: Example, 2005",
+    "Children: Kim (2001)\nGrant R01 HD012345, 2005",
+    # not a Children label
+    "Education:\n2001 Example University\n2005 Example Hospital",
+    # every date on the label's own line: a one-line list with a name after it
+    "Children: Kim Example 2001, Lee Example 2003\nBob Example",
+    # a Children label on the last line takes nothing before it
+    "Kim Example 2001\nLee Example 2003\nChildren: Bob",
+])
+def test_847_what_is_not_a_continued_child_list_keeps_its_years(text):
+    assert redact_pre_llm_values(text) == text
+
+
+def test_847_a_continued_child_list_is_followed_over_at_most_twelve_lines():
+    """The label's own line and twelve more: a thirteenth list line keeps its year."""
+    lines = [f"Kim Example {2001 + n}" for n in range(13)]
+    out = redact_pre_llm_values("Children:\n" + "\n".join(lines)).split("\n")
+    assert out[1:13] == [f"Kim Example {PRE_LLM_PLACEHOLDER}"] * 12
+    assert out[13] == "Kim Example 2013"
+
+
+def test_847_the_price_of_a_continued_child_list_is_a_capitalised_line_after_it():
+    """Stated cost, pinned so a reviewer sees it (the pre-LLM twin of #1223's
+    render-time price): a line of nothing but capitalised words and a year
+    right after a dated child list reads as one more child, and its year is
+    withheld from the LLM. Never a leak; possibly a lost year."""
+    out = redact_pre_llm_values("Children: Kim (2001)\nAppointed Assistant Professor 2005")
+    assert out == f"Children: Kim ({PRE_LLM_PLACEHOLDER})\nAppointed Assistant Professor {PRE_LLM_PLACEHOLDER}"
+
+
+def test_847_a_child_list_held_as_separate_paragraphs_is_scrubbed_across_them():
+    """R6, the reader's half: the paragraphs are joined, the list's dates
+    replaced wherever they sit, and split back into the same paragraphs."""
+    paragraphs = ["Children:", "Kim Example 01/02/2001", "Lee Example (2003)", "Education"]
+    assert redact_pre_llm_child_list_paragraphs(paragraphs) == [
+        "Children:", f"Kim Example {PRE_LLM_PLACEHOLDER}", f"Lee Example ({PRE_LLM_PLACEHOLDER})", "Education"]
+    # a list on the first paragraph's own lines is that paragraph's own scrub
+    own = ["Children: Kim 2001\nLee 2003", "Education: Example University, 2005"]
+    assert redact_pre_llm_child_list_paragraphs(own) == own
+
+
+@pytest.mark.parametrize("text", [
+    f"Children: Kim Example ({PRE_LLM_PLACEHOLDER})\nLee Example ({PRE_LLM_PLACEHOLDER})",
+    f"Children: Kim ({PRE_LLM_PLACEHOLDER})\nLee - {PRE_LLM_PLACEHOLDER}",
+    f"Children:\nKim Example (born {PRE_LLM_PLACEHOLDER})\nLee Example {PRE_LLM_PLACEHOLDER}",
+])
+def test_847_a_list_line_whose_date_was_already_scrubbed_is_still_a_list_line(text):
+    """R7: once the pre-LLM scrub replaced a list line's date, the line had no
+    digit left, so it was no longer absorbed and the name rendered."""
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert residual == "", code
+        assert withheld
+
+
+@pytest.mark.parametrize("kept", [
+    f"awarded the Example Prize ({PRE_LLM_PLACEHOLDER})",
+    f"Grant R01 HD000000 ({PRE_LLM_PLACEHOLDER})",
+    f"Citizenship: Example ({PRE_LLM_PLACEHOLDER})",
+])
+def test_847_a_placeholder_does_not_make_a_line_of_anything_else_a_list_line(kept):
+    """R7's inverse: the placeholder counts as a list item's detail only; a
+    line with a lowercase word, a grant number or a label is still not one."""
+    for code in (A, APPENDIX):
+        assert _withheld_residual(f"Children: Kim ({PRE_LLM_PLACEHOLDER})\n{kept}", code=code)[0] == kept, code
+
+
+@pytest.mark.parametrize("text", [
+    "Children: Kim Example (2001), Lee\n(2003), and Bob Example (2005).",
+    "Children: Kim (2001)\nLee, Bob Example (2003)",
+    "Children: Kim (2001)\nLee Example (2003).",
+    f"Children: Kim ({PRE_LLM_PLACEHOLDER})\n({PRE_LLM_PLACEHOLDER}) and Lee-{PRE_LLM_PLACEHOLDER}.",
+    "Children: Kim (2001)\nLee Example-2003, Bob",
+    "Children: Kim (2001)\n   Lee Example (2003).",
+])
+def test_847_a_loose_list_line_is_absorbed(text):
+    """R8: a line that opens with the previous item's detail, holds a bare
+    one-name item beside dated ones, or ends with a full stop."""
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert residual == "", (text, code)
+        assert [item.category for item in withheld] == [CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("Children: Kim (2001)\nBob attends Example School (2003).", "Bob attends Example School (2003)."),
+    ("Children: Kim (2001)\nGrant R01 HD012345 (2003)", "Grant R01 HD012345 (2003)"),
+    ("Children: Kim (2001)\nLee, Bob", "Lee, Bob"),
+    ("Children: Kim (2001)\nCitizenship: Example (2003)", "Citizenship: Example (2003)"),
+])
+def test_847_a_loose_list_line_needs_a_detail_and_nothing_but_list_items(text, kept):
+    residual, _withheld = _withheld_residual(text)
+    assert residual == kept
+
+
+def test_847_the_loose_list_line_is_linear_in_the_length_of_a_line():
+    """R8 must not rescan a line at every offset: blank runs, unclosed
+    parentheses and long item runs that never become a list line."""
+    start = time.perf_counter()
+    for text in ("Children: Kim\nAnn (2001)" + " " * 8000 + "x",
+                 "Children: Kim\nAnn Bob" + " " * 8000 + "x",
+                 "Children: Kim\n" + "(1) " * 4000 + "x",
+                 "Children: Kim\n" + "Ann (2001), " * 3000 + "x",
+                 "Children: Kim\n" + "(" * 8000 + "2001",
+                 f"Children: Kim\nAnn {PRE_LLM_PLACEHOLDER}" + " -" * 4000 + "x"):
+        _withheld_residual(text)
+    assert time.perf_counter() - start < 2.0
+
+
+#: (text, its children's names, its children's dates): one per chosen shape.
+_847_AGREE = [
+    ("Two sons: Kim (01/02/2001), Lee, born 03/04/2003", ["Kim", "Lee"], ["01/02/2001", "03/04/2003"]),
+    ("Two sons, Kim (2001) and Lee (2003)", ["Kim", "Lee"], ["2001", "2003"]),
+    ("PERSONAL: One child - Kim Lee Example (01/02/2001)", ["Kim", "Lee"], ["01/02/2001"]),
+    ("Family: Pat Example DOB: 01/02/1974, Kim DOB: 03/04/2001, Lee DOB: 05/06/2003",
+     ["Kim", "Lee"], ["01/02/1974", "03/04/2001", "05/06/2003"]),
+    ("Children: Kim Lee Example, b. 2001; Lee Example (born 2003)", ["Kim", "Lee"], ["2001", "2003"]),
+    ("Children:\nKim Example 01/02/2001\nLee Example 03/04/2003", ["Kim", "Lee"], ["01/02/2001", "03/04/2003"]),
+    ("Children: Kim Example (2001), Lee\n(2003), and Bob Example (2005).", ["Kim", "Lee", "Bob"],
+     ["2001", "2003", "2005"]),
+]
+
+
+@pytest.mark.parametrize("text, names, dates", _847_AGREE)
+def test_847_the_pre_llm_scrub_and_the_render_agree(text, names, dates):
+    """Bar (4): every child date the render withholds is replaced before the
+    LLM too, and once it is, the render still withholds every child's name
+    beside the placeholder, at the Personal Data and the Appendix scope."""
+    scrubbed = redact_pre_llm_values(text)
+    for date in dates:
+        assert date not in scrubbed, (text, date)
+    for code in (A, APPENDIX):
+        residual, withheld = _withheld_residual(scrubbed, code=code)
+        assert withheld, (text, code)
+        for value in names + dates + [PRE_LLM_PLACEHOLDER]:
+            assert value not in residual, (text, code, value)
+
+
+def _docx_texts(path) -> str:
+    """Every XML part of a docx, raw, then every paragraph's text: its w:t
+    (inserted runs included), w:delText and w:instrText nodes in order, so a
+    value split across runs is still found."""
+    import zipfile
+
+    from lxml import etree
+
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    parts, paragraphs = [], []
+    with zipfile.ZipFile(path) as zf:
+        for name in zf.namelist():
+            if name.endswith(".xml"):
+                raw = zf.read(name)
+                parts.append(raw.decode("utf-8", "replace"))
+                for p in etree.fromstring(raw).iter(w + "p"):
+                    paragraphs.append("".join(node.text or "" for node in
+                                              p.iter(w + "t", w + "delText", w + "instrText")))
+    return "\n".join(parts + paragraphs)
+
+
+#: (entry text, its sentinel values): invented names and dates distinctive
+#: enough to search the rendered document for.
+_847_RENDERED = [
+    ("One child - Zqxanna Zqxlee (07/08/2009)", ["Zqxanna", "Zqxlee", "07/08/2009"]),
+    (f"PERSONAL: Two sons, Zqxbert ({PRE_LLM_PLACEHOLDER}) and Zqxcarl ({PRE_LLM_PLACEHOLDER})",
+     ["Zqxbert", "Zqxcarl"]),
+    ("Two daughters: Zqxdora Example, Zqxelle Example (11/12/2013)", ["Zqxdora", "Zqxelle", "11/12/2013"]),
+    ("Marital Status and Children: Married; Zqxfinn (09/10/2012), Zqxgus", ["Zqxfinn", "Zqxgus", "09/10/2012"]),
+    (f"Children: Zqxhal Example ({PRE_LLM_PLACEHOLDER})\nZqxivy Example ({PRE_LLM_PLACEHOLDER})",
+     ["Zqxhal", "Zqxivy"]),
+    ("Children: Zqxjo (05/06/2007), Zqxkai\n(03/04/2005), and Zqxlou Example (01/02/2003).",
+     ["Zqxjo", "Zqxkai", "Zqxlou", "05/06/2007", "03/04/2005", "01/02/2003"]),
+]
+
+
+def _847_render(tmp_path, texts: list[str]) -> str:
+    """The real `generate()` over a fieldless A and a fieldless T entry of
+    each of `texts`, plus a kept T marker: `_docx_texts` of the document."""
+    import json
+
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    entries = [{"text": "Name: Jane Q. Public, MD", "taxonomy_code": "A",
+                "extracted_fields": {}, "element_idx_start": 0}]
+    for i, text in enumerate(texts):
+        for j, code in enumerate(("A", "T")):
+            entries.append({"text": text, "taxonomy_code": code,
+                            "extracted_fields": {}, "element_idx_start": 1 + 2 * i + j})
+    entries.append({"text": "DISTINCTIVE_KEPT_T", "taxonomy_code": "T",
+                    "extracted_fields": {}, "element_idx_start": 99})
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    input_path, output_path = tmp_path / "in.json", tmp_path / "out.docx"
+    input_path.write_text(json.dumps({"document_uid": "TS0847", "entries": entries}))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+    rendered = _docx_texts(output_path)
+    assert "DISTINCTIVE_KEPT_T" in rendered, "the render did not include the entries at all"
+    return rendered
+
+
+def test_847_child_names_and_dates_never_reach_the_rendered_document(tmp_path):
+    """Render proof, not matcher proof: the real `generate()` over fieldless A
+    and T entries of each chosen render shape, every XML part of the docx
+    searched for each sentinel name and date, tracked changes included."""
+    rendered = _847_render(tmp_path, [text for text, _values in _847_RENDERED])
+    for text, values in _847_RENDERED:
+        for value in values:
+            assert value not in rendered, f"{value!r} of {text!r} reached the rendered document"
+
+
+#: (source paragraphs, as stage 2 joins them into one entry; their sentinel
+#: values): one entry per chosen shape that reaches the reader. Invented, and
+#: years no template part holds.
+_847_SOURCE = [
+    (["Children:", "Zqxhal Example 01/02/2001", "Zqxivy Example (03/04/2003)"],
+     ["Zqxhal", "Zqxivy", "01/02/2001", "03/04/2003"]),
+    (["Two sons, Zqxbert (1931) and Zqxcarl (1933)"], ["Zqxbert", "Zqxcarl", "1931", "1933"]),
+    (["Children: Zqxkim Example, b. 1935; Zqxlee Example (born 1937)"], ["Zqxkim", "Zqxlee", "1935", "1937"]),
+    (["Two daughters: Zqxdora (05/06/2005), Zqxelle (07/08/2007), both at home"],
+     ["Zqxdora", "Zqxelle", "05/06/2005", "07/08/2007"]),
+    (["Family: Pat Example DOB: 09/10/1974, Zqxfinn DOB: 11/12/2009"], ["Zqxfinn", "09/10/1974", "11/12/2009"]),
+]
+
+
+def test_847_a_source_docx_s_child_names_and_dates_never_reach_the_rendered_document(tmp_path):
+    """Wire proof of both halves: a source docx through the real reader
+    (`extract_unified_elements`, the pre-LLM scrub), its paragraphs joined
+    into entries, then the real `generate()`. No child date reaches the
+    reader's output, and neither a child's name nor a date the rendered
+    document. origin/dev renders twelve of these nineteen values."""
+    from docx import Document
+
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    doc = Document()
+    for paragraphs, _values in _847_SOURCE:
+        for paragraph in paragraphs:
+            doc.add_paragraph(paragraph)
+    doc.save(str(tmp_path / "source.docx"))
+    read = [e["text"] for e in extract_unified_elements(str(tmp_path / "source.docx"))["elements"]]
+    entries, pos = [], 0
+    for paragraphs, values in _847_SOURCE:
+        entries.append("\n".join(read[pos:pos + len(paragraphs)]))
+        pos += len(paragraphs)
+        for value in values:
+            if value[0].isdigit():
+                assert value not in entries[-1], f"{value!r} reached the reader's output"
+    rendered = _847_render(tmp_path, entries)
+    for _paragraphs, values in _847_SOURCE:
+        for value in values:
+            assert value not in rendered, f"{value!r} reached the rendered document"

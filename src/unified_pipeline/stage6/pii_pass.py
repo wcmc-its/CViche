@@ -63,6 +63,7 @@ from .normalization.pii import (  # noqa: F401
     CAT_MARITAL_STATUS,
     CAT_SPOUSE,
     CAT_THIRD_PARTY_CONTACT,
+    PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
     SCOPE_MEMBERSHIPS,
     SCOPE_PERSONAL_AND_APPENDIX,
@@ -600,7 +601,15 @@ def _absorb_spouse_name_cells(text: str, end: int) -> int:
 #: price is stated: an unlabelled line of capitalised words straight after a
 #: children or family list ("US Citizen") is cut with it, never leaked.
 _LIST_NAME = r"[A-ZÀ-ÖØ-Þ](?:[^\W\d_]|['’.-])*"
-_LIST_DETAIL = r"(?:\((?=[^()\n]*\d)[^()\n]{1,30}\)|[-–—,][ \t]*\d[\d/.-]{2,9})"
+#: #847 (R7): a detail the pre-LLM scrub already replaced counts too ("(born
+#: [withheld])", "- [withheld]"). Without it a list line whose only digits
+#: were its dates had none left, was not taken, and its names rendered. Each
+#: placeholder form opens with its dash or the placeholder itself, never a
+#: blank: every use of a detail has `[ \t]*` before it, which takes them.
+_ESCAPED_PLACEHOLDER = re.escape(PRE_LLM_PLACEHOLDER)
+_LIST_DETAIL = (r"(?:\((?=[^()\n]*\d)[^()\n]{1,30}\)|[-–—,][ \t]*\d[\d/.-]{2,9}"
+                r"|\((?=[^()\n]*" + _ESCAPED_PLACEHOLDER + r")[^()\n]{1,30}\)"
+                r"|(?:[-–—,][ \t]*)?" + _ESCAPED_PLACEHOLDER + r")")
 _LIST_ITEM = (r"(?:" + _LIST_NAME + r"(?:[ \t]+" + _LIST_NAME + r"){1,3}(?:[ \t]*" + _LIST_DETAIL + r")?"
               r"|" + _LIST_NAME + r"[ \t]*" + _LIST_DETAIL + r")")
 _LIST_LINE_RE = re.compile(
@@ -608,13 +617,51 @@ _LIST_LINE_RE = re.compile(
     + r"(?:[ \t]*(?:[,;&]|\band\b)[ \t]*" + _LIST_ITEM + r")*[ \t]*(?=\n|$)")
 _LIST_LINE_CATEGORIES = frozenset({CAT_CHILDREN, CAT_FAMILY})
 
+# #847 (R8): a list line `_LIST_LINE_RE` refuses, though it holds at least one
+# detail: it opens with the previous item's detail ("(<date>), and <name>
+# (<date>)"), has a bare one-name item beside dated ones, or ends with a full
+# stop. Linear by construction: the line is found first, then read in one
+# pass -- each item is atomic and every blank run possessive, so no position
+# is tried twice. That needs one reading per item, so a name here does not
+# take a hyphen that opens a detail ("<name>-<date>").
+_LOOSE_LIST_NAME = r"[A-ZÀ-ÖØ-Þ](?:[^\W\d_]|['’.]|-(?![\d\[]))*"
+_LOOSE_LIST_ITEM = (r"(?>" + _LOOSE_LIST_NAME + r"(?:[ \t]+" + _LOOSE_LIST_NAME + r"){0,3}"
+                    r"(?:[ \t]*+" + _LIST_DETAIL + r")?)")
+_LOOSE_LIST_SEPARATOR = r"[ \t]*+(?:[,;&]|\band\b)[ \t]*+(?:(?:and|&)[ \t]+)?+"
+_LOOSE_LIST_LINE_RE = re.compile(
+    r"(?:" + _LIST_DETAIL + _LOOSE_LIST_SEPARATOR + r")?+" + _LOOSE_LIST_ITEM
+    + r"(?:" + _LOOSE_LIST_SEPARATOR + _LOOSE_LIST_ITEM + r")*+[ \t]*+\.?[ \t]*+")
+_LIST_DETAIL_RE = re.compile(_LIST_DETAIL)
+#: The line break a list line opens with, and the blanks around it.
+_LIST_LINE_BREAK_RE = re.compile(r"[ \t]*+\n[ \t]*+")
+
+
+def _loose_list_line_end(text: str, end: int) -> int | None:
+    """Where the line after `end` ends when it is a loose list line
+    (`_LOOSE_LIST_LINE_RE`, whole) holding a detail (`_LIST_DETAIL_RE`);
+    None when it is not, or `end` is not at a line break."""
+    line_break = _LIST_LINE_BREAK_RE.match(text, end)
+    if line_break is None:
+        return None
+    start = line_break.end()
+    line_end = text.find("\n", start)
+    line_end = len(text) if line_end < 0 else line_end
+    if (_LOOSE_LIST_LINE_RE.fullmatch(text, start, line_end) is None
+            or _LIST_DETAIL_RE.search(text, start, line_end) is None):
+        return None
+    return line_end
+
 
 def _absorb_list_lines(text: str, end: int) -> int:
     """The offset a cut ending at `end` runs to once the lines that go on
-    with the list it ends (`_LIST_LINE_RE`) are taken in (#1223)."""
-    while (line := _LIST_LINE_RE.match(text, end)) is not None:
-        end = line.end()
-    return end
+    with the list it ends (`_LIST_LINE_RE`, #1223, else a loose list line,
+    #847 `_loose_list_line_end`) are taken in."""
+    while True:
+        line = _LIST_LINE_RE.match(text, end)
+        line_end = line.end() if line is not None else _loose_list_line_end(text, end)
+        if line_end is None:
+            return end
+        end = line_end
 
 
 def _extend_label_span(text: str, match: PiiMatch, scope: str) -> _BareLabelSpan:
