@@ -10,7 +10,10 @@ four kinds of copy reach the page twice:
   under its affiliated hospital (EQGGRB-07);
 - an undated header line repeating a dated appointment (RVROVQ-05, OTBUCZ-03);
 - one paper coded S1 in one bibliography list and S2 or S6 in another, under
-  one PMID, DOI or 5d citation (#446, a partner reviewer's returned CV).
+  one PMID, DOI, PMCID or 5d citation (#446, a partner reviewer's returned CV);
+- one paper under two other bibliography codes, a stage-2 split whose halves
+  5d completed into one citation (VGHNZD-07) or one article listed again
+  under Chapters (RLADNC) (#446, `_twin_drops`).
 
 Each rule here reads `extracted_fields`, never the text, and drops only when
 the two records agree on everything that tells two records of the code apart:
@@ -24,6 +27,7 @@ Runs after `dedup.deduplicate_entries` on what it kept. Nothing here may import
 import re
 from collections.abc import Callable
 from types import MappingProxyType
+from typing import NamedTuple
 
 from .dedup import (
     _YEAR_RE,
@@ -31,8 +35,10 @@ from .dedup import (
     _citation_identity_keys,
     _citations_conflict,
     _decision_fields,
+    _drops_a_printed_date,
     _entry_signature_words,
     _first_author,
+    _identity_drop_loses_a_date,
     _is_subsequence,
     _is_word_run,
     _ordered_words,
@@ -42,6 +48,7 @@ from .dedup import (
 )
 from .fan_out import FANNED_OUT_FROM
 from .normalization.publication import ResolvedPublication, resolve_publication
+from .sorting.document_order import element_idx_sort_key
 
 # The grant codes, one record whatever its status: grant_status_corrector moves
 # a copy with an amount to M2B and leaves a copy without one in M2A (AKPQEB-04).
@@ -57,11 +64,22 @@ APPOINTMENT_CODE = 'D1'
 # equal. In this order, so an equal pair keeps its peer-reviewed copy.
 PUBLISHED_ARTICLE_CODES = ('S1', 'S2', 'S6')
 # The `dedup._citation_identity_keys` kinds that pair two article lists: the
-# PMID, the DOI, and the whole 5d citation, which a stage-2 split's two halves
-# share when 3b codes them apart (VGHNZD-07: the head S2, the tail S1).
-# Title + journal + year is left out: it is the weakest kind even inside one
-# list, and nothing on the farm needs it across lists.
-_CROSS_LIST_KEY_KINDS = frozenset({'pmid', 'doi', 'citation'})
+# PMID, the DOI, the PMCID, and the whole 5d citation, which a stage-2 split's
+# two halves share when 3b codes them apart (VGHNZD-07: the head S2, the tail
+# S1). Title + journal + year is left out: it is the weakest kind even inside
+# one list, and nothing on the farm needs it across lists.
+_CROSS_LIST_KEY_KINDS = frozenset({'pmid', 'doi', 'pmcid', 'citation'})
+# #446: one paper under two bibliography codes that are not both article
+# lists (`_twin_drops`). Every S code but S0, the researcher-profile list.
+TWIN_CODES = ('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9')
+# The codes whose copies may pair on a PMID, DOI or PMCID: articles, books,
+# chapters and non-peer-reviewed papers. A submitted paper (S7), an abstract
+# (S8) or a media piece (S9) can carry its paper's PMID and still be a record
+# of its own (web056: an abstract under its paper's PMID), so it pairs only on
+# one whole 5d citation.
+_IDENTIFIER_TWIN_CODES = frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6'})
+_CITATION_KEY_KINDS = frozenset({'citation'})
+TWIN_RULE = 'cross_code_twin'
 # The sidecar decision's metric for a drop made here, followed by the rule's
 # name. The doctor's dedup_drops lint reads it: these drops match on fields,
 # so the text coverage it tests for a text-similarity drop says nothing.
@@ -196,33 +214,49 @@ def _lists_disagree(kind: str, first: tuple[dict, ResolvedPublication],
             or _part_numbers(first_pub.title) != _part_numbers(second_pub.title))
 
 
+def _agreeing_kinds(first: tuple[dict, ResolvedPublication],
+                    second: tuple[dict, ResolvedPublication],
+                    kinds: frozenset[str]) -> set[str]:
+    """The `kinds` of `dedup._citation_identity_keys` key two copies in two
+    lists share with nothing apart: neither `dedup._citations_conflict` nor
+    `_lists_disagree` refuses the kind.
+
+    Empty when either copy is exempt, as in `dedup._drop_citation_copies`: a
+    fanned-out record (#983), or an in-press listing stage 5 superseded,
+    which stage 6 renders as a tracked deletion of the published copy it
+    names (BMAMWE). Empty too when either names no title: a title-less line
+    in another list is a note about the paper, not a second listing of it
+    (web172: "Editorial in Radiology: Artificial Intelligence DOI: ..." under
+    the paper's own DOI, which stage 4 also wrote onto the paper)."""
+    if any(entry.get(FANNED_OUT_FROM) or entry.get('in_press_superseded') is True
+           for entry, _pub in (first, second)):
+        return set()
+    if not (first[1].title and second[1].title):
+        return set()
+    first_keys, second_keys = ({key for key in _citation_identity_keys(*copy) if key[0] in kinds}
+                               for copy in (first, second))
+    return {kind for kind, _value in first_keys & second_keys
+            if not (_citations_conflict(kind, first, second)
+                    or _lists_disagree(kind, first, second))}
+
+
 def _same_paper(first: dict, second: dict) -> dict | None:
     """The less full copy (`dedup._citation_fullness`) when two article
-    records share a PMID, a DOI or a whole 5d citation and
-    `dedup._citations_conflict` finds nothing apart: the bibliography-group
-    rule of `dedup._drop_citation_copies`, asked across codes. An equal pair
-    drops `second`.
-
-    Its exemptions are that rule's too: a fanned-out record (#983) and an
-    in-press listing stage 5 superseded, which stage 6 renders as a tracked
-    deletion of the published copy it names (BMAMWE), are never dropped.
-    Both copies must name a title: a title-less line in another list is a
-    note about the paper, not a second listing of it (web172: "Editorial in
-    Radiology: Artificial Intelligence DOI: ..." under the paper's own DOI,
-    which stage 4 also wrote onto the paper)."""
-    if any(entry.get(FANNED_OUT_FROM) or entry.get('in_press_superseded') is True
-           for entry in (first, second)):
+    records share a PMID, a DOI, a PMCID or a whole 5d citation with nothing
+    apart (`_agreeing_kinds`): the bibliography-group rule of
+    `dedup._drop_citation_copies`, asked across codes, with its exemptions:
+    a pair only shape A makes keeps both copies when the dropped one alone
+    prints a date (`dedup._identity_drop_loses_a_date`, GLC5JG 577/578).
+    An equal pair drops `second`."""
+    copies = (first, resolve_publication(first)), (second, resolve_publication(second))
+    agreeing = _agreeing_kinds(*copies, _CROSS_LIST_KEY_KINDS)
+    if not agreeing:
         return None
-    pubs = resolve_publication(first), resolve_publication(second)
-    if not (pubs[0].title and pubs[1].title):
+    dropped, kept = (copies if _citation_fullness(*copies[0]) < _citation_fullness(*copies[1])
+                     else copies[::-1])
+    if _identity_drop_loses_a_date(agreeing, dropped, kept):
         return None
-    copies = (first, pubs[0]), (second, pubs[1])
-    first_keys, second_keys = ({key for key in _citation_identity_keys(*copy)
-                                if key[0] in _CROSS_LIST_KEY_KINDS} for copy in copies)
-    if all(_citations_conflict(kind, *copies) or _lists_disagree(kind, *copies)
-           for kind, _value in first_keys & second_keys):
-        return None
-    return first if _citation_fullness(first, pubs[0]) < _citation_fullness(second, pubs[1]) else second
+    return dropped[0]
 
 
 def _same_honor(first: dict, second: dict) -> dict | None:
@@ -420,6 +454,83 @@ def _undated_drops(entries_by_code: dict[str, list[dict]]) -> list[tuple[str, di
     return drops
 
 
+class _Listing(NamedTuple):
+    """One bibliography entry, the code it is grouped under, and its
+    citation, resolved once."""
+    code: str
+    entry: dict
+    pub: ResolvedPublication
+
+
+def _twin_keep_order(listing: _Listing, by_identifier: bool) -> tuple:
+    """Sort key; the first copy is kept. The owner ruling of 2026-10-30
+    (#1435, #2005 Q7): one fact under two headings renders once, in the
+    section the template expects for it, else the first in source order. A
+    pair matched on an identifier keeps its article-list copy (S1/S2/S6),
+    then the lower element index wins, then the fuller copy
+    (`dedup._citation_fullness`)."""
+    in_article_list = by_identifier and listing.code in PUBLISHED_ARTICLE_CODES
+    fullness = _citation_fullness(listing.entry, listing.pub)
+    return (not in_article_list, element_idx_sort_key(listing.entry.get('element_idx_start')),
+            tuple(-int(value) for value in fullness))
+
+
+def _twin_to_drop(first: _Listing, second: _Listing) -> _Listing | None:
+    """The copy to drop when two listings under two codes are one paper;
+    None otherwise. They pair on one whole 5d citation, or, when both codes
+    are in `_IDENTIFIER_TWIN_CODES`, on a PMID, DOI or PMCID too, with
+    nothing apart (`_agreeing_kinds`). Two article lists' copies are
+    `_same_paper`'s to judge, so a pair it kept on the page is not paired
+    here. Every drop here is #446's, so it is refused when the dropped copy
+    alone prints a date (`dedup._drops_a_printed_date`, #446 review). An
+    equal pair drops `second`."""
+    codes = {first.code, second.code}
+    if len(codes) == 1 or codes <= set(PUBLISHED_ARTICLE_CODES):
+        return None
+    kinds = _CROSS_LIST_KEY_KINDS if codes <= _IDENTIFIER_TWIN_CODES else _CITATION_KEY_KINDS
+    agreeing = _agreeing_kinds((first.entry, first.pub), (second.entry, second.pub), kinds)
+    if not agreeing:
+        return None
+    by_identifier = bool(agreeing - _CITATION_KEY_KINDS)
+    kept = min((first, second), key=lambda listing: _twin_keep_order(listing, by_identifier))
+    dropped = second if kept is first else first
+    if _drops_a_printed_date(dropped.entry, kept.entry):
+        return None
+    return dropped
+
+
+def _twin_drops(entries_by_code: dict[str, list[dict]],
+                gone: set[int]) -> list[tuple[str, dict, dict, str]]:
+    """(code, dropped, kept, kept_code) for each pair of `TWIN_CODES`
+    listings `_twin_to_drop` judges one paper, in `_pairwise_drops`' order.
+    An entry in `gone` (dropped by an earlier rule) is not listed, and one
+    dropped here neither drops nor vouches again.
+
+    Each citation is resolved once and only listings sharing an identity key
+    are judged: the largest #1243 farm run holds 1.55 million cross-code
+    pairs of S1-S9 entries, too many to resolve two citations for each."""
+    listings = [_Listing(code, entry, resolve_publication(entry)) for code in TWIN_CODES
+                for entry in entries_by_code.get(code, []) if id(entry) not in gone]
+    holders: dict[tuple[str, str], list[int]] = {}
+    for index, listing in enumerate(listings):
+        for key in _citation_identity_keys(listing.entry, listing.pub):
+            holders.setdefault(key, []).append(index)
+    pairs = sorted({(i, j) for held in holders.values() for i in held for j in held if i < j})
+    dropped_ids: set[int] = set()
+    drops = []
+    for i, j in pairs:
+        first, second = listings[i], listings[j]
+        if id(first.entry) in dropped_ids or id(second.entry) in dropped_ids:
+            continue
+        loser = _twin_to_drop(first, second)
+        if loser is None:
+            continue
+        winner = second if loser is first else first
+        dropped_ids.add(id(loser.entry))
+        drops.append((loser.code, loser.entry, winner.entry, winner.code))
+    return drops
+
+
 _PAIR_RULES = (
     (GRANT_FAMILY_CODES, _same_grant, 'grant_family', True),
     ((HONOR_CODE,), _same_honor, 'honor_name', False),
@@ -440,6 +551,8 @@ def deduplicate_record_groups(entries_by_code: dict[str, list[dict]],
         members = [(code, entry) for code in codes for entry in entries_by_code.get(code, [])]
         drops += [drop + (rule,) for drop in _pairwise_drops(members, same, rule, cross_code_only)]
     drops += [drop + ('undated_appointment',) for drop in _undated_drops(entries_by_code)]
+    gone = {id(dropped) for _code, dropped, *_rest in drops}
+    drops += [drop + (TWIN_RULE,) for drop in _twin_drops(entries_by_code, gone)]
     for code, dropped, kept, kept_code, rule in drops:
         entries_by_code[code] = [e for e in entries_by_code[code] if e is not dropped]
         dropped_ids.add(id(dropped))

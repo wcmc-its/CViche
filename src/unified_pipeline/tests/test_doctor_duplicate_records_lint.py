@@ -31,13 +31,16 @@ from docx.oxml.ns import nsdecls  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     DUPLICATE_RECORD_FUZZY_MIN_CHARS,
     DUPLICATE_RECORD_ID_TITLE_OVERLAP,
+    DUPLICATE_RECORD_LETTER_EDITS_MAX,
     DUPLICATE_RECORD_MIN_CHARS,
+    DUPLICATE_RECORD_TAIL_MAX_CHARS,
     DUPLICATE_RECORD_TITLE_MIN_CHARS,
     DUPLICATE_RECORD_WINDOW,
     RENDER_UBIQUITOUS_MIN_LINES,
     _record_lines,
     _record_rendered,
     _rendered_lines,
+    _within_edits,
     lint_duplicate_passages,
     lint_duplicate_records,
     lint_unrendered_records,
@@ -129,7 +132,8 @@ def test_flags_when_enumerator_and_punctuation_differ_between_occurrences():
     (_CITATION_A.replace("documents", "document"), True),   # one letter dropped
     (_CITATION_A.replace("study", "studs"), True),          # one letter replaced
     (_CITATION_A.replace("documents", "documentss"), True),  # one letter added
-    (_CITATION_A.replace("documents", "documen"), False),   # two letters
+    (_CITATION_A.replace("documents", "documen"), True),    # two letters (#446: up to three)
+    (_CITATION_A.replace("documents", "docum"), False),     # four letters
     (_CITATION_A.replace("2020", "2021"), False),           # a digit is another record
     (_CITATION_A.replace("12(3)", "12(4)"), False),
 ])
@@ -171,6 +175,118 @@ def test_one_letter_tolerance_needs_a_volume_or_page(tail, fires):
     # An exact repeat still counts with no volume or page.
     blocks = [("p", "D. ABSTRACTS"), ("p", f"1. {body}"), ("p", f"2. {body}")]
     assert len(lint_duplicate_records(blocks)) == 1
+
+
+# #446: two copies of one record further apart than one letter (UAUUUE; DCEQYL,
+# KRSFSI, HTOFHA, web056 on the #1243 farm). Invented names and titles.
+
+_CHAPTER = ("Sample AB, Example CD. Rotor mechanisms shaping widget speed. In: Example EF, "
+            "ed. Atlas of Example Widgets. Example City: Example Press; 2003:63-77.")
+
+
+def _fires(first: str, second: str, header: str = "D. PUBLICATIONS") -> bool:
+    blocks = [("p", header), ("p", f"1. {first}"), ("p", f"2. {second}")]
+    return bool(lint_duplicate_records(blocks))
+
+
+def test_near_copy_thresholds_are_pinned():
+    assert DUPLICATE_RECORD_TAIL_MAX_CHARS == 40
+    assert DUPLICATE_RECORD_LETTER_EDITS_MAX == 3
+
+
+@pytest.mark.parametrize("tail, fires", [
+    ("; discussion 412.", True),                    # UAUUUE: the paper, then its discussion page
+    ("; with discussion by the panel, pages 412-419.", False),  # over 40 characters
+    ("; discussion " + "a" * 28 + ".", True),       # a 40-character tail, the space included
+    ("; discussion " + "a" * 29 + ".", False),      # 41
+    ("1.", False),                                  # "63-77" runs on to "63-771": another page
+])
+def test_a_copy_with_a_short_tail_is_the_same_record(tail, fires):
+    second = _CHAPTER[:-1] + tail
+    assert _fires(_CHAPTER, second) is fires
+    finding = lint_duplicate_records([("p", "D. PUBLICATIONS"), ("p", f"1. {_CHAPTER}"),
+                                      ("p", f"2. {second}")])
+    assert [f["severity"] for f in finding] == (["WARN"] if fires else [])
+
+
+@pytest.mark.parametrize("second, fires", [
+    (_CHAPTER.replace("Sample AB, Example CD", "Sample A, Example C"), True),    # two initials
+    (_CHAPTER.replace("Sample AB, Example CD", "Sample ABC, Example CDEF"), True),  # three
+    (_CHAPTER.replace("Sample AB, Example CD", "Sample ABCD, Example CDEF"), False),  # four added
+    (_CHAPTER.replace("Sample AB, Example CD", "Sample WX, Example YZ"), False),  # four replaced
+    (_CHAPTER.replace("mechanisms", "mechanism").replace("Widgets", "Widget"), True),  # two plurals
+    (_CHAPTER.replace("Sample AB", "Sample ABC").replace("63-77", "63-78"), False),  # and a digit
+    (_CHAPTER.replace("Atlas", "Atlas II"), False),                            # a roman numeral added
+])
+def test_a_copy_three_letters_apart_is_the_same_record(second, fires):
+    assert _fires(_CHAPTER, second) is fires
+
+
+@pytest.mark.parametrize("old, first_new, second_new", [
+    # LFFKVV: one author's two papers of one year, told apart by a letter.
+    ("2003:63-77", "2005a;12:63-77", "2005b;12:63-77"),
+    # HVLDGS: part ii and part iii of one series.
+    ("speed.", "speed: part ii.", "speed: part iii."),
+    # The word "part" itself changed.
+    ("speed.", "speed, part a.", "speed, pert a."),
+])
+def test_a_letter_that_numbers_the_record_is_another_record(old, first_new, second_new):
+    """A second letter apart elsewhere (an author initial) so the one-letter
+    rule cannot pair them: only the near-copy rule could."""
+    first = _CHAPTER.replace(old, first_new)
+    second = _CHAPTER.replace(old, second_new).replace("Sample AB", "Sample ABC")
+    assert not _fires(first, second)
+    # Without the numbering word, the same two letters are one record.
+    assert _fires(first, first.replace("Sample AB", "Sample ABCD"))
+
+
+def test_a_near_copy_needs_a_long_body_naming_a_volume_or_page():
+    talk = "Sample AB. Rotor mechanisms shaping widget speed. Example Widget Society, 2018."
+    assert len(talk) >= DUPLICATE_RECORD_FUZZY_MIN_CHARS
+    assert not _fires(talk, talk.replace("Sample AB", "Sample ABC"))      # no volume or page
+    assert not _fires(talk, talk[:-1] + "; discussion.")
+    assert not _fires(talk, talk[:-1] + "; vol 12.")   # only the longer body names a volume
+    short = "Sample AB. Rotor speed. Widget J. 12:3."
+    assert len(short) < DUPLICATE_RECORD_FUZZY_MIN_CHARS
+    assert not _fires(short, short.replace("Sample AB", "Sample ABC"))
+    assert not _fires(short, short[:-1] + "; discussion 4.")
+    assert not _fires(short, short[:-1] + "; discussion with the panel 4.")  # only the longer is long
+
+
+def test_a_tail_follows_the_whole_shorter_body():
+    other = _CHAPTER.replace("Rotor", "Gizmo")[:-1] + "; discussion 412."
+    assert not _fires(_CHAPTER, other)
+
+
+@pytest.mark.parametrize("numeral", ["I", "II", "IV", "V", "VI", "IX", "X"])
+def test_a_roman_numeral_added_is_another_record(numeral):
+    assert not _fires(_CHAPTER, _CHAPTER.replace("Atlas", f"Atlas {numeral}"))
+    assert _fires(_CHAPTER, _CHAPTER.replace("Atlas", "Atlas Q"))  # a letter that numbers nothing
+
+
+def test_a_near_copy_in_a_body_of_two_hundred_words_still_pairs():
+    """The word diff aligns every word of a long body. `difflib`'s junk
+    heuristic, on from 200 words, would leave a run of repeated words
+    unaligned and read their numbers as changed."""
+    body = _CHAPTER + " Widget rotors, 12;34." * 30 + " Gizmo rotors, 12;34." + " Widget rotors, 12;34." * 30
+    assert len(body.split()) >= 200
+    assert _fires(body, body.replace("Gizmo rotors", "Gizmo rotr"))  # two letters
+
+
+@pytest.mark.parametrize("a, b, limit, within", [
+    ("kitten", "sitting", 3, True),
+    ("kitten", "sitting", 2, False),
+    ("flaw", "lawn", 2, True),
+    ("ab", "ba", 1, False),               # a swap is two edits
+    ("", "abc", 3, True),
+    ("abcd", "", 3, False),
+    ("abcdefgh", "abxdefgy", 2, True),
+    ("abcdefgh", "xbcdefgy", 1, False),
+    ("xyzabcdef", "abcdef", 3, True),     # the whole path on the band's edge
+])
+def test_within_edits(a, b, limit, within):
+    assert _within_edits(a, b, limit) is within
+    assert _within_edits(b, a, limit) is within
 
 
 def test_three_occurrences_count_as_two_duplicate_pairs():
