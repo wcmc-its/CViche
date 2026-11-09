@@ -716,8 +716,8 @@ def test_meeting_date_is_the_month_and_day_its_line_writes(year, text, expected)
     ('2017', 'A Talk. Larks Day 17 Jun 2017, Larchmere. Biol Larks 34(2):151-152.',
      '2017 Jun 17'),
     # A number after a numbering word is not a day; the day after the month
-    # is (web204 2363's shape).
-    ('2006', 'A Talk. Biol Larks 31 (2), A140 Part 2 MAR 8 2006.', '2006 MAR 8'),
+    # is.
+    ('2006', 'A Talk. Larks Day, Part 2 MAR 8 2006.', '2006 MAR 8'),
     ('2010', 'A Talk. Biol Larks Vol. 31 No. 5 April 2010, p 12.', '2010 April'),
     ('2014', 'A Talk. Biol Larks V28:No.9 September 2014.', '2014 September'),
     ('2015', 'A Talk. Larks Day, Board 12 May 2015.', '2015 May'),
@@ -744,6 +744,16 @@ def test_meeting_date_is_the_month_and_day_its_line_writes(year, text, expected)
     ('2015', 'A Talk. Larks Day, 0 May 2015.', '2015 May'),
     # The last day a month has is a day.
     ('2015', 'A Talk. Larks Day, October 31, 2015.', '2015 October 31'),
+    # #1570 round 3: a session or room number is no journal locator, nor is
+    # a letter and number after a place word or inside a title, nor a word
+    # in parentheses after a number.
+    ('2008', 'A Talk. Larks Day, Session 4, Hall B2, Larchmere, 21-24 October 2008.',
+     '2008 October 21-24'),
+    ('2015', 'A Talk on p53 in Larks. Larks Day, Larchmere, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Poster P12, Larchmere, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Room 101 (East), May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Room 12B3, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day 2014 T5: Larchmere, May 2015.', '2015 May'),
 ])
 def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expected):
     entry = {'text': text, 'extracted_fields': {'year': year}}
@@ -763,6 +773,7 @@ def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expect
     # After a journal locator, right after it or further on: the month may
     # be the issue's, not the meeting's (BLBVPD 2126's shape).
     ('2008', 'A Talk. Larks Day. Biol Larks 177: A116, Jun 2008.'),
+    ('2008', 'A Talk. Larks Day. Biol Larks 177: 116, Jun 2008.'),
     ('2008', 'A Talk. Larks Day. Biol Larks 12(3):45-67. June 2008.'),
     ('1993', 'A Talk. Clin Larks 17(3):212A, 1993 (presented at Larks Day, '
              'Larchmere, May 9, 1993).'),
@@ -770,6 +781,18 @@ def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expect
     ('2004', 'A Talk. Larks Day. Biol Larks 28(6):S111-S112 Larchmere, May 2004.'),
     ('2006', 'A Talk. Biol Larks 212 (9): 450 Suppl. S OCT 30 2006.'),
     ('2008', 'A Talk. Biol Larks 12(3) : 45-67, Larks Day, May 2008.'),
+    # #1570 round 3: a volume and issue, or a page with a letter prefix after
+    # a volume, an issue or a supplement, is a locator with no colon too.
+    ('2006', 'A Talk. Biol Larks 31 (2), A140 Part 2 MAR 8 2006.'),
+    ('2006', 'A Talk. Biol Larks, 31 (2), A140-A140 Part 1 MAR 8 2006.'),
+    ('2006', 'A Talk. Biol Larks 31 (2), 140-141, May 2006.'),
+    ('2006', 'A Talk. Biol Larks 31(Suppl. 1), 140, May 2006.'),
+    ('2017', 'A Talk. Biol Larks, Vol. 9, Issue 2, E260-261. October 2017.'),
+    ('2017', 'A Talk. Biol Larks 66 Suppl. (1) A223. June 2017.'),
+    ('2015', 'A Talk. Biol Larks 12, e1234. May 2015.'),
+    ('2015', 'A Talk. Biol Larks, Volume 6, Supplement, Page S14, October 2015.'),
+    ('2006', 'A Talk. Biol Larks 7, S12 Pt 2 JUL 4 2006.'),
+    ('2006', 'A Talk. Biol Larks 7, S12-S14 Suppl 2 JUL 2006.'),
     # Two months written for the year: which one is the meeting's is not said.
     ('2015', 'A Talk. Larks Day, October 2015; Wren Day, November 2015.'),
     ('2015', 'A Talk. Larks Day, September 30, 2015 - October 3, 2015.'),

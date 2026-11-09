@@ -531,6 +531,30 @@ _AWARD_OR_ROLE_BEFORE_RE = re.compile(
     r'\W+(?:\w+\W+){0,2}$', re.IGNORECASE)
 #: An award right after a type: "Poster award", "Oral presentation competition".
 _AWARD_AFTER_RE = re.compile(r'\W*(?:award|prize|competition|winner|judg)', re.IGNORECASE)
+#: A word that names a prize, in English, Spanish, Portuguese or French, or
+#: a place in one ("2nd place"). Anywhere before a type, it makes the line a
+#: prize statement that names the type the prize was in, past the two words
+#: `_AWARD_OR_ROLE_BEFORE_RE` reads (#1570 round 3). An ordinal with no
+#: "place" numbers a meeting ("2nd Annual"), and "best" or "top" further
+#: back is title prose ("best practice"), so neither counts here.
+_PRIZE_WORD_RE = re.compile(
+    r'\b(?:award\w*|prize\w*|winner\w*|competition\w*|pr[eéê]mio\w*|prix|ganador\w*'
+    r'|vencedor\w*|(?:\d+(?:st|nd|rd|th)|first|second|third)\s+place)\b', re.IGNORECASE)
+#: The word right before a type in the same clause: only spaces between, no
+#: punctuation and no tab, which sets off a CV's columns.
+_WORD_BEFORE_RE = re.compile(r'(\w+)[ \u00a0]*$')
+#: Words that may stand right before a type without qualifying it: articles
+#: and determiners, prepositions, conjunctions ("Accepted for oral
+#: presentation", "Presented as a poster", "Abstract and poster"), and
+#: "accepted", which says the abstract was taken, not in what format
+#: (LPPQAJ 208). A number is a determiner too ("2004 poster").
+_UNQUALIFYING_WORDS = frozenset({
+    'a', 'an', 'the', 'this', 'that', 'these', 'those', 'each', 'every', 'its', 'their',
+    'our', 'my', 'his', 'her', 'your',
+    'as', 'at', 'by', 'during', 'for', 'from', 'in', 'into', 'of', 'on', 'to', 'via',
+    'with', 'within',
+    'and', 'or', 'but', 'nor',
+    'accepted'})
 #: What may join two types a line names together: nothing, or up to two of
 #: "and", "or", "and/or", "&", "/" and a comma.
 _TYPE_JOINER = r'(?:\s*(?:and/or|and|or|[&/,])\s*){1,2}|\s+'
@@ -564,6 +588,19 @@ def _is_award_or_role(text: str, match: re.Match[str]) -> bool:
                 or _AWARD_AFTER_RE.match(text, match.end()))
 
 
+def _is_prize_or_qualified(text: str, match: re.Match[str]) -> bool:
+    """True when the type `match` found in `text` follows a prize word
+    anywhere before it (`_PRIZE_WORD_RE`), or a word right before it in the
+    same clause qualifies it ("Short oral presentation", "Scientific Salon
+    Oral Presentation"): any word but those `_UNQUALIFYING_WORDS` names or a
+    number. Either way the type alone is not what the line says this work
+    was: the prize's category, or another format (#1570 round 3)."""
+    if _PRIZE_WORD_RE.search(text, 0, match.start()):
+        return True
+    word = _WORD_BEFORE_RE.search(text, 0, match.start())
+    return bool(word) and not (word[1].isdigit() or word[1].casefold() in _UNQUALIFYING_WORDS)
+
+
 def _spoken_heads_beside_a_poster(text: str) -> set[str]:
     """The spoken types `text` states with no kind of their own
     (`_SPOKEN_HEAD_BESIDE_A_POSTER_RE`), outside an award or role context."""
@@ -591,15 +628,19 @@ def presentation_type_note(source_text: str, title: str, shown_text: str) -> str
     (`_spoken_heads_beside_a_poster`). Also '' when the stored `title` or
     `shown_text` -- what the row already prints, its event-status note
     included -- names that type, so the type is never printed twice (#1570).
+    And '' when any type the line states follows a prize word or a word that
+    qualifies it (`_is_prize_or_qualified`), so a prize's category or a
+    qualified format is not printed as how the work was given (#1570 round 3).
     """
-    phrases = [match[0] for match in _PRESENTATION_TYPE_RE.finditer(source_text)
+    matches = [match for match in _PRESENTATION_TYPE_RE.finditer(source_text)
                if not _is_award_or_role(source_text, match)]
-    heads = {_presentation_head(phrase) for phrase in phrases}
+    heads = {_presentation_head(match[0]) for match in matches}
     heads |= _spoken_heads_beside_a_poster(source_text)
-    if (not phrases or len(heads) != 1
-            or heads & (_presentation_heads(title) | _presentation_heads(shown_text))):
+    if (not matches or len(heads) != 1
+            or heads & (_presentation_heads(title) | _presentation_heads(shown_text))
+            or any(_is_prize_or_qualified(source_text, match) for match in matches)):
         return ''
-    return _capitalised(phrases[0])
+    return _capitalised(matches[0][0])
 
 
 #: A four-digit year inside a stored date value: "2005" in "2005-Summer" or

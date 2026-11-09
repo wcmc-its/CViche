@@ -268,6 +268,20 @@ _RANGE_DASH_END_RE = re.compile(r'[-–]\s*$')
 #: may be the journal issue's, not the meeting's (GNONHA, #1570; BLBVPD
 #: 2126: a volume, issue and page, then the meeting in brackets).
 _JOURNAL_LOCATOR_RE = re.compile(r'\d+\s*(?:\([^)]*\))?\s*:\s*[A-Za-z]?\d')
+#: A journal locator with no colon (#1570 round 3: a volume, issue and
+#: lettered page, then "Part 1" and the issue's date): a volume and its issue
+#: in brackets ("20 (4)", "50(Suppl. 1)"), or a page or range of pages with a
+#: letter prefix ("A586", "S12-S14", "e1234"). A lettered page stands right
+#: after a volume, an issue or a supplement (a number, a closing bracket, or
+#: "Vol."/"Issue"/"Suppl.", with "p."/"pp."/"Page" between if the line
+#: writes one), and before punctuation, the date, or "Part"/"Pt"/"Suppl". A
+#: letter and number after any other word is a room, a poster or a title's
+#: own ("Hall B2", "Poster P12", "p53"), and "Session 4" has no letter.
+_JOURNAL_ISSUE_OR_PAGE_RE = re.compile(
+    r'\d+\s*\(\s*(?:suppl(?:ement)?\.?\s*)?\d+[A-Za-z]?(?:\s*[-–]\s*\d+)?\s*\)'
+    r'|(?:\d|\)|\b(?:vol(?:ume)?|issue|suppl(?:ement)?)\.?)\s*[,.:;]?\s*(?:(?:p|pp|page)\.?\s*)?'
+    r'(?<![\w-])[A-Za-z]\d+(?:\s*[-–]\s*[A-Za-z]?\d+)?(?=\s*(?:[.,;)]|$|(?:part|pt|suppl)\b))',
+    re.IGNORECASE)
 #: Words that number a part of a journal, a book or a meeting. A number
 #: right after one is not a day: "Part 2 MAR 8 2006" printed "2006 MAR 2"
 #: (web204 2363's shape, #1570), and "No. 5 April 2010" and "Board 12 May 2015"
@@ -319,9 +333,10 @@ def _bare_year_date(value: object, source_text: str) -> WrittenDate:
     980; #1570 round 3). Every month the line writes with that year has to
     be the same month, because a line that writes two does not say which is
     the meeting's. The first is taken, unless it ends a range that began in
-    another month, or a journal locator stands anywhere before it, where the
-    month may be the issue's. Its days are taken as the line writes them
-    when they stand on one side of the month and are plausibly days
+    another month, or a journal locator stands anywhere before it, with a
+    colon or without (`_JOURNAL_LOCATOR_RE`, `_JOURNAL_ISSUE_OR_PAGE_RE`),
+    where the month may be the issue's. Its days are taken as the line
+    writes them when they stand on one side of the month and are plausibly days
     (`_plausible_days`); days on both sides leave which is the meeting's
     open ("12 October 12 2016"), so only the month is taken.
     """
@@ -334,7 +349,8 @@ def _bare_year_date(value: object, source_text: str) -> WrittenDate:
         return WrittenDate()
     first = dates[0]
     if (_RANGE_DASH_END_RE.search(source_text, 0, first.start())
-            or _JOURNAL_LOCATOR_RE.search(source_text, 0, first.start())):
+            or _JOURNAL_LOCATOR_RE.search(source_text, 0, first.start())
+            or _JOURNAL_ISSUE_OR_PAGE_RE.search(source_text, 0, first.start())):
         return WrittenDate()
     before = _plausible_days(source_text, first, 'day_before')
     after = _plausible_days(source_text, first, 'day_after')
