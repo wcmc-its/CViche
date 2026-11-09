@@ -218,6 +218,9 @@ HOME_ONLY_IMPORTS = {
                                       "_citation_identity_keys", "_citations_conflict", "_first_author",
                                       "_first_author_names", "_one_slip_apart",
                                       "_author_name_sets",
+                                      "_titles_disagree", "_TITLE_SLIP_MIN_LETTERS",
+                                      "_drops_a_printed_date", "_identity_drop_loses_a_date",
+                                      "_printed_dates", "_paired_only_by_shape_a",
                                       "_field_dates_text", "_split_record_family",
                                       "_is_sibling_of",
                                       "_undated_split_record_absorbs_date",
@@ -233,7 +236,9 @@ HOME_ONLY_IMPORTS = {
                                              "record_siblings", "record_twins",
                                              "short_tab_part_words",
                                              "sibling_record_rendered", "_OPEN_TERM_WORDS",
-                                             "_field_strings", "dated_clause_lines", "extracted_clause"),
+                                             "_field_strings", "dated_clause_lines", "extracted_clause",
+                                             "distinguishing_values", "piece_rendered",
+                                             "values_contradict"),
 }
 
 _RELOCATED_CASES = [

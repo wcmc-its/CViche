@@ -12,6 +12,7 @@ module, so they move together and stop being module-global.
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
 import copy
+import difflib
 import functools
 import json
 import math
@@ -61,10 +62,12 @@ from unified_pipeline.stage6.pii_pass import run_pii_pass
 from unified_pipeline.stage6.render_check import (
     _record_tokens,
     _whole_record_rendered,
+    distinguishing_values,
+    piece_rendered,
     record_chunks,
-    record_pieces,
     segment_already_rendered,
     segment_held_by_fields,
+    values_contradict,
 )
 from unified_pipeline.stage6.sections.appendix import (
     _TRUNCATION_MARKER,
@@ -579,6 +582,7 @@ class RenderedLines(NamedTuple):
     tokens: list[set[str]]      # distinctive 5+-letter tokens per line
     years: list[set[str]]       # years per line, for the date-agreement check
     ubiquitous: frozenset[str]  # tokens on RENDER_UBIQUITOUS_LINE_SHARE+ of lines
+    values: list[frozenset[int]]  # `distinguishing_values` per line (#2055)
 
 
 def _ubiquitous_tokens(line_token_sets: list[set[str]]) -> frozenset[str]:
@@ -593,13 +597,14 @@ def _ubiquitous_tokens(line_token_sets: list[set[str]]) -> frozenset[str]:
 
 
 def _rendered_lines(blocks: list[tuple[str, str]]) -> RenderedLines:
-    """The per-line token sets, per-line year sets and ubiquitous-token set
-    of the rendered output, built once per document."""
+    """The per-line token sets, year sets and distinguishing values, and the
+    ubiquitous-token set, of the rendered output, built once per document."""
     lines = [line for _, text in blocks for line in str(text).split("\n")
              if line.strip()]
     tokens = [_long_word_tokens(line) for line in lines]
     years = [set(_YEAR_RE.findall(line)) for line in lines]
-    return RenderedLines(tokens, years, _ubiquitous_tokens(tokens))
+    return RenderedLines(tokens, years, _ubiquitous_tokens(tokens),
+                         [distinguishing_values(line) for line in lines])
 
 
 def _line_vouches(tokens: set[str], record_years: set[str],
@@ -624,8 +629,13 @@ def _record_rendered(line: str, haystack: str,
     output's ubiquitous tokens left out) on a line whose year does not
     contradict the record's. Verbatim absence alone proves nothing (stage 6
     reformats dates/fields), so False requires a token-verifiable miss; a
-    line without enough distinctive tokens is None, not missing."""
-    if any(piece in haystack for piece in record_pieces(line)):
+    line without enough distinctive tokens is None, not missing.
+
+    Either way the vouching line's `distinguishing_values` must not
+    contradict the record's, as in stage 6's `_record_rendered`: a record
+    that differs from a rendered row only in its edition or part shares
+    its opening piece and most of its words (#2055)."""
+    if piece_rendered(line, haystack, output.values):
         return True
     record_years = set(_YEAR_RE.findall(line))
     rendered = None
@@ -633,8 +643,11 @@ def _record_rendered(line: str, haystack: str,
         tokens = _long_word_tokens(chunk) - output.ubiquitous
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
+        values = distinguishing_values(chunk)
         if any(_line_vouches(tokens, record_years, line_tokens, line_years)
-               for line_tokens, line_years in zip(output.tokens, output.years)):
+               and not values_contradict(values, line_values)
+               for line_tokens, line_years, line_values
+               in zip(output.tokens, output.years, output.values, strict=True)):
             return True
         rendered = False
     return rendered
@@ -1730,6 +1743,81 @@ DUPLICATE_RECORD_FUZZY_MIN_CHARS = 60
 #: letter apart are two records (126-run farm/batch corpus: web218, web227
 #: twice and web244, each the same abstract at two meetings).
 _NON_YEAR_NUMBER_RE = re.compile(r"(?<!\d)(?!(?:19|20)\d{2}(?!\d))\d+")
+#: #446: two copies can end further apart than one letter. A body is still
+#: the record's other copy when it is the shorter body plus a tail of whole
+#: words at most this long, counting the space before it (UAUUUE: a paper
+#: and the same paper with "; discussion <page>" after it).
+DUPLICATE_RECORD_TAIL_MAX_CHARS = 40
+#: ... or when at most this many characters are inserted, deleted or replaced
+#: (an author initial, a plural, a typo: DCEQYL, KRSFSI, HTOFHA and web056 on
+#: the #1243 farm). Four is too many: two abstracts four letters apart, a
+#: "STEMI" alert and a "Stroke" alert (NQSOPB, REIUOE), are two records.
+DUPLICATE_RECORD_LETTER_EDITS_MAX = 3
+#: A word that numbers a record within its series, which never changes
+#: between two copies of one record: a roman numeral or "part" (HVLDGS's
+#: part I and part II). A word holding a digit is one too (`_numbering_word`):
+#: a volume, a page, or a "2005a" beside a "2005b" (LFFKVV).
+_RECORD_NUMBERING_WORD_RE = re.compile(r"i{1,3}|iv|vi{0,3}|ix|x|part")
+
+
+def _numbering_word(word: str) -> bool:
+    """A word of a passage key that numbers the record (`_RECORD_NUMBERING_WORD_RE`)."""
+    return any(char.isdigit() for char in word) or bool(_RECORD_NUMBERING_WORD_RE.fullmatch(word))
+
+
+def _changed_words(a: str, b: str) -> list[str]:
+    """The words of passage keys `a` and `b` a word-by-word diff does not align."""
+    words_a, words_b = a.split(), b.split()
+    matcher = difflib.SequenceMatcher(None, words_a, words_b, autojunk=False)
+    return [word for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != "equal"
+            for word in words_a[i1:i2] + words_b[j1:j2]]
+
+
+def _within_edits(a: str, b: str, limit: int) -> bool:
+    """Whether at most `limit` inserted, deleted or replaced characters turn
+    `a` into `b` (edit distance, computed only within `limit` of the diagonal,
+    where any alignment that close must run)."""
+    if abs(len(a) - len(b)) > limit:
+        return False
+    previous = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        current = [i] + [limit + 1] * len(b)
+        for j in range(max(1, i - limit), min(len(b), i + limit) + 1):
+            current[j] = min(previous[j] + 1, current[j - 1] + 1,
+                             previous[j - 1] + (a[i - 1] != b[j - 1]))
+        if min(current) > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+def _with_short_tail(short: str, long: str) -> bool:
+    """`long` is `short` plus whole words, at most
+    DUPLICATE_RECORD_TAIL_MAX_CHARS long. A tail that runs on from `short`'s
+    last word ("34" to "345") is another page, not a tail."""
+    tail = long[len(short):]
+    return (long.startswith(short) and tail.startswith(" ")
+            and len(tail) <= DUPLICATE_RECORD_TAIL_MAX_CHARS)
+
+
+def _few_letters_apart(a: str, b: str) -> bool:
+    """At most DUPLICATE_RECORD_LETTER_EDITS_MAX characters inserted, deleted
+    or replaced, none of them in a word that numbers the record
+    (`_numbering_word`)."""
+    return (_within_edits(a, b, DUPLICATE_RECORD_LETTER_EDITS_MAX)
+            and not any(_numbering_word(word) for word in _changed_words(a, b)))
+
+
+def _near_copy(a: str, b: str) -> bool:
+    """Two bodies of one record further apart than `_one_letter_apart` reads
+    (#446): the shorter is DUPLICATE_RECORD_FUZZY_MIN_CHARS or longer and
+    names a volume or page (_NON_YEAR_NUMBER_RE), and the longer is it plus
+    a short tail (`_with_short_tail`) or a few letters off it
+    (`_few_letters_apart`)."""
+    short, long = sorted((a, b), key=len)
+    if len(short) < DUPLICATE_RECORD_FUZZY_MIN_CHARS or not _NON_YEAR_NUMBER_RE.search(short):
+        return False
+    return _with_short_tail(short, long) or _few_letters_apart(a, b)
 
 
 def _one_letter_apart(a: str, b: str) -> bool:
@@ -1748,10 +1836,10 @@ def _one_letter_apart(a: str, b: str) -> bool:
 def _same_body(a: str, b: str) -> bool:
     """One record's two rendered bodies: equal, or one letter apart when
     both are DUPLICATE_RECORD_FUZZY_MIN_CHARS or longer and name a volume
-    or page (_NON_YEAR_NUMBER_RE)."""
+    or page (_NON_YEAR_NUMBER_RE), or a near copy (`_near_copy`)."""
     return a == b or (min(len(a), len(b)) >= DUPLICATE_RECORD_FUZZY_MIN_CHARS
                       and bool(_NON_YEAR_NUMBER_RE.search(a))
-                      and _one_letter_apart(a, b))
+                      and _one_letter_apart(a, b)) or _near_copy(a, b)
 
 
 def _duplicate_block_pairs(blocks: list[tuple[str, str]]) -> list[tuple[int, int]]:

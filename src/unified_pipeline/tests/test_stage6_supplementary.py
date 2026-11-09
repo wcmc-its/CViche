@@ -161,6 +161,20 @@ def test_a_label_table_vouches_for_a_line_whose_facts_sit_in_its_rows():
     assert sp._record_rendered(line, plain.text, plain.line_tokens) is False
 
 
+
+def test_prose_naming_another_edition_than_the_page_is_unrendered():
+    """#2055: the prose shares the rendered line's opening words and differs
+    in its edition alone, which `rendered_haystack` reads off each line."""
+    guide = "Certified proficient in the Example Guides to the Evaluation of Example Impairment"
+    prose = f"{guide}, 6th Edition, by examination"
+    entry = _entry(f"Associate Professor\tExample University\t{prose}", title="Associate Professor",
+                   institution="Example University", start_date="2010", end_date="2015")
+    page = sp.rendered_haystack([f"{guide}, 3rd Edition, by examination"], Document())
+    assert sp.unrendered_prose(entry, "D1", page) == [prose]
+    same = sp.rendered_haystack([f"{guide}, Sixth Edition, by examination"], Document())
+    assert sp.unrendered_prose(entry, "D1", same) == []
+
+
 # --- where it goes -----------------------------------------------------------------
 
 def _candidate(text, position=0, paragraph=None):

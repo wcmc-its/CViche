@@ -228,7 +228,8 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Postdoctoral Training: section heading not found in template; %d entries not rendered': 'warning',
     'Postdoctoral Training: table not found after section heading; %d entries not rendered': 'warning',
     'Propagated institution to %d sub-entries': 'info',
-    'Refused institution propagation to %d entries whose candidate parents ended before they began': 'info',
+    'Refused institution propagation to %d entries whose candidate parents ended before '
+    'they began or sat beyond another employer': 'info',
     'institution_enrichment is %s, not a mapping; treating as absent for propagation': 'warning',
     'Service on Boards: no %s or National table found; %d %s entries not rendered': 'warning',
     'Service on Boards: no Regional/National/International table found in template; %d entries not rendered': 'warning',

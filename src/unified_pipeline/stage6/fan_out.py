@@ -238,7 +238,11 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'M2B': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'notes', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'status', 'title', 'total_funding'}),
     'M2C': frozenset({'agency', 'annual_funding', 'grant_number', 'notes', 'pi_name', 'pi_role', 'status', 'submission_date', 'title', 'total_funding_requested'}),
     'M2D': frozenset({'assignee', 'filing_date', 'inventors', 'issue_date', 'patent_number', 'status', 'title'}),
-    'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'role', 'start_date'}),
+    # N2's Award Source also prints M2's `notes`, `pi_name` and `total_funding`
+    # (`mentoring.N2_AWARD_PHRASE_FIELDS`, #1710), which N2's schema does not
+    # name yet: the one entry here that is not a schema field.
+    'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'notes', 'pi_name', 'role',
+                     'start_date', 'total_funding'}),
     # A bare N3 that names a mentee renders as one (`_route_bare_mentee`, #1574).
     'N3': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date', 'thesis_title'}),
     'N3A': frozenset({'mentee_level', 'mentee_name', 'research_focus', 'start_date'}),

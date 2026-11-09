@@ -959,6 +959,119 @@ def test_training_grant_rows_read_the_record_line_over_the_entry_text():
         _AWARD_SOURCE_LABEL] == 'Invented Fund'
 
 
+# --- N2 widened (#1710, owner ruling 2026-11-06): mm/yyyy, no invented Present,
+# --- and M2's PI, total and notes in Award Source -----------------------------
+
+_DURATION_LABEL = 'Duration of support (mm/yyyy-mm/yyyy):'
+
+
+def _duration(fields: dict, text: str = '') -> str:
+    return dict(_training_grant_rows(fields, text))[_DURATION_LABEL]
+
+
+def test_training_grant_rows_print_the_months_a_grant_states():
+    fields = {'agency': 'Invented Fund', 'start_date': '2000-11', 'end_date': '2002-06'}
+    assert _duration(fields) == '11/2000-06/2002'
+    # A year gains no month: a year range stays years, a year start's month end its year.
+    assert _duration({'agency': 'Invented Fund', 'start_date': '2018', 'end_date': '2021'}) == '2018-2021'
+    assert _duration({'agency': 'Invented Fund', 'start_date': '2016', 'end_date': '2018-06'}) == '2016-2018'
+
+
+@pytest.mark.parametrize('start, end, text, expected', [
+    # A start alone whose text closes it is that start alone, never "-Present".
+    ('2014', '', 'Invented Fund\tInvented Award\t2014', '2014'),
+    ('FY07', '', 'Invented Fund\tInvented Award\tFY07', 'FY07'),
+    ('2014-09', '', 'Invented Fund\tInvented Award\t09/2014', '09/2014'),
+    # Present only where the record says so: its text leaves the year open, or
+    # the stored end is present/current/ongoing.
+    ('2014', '', 'Invented Fund\tInvented Award\t2014-', '2014-Present'),
+    ('2014', '', 'Invented Fund\tInvented Award\t2014 - present', '2014-Present'),
+    ('2014', 'present', 'Invented Fund\tInvented Award\t2014', '2014-Present'),
+    ('2014', 'current', 'Invented Fund\tInvented Award\t2014', '2014-Present'),
+    ('2014', 'ongoing', 'Invented Fund\tInvented Award\t2014', '2014-Present'),
+])
+def test_training_grant_rows_print_present_only_when_the_record_says_so(start, end, text, expected):
+    assert _duration({'agency': 'Invented Fund', 'start_date': start, 'end_date': end}, text) == expected
+
+
+def test_training_grant_rows_add_the_pi_the_total_and_the_notes_after_the_role():
+    fields = {'agency': 'Invented Fund', 'role': 'Mentor', 'pi_name': 'Riley Fictional',
+              'total_funding': '60000', 'notes': 'Invented Bridge Track'}
+    assert _award_source(fields, 'Invented Fund\tInvented Study') == (
+        'Invented Fund (Mentor; PI: Riley Fictional; Total award: $60,000; Invented Bridge Track)')
+    # With no role or agency they make the parenthetical alone.
+    assert _award_source({'grant_title': 'Invented Study', 'total_funding': 1500}, 'Invented Study') == (
+        '(Total award: $1,500)')
+
+
+@pytest.mark.parametrize('line, label', [
+    ('Invented Fund\tTotal Grant Amount: $60,000', 'Total Grant Amount'),
+    ('Invented Fund\tTotal  Grant Amount: $60,000', 'Total Grant Amount'),
+    ('Invented Fund | Award amount:  60,000.00', 'Award amount'),
+    ('Invented Fund\tDirect: $40,000; Total: $60,000', 'Total'),
+    # No colon label in the amount's own cell: M2's label.
+    ('Invented Fund\tDirect Costs: $40,000', 'Total award'),
+    ('Invented Fund\tTotal Grant Amount:\t$60,000', 'Total award'),
+    ('Invented Fund\t$60,000', 'Total award'),
+])
+def test_training_grant_rows_write_the_total_under_the_label_its_cell_gives(line, label):
+    assert _award_source({'agency': 'Invented Fund', 'total_funding': 60000}, line) == (
+        f'Invented Fund ({label}: $60,000)')
+
+
+def test_training_grant_rows_read_the_total_label_off_the_record_line_and_a_short_amount():
+    """A record of a split entry takes its own line's label, not a sibling's,
+    and a three-digit amount has a label as much as a long one."""
+    text = 'Invented Fund A\tAward Amount: $60,000\nInvented Fund B\tTotal: $60,000'
+    rows = dict(_training_grant_rows({'agency': 'Invented Fund B', 'total_funding': 60000}, text,
+                                     'Invented Fund B\tTotal: $60,000'))
+    assert rows[_AWARD_SOURCE_LABEL] == 'Invented Fund B (Total: $60,000)'
+    assert _award_source({'agency': 'Invented Fund', 'total_funding': 500},
+                         'Invented Fund\tStipend: $500') == 'Invented Fund (Stipend: $500)'
+
+
+def test_training_grant_rows_write_the_notes_verbatim_however_long():
+    notes = ' '.join(f'Invented{n}' for n in range(40))
+    assert _award_source({'agency': 'Invented Fund', 'notes': notes}, 'Invented Fund') == (
+        f'Invented Fund ({notes})')
+
+
+def test_training_grant_rows_never_name_the_cv_owner_as_pi():
+    fields = {'agency': 'Invented Fund', 'role': 'Mentor', 'pi_name': 'R. Fictional'}
+    rows = dict(_training_grant_rows(fields, 'Invented Fund', None, 'Riley Fictional'))
+    assert rows[_AWARD_SOURCE_LABEL] == 'Invented Fund (Mentor)'
+    # Another person who shares the owner's given name is a PI.
+    fields['pi_name'] = 'Riley Othername'
+    rows = dict(_training_grant_rows(fields, 'Invented Fund', None, 'Riley Fictional'))
+    assert rows[_AWARD_SOURCE_LABEL] == 'Invented Fund (Mentor; PI: Riley Othername)'
+
+
+@pytest.mark.parametrize('fields, line, expected', [
+    # The PI a #2108 labelled phrase already names.
+    ({'pi_name': 'Riley Fictional'}, 'Invented Fund\tPI Name: Riley Fictional',
+     'Invented Fund (PI Name: Riley Fictional)'),
+    # A total whose digits a cell already writes, cents or not.
+    ({'grant_title': 'Invented Award of $60,000', 'total_funding': '60000.50'}, 'Invented Fund',
+     'Invented Fund'),
+    # Notes whose every word a cell or an earlier phrase already holds.
+    ({'grant_title': 'Invented Study', 'notes': 'Invented study'}, 'Invented Fund', 'Invented Fund'),
+    ({'notes': 'Invented Fund'}, 'Invented Fund', 'Invented Fund'),
+    ({'start_date': '2018', 'end_date': '2021', 'notes': '2018-2021'}, 'Invented Fund',
+     'Invented Fund'),
+    ({'pi_name': 'Riley Fictional', 'notes': 'PI: Riley Fictional'}, 'Invented Fund',
+     'Invented Fund (PI: Riley Fictional)'),
+    ({'total_funding': '60000', 'notes': 'Total award $60,000'}, 'Invented Fund',
+     'Invented Fund (Total award: $60,000)'),
+    # Only M2's three names are read, never a look-alike key.
+    ({'pi': 'Riley Fictional', 'principal_investigator': 'Casey Madeup', 'amount': '5000',
+      'annual_funding': '5000', 'remarks': 'Invented remark'}, 'Invented Fund', 'Invented Fund'),
+    # Blank values add nothing.
+    ({'pi_name': ' ', 'total_funding': None, 'notes': ''}, 'Invented Fund', 'Invented Fund'),
+])
+def test_training_grant_rows_add_no_value_a_cell_already_shows(fields, line, expected):
+    assert _award_source({'agency': 'Invented Fund', **fields}, line) == expected
+
+
 # --- N2: an entry that is not a grant (#1710 residual 4) ---------------------------
 
 @pytest.mark.parametrize('fields, line', [
@@ -967,6 +1080,10 @@ def test_training_grant_rows_read_the_record_line_over_the_entry_text():
     ({'agency': 'Invented University (Invented College)'},
      'Invented University (Invented College)'),
     ({'title': 'Ninth Street Invented Center'}, 'Ninth Street Invented Center'),
+    # M2's PI, total and notes (#1710) do not move a program to a table: their
+    # labels are not the line's words.
+    ({'grant_title': 'Invented Graduate Program', 'pi_name': 'Riley Fictional',
+      'notes': 'Invented remark', 'total_funding': 'n/a'}, 'Invented Graduate Program'),
 ])
 def test_n2_entry_with_no_number_grant_word_or_funder_is_not_grant_shaped(fields, line):
     assert _training_grant_is_not_grant_shaped(fields, line) is True
@@ -992,6 +1109,7 @@ def test_n2_entry_with_no_number_grant_word_or_funder_is_not_grant_shaped(fields
     ({'grant_title': 'Invented Program', 'start_date': '2019', 'end_date': '2021'},
      'Invented Program 2019-2021'),
     ({'grant_title': 'Invented Program', 'end_date': '2021'}, 'Invented Program 2021'),
+    ({'grant_title': 'Invented Program', 'start_date': '2019'}, 'Invented Program 2019'),
     ({}, '  '),
 ])
 def test_n2_entry_with_a_number_grant_word_or_funder_stays_a_grant(fields, line):
@@ -1273,6 +1391,54 @@ def test_n2_split_record_reads_only_its_own_line():
         ('tbl', 'Invented Fund B'),
         ('p', ''),
         ('p', 'Invented Program B'),
+    ]
+
+
+def _cell_text(cell) -> str:
+    """A cell's text with its tracked insertions (`w:ins`) read too."""
+    return ''.join(t.text or '' for t in cell._tc.iter(qn('w:t')))
+
+
+@pytest.mark.parametrize('cv_owner, document_uid', [
+    ({'first_name': 'Riley', 'last_name': 'Fictional'}, 'TESTAA'),
+    ({}, '2015_Fictional'),   # no owner record: its name read off the uid
+])
+def test_n2_generate_prints_months_no_invented_present_and_never_the_owner_as_pi(
+        tmp_path, cv_owner, document_uid):
+    """#1710 through the call the pipeline makes, `generate()`: its section
+    dispatch hands `_fill_mentoring` the CV owner, so a `pi_name` that names
+    the owner adds no PI; the total takes the label the grant's own line
+    gives it, the notes follow; Duration prints the months a grant states,
+    and a lone start its text closes prints alone."""
+    entries = [
+        {'taxonomy_code': 'N2', 'element_idx_start': 10,
+         'text': 'Invented Institute T32XX000000\tInvented Scholars Program\t'
+                 'Total Grant Amount: $250,000\t09/2010-08/2015',
+         'extracted_fields': {'agency': 'Invented Institute', 'grant_number': 'T32XX000000',
+                              'grant_title': 'Invented Scholars Program', 'role': 'Mentor',
+                              'pi_name': 'R. Fictional', 'total_funding': '250000',
+                              'notes': 'Invented Bridge Track', 'start_date': '2010-09',
+                              'end_date': '2015-08'}},
+        {'taxonomy_code': 'N2', 'element_idx_start': 12,
+         'text': 'Invented Foundation\tInvented Bridge Award\t2014',
+         'extracted_fields': {'agency': 'Invented Foundation', 'grant_title': 'Invented Bridge Award',
+                              'start_date': '2014'}},
+    ]
+    source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+    source.write_text(json.dumps({'document_uid': document_uid, 'entries': entries,
+                                  'cv_owner': cv_owner}))
+
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+
+    tables = [[(_cell_text(row.cells[0]), _cell_text(row.cells[1])) for row in table.rows]
+              for table in Document(str(target)).tables
+              if table.rows and _cell_text(table.rows[0].cells[0]) == _AWARD_SOURCE_LABEL]
+    assert tables == [
+        [(_AWARD_SOURCE_LABEL, 'Invented Institute (T32XX000000) (Mentor; Total Grant Amount: '
+                               '$250,000; Invented Bridge Track)'),
+         ('Project title:', 'Invented Scholars Program'), (_DURATION_LABEL, '09/2010-08/2015')],
+        [(_AWARD_SOURCE_LABEL, 'Invented Foundation'), ('Project title:', 'Invented Bridge Award'),
+         (_DURATION_LABEL, '2014')],
     ]
 
 
