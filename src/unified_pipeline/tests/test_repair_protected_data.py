@@ -365,3 +365,11 @@ def test_the_title_gate_is_the_appendix_s_only():
     text = "Children: Ann and Bea. The family moved to Springfield in 1975 and later to Rivertown."
     assert repair._independent_leaks(text, "appendix") == []
     assert repair._independent_leaks(text, "personal data")
+
+
+def test_847_a_child_statement_struck_through_is_cut():
+    """#847 (BLBVPD-01): the lint's head-count shape reaches the repair too, so
+    a child statement left in a tracked deletion is removed, not just shown
+    struck through. Invented values."""
+    leaks = repair._deleted_leaks("One child - Kim Lee Example")
+    assert [(leak.start, leak.category) for leak in leaks] == [(0, "children / dependents")]
