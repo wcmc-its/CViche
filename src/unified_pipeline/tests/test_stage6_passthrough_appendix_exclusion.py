@@ -796,6 +796,11 @@ def test_534_only_an_entry_of_neither_copied_section_is_receipted_by_the_copy():
                                       {"E": {"npi", "number", "1234567893", "pretend"}})
     # A line with no token ("of an") is printed by no block.
     assert not _copy_prints_foreign_entry({**other, "text": "of an"}, copied)
+    # A bare label is covered by any block holding its word, so it needs 3 tokens.
+    labels = {"E": {"current", "position", "npi", "number", "1234567893"}}
+    assert not _copy_prints_foreign_entry({**other, "text": "Current:"}, labels)
+    assert not _copy_prints_foreign_entry({**other, "text": "Current Position:"}, labels)
+    assert _copy_prints_foreign_entry({**other, "text": "Current Position: NPI"}, labels)
 
 
 def test_a_copied_blocks_own_entry_it_does_not_print_still_reaches_the_appendix(tmp_path):

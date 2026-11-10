@@ -445,6 +445,9 @@ def _percent_effort_row_index(table) -> dict[str, int]:
 # J-coded row from some other table, say) still reaches the Appendix.
 _COPIED_ENTRY_TOKEN_COVERAGE = 0.8
 _ENTRY_TOKEN_RE = re.compile(r"[a-z]{3,}|\d+")
+# The fewest distinct tokens another section's entry needs before a copied
+# block that prints them counts as its receipt (#534).
+_FOREIGN_ENTRY_MIN_TOKENS = 3
 # The letters whose source block is copied verbatim. J is not one (#2028):
 # its fixed-row table is always filled by `_fill_percent_effort`, because a
 # source's J block can hold anything under that heading -- an old-form CV's
@@ -472,9 +475,13 @@ def _belongs_to(entry: dict, letter: str) -> bool:
             or entry.get('taxonomy_code') == letter)
 
 
+def _entry_tokens(entry: dict) -> set[str]:
+    return set(_ENTRY_TOKEN_RE.findall(str(entry.get('text') or '').lower()))
+
+
 def _block_prints(entry: dict, block_tokens: set[str]) -> bool:
     """At least `_COPIED_ENTRY_TOKEN_COVERAGE` of `entry`'s tokens are in a copied block's."""
-    tokens = set(_ENTRY_TOKEN_RE.findall(str(entry.get('text') or '').lower()))
+    tokens = _entry_tokens(entry)
     return bool(tokens) and len(tokens & block_tokens) >= _COPIED_ENTRY_TOKEN_COVERAGE * len(tokens)
 
 
@@ -490,8 +497,11 @@ def _copy_prints_foreign_entry(entry: dict, copied: dict[str, set[str]]) -> bool
     other entry it prints is printed outside its own section: the row receipt
     counts it elsewhere, never written, so a line its own writer dropped is
     not reported lost while the copy shows it (LDPDKA entry 31, an NPI line
-    inside a copied E block). `copied` holds only the blocks actually copied."""
-    return (any(_block_prints(entry, tokens) for tokens in copied.values())
+    inside a copied E block). `copied` holds only the blocks actually copied.
+    A line of fewer than `_FOREIGN_ENTRY_MIN_TOKENS` tokens is not counted: a
+    bare label ("Current:") is covered by any block that holds the word."""
+    return (len(_entry_tokens(entry)) >= _FOREIGN_ENTRY_MIN_TOKENS
+            and any(_block_prints(entry, tokens) for tokens in copied.values())
             and not any(_belongs_to(entry, letter) for letter in _VERBATIM_LETTERS))
 
 
