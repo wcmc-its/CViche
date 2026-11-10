@@ -636,10 +636,11 @@ def _locate_node(
     is_child = len(current_path) > 1
     if not is_child:
         scope = replace(scope, claimed=frozenset())
+    search_sequence = _sequence_anchors(current_path)
     if is_child and not parent_mapped:
         matches = find_header_in_sequence(
-            elements, _sequence_anchors(current_path), start_search_idx, scope.end,
-            scope.partial_floor, scope.claimed, scope.outline,
+            elements, search_sequence, start_search_idx, scope.end, scope.partial_floor,
+            scope.claimed, scope.outline,
         )
         if matches:
             return matches[-1][1]
