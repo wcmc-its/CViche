@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
     _GROUP_HEADER_RE,
+    _TITLE_SLIP_MIN_LETTERS,
     DEDUP_UNNAMED_SHORT_MAX_WORDS,
     SPLIT_SIBLING_METRIC,
     _ad_hoc_apart,
@@ -52,8 +53,10 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _other_award_name,
     _other_journal_same_row,
     _other_series_member,
+    _paired_only_by_shape_a,
     _part_numbers,
     _place_only_event,
+    _printed_dates,
     _record_carried,
     _record_name,
     _row_residue,
@@ -64,6 +67,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _standalone_numerals,
     _teaching_parts_apart,
     _title_only_fragment,
+    _titles_disagree,
     _undated_split_record_absorbs_date,
     _under_another_year_head,
     _unlabelled_beside_class_award,
@@ -77,6 +81,7 @@ from unified_pipeline.stage6.fan_out import (  # noqa: E402
 )
 from unified_pipeline.stage6.normalization.publication import (  # noqa: E402
     ResolvedPublication,
+    resolve_publication,
 )
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
 
@@ -2530,6 +2535,319 @@ def test_two_cv_chapter_titles_under_one_pubmed_record_keep_both():
                        "Yields of a gadget club.", chapter_title="Two routes into a sprocket club",
                        year=2020)
     assert deduplicate_entries([first, second], code="S5") == [first, second]
+
+
+# #446, SLIMGK-04: one review listed twice in one list, the copies sharing only
+# a PMCID, one copy's title misspelled.
+
+_PMCID = "PMC4012345"
+_TITLE = "Widget fidelity of quenby rotor assembly"
+
+
+def _pmcid_copy(text, title, **fields):
+    return _pub(text, **{"title": title, "pmcid": _PMCID, "authors": "Quill A, Brandt B",
+                         "year": 2014, **fields})
+
+
+def test_a_misspelled_title_drops_on_a_shared_pmcid():
+    # Five significant words, one misspelled: 4/6 shared words (0.67) on dev.
+    enriched = _enriched("Quill A, Brandt B. Widget fidelity of quenby rotor assembly. "
+                         "Toy Biochem. 2014;53:1-9.", "24700001", _TITLE + ".",
+                         title=_TITLE, pmcid=_PMCID, doi="10.9999/toy.1",
+                         authors="Quill A, Brandt B", year=2014)
+    typo = _pmcid_copy("Quill A, Brandt B. Widget fideity of quenby rotor assembly. Toy Biochem. "
+                       "2014.", "Widget fideity of quenby rotor assembly")
+    typo["enrichment_status"] = "title_check_failed"
+    decisions = []
+    assert deduplicate_entries([typo, enriched], decisions=decisions, code="S2") == [enriched]
+    assert decisions[0]["metric"] == "citation_pmcid"
+
+
+@pytest.mark.parametrize("shared, metric", [
+    ({"pmid": "24700001"}, "citation_pmid"),
+    ({"doi": "10.9999/toy.1"}, "citation_doi"),
+    ({}, "citation_pmcid"),
+])
+def test_a_pair_matched_on_another_key_too_keeps_that_keys_metric(shared, metric):
+    # The PMCID is tried last: a pair dev matched on its PMID or DOI is
+    # recorded as before.
+    a = _pmcid_copy("first source line", _TITLE, **shared)
+    b = _pmcid_copy("second source line, longer", _TITLE, **shared)
+    decisions = []
+    assert len(deduplicate_entries([a, b], decisions=decisions, code="S1")) == 1
+    assert decisions[0]["metric"] == metric
+
+
+@pytest.mark.parametrize("first, second, one_paper", [
+    # The CV's PMCID column says "pending"; PubMed gave the enriched copy one.
+    ({"pmcid": "pending", "enrichment_data": {"pubmed_pmcid": _PMCID}}, {"pmcid": _PMCID}, True),
+    ({"pmcid": "pmc 4012345"}, {"pmcid": _PMCID}, True),        # case and a space
+    ({"pmcid": "PMCID: PMC4012345"}, {"pmcid": _PMCID}, True),  # a label before it
+    # The CV's own PMCID first, PubMed's only when the CV's names none.
+    ({"pmcid": _PMCID, "enrichment_data": {"pubmed_pmcid": "PMC4099999"}}, {"pmcid": _PMCID}, True),
+    ({"pmcid": "4012345"}, {"pmcid": "4012345"}, False),        # a bare number names no PMCID
+    ({"pmcid": "In Process"}, {"pmcid": "In Process"}, False),
+    ({"pmcid": "NIHMS561234"}, {"pmcid": "NIHMS561234"}, False),
+    ({"pmcid": "PMC123"}, {"pmcid": "PMC123"}, False),          # too short to be one
+])
+def test_only_a_pmc_shaped_value_is_a_pmcid_key(first, second, one_paper):
+    copies = []
+    for text, extra in (("first source line", first), ("second source line, longer", second)):
+        extra = dict(extra)
+        enrichment = extra.pop("enrichment_data", None)
+        copy = _pmcid_copy(text, _TITLE, **extra)
+        if enrichment:
+            copy["enrichment_data"] = enrichment
+        copies.append(copy)
+    kept = deduplicate_entries(copies, code="S1")
+    assert len(kept) == (1 if one_paper else 2)
+
+
+@pytest.mark.parametrize("first_title, second_title", [
+    (_TITLE + ", part I", _TITLE + ", part II"),
+    (_TITLE + ", Pt 1", _TITLE + ", Pt 2"),
+    (_TITLE + ", Pt. I", _TITLE + ", Pt. II"),
+])
+def test_two_parts_under_one_pmcid_keep_both(first_title, second_title):
+    a = _pmcid_copy("first source line", first_title)
+    b = _pmcid_copy("second source line, longer", second_title)
+    assert deduplicate_entries([a, b], code="S1") == [a, b]
+
+
+@pytest.mark.parametrize("first, second", [
+    ({"year": 2014}, {"year": 2015}),                     # an e-pub and a print year
+    ({"pmid": "24700001"}, {"pmid": "24700002"}),         # two PubMed records
+    ({"authors": "Quill A"}, {"authors": "Pike S"}),      # another first author
+])
+def test_a_shared_pmcid_with_a_conflict_keeps_both(first, second):
+    a = _pmcid_copy("first source line", _TITLE, **first)
+    b = _pmcid_copy("second source line, longer", _TITLE, **second)
+    assert deduplicate_entries([a, b], code="S1") == [a, b]
+
+
+@pytest.mark.parametrize("second_title, one_paper", [
+    ("Rotor mechanisms of quenby widgets", True),         # a plural: 3/5 words on dev
+    ("Rotor mechansm of quenby widgets", True),           # a letter dropped
+    ("Rotor mehcanism of quenby widgets", True),          # two neighbours swapped
+    ("Rotor mechanism of quenby widgets", True),          # the same title
+    ("Rotor machinery of quenby widgets", False),         # another word
+    ("Rotor mechanisms across barrow gears", False),      # one slip, the rest apart: 2/7
+])
+def test_a_title_word_one_slip_off_agrees_on_a_shared_identifier(second_title, one_paper):
+    a = _pub("first source line", pmid="31234567", title="Rotor mechanism of quenby widgets",
+             year=2019)
+    b = _pub("second source line, longer", pmid="31234567", title=second_title, year=2019)
+    assert len(deduplicate_entries([a, b], code="S1")) == (1 if one_paper else 2)
+
+
+@pytest.mark.parametrize("first, second, disagree", [
+    ("tumor", "tumour", False),         # five letters: a slip
+    ("tumor", "tumr", True),            # one of the two under five letters
+    ("tumr", "tumor", True),
+    ("cyst", "cyts", True),             # four letters: often another word
+    ("covid19", "covid91", True),       # a slip by a digit is another number
+    ("rotors", "rotors2", True),        # a digit added
+])
+def test_only_a_long_word_of_letters_is_a_slip(first, second, disagree):
+    shared = {"renal", "growth"}
+    assert _titles_disagree(shared | {first}, shared | {second}, forgive_slips=True) is disagree
+    assert _TITLE_SLIP_MIN_LETTERS == 5
+
+
+def test_a_title_word_is_one_slips_twin_once():
+    # "widgets" and "widgat" are each one slip off "widget", which counts
+    # once: 2 shared of 3 words, under the agreement.
+    assert _titles_disagree({"rotor", "widgets", "widgat"}, {"rotor", "widget"},
+                            forgive_slips=True)
+    # Without `forgive_slips` a slip is a word apart, as on dev.
+    assert not _titles_disagree({"rotor", "mechanism", "quenby"},
+                                {"rotor", "mechanisms", "quenby"}, forgive_slips=True)
+    assert _titles_disagree({"rotor", "mechanism", "quenby"}, {"rotor", "mechanisms", "quenby"})
+
+
+def test_titles_sharing_exactly_the_agreement_agree():
+    # 4 of 5 words is 0.8, `_CITATION_TITLE_AGREEMENT` itself: not under it.
+    words = {"rotor", "mechanism", "quenby", "widgets"}
+    assert not _titles_disagree(words | {"barrow"}, words)
+    assert not _titles_disagree(words | {"barrow"}, words, forgive_slips=True)
+    assert _titles_disagree(words | {"barrow", "gears"}, words, forgive_slips=True)
+
+
+def test_a_title_journal_year_match_does_not_forgive_a_slip():
+    # No identifier: PubMed printed one title on both, the CV's own titles
+    # are one slip apart. Only an identifier forgives the slip.
+    a = _enriched("first source line", "", "Widget fidelity of quenby rotor assembly.",
+                  title="Widget fidelity of quenby rotor assembly", journal="Toy Biochem",
+                  year=2014)
+    b = _enriched("second source line, longer", "", "Widget fidelity of quenby rotor assembly.",
+                  title="Widget fideity of quenby rotor assembly", journal="Toy Biochem",
+                  year=2014)
+    assert deduplicate_entries([a, b], code="S1") == [a, b]
+
+
+# #446 review (YME2VA 828/602): two copies whose PMCIDs both exist and differ
+# are two records, like two PMIDs, whichever key they share.
+
+@pytest.mark.parametrize("shared", [{"doi": "10.9999/toy.1"}, {"pmid": "24700001"}])
+@pytest.mark.parametrize("first, second, one_paper", [
+    ({"pmcid": _PMCID}, {"pmcid": "PMC4099999"}, False),           # two PMCIDs
+    ({"pmcid": _PMCID}, {"enrichment_data": {"pubmed_pmcid": "PMC4099999"}}, False),  # PubMed's
+    ({"pmcid": _PMCID}, {"pmcid": _PMCID}, True),                  # one PMCID
+    ({"pmcid": _PMCID}, {}, True),                                 # one copy names none
+    ({"pmcid": _PMCID}, {"pmcid": "pending"}, True),               # not PMC-shaped: none
+])
+def test_two_pmcids_under_one_identifier_keep_both(shared, first, second, one_paper):
+    copies = []
+    for text, extra in (("first source line", first), ("second source line, longer", second)):
+        extra = dict(extra)
+        enrichment = extra.pop("enrichment_data", None)
+        copy = _pub(text, title=_TITLE, authors="Quill A, Brandt B", year=2014, **shared, **extra)
+        if enrichment:
+            copy["enrichment_data"] = enrichment
+        copies.append(copy)
+    assert len(deduplicate_entries(copies, code="S4")) == (1 if one_paper else 2)
+
+
+def test_a_misspelled_chapter_under_one_doi_with_another_pmcid_keeps_both():
+    # YME2VA's shape: the title slip is forgiven, the PMCIDs still differ.
+    typo = _pub("Quill A, Brandt B. Widget fideity of quenby rotor assembly. 2014. PMC24700001.",
+                doi="10.9999/toy.1", pmcid="PMC24700001", authors="Quill A, Brandt B",
+                title="Widget fideity of quenby rotor assembly", year=2014)
+    enriched = _enriched("Quill A, Brandt B. Widget fidelity of quenby rotor assembly. 2014.",
+                         "24700001", _TITLE + ".", doi="10.9999/toy.1", pmcid="PMC4012345",
+                         authors="Quill A, Brandt B", title=_TITLE, year=2014)
+    assert deduplicate_entries([typo, enriched], code="S4") == [typo, enriched]
+    enriched["extracted_fields"]["pmcid"] = "PMC24700001"
+    assert deduplicate_entries([typo, enriched], code="S4") == [enriched]
+
+
+# #446 review (GLC5JG 577/578): a pair only shape A makes, on a PMCID or on a
+# PMID or DOI once a title slip is forgiven, keeps both copies when the copy
+# it would drop prints a year, or a month, the kept copy's row does not.
+
+_FRAGMENT_PMID = "24700001"
+
+
+def _dated_typo_copy(date):
+    """A CV line with a misspelled title, whose 5d citation prints `date`."""
+    citation = (f"Quill A, Brandt B. Widget fideity of quenby rotor assembly. Toy Biochem. "
+                f"{date};53(3):1-9.")
+    return _pub(citation, pmid=_FRAGMENT_PMID, title="Widget fideity of quenby rotor assembly",
+                journal="Toy Biochem", authors="Quill A, Brandt B", year=2014,
+                formatted_citation=citation, formatting_source="stage_5d_llm")
+
+
+def _pubmed_fragment(year=""):
+    """A PMID-only stage-2 fragment PubMed completed: its row prints PubMed's
+    title and the year stage 4 read off the fragment, here none."""
+    return _enriched("PMID " + _FRAGMENT_PMID, _FRAGMENT_PMID, _TITLE + ".", journal="Toy Biochem",
+                     authors="Quill A, Brandt B", volume="53", issue="3", pages="1-9", year=year)
+
+
+@pytest.mark.parametrize("fragment_year, typo_date, one_paper", [
+    ("", "2014 Mar", False),            # GLC5JG 577: the year and month print only in the typo
+    ("2014", "2014 Mar", False),        # the month alone
+    ("2014 Mar", "2014 Mar", True),     # the kept row prints the same date
+    ("2014 March", "2014 Mar", True),   # a month spelled out is the same month
+    ("2014", "2014", True),
+    ("2014 Apr", "2014 Mar", False),    # another month
+])
+def test_a_slip_pair_keeps_both_when_the_dropped_copy_alone_prints_a_date(
+        fragment_year, typo_date, one_paper):
+    fragment, typo = _pubmed_fragment(fragment_year), _dated_typo_copy(typo_date)
+    decisions = []
+    kept = deduplicate_entries([typo, fragment], decisions=decisions, code="S1")
+    assert kept == ([fragment] if one_paper else [typo, fragment])
+    assert [d["metric"] for d in decisions] == (["citation_pmid"] if one_paper else [])
+
+
+def test_a_pmcid_pair_keeps_both_when_the_dropped_copy_alone_prints_a_date():
+    typo = _dated_typo_copy("2014 Mar")
+    typo["extracted_fields"].update(pmid="", pmcid=_PMCID)
+    fragment = _pubmed_fragment()
+    fragment["extracted_fields"].update(pmid="", pmcid=_PMCID)
+    assert deduplicate_entries([typo, fragment], code="S1") == [typo, fragment]
+    fragment["extracted_fields"]["year"] = "2014 Mar"
+    assert deduplicate_entries([typo, fragment], code="S1") == [fragment]
+
+
+def test_a_pmid_pair_whose_cv_titles_are_a_slip_apart_is_shape_as():
+    # PubMed printed one title on both, so they share a title + journal +
+    # year too; the CV's own titles are one slip apart, which only the PMID
+    # forgives. Shape A's pair: the month only the dropped copy prints stays.
+    typo = _dated_typo_copy("2014 Mar")
+    typo["enrichment_status"] = "enriched"
+    typo["enrichment_data"] = {"pubmed_title": _TITLE + "."}
+    fragment = _pubmed_fragment("2014")
+    fragment["extracted_fields"]["title"] = _TITLE
+    fragment["text"] += ", a longer line"
+    assert deduplicate_entries([typo, fragment], code="S1") == [typo, fragment]
+    fragment["extracted_fields"]["year"] = "2014 Mar"
+    assert deduplicate_entries([typo, fragment], code="S1") == [fragment]
+
+
+_SLIP_TITLE = "Widget fideity of quenby rotor assembly"
+
+
+@pytest.mark.parametrize("agreeing, second_title, only_shape_a", [
+    ({"pmcid"}, _TITLE, True),                         # a PMCID alone
+    ({"pmid"}, _TITLE, False),                         # dev's PMID pair
+    ({"doi"}, _TITLE, False),                          # dev's DOI pair
+    ({"pmid"}, _SLIP_TITLE, True),                     # only a forgiven slip agrees
+    ({"doi", "pmcid"}, _SLIP_TITLE, True),
+    ({"pmid", "pmcid"}, _TITLE, False),
+    ({"pmid", "citation"}, _SLIP_TITLE, False),        # one 5d citation: dev's
+    ({"citation"}, _SLIP_TITLE, False),
+    ({"title_journal_year"}, _TITLE, False),
+])
+def test_a_pair_is_shape_as_only_on_a_pmcid_or_a_forgiven_slip(agreeing, second_title,
+                                                               only_shape_a):
+    first = _pub("x", title=_TITLE)
+    second = _pub("y", title=second_title)
+    copies = [(entry, resolve_publication(entry)) for entry in (first, second)]
+    assert _paired_only_by_shape_a(agreeing, *copies) is only_shape_a
+
+
+def test_two_equally_full_copies_keep_the_one_listed_first():
+    # Same fields, same line length: neither is fuller, so the first stays.
+    first = _pub("Quill A. Rotor gears. Toy Biochem. 2014;53:1-9. A", pmid=_FRAGMENT_PMID,
+                 title="Rotor gears", journal="Toy Biochem", year=2014)
+    second = _pub("Quill A. Rotor gears. Toy Biochem. 2014;53:1-9. B", pmid=_FRAGMENT_PMID,
+                  title="Rotor gears", journal="Toy Biochem", year=2014)
+    assert deduplicate_entries([first, second], code="S1") == [first]
+    assert deduplicate_entries([second, first], code="S1") == [second]
+
+
+def test_a_pair_dev_makes_still_drops_a_date_only_the_dropped_copy_prints():
+    # The titles agree with no slip forgiven: a PMID pair dev made, which
+    # the date rule leaves as it was.
+    typo = _dated_typo_copy("2014 Mar")
+    typo["extracted_fields"]["title"] = _TITLE
+    typo["extracted_fields"]["formatted_citation"] = typo["text"].replace("fideity", "fidelity")
+    fragment = _pubmed_fragment()
+    assert deduplicate_entries([typo, fragment], code="S1") == [fragment]
+
+
+@pytest.mark.parametrize("citation, dates", [
+    ("Quill A. Rotor gears. Toy Biochem. 2014 Mar;53(3):1-9.", {(2014, None), (2014, 3)}),
+    ("Quill A. Rotor gears. Toy Newsletter. November 2016.", {(2016, None), (2016, 11)}),
+    ("Quill A. Rotor gears. Toy Newsletter. Nov. 5, 2016.", {(2016, None), (2016, 11)}),
+    ("Quill A. Rotor gears. Toy Biochem. 2014 Sept.", {(2014, None), (2014, 9)}),
+    ("Quill A. Rotor gears. Toy Biochem. 53(3):1-9. doi:10.3171/2021.12.TOY21473.", set()),
+    ("Quill A. Rotor gears 1990-2010. Toy Biochem. 2014;53.", {(1990, None), (2010, None),
+                                                               (2014, None)}),
+    ("Quill A. Rotor gears. Toy Biochem. 2014 Toy;53.", {(2014, None)}),  # no month word
+])
+def test_a_rows_printed_dates_are_its_years_and_the_months_beside_them(citation, dates):
+    entry = _pub(citation, formatted_citation=citation, formatting_source="stage_5d_llm")
+    assert _printed_dates(entry) == dates
+
+
+def test_a_rows_printed_dates_come_from_the_row_it_assembles():
+    # No 5d citation: the row prints the stored year in its trailer.
+    assert _printed_dates(_pub("x", title="Rotor gears", journal="Toy Biochem", year="2014 Mar",
+                               volume="53")) == {(2014, None), (2014, 3)}
+    assert _printed_dates(_pubmed_fragment()) == set()
 
 
 def test_the_copy_filling_more_fields_is_kept_over_the_longer_line():
