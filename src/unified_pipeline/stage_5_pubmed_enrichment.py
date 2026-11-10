@@ -517,6 +517,69 @@ def cv_byline_over_shorter_pubmed_list(cv_authors: str | list[str] | None,
     return ', '.join(pubmed_at.get(k) or _pubmed_style(name, given_first) for k, name in enumerate(cv_names))
 
 
+# MEDLINE's author cap by publication year, (last year, authors indexed): ten
+# through 1995, then 24 plus the last author to 1999 (#1661). A PubMed list
+# exactly at its year's cap may be a longer byline cut short (#2004).
+MEDLINE_AUTHOR_CAPS = ((1995, 10), (1999, 25))
+# A target_name word with fewer lowercase letters is initials, mixed-case
+# ones included ("FJTh"), not the owner's name.
+_MIN_OWNER_NAME_LOWERCASE = 2
+# A surname longer than this matches the owner one letter off, as in `_same_author`.
+_ONE_EDIT_SURNAME_FLOOR = 3
+
+
+def medline_author_cap(year: object) -> int | None:
+    """How many authors MEDLINE indexed for a record of `year`; None from
+    2000 on, or for no year."""
+    try:
+        published = int(str(year).strip()[:4])
+    except ValueError:
+        return None
+    return next((cap for last_year, cap in MEDLINE_AUTHOR_CAPS if published <= last_year), None)
+
+
+def _owner_name_words(target_name: str | None) -> set[str]:
+    """The owner's name words: those of `target_name` with two or more
+    lowercase letters, so initials ("JA", "FJTh") are left out."""
+    words = [w for w in str(target_name or '').split()
+             if sum(c.islower() for c in w) >= _MIN_OWNER_NAME_LOWERCASE]
+    return _folded_words(' '.join(words), _MIN_SURNAME_WORD_LEN)
+
+
+def _names_the_owner(pubmed_name: str, owner: set[str]) -> bool:
+    """Whether a PubMed "Surname Initials" author has the owner's surname,
+    or one letter off it past three letters."""
+    surname = ''.join(_folded_tokens(pubmed_name.rpartition(' ')[0])).lower()
+    return any(surname == word or (len(word) > _ONE_EDIT_SURNAME_FLOOR and _within_one_edit(surname, word))
+               for word in owner)
+
+
+def capped_pubmed_list_drops_the_owner(cv_authors: str | list[str] | None, target_name: str | None,
+                                       pubmed_authors: list[str], pubmed_year: object) -> bool:
+    """Whether PubMed's list is MEDLINE's capped cut of the CV's byline with
+    the owner past the cut (#2004): it holds exactly the cap for its year
+    (`medline_author_cap`), the CV's list is at least that long and names
+    the owner, PubMed's names nobody with the owner's surname or one letter
+    off it, and both open with the same author. `pubmed_list_drops_the_owner`
+    misses it when PubMed's list names a co-author the CV lacks; MEDLINE
+    capped WZSMUO e690's 1999 record at 25, and the owner, later in the CV's
+    byline, rendered nowhere."""
+    cap = medline_author_cap(pubmed_year)
+    cv_names = _cv_author_names(cv_authors)
+    owner = _owner_name_words(target_name)
+    return bool(cap and len(pubmed_authors) == cap and len(cv_names) >= cap
+                and owner & _folded_words(str(cv_authors or ''), _MIN_SURNAME_WORD_LEN)
+                and not any(_names_the_owner(author, owner) for author in pubmed_authors)
+                and _same_author(pubmed_authors[0], cv_names[0]))
+
+
+def _withhold_pubmed_authors(enrichment: dict) -> None:
+    """Withhold PubMed's author list so stage 6 renders the CV's, and keep
+    PubMed's beside it for audit."""
+    enrichment['pubmed_authors_without_owner'] = enrichment['pubmed_authors']
+    enrichment['pubmed_authors'] = None
+
+
 def cites_a_reply(text: str, title: str = '') -> bool:
     """Whether the CV's citation text calls the entry a reply. A marker inside
     the title is the title's, so the text must hold more matches than the
@@ -2056,9 +2119,7 @@ class PubMedEnricher:
         # renders; PubMed's is kept beside it for audit.
         if pubmed_list_drops_the_owner(fields.get('authors'), fields.get('target_name'),
                                        pubmed_record.get('authors') or []):
-            enrichment = entry['enrichment_data']
-            enrichment['pubmed_authors_without_owner'] = enrichment['pubmed_authors']
-            enrichment['pubmed_authors'] = None
+            _withhold_pubmed_authors(entry['enrichment_data'])
         # A PubMed list that is the CV's byline with names cut renders as the
         # CV's byline, in PubMed's form (#1661).
         elif cv_byline := cv_byline_over_shorter_pubmed_list(
@@ -2066,6 +2127,11 @@ class PubMedEnricher:
             enrichment = entry['enrichment_data']
             enrichment['pubmed_authors_shorter'] = enrichment['pubmed_authors']
             enrichment['pubmed_authors'] = cv_byline
+        # A list at MEDLINE's cap that names a co-author the CV lacks, and so
+        # passed both rules above, but cut the owner (#2004).
+        elif capped_pubmed_list_drops_the_owner(fields.get('authors'), fields.get('target_name'),
+                                                pubmed_record.get('authors') or [], pubmed_record.get('year')):
+            _withhold_pubmed_authors(entry['enrichment_data'])
 
         # Fill in missing identifier fields
         if not fields.get('pmid') and pubmed_record.get('pmid'):

@@ -3305,6 +3305,50 @@ def test_no_co_investigators_keeps_the_eight_row_block():
     assert len(_generator()._create_grant_table(fields, 'M2A').rows) == 8
 
 
+# --- #2004: a co_investigators value naming only the other PIs is the PI row ---
+
+@pytest.mark.parametrize('pi_name, co_investigators, pi_cell', [
+    # one trailing MPI tag over the whole value
+    ('Ada Varnell', 'Osterby & Quill (MPI)', 'Ada Varnell; Osterby & Quill (MPI)'),
+    ('Ada Varnell', 'Osterby, B; Quill, C; Tamsin, D (MPIs)',
+     'Ada Varnell; Osterby, B; Quill, C; Tamsin, D (MPIs)'),
+    # one prefixed name, with no PI resolved
+    (None, 'MPI Dr. Bram Osterby', 'MPI Dr. Bram Osterby'),
+    # every part tagged PI or MPI, the PI among them: the value alone
+    ('Ada Varnell', 'Ada Varnell (PI), Bram Osterby (MPI)', 'Ada Varnell (PI), Bram Osterby (MPI)'),
+    # the tag spelt out, and a value stage 4 wrapped across lines
+    ('Ada Varnell', 'Osterby & Quill (Multiple Principal Investigator)',
+     'Ada Varnell; Osterby & Quill (Multiple Principal Investigator)'),
+    ('Ada Varnell', 'Osterby &\n  Quill (MPI)', 'Ada Varnell; Osterby & Quill (MPI)'),
+])
+def test_co_investigators_naming_only_multiple_pis_move_to_the_pi_row(pi_name, co_investigators, pi_cell):
+    fields = {'title': 'Shared Cohort Study', 'pi_name': pi_name,
+              'co_investigators': co_investigators, 'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2B'))
+
+    assert cells['Name of Principal Investigator:'] == pi_cell
+    assert 'Co-Investigators:' not in cells
+
+
+@pytest.mark.parametrize('co_investigators', [
+    'Osterby (MPI), Quill',             # an untagged co-investigator
+    'Osterby (Co-I), Quill (MPI)',      # another role word
+    'Osterby (Co-PI)',                  # a co-PI is no PI
+    'Osterby, Quill',                   # no MPI tag at all
+    'Osterby, Co-I; Quill (MPI)',       # another role inside a tagged group
+    'Osterby, Co-PI; Quill (MPI)',
+    'Osterby (PI), Quill (PI)',         # PI tags but no MPI
+    'MPI Osterby (PI)',                 # one name, not a list of PIs
+])
+def test_co_investigators_naming_anyone_else_keep_their_own_row(co_investigators):
+    fields = {'title': 'Shared Cohort Study', 'pi_name': 'Ada Varnell',
+              'co_investigators': co_investigators, 'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2B'))
+
+    assert cells['Name of Principal Investigator:'] == 'Ada Varnell'
+    assert cells['Co-Investigators:'] == co_investigators
+
+
 # --- EBYSBC E7: an empty-section label is no status ----------------------------
 
 @pytest.mark.parametrize('status', [

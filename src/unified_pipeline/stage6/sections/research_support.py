@@ -1682,6 +1682,54 @@ def honor_listed_as_funding_warnings(moved: list[object]) -> list[dict[str, Any]
     }]
 
 
+# A co_investigators value can name only the grant's other principal
+# investigators (#2004): "Osterby & Quill (MPI)", "MPI Dr. Bram Osterby",
+# "Ada Varnell (PI), Bram Osterby (MPI)". Those people are PIs, so the value
+# belongs in the PI row, not under Co-Investigators.
+_MPI_WORD = r"(?:M-?PIs?|multiple[\s-]+PIs?|multi-?PIs?|multiple[\s-]+principal[\s-]+investigators?)"
+MPI_TAG_RE = re.compile(r"(?<![\w-])" + _MPI_WORD + r"(?![\w-])", re.IGNORECASE)
+# One tag over the whole value: "A; B; C (MPIs)".
+_MPI_GROUP_TAG_RE = re.compile(r"^[^()]+?\s*\(\s*" + _MPI_WORD + r"\s*\)\s*\.?$", re.IGNORECASE)
+# One name after the tag: "MPI Dr. A", "MPI: A".
+_MPI_PREFIXED_NAME_RE = re.compile(r"^" + _MPI_WORD + r"\s*:?\s+[^,;()&]+$", re.IGNORECASE)
+# One part of a list tagged PI or MPI: "A (PI)", "B (MPI)".
+_PI_TAGGED_PART_RE = re.compile(r"^[^()]+\(\s*(?:" + _MPI_WORD + r"|(?:contact\s+)?PI)\s*\)$", re.IGNORECASE)
+_CO_INVESTIGATOR_PART_SEPARATOR_RE = re.compile(r"[;,]")
+# A role besides (multiple) PI: a value naming one names someone who is not a PI.
+_NON_PI_ROLE_RE = re.compile(
+    r"(?<![\w-])(?:co-?i|co-?investigators?|investigator|collaborators?|consultants?|mentors?|"
+    r"sub-?(?:pi|investigator)|site\s+pi|co-?pis?|key\s+personnel)(?![\w-])", re.IGNORECASE)
+
+
+def names_only_multiple_pis(value: str) -> bool:
+    """True when a co_investigators value names only people tagged as the
+    grant's (multiple) PIs: one MPI tag over the whole value ("A & B (MPI)"),
+    one name after the tag ("MPI Dr. A"), or a list whose every part is
+    tagged PI or MPI ("A (PI), B (MPI)"). A value with any other role word,
+    or any untagged name in a list, names a co-investigator (#2004)."""
+    if not MPI_TAG_RE.search(value) or _NON_PI_ROLE_RE.search(MPI_TAG_RE.sub(' ', value)):
+        return False
+    if _MPI_GROUP_TAG_RE.match(value) or _MPI_PREFIXED_NAME_RE.match(value):
+        return True
+    parts = [p.strip() for p in _CO_INVESTIGATOR_PART_SEPARATOR_RE.split(value) if p.strip()]
+    return len(parts) > 1 and all(_PI_TAGGED_PART_RE.match(p) for p in parts)
+
+
+def principal_investigator_cell(pi_name: str | None, co_investigators: object) -> str | None:
+    """The Name of Principal Investigator cell: the resolved PI, joined by a
+    co_investigators value that names only the grant's other PIs
+    (`names_only_multiple_pis`, #2004) -- the value alone when it already
+    names the PI or no PI resolved, else "<PI>; <value>". `_optional_grant_rows`
+    then writes no Co-Investigators row for it."""
+    value = ' '.join(str(co_investigators or '').split())
+    if not names_only_multiple_pis(value):
+        return pi_name
+    pi = (pi_name or '').strip()
+    if not pi or pi.casefold() in value.casefold():
+        return value
+    return f"{pi}; {value}"
+
+
 def _optional_grant_rows(
     fields: GrantFields, title: str, pi_name: str | None,
     cost_rows: list[tuple[str, str]],
@@ -1692,7 +1740,9 @@ def _optional_grant_rows(
     template has only a PI row, and #1008 stopped feeding this field into it
     (it usually held the CV owner), which left the names in no cell. A row of
     its own keeps them without touching the PI cell; a value identical to the
-    resolved PI is dropped, since it would repeat the row above it.
+    resolved PI is dropped, since it would repeat the row above it, and so is
+    one naming only the grant's other PIs, which the PI cell carries instead
+    (`principal_investigator_cell`, #2004).
 
     Total requested and Submitted (#1299) carry the two M2C schema fields
     nothing else reads: a pending grant's requested amount and its submission
@@ -1715,7 +1765,8 @@ def _optional_grant_rows(
     title_text = (title or '').strip().lower()
     rows = []
     co_investigators = str(fields.get('co_investigators') or '').strip()
-    if co_investigators and co_investigators.lower() != (pi_name or '').strip().lower():
+    if (co_investigators and not names_only_multiple_pis(co_investigators)
+            and co_investigators.lower() != (pi_name or '').strip().lower()):
         rows.append((CO_INVESTIGATORS_LABEL, co_investigators))
     requested = _format_currency(fields.get('total_funding_requested'))
     if requested and (TOTAL_REQUESTED_LABEL, requested) not in cost_rows:
@@ -2138,7 +2189,7 @@ class ResearchSupportSection:
             *cost_rows,
             (NON_FINANCIAL_SUPPORT_LABEL, fields.get('non_financial_support', '')),
             (DURATION_LABEL, self._format_grant_duration(fields, code, raw_text)),
-            (PI_NAME_LABEL, pi_name),
+            (PI_NAME_LABEL, principal_investigator_cell(pi_name, fields.get('co_investigators'))),
             (YOUR_ROLE_LABEL, role),
             (PERCENT_EFFORT_LABEL, percent_effort),
             *_optional_grant_rows(fields, title, pi_name, cost_rows),

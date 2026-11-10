@@ -147,6 +147,27 @@ def test_location_remainder(location, institution, remainder):
     assert _location_remainder(location, institution) == remainder
 
 
+@pytest.mark.parametrize("location, institution, remainder", [
+    # #2004: the institution's comma tail is the city alone, so only the
+    # state is still missing; it is added as the location writes it
+    ("Crab Hollow, NY", "Norvale State University, Crab Hollow", "NY"),
+    ("Crab Hollow, NY", "Department of Example, Norvale State University, crab hollow", "NY"),
+    ("Crab Hollow, New York", "Norvale State University, Crab Hollow", "New York"),
+    # never: the tail already carries a state, abbreviated or spelt out
+    ("Crab Hollow, NY", "Norvale State University, Crab Hollow, NY", ""),
+    ("Crab Hollow, NY", "Norvale State University, Crab Hollow, New York", ""),
+    # never: the city is itself a state name, so the tail may be the state
+    ("New York, NY", "Norvale University, New York", ""),
+    ("Washington, DC", "Norvale University, Washington", ""),
+    # never: a foreign location, or one of three parts
+    ("Crab Hollow, United Kingdom", "Norvale University, Crab Hollow", ""),
+    ("Crab Hollow, ON", "Norvale University, Crab Hollow", ""),
+    ("Crab Hollow, NY, USA", "Norvale University, Crab Hollow", ""),
+])
+def test_location_remainder_adds_the_state_a_city_only_tail_lacks(location, institution, remainder):
+    assert _location_remainder(location, institution) == remainder
+
+
 @pytest.mark.parametrize("enrichment", [["a"], "abc"])
 def test_non_mapping_enrichment_falls_back_to_no_enrichment(enrichment):
     """#743: a list- or str-valued institution_enrichment (a malformed

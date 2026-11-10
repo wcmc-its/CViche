@@ -36,10 +36,11 @@ most often missing:
 
 Enriched location is then appended as a tracked insertion, unless the
 institution string already ends in it -- "Massachusetts General Hospital,
-Boston, MA" would otherwise gain a second Boston. That predicate lives in
-`resolution._location_already_in_institution`, shared with education and
-positions (#897: the earlier city-word check dropped the location from every
-"New York University" / "New York Presbyterian" entry).
+Boston, MA" would otherwise gain a second Boston -- and as its state alone when
+the institution ends in the city alone (#2004). That rule lives in
+`resolution._location_to_append`, shared with education and positions (#897:
+the earlier city-word check dropped the location from every "New York
+University" / "New York Presbyterian" entry).
 
 A tab inside `training_type` is the extractor having flattened a table cell
 boundary, so tabs become ", " rather than rendering as a run of whitespace.
@@ -64,7 +65,7 @@ from ..normalization import _get_cleaned_institution_name
 from ..parsing.text import supervisor_name
 from ..resolution import (
     _get_institution_location,
-    _location_already_in_institution,
+    _location_to_append,
     _recover_institution_from_nearby_entries,
 )
 from ..sorting import sort_entries_reverse_chronological
@@ -131,10 +132,11 @@ class PostdocTrainingRecord:
     'training_type' vs 'title', or 'field_of_study' vs 'specialty', is
     decided.
 
-    `location` is already '' when the institution string names that city, so
-    the renderer needs no de-duplication rule of its own; `dates` is already
-    through the code's own date rule. `source_entry` is the stage-4 dict as
-    `_gather_postdoc_entries` hands it on, carried through because
+    `location` is already only what the institution string still lacks --
+    '' when it ends in the location, the state when it ends in the city
+    alone -- so the renderer needs no de-duplication rule of its own; `dates`
+    is already through the code's own date rule. `source_entry` is the
+    stage-4 dict as `_gather_postdoc_entries` hands it on, carried through because
     `_add_table_row_with_mixed_content` reads it to attach upstream pipeline
     comments to the row and records the row against it.
     """
@@ -253,12 +255,12 @@ def _normalize_training_entry(
     if not institution and all_entries:
         institution = _recover_institution_from_nearby_entries(entry, all_entries)
 
-    # Location from Stage 5b enrichment. Dropped outright when the
-    # institution already names the city, so the renderer has no
+    # Location from Stage 5b enrichment, cut to what the institution still
+    # lacks: nothing when it already ends in the location, the state alone
+    # when it ends in the city alone (#2004). The renderer then has no
     # de-duplication rule of its own to keep in step with this one.
     location, location_is_enriched = _get_institution_location(entry)
-    if _location_already_in_institution(location, institution):
-        location = ''
+    location = _location_to_append(location, institution)
     # The labelled supervisor goes last, once every cell it is checked against is known.
     training_type = _with_mentor(training_type, entry, (training_type, institution, location), cv_owner)
     start_date, end_date = (fields.get(name, '') for name in POSTDOC_DATE_FIELDS)

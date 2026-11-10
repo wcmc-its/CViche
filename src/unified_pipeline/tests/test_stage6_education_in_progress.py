@@ -501,6 +501,49 @@ class TestInstitutionLocationEnrichment:
         assert row.cells[1].text == "Ohio State University, Boston, MA"
         assert _cell_ins_parts(row.cells[1]) == []
 
+    @pytest.mark.parametrize("institution, city, inserted", [
+        # #2004: an institution ending in its city alone read as already
+        # holding the whole location, so the state was dropped. Only the
+        # state is missing, and it is the enrichment's tracked change.
+        ("Norvale State University, Crab Hollow", "Crab Hollow", [(", NY", "Institution Enrichment")]),
+        # a city that is a state name: the tail may be the state, nothing is added
+        ("Norvale University, New York", "New York", []),
+    ])
+    def test_a_city_only_tail_gains_the_enriched_state_alone(self, institution, city, inserted):
+        gen = _generator()
+        gen._fill_education([{
+            "text": f"BA | {institution} | 1990",
+            "extracted_fields": {"degree": "BA", "institution": institution},
+            "institution_enrichment": {"city": city, "state": "New York",
+                                       "country_code": "US"},
+        }])
+        cell = _first_data_row(gen).cells[1]
+
+        assert cell.text == institution
+        assert _cell_ins_parts(cell) == inserted
+
+    @pytest.mark.parametrize("institution, location, expected", [
+        # stage 4's own location: the CV wrote the state, so it is plain text
+        ("Norvale State University, Crab Hollow", "Crab Hollow, NY",
+         "Norvale State University, Crab Hollow, NY"),
+        # a city that is a state name, and a tail that already has the state
+        ("Norvale University, New York", "New York, NY", "Norvale University, New York"),
+        ("Norvale State University, Crab Hollow, NY", "Crab Hollow, NY",
+         "Norvale State University, Crab Hollow, NY"),
+    ])
+    def test_a_city_only_tail_gains_the_stage4_state_as_plain_text(
+            self, institution, location, expected):
+        gen = _generator()
+        gen._fill_education([{
+            "text": "BA",
+            "extracted_fields": {"degree": "BA", "institution": institution,
+                                 "location": location},
+        }])
+        cell = _first_data_row(gen).cells[1]
+
+        assert cell.text == expected
+        assert _cell_ins_parts(cell) == []
+
 
 class TestSkipAndNormalizationRules:
     """Skip/normalization business rules (review thread 3914996508 item 4):

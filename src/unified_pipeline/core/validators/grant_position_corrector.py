@@ -73,11 +73,31 @@ GRANT_PATTERNS = [
     r'\bPI\s*:',  # PI: John Smith
     r'\b(?:Co-?)?(?:Principal\s+)?Investigator\b',
     r'\b(?:\d{1,2}/\d{2,4})\s*[-–]\s*(?:\d{1,2}/\d{2,4}|present)\b',  # Date ranges like 07/22-06/27
+    # #2004: three grants that also named a director's role were recoded
+    # for want of these.
+    r'\bProgram\s+Project\b',  # a programme-project (P01) core
+    r'\bNational\s+Institutes?\s+of\s+Health\b',
+    r'\bfunded\b',
+]
+
+# NIH institutes whose acronym starts "NI" (NIH, NIMH and NINDS are above),
+# with NICHD's and NIDCR's earlier names. A closed list, not "NI" plus any
+# capitals: "Medical Director, NICU" is a position (#2004).
+NIH_NI_INSTITUTE_ACRONYMS = (
+    'NIA', 'NIAAA', 'NIAID', 'NIAMS', 'NIBIB', 'NICHD', 'NICHHD', 'NIDA', 'NIDCD',
+    'NIDCR', 'NIDDK', 'NIDR', 'NIEHS', 'NIGMS', 'NIMHD', 'NINR',
+)
+# Grant indicators matched in capitals only: an acronym or a letter-prefixed
+# grant number ("RR-00125") written in lower case is ordinary text (#2004).
+CASE_SENSITIVE_GRANT_PATTERNS = [
+    r'\b[A-Z]{1,2}-\d{4,}\b',
+    r'\b(?:' + '|'.join(NIH_NI_INSTITUTE_ACRONYMS) + r')\b',
 ]
 
 # Compile patterns
 POSITION_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in POSITION_LEADERSHIP_PATTERNS]
-GRANT_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in GRANT_PATTERNS]
+GRANT_PATTERNS_COMPILED = ([re.compile(p, re.IGNORECASE) for p in GRANT_PATTERNS]
+                           + [re.compile(p) for p in CASE_SENSITIVE_GRANT_PATTERNS])
 
 
 def has_position_indicators(text: str) -> tuple[bool, str]:

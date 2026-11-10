@@ -514,9 +514,56 @@ def _mentee_range(start: str, end: str, source_text: str) -> str:
     return first if first == last else f"{first}-{last}"
 
 
+#: A month or season a mentee's expected completion may name: "May", "Sept.", "Fall".
+_MONTH_OR_SEASON = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+                    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|"
+                    r"spring|summer|fall|autumn|winter)\.?")
+#: A mentee's class year or expected completion as a CV writes it (#2004):
+#: "Class of 2028", "expected graduation May 2029", "Anticipated 2030".
+_CLASS_OR_EXPECTED_YEAR_RE = re.compile(
+    r"\b(?:class\s+of\s+(?P<class_year>(?:19|20)\d{2})"
+    r"|(?:expected|anticipated)(?:\s+(?:graduation|completion|defen[cs]e|grad\.?))?"
+    r"(?:\s+(?:in|date:?))?(?:\s+" + _MONTH_OR_SEASON + r")?\s+(?P<expected_year>(?:19|20)\d{2}))(?!\d)",
+    re.IGNORECASE)
+#: Any year from 1900 to 2099 a mentee line writes.
+_CENTURY_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+
+def _class_year_phrase(period: str, source_text: str) -> str:
+    """The source line's one class-of or expected-completion phrase, first
+    letter capitalised, when `period` renders only its year ("2028", or
+    "2028-present" for an ongoing mentee) and the line writes no other year;
+    '' otherwise (#2004).
+
+    "Class of 2028" cut to "2028" reads as the year the mentorship ran, not
+    the year the mentee graduates. A line with two such phrases or a second
+    year, and a period that names another year or a range, keep the period.
+    """
+    phrases = list(_CLASS_OR_EXPECTED_YEAR_RE.finditer(source_text))
+    if len(phrases) != 1:
+        return ''
+    year = phrases[0].group('class_year') or phrases[0].group('expected_year')
+    if set(_CENTURY_YEAR_RE.findall(source_text)) != {year}:
+        return ''
+    # The two shapes `_mentee_period` gives one year: alone, or open-ended.
+    if not re.fullmatch(rf"{year}(?:-present)?", period):
+        return ''
+    phrase = ' '.join(phrases[0].group(0).split())
+    return phrase[0].upper() + phrase[1:]
+
+
 def _format_mentee_duration(fields: Mapping[str, Any], *, ongoing: bool,
                             source_text: str) -> str:
-    """The Mentoring Period cell of one mentee table.
+    """The Mentoring Period cell of one mentee table: `_mentee_period`, or
+    the CV's own class-of or expected-completion phrase when the period
+    renders only that phrase's year (`_class_year_phrase`, #2004)."""
+    period = _mentee_period(fields, ongoing=ongoing, source_text=source_text)
+    return _class_year_phrase(period, source_text) or period
+
+
+def _mentee_period(fields: Mapping[str, Any], *, ongoing: bool,
+                   source_text: str) -> str:
+    """The Mentoring Period of one mentee, from its stored dates.
 
     `ongoing` is the caller's decision that the mentorship is still running
     (stage6/sections/mentoring.py `_is_ongoing_mentorship`). Only then does a
