@@ -30,8 +30,10 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from unified_pipeline.stage6.normalization.pii import (
+    CHILD_LIST_MAX_LINES,
     PRE_LLM_PLACEHOLDER,
     pre_llm_bare_label_category,
+    redact_pre_llm_child_list_paragraphs,
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
@@ -1639,6 +1641,39 @@ def _scrub_pre_llm_pii_next_element(elements: list[dict[str, Any]]) -> None:
         _scrub_pre_llm_value_of_category_in_element(elements[idx + 1], category)
 
 
+def _plain_paragraph_run(elements: list[dict[str, Any]], start: int) -> list[str]:
+    """The texts of the elements from `start` on that are paragraphs, not
+    tables, up to the first table, at most the label's own plus
+    `CHILD_LIST_MAX_LINES`. A table's text is rebuilt from its cells, never
+    scrubbed on its own (#847 round 4), so a table ends the run."""
+    texts: list[str] = []
+    for el in elements[start:start + CHILD_LIST_MAX_LINES + 1]:
+        text = el.get("text")
+        if el.get("data") or not isinstance(text, str):
+            break
+        texts.append(text)
+    return texts
+
+
+def _scrub_pre_llm_child_list_paragraphs(elements: list[dict[str, Any]]) -> None:
+    """#847 (R6): a Children label paragraph whose list goes on in the
+    paragraphs after it ("Children:", "<name> <date>", "<name> <date>").
+    Each paragraph's own scrub sees one line of the list, so a line of names
+    and dates under the label kept its dates. Here each paragraph with a
+    colon is joined with the paragraphs after it, and the list's dates are
+    withheld wherever they sit (`redact_pre_llm_child_list_paragraphs`, which
+    leaves the run alone unless the list runs past its first paragraph, and
+    stops it at a blank line)."""
+    for idx, el in enumerate(elements):
+        if ":" not in str(el.get("text") or ""):
+            continue
+        texts = _plain_paragraph_run(elements, idx)
+        if len(texts) < 2:
+            continue
+        for offset, scrubbed in enumerate(redact_pre_llm_child_list_paragraphs(texts)):
+            _set_scrubbed_text(elements[idx + offset], scrubbed)
+
+
 def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Replace DOB/SSN VALUES in place, in every element and table cell
     `extract_unified_elements` built, before any LLM stage reads them
@@ -1649,7 +1684,9 @@ def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str
     value-cell case, `_scrub_pre_llm_pii_column` for the value directly
     below a label in a two-row form table, and
     `_scrub_pre_llm_pii_next_element` for a label-only paragraph whose
-    value is the following paragraph or table.
+    value is the following paragraph or table, and
+    `_scrub_pre_llm_child_list_paragraphs` for a child list that goes on in
+    the paragraphs after its label (#847).
 
     A table element's `data` (per-cell) is the source of truth once any
     cell-level scrub runs on it: `text` (the pre-flattened join built at
@@ -1675,6 +1712,7 @@ def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str
             if isinstance(text, str) and text:
                 _set_scrubbed_text(el, redact_pre_llm_values(text))
     _scrub_pre_llm_pii_next_element(elements)
+    _scrub_pre_llm_child_list_paragraphs(elements)
     return elements
 
 

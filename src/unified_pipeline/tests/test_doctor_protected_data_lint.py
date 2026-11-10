@@ -1131,3 +1131,41 @@ def test_1426_the_independent_shape_reads_each_line_and_whole_words(text):
 def test_1426_the_memberships_section_does_not_get_the_ambiguous_rows():
     blocks = [_p(_MEMBERSHIPS_HEADER), _p("Children: Example Society Section")]
     assert lint_protected_data_in_output(blocks) == []
+
+
+# --------------------------------------------------------------------------
+# #847 (BLBVPD-01): a head count before the child word, then the children's
+# names. The child words lacked the singular "child", so "One child - <name>"
+# rendered with the lint silent. Invented values.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "One child - Kim Lee Example",
+    "One child: Kim",
+    "Two grandchildren: Kim, Lee",
+    "Two grown daughters - Kim Example and Lee Example",
+    "3 children (Kim, Lee and Bob)",
+    "Two grown grandsons: Kim, Lee",
+    "Two adult sons: Kim, Lee",
+    "One young child - Kim Example",
+])
+def test_847_a_head_count_and_the_children_s_names_are_a_shape(text):
+    assert _shape_categories(text) == ["children / dependents"]
+
+
+def test_847_a_child_statement_in_the_appendix_is_one_finding_naming_no_value():
+    findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p("One child - Kim Lee Example")])
+    assert len(findings) == 1
+    assert "(children / dependents)" in findings[0]["message"]
+    assert "Kim" not in findings[0]["message"]
+
+
+@pytest.mark.parametrize("text", [
+    "One child with asthma - Example Study",
+    "40 children: a cohort of asthma",
+    "Five children - The Forgotten Patients",
+    "Two-child families: Example Survey",
+    "Symposium for Dr. Example's 70th Birthday - Example Hall, 2019",
+])
+def test_847_a_study_count_or_a_title_after_a_head_count_is_not_a_shape(text):
+    assert _shape_hits(text, []) == []
