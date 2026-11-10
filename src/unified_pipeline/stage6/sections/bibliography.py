@@ -92,19 +92,26 @@ logger = logging.getLogger(__name__)
 _EVENT_STATUS_CODES = frozenset({'S8'})
 
 
-def _with_abstract_status(code: str, citation: str, pub: Mapping) -> str:
-    """`citation` with its source line's presentation type
+def _with_abstract_status(code: str, citation: str, pub: Mapping, num: int) -> str:
+    """`citation`, numbered `num`, with its source line's presentation type
     (`presentation_type_note`, #1570) and then its event-status note
     (`event_status_note`, #1436), each in parentheses, when `code` is an event
     subsection. The type is checked against the citation and the note, so
-    one that either already prints is not added again. A multi-line source is
-    a fused block of several citations (#208) whose type or note may belong
-    to another of them, so it is left as the citation reads."""
+    one that either already prints is not added again. A note that writes
+    the month the meeting trailer took beside a stored bare year
+    (`WrittenDate.is_month_written_in`) leaves that year bare
+    (`citation_with_stored_year`), so the row prints the month once (VDFTOD
+    106-108, 118; #1570 round 4). A multi-line source is a fused block of
+    several citations (#208) whose type or note may belong to another of
+    them, so it is left as the citation reads."""
     source = _event_source(code, pub)
     if not source:
         return citation
+    resolved = resolve_publication(pub)
     status = event_status_note(source, citation)
-    kind = presentation_type_note(source, resolve_publication(pub).title, f"{citation} {status}")
+    if resolved.bare_year_date.is_month_written_in(status):
+        citation = citation_with_stored_year(pub, num)
+    kind = presentation_type_note(source, resolved.title, f"{citation} {status}")
     return " ".join([citation, *(f"({note})" for note in (kind, status) if note)])
 
 
@@ -913,7 +920,7 @@ class BibliographySection:
                     continue
                 citation_num += 1
                 citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
-                citation_text = _with_abstract_status(code, citation_text, pub)
+                citation_text = _with_abstract_status(code, citation_text, pub, citation_num)
                 source_heading_note = _source_heading_note(citation_text, pub)
                 original_text = enrichment.text
                 enrichment_status = enrichment.enrichment_status

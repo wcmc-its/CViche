@@ -25,7 +25,12 @@ from dataclasses import replace
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from ..normalization import ResolvedPublication, WrittenDate, resolve_publication
+from ..normalization import (
+    ResolvedPublication,
+    WrittenDate,
+    resolve_publication,
+    written_month_dates,
+)
 
 # Money is quantized to cents under a named rounding policy rather than
 # whatever a binary float's repr happens to do (round-2 review of #481,
@@ -471,8 +476,10 @@ def _format_currency(value: object) -> str:
 # An event-status note on a talk or abstract line: "(postponed due to
 # COVID-19)", "[Poster session canceled]", "virtual due to ...". No R or S8
 # schema field holds it, so stage 4 drops it and a postponed talk renders as
-# delivered (NDMRSO: SYWZJA 557, TVZDVF 451/494/496, #1436).
-_EVENT_STATUS_WORD = r'(?:postponed|cancell?ed|virtual(?:ly)?\s+due\s+to)'
+# delivered (NDMRSO: SYWZJA 557, TVZDVF 451/494/496, #1436). The first two
+# say the event did not take place as planned (`_NOT_GIVEN_RE`).
+_EVENT_CALLED_OFF_WORD = r'postponed|cancell?ed'
+_EVENT_STATUS_WORD = rf'(?:{_EVENT_CALLED_OFF_WORD}|virtual(?:ly)?\s+due\s+to)'
 _EVENT_STATUS_WORD_RE = re.compile(rf'\b{_EVENT_STATUS_WORD}\b', re.IGNORECASE)
 # The whole parenthetical or bracket the status word sits in ...
 _BRACKETED_EVENT_STATUS_RE = re.compile(
@@ -568,6 +575,30 @@ _SPOKEN_HEAD_BESIDE_A_POSTER_RE = re.compile(
     rf'(?<![\w-])(?:(?P<before>{_SPOKEN_HEAD})(?:{_TYPE_JOINER}){_POSTER_HEAD}(?![\w-])'
     rf'|{_POSTER_HEAD}(?:{_TYPE_JOINER})(?P<after>{_SPOKEN_HEAD})(?![\w-])'
     rf'|(?P<communication>{_SPOKEN_HEAD})\s+communication)', re.IGNORECASE)
+#: Words that say the meeting or the talk did not take place: the event
+#: status words for that (`_EVENT_CALLED_OFF_WORD`), "not held" and
+#: "withdrawn". A type would then name a talk nobody gave (FBNZIP 69's
+#: "selected for oral presentation ... (not held due to COVID-19
+#: pandemic)"; #1570 round 4).
+_NOT_GIVEN_RE = re.compile(rf'\b(?:{_EVENT_CALLED_OFF_WORD}|not\s+held|withdrawn)\b',
+                           re.IGNORECASE)
+#: A presentation a line lists, as "presented at <meeting>" ...
+_PRESENTED_AT_RE = re.compile(r'\bpresented\s+at\b', re.IGNORECASE)
+#: ... or as "<type> Presentation: <meeting>" or "presentation at <meeting>".
+_PRESENTATION_AT_RE = re.compile(r'\bpresentation\s*(?::|at\b)', re.IGNORECASE)
+
+
+def _lists_several_presentations(text: str) -> bool:
+    """True when `text` lists two or more presentations of the work: two
+    "presented at" items, two "Presentation:" or "presentation at" items,
+    or meeting dates in two different months (`written_month_dates`). The
+    type the line states may then be one presentation's only, while the row
+    covers them all (YIFJUS 228: a talk at one meeting, a poster at the
+    next; #1570 round 4). One item of each kind is one presentation told
+    twice ("Poster presentation: presented at ...")."""
+    return (len(_PRESENTED_AT_RE.findall(text)) > 1
+            or len(_PRESENTATION_AT_RE.findall(text)) > 1
+            or len(written_month_dates(text)) > 1)
 
 
 def _presentation_head(phrase: str) -> str:
@@ -631,7 +662,12 @@ def presentation_type_note(source_text: str, title: str, shown_text: str) -> str
     And '' when any type the line states follows a prize word or a word that
     qualifies it (`_is_prize_or_qualified`), so a prize's category or a
     qualified format is not printed as how the work was given (#1570 round 3).
+    And '' when the line says the meeting or talk did not take place
+    (`_NOT_GIVEN_RE`), or lists several presentations
+    (`_lists_several_presentations`) (#1570 round 4).
     """
+    if _NOT_GIVEN_RE.search(source_text) or _lists_several_presentations(source_text):
+        return ''
     matches = [match for match in _PRESENTATION_TYPE_RE.finditer(source_text)
                if not _is_award_or_role(source_text, match)]
     heads = {_presentation_head(match[0]) for match in matches}

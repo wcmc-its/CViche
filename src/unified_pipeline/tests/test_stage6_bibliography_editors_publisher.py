@@ -1979,6 +1979,72 @@ def test_presentation_type_note_keeps_a_type_no_word_qualifies(text, expected):
     assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
 
 
+@pytest.mark.parametrize('text', [
+    # #1570 round 4 (FBNZIP 69's shape): the line says the meeting or the
+    # talk did not take place, so the type names a talk nobody gave.
+    'Rook J. A Talk on Larks. Selected for oral presentation, Quillfern Meeting '
+    '(not held due to a storm).',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting. NOT  HELD.',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting. Cancelled due to a storm.',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting [canceled].',
+    'Rook J. A Talk on Larks. Oral presentation, Quillfern Meeting. Postponed due to a storm.',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting (abstract withdrawn).',
+])
+def test_presentation_type_note_is_empty_for_an_event_that_did_not_take_place(text):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == ''
+
+
+@pytest.mark.parametrize('text,expected', [
+    # A meeting that took place keeps its type, online or as planned ...
+    ('Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting, held virtually due to '
+     'a storm.', 'Poster presentation'),
+    ('Rook J. A Talk on Larks. Oral presentation, Quillfern Meeting (held as planned).',
+     'Oral presentation'),
+    # ... and a status word inside a longer word is none.
+    ('Rook J. Uncancelled larks. Poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. Larks withdrawnness. Poster, Quillfern Meeting.', 'Poster'),
+])
+def test_presentation_type_note_keeps_the_type_of_an_event_that_took_place(text, expected):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
+
+
+@pytest.mark.parametrize('text', [
+    # #1570 round 4 (YIFJUS 228's shape): the line lists two presentations,
+    # so the type it states may be one's only, and the row covers both: two
+    # "Presentation:" or "presentation at" items, two "presented at" items,
+    # or meeting dates in two different months.
+    'Rook J. A Talk on Larks. - Presentation: Quillfern Meeting. March 2008. - Poster '
+    'Presentation: Wren Meeting. May 2008.',
+    'Rook J. A Talk on Larks. Presentation: Quillfern Meeting. Poster Presentation: Wren Meeting.',
+    'Rook J. A Talk on Larks. Poster presentation at the Quillfern Meeting. Poster presentation '
+    'at the Wren Retreat.',
+    'Rook J. A Talk on Larks. Poster. Presented at the Quillfern Meeting and presented at the '
+    'Wren Retreat.',
+    'Rook J. A Talk on Larks (November 2017). Poster session, Quillfern Meeting. Wren Meeting, '
+    'December 2017.',
+    'Rook J. A Talk on Larks. Poster, Quillfern Meeting, May 2008; Wren Meeting, May 2009.',
+])
+def test_presentation_type_note_is_empty_when_the_line_lists_several_presentations(text):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == ''
+
+
+@pytest.mark.parametrize('text,expected', [
+    # One presentation keeps its type: one item of each kind is one
+    # presentation told twice ...
+    ('Rook J. A Talk on Larks. Poster presentation: presented at the Quillfern Meeting, '
+     'May 2008.', 'Poster presentation'),
+    # ... and one month written twice, a range across two months, or a year
+    # written with no month, is one meeting's date.
+    ('Rook J. A Talk on Larks. Poster, Quillfern Meeting, 3-5 May 2008. Updated May 2008.',
+     'Poster'),
+    ('Rook J. A Talk on Larks. Poster, Quillfern Meeting, 30 September 2012 - 3 October 2012.',
+     'Poster'),
+    ('Rook J. A Talk on Larks. Poster, Quillfern Meeting 2003, Larchmere, May 2004.', 'Poster'),
+])
+def test_presentation_type_note_keeps_the_type_of_one_presentation(text, expected):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
+
+
 def test_pubmed_title_question_keeps_its_mark_without_a_period():
     """#2069 through the enrichment path: the PubMed title outranks the
     extracted one, and its "?" is not followed by a "."."""

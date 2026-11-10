@@ -3984,10 +3984,12 @@ def test_an_s8_citation_is_read_by_the_planner_without_its_line_type_and_date():
 
 @pytest.mark.parametrize("change,printed_tail,planner_tail", [
     # The event-status note printed before #1570 too (#1436), so it is kept.
+    # (A meeting held online: a postponed one prints no type, #1570 round 4.)
     ({"text": ("Rook J. Widget calibration. Poster presentation, Annual Meeting of the Eastern "
-               "Example Society, Larchmere, Quebec, Canada, August 2002. Postponed due to COVID-19.")},
-     "2002 August; Larchmere, Quebec, Canada. (Poster presentation) (Postponed due to COVID-19)",
-     "2002; Larchmere, Quebec, Canada. (Postponed due to COVID-19)"),
+               "Example Society, Larchmere, Quebec, Canada, August 2002. Held virtually due to "
+               "COVID-19.")},
+     "2002 August; Larchmere, Quebec, Canada. (Poster presentation) (virtually due to COVID-19)",
+     "2002; Larchmere, Quebec, Canada. (virtually due to COVID-19)"),
     # So is the disclaiming heading's note after the citation (#1573).
     ({"hierarchy": ["Abstracts (not as an author)"]},
      '2002 August; Larchmere, Quebec, Canada. (Poster presentation) '

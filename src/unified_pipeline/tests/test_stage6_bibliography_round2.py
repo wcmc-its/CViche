@@ -1478,12 +1478,56 @@ def _abstract_paragraphs(code, source_line, citation_body):
 
 def test_an_s8_postponed_note_dropped_by_the_citation_is_appended():
     # NDMRSO SYWZJA 557's shape: the note is a bare sentence, 5d dropped it.
-    # The line's "Oral presentation" is kept too, before the note (#1570).
+    # The line's "Oral presentation" is not: the talk was not given (#1570
+    # round 4).
     source = ("19. Doe J, Roe R. (2020, March). Widget calibration. Oral presentation at "
               "the Widget Society Conference, Springfield. Postponed due to COVID-19.")
     body = "Doe J, Roe R. Widget calibration. Widget Society Conference; 2020 Mar; Springfield."
     assert _abstract_paragraphs("S8", source, body) == \
-        [f"1. {body} (Oral presentation) (Postponed due to COVID-19)"]
+        [f"1. {body} (Postponed due to COVID-19)"]
+
+
+def test_an_s8_type_is_printed_before_the_status_note_of_an_event_that_took_place():
+    # A meeting held online keeps the line's type, before its note (#1570).
+    source = ("19. Doe J, Roe R. (2020, March). Widget calibration. Oral presentation at "
+              "the Widget Society Conference, Springfield. Held virtually due to COVID-19.")
+    body = "Doe J, Roe R. Widget calibration. Widget Society Conference; 2020 Mar; Springfield."
+    assert _abstract_paragraphs("S8", source, body) == \
+        [f"1. {body} (Oral presentation) (virtually due to COVID-19)"]
+
+
+def _meeting_paragraphs(source_line):
+    """The citation paragraphs `_fill_bibliography` writes for an S8 talk
+    with no stage-5d citation, whose stage-4 year is the bare "2020": the
+    meeting trailer prints the month the line writes beside it (#1570)."""
+    gen = _generator()
+    entry = {"text": source_line, "extracted_fields": {
+        "authors": "Doe J", "title": "Widget calibration", "year": "2020",
+        "conference_name": "Widget Society Conference", "location": "Springfield"}}
+    gen._fill_bibliography({"S8": [entry]}, cv_owner={}, document_uid="")
+    return [p.text for p in gen.doc.paragraphs if p.text.startswith("1. ")]
+
+
+@pytest.mark.parametrize("source,note", [
+    # #1570 round 4 (VDFTOD 106-108, 118's shape): the status note the row
+    # prints writes the month, so the date keeps the bare year ...
+    ("Doe J. (April 2020 - Cancelled due to a storm) Widget calibration. Widget Society "
+     "Conference, Springfield.", "(April 2020 - Cancelled due to a storm)"),
+    # ... in any spelling of that month.
+    ("Doe J. Widget calibration. Widget Society Conference, Springfield, April 2020 "
+     "(Apr. 2020 session cancelled).", "(Apr. 2020 session cancelled)"),
+])
+def test_an_s8_bare_year_takes_no_month_its_status_note_prints(source, note):
+    assert _meeting_paragraphs(source) == [
+        f"1. Doe J. Widget calibration. Widget Society Conference; 2020; Springfield. {note}"]
+
+
+def test_an_s8_bare_year_takes_a_month_its_status_note_does_not_print():
+    source = ("Doe J. Widget calibration. Widget Society Conference, Springfield, April 2020 "
+              "(postponed due to a storm).")
+    assert _meeting_paragraphs(source) == [
+        "1. Doe J. Widget calibration. Widget Society Conference; 2020 April; Springfield. "
+        "(postponed due to a storm)"]
 
 
 def test_an_s8_citation_that_kept_its_status_is_unchanged():
