@@ -3149,3 +3149,141 @@ def test_is_blank_value_field_row_rejects_the_merged_label_echo():
     assert not is_blank_value_field_row("EDUCATION:", blank, [valued, blank, other])
     assert not is_blank_value_field_row("EDUCATION:", blank, [other, blank, valued])
     assert is_blank_value_field_row("EDUCATION:", blank, [valued, other, blank])
+
+
+# --------------------------------------------------------------------------
+# #847 (R6): a child list that goes on in the paragraphs after its Children
+# label. Each paragraph's own scrub sees one line of the list, so its dates
+# reached the LLM. Every name and date below is invented.
+# --------------------------------------------------------------------------
+
+def _paragraphs_docx(path, paragraphs):
+    doc = Document()
+    for text in paragraphs:
+        doc.add_paragraph(text)
+    doc.save(str(path))
+    return path
+
+
+def test_847_a_child_list_in_the_paragraphs_after_its_label_loses_its_dates(tmp_path):
+    path = _paragraphs_docx(tmp_path / "child_list_paragraphs.docx", [
+        "Children:", "Kim Example 01/02/2001", "Lee Example (2003)", "Education",
+        "2005 MD, Example University"])
+    elements = extract_unified_elements(str(path))["elements"]
+    assert [e["text"] for e in elements] == [
+        "Children:", "Kim Example [withheld]", "Lee Example ([withheld])", "Education",
+        "2005 MD, Example University"]
+
+
+def test_847_a_child_list_of_two_paragraphs_loses_its_dates(tmp_path):
+    """The label's own paragraph holds the first child, the next the second."""
+    path = _paragraphs_docx(tmp_path / "child_list_two_paragraphs.docx", [
+        "Children: Kim Example 2001", "Lee Example 2003"])
+    elements = extract_unified_elements(str(path))["elements"]
+    assert [e["text"] for e in elements] == ["Children: Kim Example [withheld]", "Lee Example [withheld]"]
+
+
+def test_847_a_child_list_rewritten_across_paragraphs_drops_its_stale_offsets(tmp_path):
+    """The scrub rewrites a child line, so the tab offsets recorded against
+    the text as read no longer index it (#1252)."""
+    path = _paragraphs_docx(tmp_path / "child_list_tabs.docx", [
+        "Two sons:", "Kim Example\t01/02/2001", "Lee Example\t03/04/2003"])
+    elements = extract_unified_elements(str(path))["elements"]
+    assert [e["text"] for e in elements] == ["Two sons:", "Kim Example [withheld]", "Lee Example [withheld]"]
+    assert all(TAB_OFFSETS_KEY not in e for e in elements[1:])
+
+
+def test_847_a_child_list_after_other_paragraphs_and_a_table_loses_its_dates(tmp_path):
+    """The label need not open the document: a heading, then a table whose
+    label cell holds a colon (a run of no paragraph), then the label and its
+    list."""
+    doc = Document()
+    doc.add_paragraph("Personal Data")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Citizenship:"
+    table.cell(0, 1).text = "Example"
+    for text in ("Children:", "Kim Example 2001", "Lee Example 2003"):
+        doc.add_paragraph(text)
+    doc.save(str(tmp_path / "child_list_later.docx"))
+    elements = extract_unified_elements(str(tmp_path / "child_list_later.docx"))["elements"]
+    assert [e["text"] for e in elements][-3:] == ["Children:", "Kim Example [withheld]", "Lee Example [withheld]"]
+
+
+@pytest.mark.parametrize("paragraphs", [
+    # one dated child only
+    ["Children:", "Kim Example 2001", "Board certified in 2005"],
+    # a blank paragraph ends the list before its second date
+    ["Children:", "Kim Example 2001", "", "Lee Example 2003"],
+    # not a Children label
+    ["Education:", "2001 Example University", "2005 Example Hospital"],
+    # the label goes on in prose
+    ["Children: two, both grown", "Kim Example 2001", "Lee Example 2003"],
+])
+def test_847_paragraphs_that_are_not_a_continued_child_list_keep_their_years(tmp_path, paragraphs):
+    path = _paragraphs_docx(tmp_path / "not_a_child_list.docx", paragraphs)
+    elements = extract_unified_elements(str(path))["elements"]
+    assert [e["text"] for e in elements] == paragraphs
+
+
+def test_847_a_table_ends_a_child_list_in_the_paragraphs(tmp_path):
+    doc = Document()
+    doc.add_paragraph("Children:")
+    doc.add_paragraph("Kim Example 2001")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Lee Example 2003"
+    table.cell(0, 1).text = "Example"
+    path = tmp_path / "child_list_then_table.docx"
+    doc.save(str(path))
+    elements = extract_unified_elements(str(path))["elements"]
+    assert [e["text"] for e in elements] == ["Children:", "Kim Example 2001", "Lee Example 2003 | Example"]
+
+
+def test_847_the_reader_scrub_and_the_render_agree_on_a_child_list_in_paragraphs(tmp_path):
+    """Bar (4) for R6: the reader replaces every child date of a list held as
+    paragraphs, and the render of those lines, joined as stage 2 joins an
+    entry's lines, keeps neither a child's name nor a date."""
+    from unified_pipeline.stage6.pii_pass import run_pii_pass
+    from unified_pipeline.stage_6_word_template import RENDER_ROUTED_CODES
+
+    path = _paragraphs_docx(tmp_path / "child_list_agree.docx", [
+        "Children:", "Kim Example (01/02/2001)", "Lee Example (03/04/2003)."])
+    entry_text = "\n".join(e["text"] for e in extract_unified_elements(str(path))["elements"])
+    assert "01/02/2001" not in entry_text and "03/04/2003" not in entry_text
+    for code in ("A", "T"):
+        entry = {"text": entry_text, "taxonomy_code": code, "extracted_fields": {}}
+        result = run_pii_pass({code: [entry]}, routed_codes=RENDER_ROUTED_CODES, section_names={})
+        assert result.withheld, code
+        assert entry["text"] == "", code
+
+
+#: (paragraph, what the reader leaves of it): R1, R2, R3 and R4 reach the
+#: reader through each paragraph's own scrub; the last two are inverses (a
+#: title after a head count, a study count inside a sentence).
+_847_READER_PARAGRAPHS = [
+    ("Two sons: Kim (01/02/2001), Lee (03/04/2003), both at home",
+     "Two sons: Kim ([withheld]), Lee ([withheld]), both at home"),
+    ("Two sons, Kim (2012) and Lee (2013)", "Two sons, Kim ([withheld]) and Lee ([withheld])"),
+    ("Family: Pat Example DOB: 01/02/1974, Kim DOB: 05/06/2005",
+     "Family: Pat Example DOB: [withheld], Kim DOB: [withheld]"),
+    ("Children: Kim Example, b. 2016; Lee Example (born 2017)",
+     "Children: Kim Example, b. [withheld]; Lee Example (born [withheld])"),
+    ("Two Sons - The Memoir. Example Press, 1999", "Two Sons - The Memoir. Example Press, 1999"),
+    ("Studied 2 children - Kim (2019) and Lee (2021)", "Studied 2 children - Kim (2019) and Lee (2021)"),
+]
+
+
+def test_847_each_paragraph_shape_reaches_every_reader_output(tmp_path):
+    """#847 (R1-R4) at the reader: the elements, and the lines stage 1a's
+    chunk builder reads (`extract_text_from_docx`), lose the child dates and
+    keep the inverses' years."""
+    try:
+        from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+            extract_text_from_docx,
+        )
+    except ImportError:
+        pytest.skip("chunked_chat_hierarchy_extractor not importable in this env")
+
+    path = _paragraphs_docx(tmp_path / "child_shapes.docx", [raw for raw, _ in _847_READER_PARAGRAPHS])
+    expected = [scrubbed for _, scrubbed in _847_READER_PARAGRAPHS]
+    assert [e["text"] for e in extract_unified_elements(str(path))["elements"]] == expected
+    assert extract_text_from_docx(str(path)) == expected

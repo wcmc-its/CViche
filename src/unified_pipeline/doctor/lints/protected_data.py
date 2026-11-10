@@ -248,6 +248,11 @@ _COUNT = r"(?:[1-9]|(?i:one|two|three|four|five|six|seven|eight|nine|ten))\b"
 _SEP = r"[ \t]*(?::|[-–—](?=[ \t])|\()[ \t]*"
 _CHILD_WORDS = r"(?i:children|sons?|daughters?)"
 _GRANDCHILD_WORDS = r"(?i:(?:great[- ]?)?grand(?:children|child|sons?|daughters?))"
+#: #847 (BLBVPD-01): the child words after a head count, the singular "child"
+#: among them ("One child - <name>"): `_CHILD_WORDS` lacks it, and that line
+#: was missed. An adult child is still a child ("two grown sons: ...").
+_COUNTED_CHILD_WORDS = r"(?i:children|child|sons?|daughters?)"
+_CHILD_AGE_WORD = r"(?i:(?:adult|grown|young)[ \t]+)?"
 #: A North American number, with or without its area-code parentheses.
 _PHONE = r"(?:\+?1[ .-]?)?(?:\(\d{3}\)[ .-]?|\b\d{3}[ .-])\d{3}[ .-]\d{4}\b"
 _STREET = (r"\b\d{1,6}[ \t]+(?:[A-Z][\w.'’-]*[ \t]+){1,4}"
@@ -310,6 +315,10 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
     # "& Sons" / "and Sons" is a publisher ("Example & Sons: Hoboken").
     (re.compile(r"(?<!& )(?<!and )\b" + _CHILD_WORDS + r"\b" + _SEP
                 + r"(?P<value>" + _NAMES + "|" + _DATE + "|" + _COUNT + ")"), CAT_CHILDREN),
+    # #847 (BLBVPD-01): a head count, the child word, then the children's
+    # names -- "One child - <name> <name>", "Two sons: <name>, <name>".
+    (re.compile(r"(?<![\w-])" + _COUNT + r"[ \t]+" + _CHILD_AGE_WORD + r"(?:" + _GRANDCHILD_WORDS + "|"
+                + _COUNTED_CHILD_WORDS + r")\b" + _SEP + r"(?P<value>" + _NAMES + ")"), CAT_CHILDREN),
     (re.compile(r"\b" + _GRANDCHILD_WORDS + r"\b" + _SEP
                 + r"(?P<value>" + _NAMES + "|" + _DATE + "|" + _COUNT + ")"), CAT_FAMILY),
     # A count ending its fragment ("Nationality: ...; three children"), not one
