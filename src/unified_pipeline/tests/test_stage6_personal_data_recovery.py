@@ -1910,6 +1910,442 @@ def test_the_contact_block_net_reads_no_a_entry_text(tmp_path):
     assert rows["Office telephone:"] == ""
 
 
+# #1222 (NECRGC EYTHNB 10, WYNUCX 5-17): an office block stage 3b coded O or
+# D1 lists its number with no label, and in EYTHNB it holds no email either,
+# so the contact-block net above took neither its phone nor its address. The
+# two new paths, the preamble anchor and the unlabelled-number scan, act only
+# on positive evidence that the block is the owner's office.
+
+def _preamble_office_block(extra="", hierarchy=("Personal Data",), code="O"):
+    entry = _entry(f"Director of Examples\tExample Center\tExample Medical Center\t{extra}"
+                   "100 Sample Avenue, Mail code 1\tExampleton, ZZ 00000\t"
+                   "555-555-0103\tFax: 555-555-0104",
+                   code, {"leadership_role": "Director of Examples",
+                          "institution": "Example Medical Center"}, idx=10)
+    entry["hierarchy"] = list(hierarchy)
+    return entry
+
+
+def _preamble(text, code="O"):
+    entry = _entry(text, code, idx=10)
+    entry["hierarchy"] = ["Personal Data"]
+    return entry
+
+
+_OWNER_NO_EMAIL = _a("Jane Doe", {"name": "Jane Doe"}, idx=4)
+
+
+@pytest.mark.parametrize("owner", [
+    pytest.param(_a("Jane Doe\tEmail: jdoe@example.org",
+                    {"name": "Jane Doe", "institutional_email": "jdoe@example.org"}, idx=4),
+                 id="email-on-another-entry"),
+    pytest.param(_OWNER_NO_EMAIL, id="no-email-at-all"),
+])
+@pytest.mark.parametrize("code", ["O", "D1"])
+def test_1222_an_office_block_in_the_preamble_fills_the_office_rows(tmp_path, owner, code):
+    rows = _contact_rows(tmp_path, [owner, _preamble_office_block(code=code)])
+    assert rows["Office telephone:"] == "555-555-0103"
+    # The cell's lines are joined without a separator by this reader.
+    assert rows["Office address:"] == "100 Sample Avenue, Mail code 1Exampleton, ZZ 00000"
+    assert "555-0104" not in " ".join(rows.values())
+
+
+@pytest.mark.parametrize("entry", [
+    pytest.param(_preamble_office_block(hierarchy=("Professional Experience",)),
+                 id="not-in-personal-data"),
+    pytest.param(_preamble_office_block(hierarchy=("Personal Data", "Contact")),
+                 id="nested-heading"),
+    pytest.param(_preamble_office_block(extra="Administrative Assistant: Pat Roe\t"),
+                 id="staff-contact"),
+    pytest.param(_preamble_office_block(extra="Home\t"), id="home-label"),
+    pytest.param(_preamble("100 Sample Avenue\tExampleton, ZZ 00000\t555-555-0103"),
+                 id="no-office-evidence"),
+])
+def test_1222_a_preamble_block_is_read_only_when_it_is_the_owner_office(tmp_path, entry):
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, entry])
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == ""
+
+
+def test_1222_a_preamble_block_needs_both_a_street_and_a_number(tmp_path):
+    no_phone = _preamble("Office\tExample Center\t100 Sample Avenue\tExampleton, ZZ 00000")
+    no_street = _preamble("Office\tExample Medical Center\tPhone: 555-555-0103")
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, no_phone, no_street])
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == ""
+
+
+def test_1222_an_owner_block_takes_its_sole_unlabelled_office_number(tmp_path):
+    rows = _contact_rows(tmp_path, _owner_and_block(
+        "100 Sample Avenue\tExampleton, ZZ 00000\t(555) 555-0103\tFax: (555) 555-0104"))
+    assert rows["Office telephone:"] == "(555) 555-0103"
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+
+
+def test_1222_an_owner_block_with_two_unlabelled_numbers_takes_neither(tmp_path):
+    """WYNUCX 5-17: nothing says which of two unlabelled numbers is the
+    office line, so neither is taken; the address is dev's."""
+    rows = _contact_rows(tmp_path, _owner_and_block(
+        "100 Sample Avenue\tExampleton, ZZ 00000\t(555) 555-0103\t"
+        "(555) 555-0105 (clinical)\tFax: (555) 555-0104"))
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+
+
+def test_1222_an_owner_block_naming_no_workplace_takes_no_unlabelled_number(tmp_path):
+    block = _entry("jdoe@example.edu\t100 Sample Avenue\tExampleton, ZZ 00000\t(555) 555-0103",
+                   "D1", idx=7)
+    rows = _contact_rows(tmp_path, [_a("Jane Doe\tjdoe@example.edu",
+                                       {"name": "Jane Doe", "email": "jdoe@example.edu"}), block])
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+
+
+def test_1222_a_labelled_work_number_outranks_the_unlabelled_one(tmp_path):
+    rows = _contact_rows(tmp_path, _owner_and_block(
+        "100 Sample Avenue\tExampleton, ZZ 00000\t(555) 555-0105\tPhone: (555) 555-0103"))
+    assert rows["Office telephone:"] == "(555) 555-0103"
+
+
+_AFTER_ADDRESS = "100 Sample Avenue\tExampleton, ZZ 00000\t"
+
+
+@pytest.mark.parametrize("tail, expected", [
+    pytest.param("(555) 555-0103", "(555) 555-0103", id="bare"),
+    pytest.param("\t(555) 555-0103", "(555) 555-0103", id="blank-line-before"),
+    pytest.param("+44 20 7946 0958", "+44 20 7946 0958", id="international"),
+    pytest.param("(555) 555-0103 (clinical)", "(555) 555-0103 (clinical)", id="qualified"),
+    pytest.param("(555) 555-0103\tFax: (555) 555-0104", "(555) 555-0103", id="fax-after"),
+    pytest.param("Fax: (555) 555-0104\t(555) 555-0103", "(555) 555-0103", id="fax-before"),
+    pytest.param("Fax:\t(555) 555-0104\t(555) 555-0103", "(555) 555-0103",
+                 id="fax-label-on-the-line-before"),
+    pytest.param("(555) 555-0104 (f)\t(555) 555-0103", "(555) 555-0103", id="fax-qualifier"),
+    pytest.param("(555) 555-0103\t(555) 555-0105", None, id="two-numbers"),
+    pytest.param("(555) 555-0103\tRef 9555-555-0104", "(555) 555-0103",
+                 id="digits-before-a-shape-are-not-a-number"),
+    pytest.param("(555) 555-0103\tRef 555-555-01049", "(555) 555-0103",
+                 id="digits-after-a-shape-are-not-a-number"),
+    pytest.param("(555) 555-0103\tPhone: (555) 555-0105", None, id="a-labelled-number-counts"),
+    pytest.param("Cell:\t(555) 555-0103", None, id="label-before-is-not-an-address"),
+    pytest.param("Phone (555) 555-0103", None, id="not-alone-on-its-line"),
+    pytest.param("(555) 555-0103 ext 5", None, id="extension"),
+    pytest.param("NY 10021 212-555-0102", None, id="inside-a-city-line"),
+    pytest.param("1999-2004", None, id="year-range"),
+    pytest.param("2019 1234 5678", None, id="identifier-not-phone-shaped"),
+    pytest.param("555-010", None, id="too-few-digits"),
+    pytest.param("+44 20 1", None, id="international-too-few-digits"),
+    pytest.param("ZZ\t00000-1234", None, id="zip-plus-four"),
+])
+def test_1222_sole_bare_number_in_takes_only_a_lone_number_after_the_address(tail, expected):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._sole_bare_number_in(_AFTER_ADDRESS + tail) == expected
+
+
+def test_1222_a_lone_number_must_follow_a_line_with_a_digit():
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._sole_bare_number_in("Example Center\t(555) 555-0103") is None
+    assert personal_data._sole_bare_number_in("(555) 555-0103") is None
+
+
+_WORKPLACE = "Example Hospital\t100 Sample Avenue\tExampleton, ZZ 00000\t"
+
+
+@pytest.mark.parametrize("text, fragments, expected", [
+    pytest.param("Office\t100 Sample Avenue", [], 2, id="office-label"),
+    pytest.param("Work:\t100 Sample Avenue", [], 2, id="work-label"),
+    pytest.param("Business Address\t100 Sample Avenue", [], 2, id="business-label"),
+    pytest.param("Department of Medicine\t100 Sample Avenue", [], 2, id="department-label"),
+    pytest.param(_WORKPLACE + "(555) 555-0101", [], 1, id="workplace-word"),
+    pytest.param("100 Sample Avenue\tExampleton, ZZ 00000\t(555) 555-0101", [], 0,
+                 id="no-evidence"),
+    pytest.param(_WORKPLACE + "(555) 555-0101 (O)", [], 1, id="o-qualifier"),
+    pytest.param(_WORKPLACE + "(555) 555-0101 (office)", [], 2, id="office-qualifier"),
+    pytest.param(_WORKPLACE + "(555) 555-0101 (555) 555-0102", [], 1,
+                 id="an-area-code-is-no-qualifier"),
+    pytest.param(_WORKPLACE + "(555) 555-0101\t(Main Campus)", [], 1,
+                 id="a-qualifier-is-on-the-number-line"),
+    pytest.param(_WORKPLACE + "(555) 555-0101 (clinical)", [], 1, id="clinical-qualifier"),
+    pytest.param(_WORKPLACE + "(555) 555-0109 (f)", [], 1, id="fax-qualifier"),
+    pytest.param("National Reference Center\t100 Sample Avenue", [], 1,
+                 id="reference-in-a-name"),
+    pytest.param("Assistant Professor\t" + _WORKPLACE, [], 1, id="owner-faculty-title"),
+    pytest.param("Example Hospital\t100 Sample Dr. Suite 5\tExampleton, ZZ 00000", [], 1,
+                 id="dr-in-a-street-name"),
+    pytest.param("Example Hospital\tRm: 501\t(555) 555-0101", [], 1,
+                 id="letter-ending-a-word-is-not-a-label"),
+    pytest.param("Office of the Assistant Dean\t100 Sample Avenue", [], 2,
+                 id="assistant-dean-office"),
+    *[pytest.param(_WORKPLACE + tail, [], 0, id=tail.split("\t")[0].strip(":"))
+      for tail in ("(555) 555-0102 (R)", "(555) 555-0102 (evenings)", "(555) 555-0102 (h)",
+                   "H:\t(555) 555-0102", "Cell:\t(555) 555-0102", "Mob Tel: (555) 555-0102",
+                   "Home\t(555) 555-0102", "Pager\t(555) 555-0102",
+                   "Res.:\t(555) 555-0102", "Cel:\t(555) 555-0102", "Cellphone: (555) 555-0102",
+                   "Cellular\t(555) 555-0102", "Mobile\t(555) 555-0102", "Beeper\t(555) 555-0102",
+                   "Personal:\t(555) 555-0102", "Private line\t(555) 555-0102",
+                   "(555) 555-0102 (c)", "(555) 555-0102 (m)", "C:\t(555) 555-0102",
+                   "M:\t(555) 555-0102",
+                   "Mentor: Dr. Jane Roe\t(555) 555-0199",
+                   "Dr. Jane Doe\t(555) 555-0199", "Mr Pat Roe\t(555) 555-0199",
+                   "Parents' Address:\t(555) 555-0199", "Wife: Jane Doe\t(555) 555-0199",
+                   "Husband: Pat Roe", "Guardian: Pat Roe",
+                   "Spouse: Pat Roe", "Emergency Contact: Pat Roe", "Next of kin: Pat Roe",
+                   "Assistant: Pat Roe", "Referee: Pat Roe", "Reference: Pat Roe",
+                   "References Dr. Pat Roe",
+                   "NPI\t212-555-0102", "License No.:\t212 555 0102", "DEA\tAB1234567",
+                   "UPIN\tA12345", "SSN\t000-00-0000", "Social Security\t000-00-0000",
+                   "Passport\tX1234567", "Licence\t12345", "ECFMG\t0-000-000-0",
+                   "Born 1970", "Permanent Address:")],
+    pytest.param(_WORKPLACE + "(555) 555-0102", ["Spouse: Pat Roe"], 0, id="cut-role-fragment"),
+    pytest.param(_WORKPLACE + "(555) 555-0102", ["Marital status: married"], 1,
+                 id="cut-fragment-naming-no-one"),
+])
+def test_1222_office_evidence_of_a_block(text, fragments, expected):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._office_evidence_of(text, fragments) == expected
+
+
+_ADDR = "100 Sample Avenue\tExampleton, ZZ 00000"
+_ADDR_VALUE = "100 Sample Avenue\nExampleton, ZZ 00000"
+_EMAIL = "jdoe@example.edu"
+
+
+#: The second review's probes of round 3 (verify2), each with the result
+#: origin/dev a58f81f0 gives for it, which this change must also give.
+@pytest.mark.parametrize("text, hierarchy, email, expected", [
+    pytest.param(f"{_ADDR}\t(555) 555-0102 (R)", "Personal Data", None, (None, None), id="R-qualifier"),
+    pytest.param(f"{_ADDR}\t(555) 555-0101 (O)\t(555) 555-0102 (R)", "Personal Data", None,
+                 (None, None), id="O-and-R"),
+    pytest.param(f"{_ADDR}\tTel (R):\t(555) 555-0102", "Personal Data", None, (None, None),
+                 id="Tel-(R)"),
+    pytest.param(f"{_ADDR}\tR:\t(555) 555-0102", "Personal Data", None, (None, None), id="R:"),
+    pytest.param(f"{_ADDR}\tWhatsApp:\t+1 555 555 0102", "Personal Data", None, (None, None),
+                 id="whatsapp"),
+    pytest.param(f"{_ADDR}\tEmergency Phone: (555) 555-0102", "Personal Data", None,
+                 (None, None), id="emergency-phone"),
+    pytest.param(f"{_ADDR}\tEmergency:\t(555) 555-0102", "Personal Data", None, (None, None),
+                 id="emergency"),
+    pytest.param(f"{_ADDR}\tEvenings:\t(555) 555-0102", "Personal Data", None, (None, None),
+                 id="evenings"),
+    pytest.param(f"{_ADDR}\tAfter hours:\t(555) 555-0102", "Personal Data", None, (None, None),
+                 id="after-hours"),
+    pytest.param(f"{_ADDR}\tLandline:\t(555) 555-0102", "Personal Data", None, (None, None),
+                 id="landline"),
+    pytest.param(f"{_ADDR}\t(555) 555-0102\tHome", "Personal Data", None, (None, None),
+                 id="kind-after-the-number"),
+    *[pytest.param(f"{_ADDR}\t{label}: Dr. Jane Roe\t(555) 555-0199", "Personal Data", None,
+                   (None, None), id=label) for label in ("Mentor", "Supervisor", "Department Chair")],
+    pytest.param(f"{_ADDR}\tWife: Jane Doe\t(555) 555-0199", "Personal Data", None, (None, None),
+                 id="wife"),
+    pytest.param(f"Parents' Address:\t{_ADDR}\t(555) 555-0102", "Personal Data", None,
+                 (None, None), id="parents-address"),
+    *[pytest.param(f"{label}\t{_ADDR}\t(555) 555-0102", "Personal Data", None, (None, None),
+                   id=label) for label in ("Residential Address:", "Contact Address:", "Address")],
+    pytest.param(f"{_ADDR}\t1-800-555-0102", "Personal Data", None, (None, None), id="toll-free"),
+    pytest.param(f"{_ADDR}\t555-55-0102", "Personal Data", None, (None, None), id="ssn-shape"),
+    pytest.param(f"{_ADDR}\tNPI\t212-555-0102", "Personal Data", None, (None, None), id="npi"),
+    pytest.param(f"{_ADDR}\tNY 10021 212-555-0102", "Personal Data", None, (None, None),
+                 id="number-on-a-zip-line"),
+    pytest.param(f"{_ADDR}\tLicense No.:\t212 555 0102", "Personal Data", None, (None, None),
+                 id="license-number"),
+    pytest.param(f"{_ADDR}\t(555) 555-0102\tBorn 1970", "Personal Data", None, (None, None),
+                 id="birth-line"),
+    pytest.param(f"Dr. John Doe\t{_ADDR}\t(555) 555-0101\tDr. Jane Doe\t200 Other Street\t"
+                 "Elsewhere, ZZ 00000\t(555) 555-0199", "Personal Data", None, (None, None),
+                 id="two-people-no-role"),
+    pytest.param(f"References available on request\t{_ADDR}\t(555) 555-0101", "Personal Data",
+                 None, (None, None), id="references-line"),
+    pytest.param(f"{_ADDR}\tTel: (555) 555-0101 (O), (555) 555-0102 (R)", "Personal Data", None,
+                 (None, None), id="labelled-O-and-R"),
+    pytest.param(f"{_EMAIL}\tClinical Reference Laboratory\t{_ADDR}\tPhone: (555) 555-0101", "X",
+                 _EMAIL, ("(555) 555-0101", _ADDR_VALUE), id="email-reference-laboratory"),
+    pytest.param(f"{_EMAIL}\tNational Reference Center for Prions\t{_ADDR}\tPhone: (555) 555-0101",
+                 "X", _EMAIL, ("(555) 555-0101", _ADDR_VALUE), id="email-reference-center"),
+    pytest.param(f"{_EMAIL}\tOffice of the Assistant Dean\t{_ADDR}\tPhone: (555) 555-0101", "X",
+                 _EMAIL, ("(555) 555-0101", _ADDR_VALUE), id="email-assistant-dean-office"),
+    pytest.param(f"{_EMAIL}\t{_ADDR}\t(555) 555-0102 (R)", "X", _EMAIL, (None, _ADDR_VALUE),
+                 id="email-R-qualifier"),
+    pytest.param(f"{_EMAIL}\t{_ADDR}\tTel (R):\t(555) 555-0102", "X", _EMAIL, (None, _ADDR_VALUE),
+                 id="email-Tel-(R)"),
+    pytest.param(f"{_EMAIL}\t{_ADDR}\tTel: (555) 555-0101 (O)\t(555) 555-0102 (R)", "X", _EMAIL,
+                 ("(555) 555-0101", _ADDR_VALUE), id="email-O-and-R"),
+    pytest.param(f"{_EMAIL}\t{_ADDR}\t(555) 555-0101", "X", _EMAIL, (None, _ADDR_VALUE),
+                 id="email-bare-number-no-workplace"),
+])
+def test_1222_the_review_probes_give_dev_result(text, hierarchy, email, expected):
+    from unified_pipeline.stage6.sections import personal_data
+    entry = {"text": text, "taxonomy_code": "O" if email is None else "D1",
+             "hierarchy": [hierarchy]}
+    assert personal_data._work_contact_in_entries([entry], email) == expected
+
+
+@pytest.mark.parametrize("earlier", [
+    pytest.param("12 Elm Street\tExampleton, ZZ 00000\t(555) 555-0102", id="unlabelled"),
+    pytest.param("Example Hospital\t12 Elm Street\tExampleton, ZZ 00000\t(555) 555-0102",
+                 id="workplace-word-only"),
+])
+def test_1222_an_office_labelled_block_beats_an_earlier_one(tmp_path, earlier):
+    """The review's ordering probe: the explicitly Office-labelled block
+    wins, and nothing of the earlier block is taken."""
+    office = _preamble("Office\t100 Sample Avenue\tExampleton, ZZ 00000\t(555) 555-0101")
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, _preamble(earlier), office])
+    assert rows["Office telephone:"] == "(555) 555-0101"
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+
+
+def test_1222_the_first_of_equal_preamble_blocks_wins(tmp_path):
+    first, second = (_preamble(f"Example Center\t{n} Sample Avenue\tExampleton, ZZ 00000\t"
+                               f"(555) 555-010{n}") for n in (1, 2))
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, first, second])
+    assert rows["Office telephone:"] == "(555) 555-0101"
+
+
+@pytest.mark.parametrize("text, expected", [
+    pytest.param("Example Center\t100 Sample Avenue\nExampleton, ZZ 00000\nPhone: (555) 555-0101",
+                 "(555) 555-0101", id="newline-separated-label"),
+    pytest.param("Example Center\tPhone: 020 7946 0958 (R)", None, id="other-qualifier"),
+    pytest.param("Example Center\tPhone: 020 7946 0958 (office)", "020 7946 0958",
+                 id="office-qualifier"),
+    pytest.param("Example Center\tEmergency Phone: (555) 555-0102", None, id="other-word-first"),
+    pytest.param("Example Center\tOffice: 12 34", None, id="too-few-digits"),
+])
+def test_1222_work_labelled_number_in(text, expected):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._work_labelled_number_in(text) == expected
+
+
+def test_1222_a_preamble_block_takes_only_a_work_labelled_number(tmp_path):
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, _preamble(
+        f"Example Center\t{_ADDR}\tEmergency Phone: (555) 555-0102")])
+    assert rows["Office telephone:"] == ""
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, _preamble(
+        f"Example Center\t{_ADDR}\tOffice Phone: (555) 555-0101")])
+    assert rows["Office telephone:"] == "(555) 555-0101"
+
+
+@pytest.mark.parametrize("number_lines", [
+    pytest.param("(555) 555-0102 (h)", id="(h)"),
+    pytest.param("H:\t(555) 555-0102", id="H:"),
+    pytest.param("Cell Phone:\t(555) 555-0102", id="cell-phone-label"),
+    pytest.param("Fax Number:\t(555) 555-0102", id="fax-number-label"),
+    pytest.param("2019 1234 5678", id="identifier"),
+])
+def test_1222_a_preamble_block_takes_no_other_kind_of_number(tmp_path, number_lines):
+    """The first review's shapes: a home, cell or fax number, or an
+    identifier, is no office number, and without one the preamble block is
+    not read at all."""
+    entry = _preamble(f"Example Center\t{_ADDR}\t{number_lines}")
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, entry])
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == ""
+
+
+def test_1222_an_owner_block_takes_no_number_under_a_two_word_kind_label(tmp_path):
+    rows = _contact_rows(tmp_path, _owner_and_block(
+        "100 Sample Avenue\tExampleton, ZZ 00000\tMobile Phone\t(555) 555-0102"))
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+
+
+@pytest.mark.parametrize("label, withheld", [
+    pytest.param("Current Address", True, id="current-address"),
+    pytest.param("Permanent Address:", True, id="permanent-address"),
+    pytest.param("Permanent Office Address:", False, id="permanent-office-address"),
+    pytest.param("Permanent Address: Office Park", True, id="office-word-after-the-label"),
+    pytest.param("Permanent resident", True, id="no-office-evidence"),
+    pytest.param("Present Address:", True, id="present-address"),
+    pytest.param("Mailing Address", True, id="mailing-address"),
+    pytest.param("Address:", True, id="bare-address"),
+    pytest.param("Mailing Address: Example Hospital", False, id="mailing-address-at-a-workplace"),
+    pytest.param("Office Address:", False, id="office-address"),
+])
+def test_1222_a_current_or_permanent_address_block_is_withheld(tmp_path, label, withheld):
+    """#1426's unlabelled home address and the permanent-address qualifier
+    hold on the preamble anchor too, and a block saying nothing of an
+    office gives nothing."""
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, _preamble(
+        f"{label}\t12 Elm Street\tExampleton, ZZ 00000\t(555) 555-0102", code="D1")])
+    assert (rows["Office telephone:"] == "") is withheld
+    assert (rows["Office address:"] == "") is withheld
+
+
+def test_1222_the_email_block_outranks_an_earlier_preamble_block(tmp_path):
+    """dev's precedence holds: the block with the owner's work email wins
+    over a preamble block that comes before it."""
+    board = _preamble("Board member\tExample Society Office\t9 Other Road\tOthertown, ZZ 00000\t"
+                      "(555) 555-0109", code="D1")
+    owner, block = _owner_and_block("100 Sample Avenue\tExampleton, ZZ 00000")
+    rows = _contact_rows(tmp_path, [owner, board, block])
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+    assert rows["Office telephone:"] == ""
+
+
+_THIRD_PARTY_LABELS = ("Administrative Assistant: Pat Roe", "Coordinator: Pat Roe",
+                       "Emergency Contact: Pat Roe", "Spouse: Pat Roe", "Next of Kin: Pat Roe",
+                       "Reference: Dr. Pat Roe", "Referee: Dr. Pat Roe")
+
+
+@pytest.mark.parametrize("label", _THIRD_PARTY_LABELS)
+def test_1222_an_owner_block_naming_another_person_takes_no_unlabelled_number(tmp_path, label):
+    """The email anchor: no unlabelled number is taken from a block naming
+    another person (the address is read as dev reads it)."""
+    rows = _contact_rows(tmp_path, _owner_and_block(
+        f"{_ADDR}\t{label}\t12 Elm Street\tExampleton, ZZ 00000\t(555) 555-0199"))
+    assert rows["Office telephone:"] == ""
+
+
+@pytest.mark.parametrize("label", _THIRD_PARTY_LABELS)
+def test_1222_a_preamble_block_naming_another_person_is_not_read(tmp_path, label):
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, _preamble_office_block(extra=f"{label}\t")])
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == ""
+
+
+@pytest.mark.parametrize("tail, fragments", [
+    pytest.param("(555) 555-0103\tAssistant: Pat Roe\t(555) 555-0199", [],
+                 id="role-after-the-owner-lines"),
+    pytest.param("Phone: (555) 555-0199", ["Spouse: Pat Roe"], id="labelled-number-after-a-cut-role"),
+])
+def test_1222_a_preamble_block_naming_another_person_anywhere_is_not_read(tmp_path, tail, fragments):
+    """The preamble anchor has no email to say the block is the owner's, so
+    another person's role anywhere in it, or in a fragment the pii pass cut,
+    keeps the whole block out (#1578)."""
+    entry = _preamble(f"Example Center\t{_ADDR}\t{tail}")
+    entry["_pii_fragments"] = fragments
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, entry])
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == ""
+
+
+@pytest.mark.parametrize("hierarchy, email", [
+    pytest.param(["Personal Data"], "", id="preamble"),
+    pytest.param(["Present Position"], "\tjdoe@example.edu", id="email"),
+])
+def test_1222_no_unlabelled_number_is_taken_after_a_cut_role_label(tmp_path, hierarchy, email):
+    """The pii pass cuts "Spouse: Pat Roe" out of the text before the net
+    runs, so the spouse's number would read as a bare office line."""
+    entry = _entry(f"Example Center\t{_ADDR}\t(555) 555-0199{email}", "D1", idx=10)
+    entry["hierarchy"] = hierarchy
+    entry["_pii_fragments"] = ["Spouse: Pat Roe"]
+    rows = _contact_rows(tmp_path, [_a("Jane Doe\tjdoe@example.edu",
+                                       {"name": "Jane Doe", "email": "jdoe@example.edu"}, idx=4),
+                                    entry])
+    assert rows["Office telephone:"] == ""
+
+
+def test_1222_a_cut_fragment_naming_no_one_leaves_the_bare_number(tmp_path):
+    entry = _preamble(f"Example Center\t{_ADDR}\t(555) 555-0103", code="D1")
+    entry["_pii_fragments"] = ["Marital status: married"]
+    rows = _contact_rows(tmp_path, [_OWNER_NO_EMAIL, entry])
+    assert rows["Office telephone:"] == "(555) 555-0103"
+
+
+def test_1222_an_owner_faculty_title_is_not_another_person_role(tmp_path):
+    rows = _contact_rows(tmp_path, _owner_and_block(
+        f"Assistant Professor of Medicine\t{_ADDR}\t(555) 555-0103"))
+    assert rows["Office telephone:"] == "(555) 555-0103"
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+
+
 @pytest.mark.parametrize("lines, address", [
     ("100 Sample Avenue\tExample Bldg\tExampleton, ZZ 00000",
      "100 Sample Avenue\nExample Bldg\nExampleton, ZZ 00000"),
