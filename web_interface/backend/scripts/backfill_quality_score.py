@@ -9,8 +9,9 @@ file is counted as missing and left alone (the admin rescore endpoint computes
 one). Dry-run by default; pass --apply to write.
 
 --rescore-stale instead recomputes every completed run whose cached score was
-computed on other dimension weights (its total_weight is not the scorer's
-current TOTAL_WEIGHT, e.g. the /95-era scores), re-caching the JSON and
+computed on another scoring model (its total_weight is not the scorer's
+current TOTAL_WEIGHT, e.g. the /95-era scores, or its score_model is not the
+current SCORE_MODEL, e.g. the absolute-minutes scores), re-caching the JSON and
 rewriting the columns. Deterministic, no LLM; a run whose outputs are gone from
 storage is counted as missing and keeps its old score.
 
@@ -38,7 +39,7 @@ from app.services.quality_score_service import (  # noqa: E402
     persist_score_columns,
     score_columns,
 )
-from unified_pipeline.quality_score import TOTAL_WEIGHT  # noqa: E402
+from unified_pipeline.quality_score import SCORE_MODEL, TOTAL_WEIGHT  # noqa: E402
 
 logger = logging.getLogger("backfill_quality_score")
 
@@ -86,7 +87,8 @@ def backfill(db: Session, apply: bool) -> BackfillSummary:
 
 
 def rescore_stale(db: Session, apply: bool) -> BackfillSummary:
-    """Recompute (when ``apply``) every completed run scored on stale weights.
+    """Recompute (when ``apply``) every completed run scored on stale weights
+    or a stale scoring model.
 
     ``resolved`` counts the stale runs found; ``missing`` the ones whose
     outputs could not be rescored."""
@@ -100,7 +102,8 @@ def rescore_stale(db: Session, apply: bool) -> BackfillSummary:
             logger.warning("Could not read the cached score for run %s", run_id, exc_info=True)
             summary.failed += 1
             continue
-        if not isinstance(raw, dict) or raw.get("total_weight") == TOTAL_WEIGHT:
+        if not isinstance(raw, dict) or (raw.get("total_weight") == TOTAL_WEIGHT
+                                         and raw.get("score_model") == SCORE_MODEL):
             continue
         summary.resolved += 1
         if not apply:
@@ -118,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--apply", action="store_true", help="write the columns (default: dry run)")
     parser.add_argument("--rescore-stale", action="store_true",
-                        help=f"recompute runs whose cached total_weight is not {TOTAL_WEIGHT}")
+                        help=f"recompute runs whose cached total_weight is not {TOTAL_WEIGHT} "
+                             f"or whose score_model is not {SCORE_MODEL}")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 

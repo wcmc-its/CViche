@@ -1027,6 +1027,13 @@ GREEN_MAX_CLEANUP_SHARE = 0.02
 DOCTOR_HALF_WEIGHT_SHARE = GREEN_MAX_CLEANUP_SHARE * (
     DOCTOR_FINDINGS_WEIGHT - (100 - BAND_GREEN)) / (100 - BAND_GREEN)
 
+#: Which model a cached score was computed on, written into every result as
+#: ``score_model``. Bump it when the same findings would score differently, so
+#: `backfill_quality_score.py --rescore-stale` recomputes the stored scores
+#: and one scale is never read beside another. Absent on scores from before
+#: the cleanup share, which were absolute minutes.
+SCORE_MODEL = "cleanup_share"
+
 #: The cap on a run with no readable doctor report (#1593: IXJMKS scored 97
 #: GREEN with none). The score is built from the doctor's findings, so a run
 #: the doctor did not check has no estimate and cannot read "ship".
@@ -1319,6 +1326,7 @@ def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
         "raw_score_before_caps": round(raw, 2),
         "hard_fail_caps_applied": hard_fail_caps,
         "total_weight": TOTAL_WEIGHT,
+        "score_model": SCORE_MODEL,
         "dimensionScores": dimension_scores,
         "flags": flags,
         "data_complete": not missing,

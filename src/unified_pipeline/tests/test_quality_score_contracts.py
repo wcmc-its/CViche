@@ -1393,6 +1393,7 @@ def test_green_means_at_most_the_green_cleanup_share(tmp_path, monkeypatch):
     at = _run_with_minutes(tmp_path / "at", 2, monkeypatch)
     over = _run_with_minutes(tmp_path / "over", 3, monkeypatch)
     assert (at["totalScore"], at["band"]) == (85, "GREEN (ship)")
+    assert at["score_model"] == qs.SCORE_MODEL == "cleanup_share"
     assert over["band"].startswith("YELLOW") and over["hard_fail_caps_applied"] == []
 
 

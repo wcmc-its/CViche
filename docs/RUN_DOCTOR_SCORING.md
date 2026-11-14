@@ -150,7 +150,10 @@ fraction = share / (share + 0.0333)
   `MANUAL_MINUTES_PER_ENTRY` is the unit cost of retyping one lost record, so
   a run that lost every record needs 100% of the manual work. A run whose
   `classified.json` carries no entry count cannot be sized and is capped at
-  `NOT_CHECKED_CAP`, like a run with no report.
+  `NOT_CHECKED_CAP`, like a run with no report. Every result records
+  `score_model` (`cleanup_share`); after a deploy,
+  `backfill_quality_score.py --rescore-stale --apply` recomputes the stored
+  scores that lack it, so the two scales are never read side by side.
 
 - **precision** is the finding's hand-checked TP / judged as the review copy's
   gate reads it (#1589): `doctor.precision.finding_precision` over
