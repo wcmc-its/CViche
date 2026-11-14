@@ -533,6 +533,16 @@ def test_header_consumed_record_fires_on_a_heading_holding_its_first_record():
                                                  ["Example Award -2010"]]
 
 
+def test_header_consumed_record_fires_on_a_heading_holding_a_licence_number():
+    # #1254 (BCTOGR 33, PQASUT 118): one word and a licence number after the
+    # heading is a record, read with stage 1b's own test.
+    stage2 = _headers2(("MEDICAL LICENSURE", "MEDICAL LICENSURE  Exampleland #4410982"),
+                       ("Medical Licensure", "Medical Licensure: Exampleland: 4410982"))
+    findings = lint_header_consumed_record(stage2)
+    assert [f["evidence"] for f in findings] == [["Exampleland #4410982"],
+                                                 ["Exampleland: 4410982"]]
+
+
 @pytest.mark.parametrize("heading,text", [
     ("PUBLICATIONS", "PUBLICATIONS:"),
     ("Peer Reviewed Manuscripts", "Peer Reviewed Manuscripts (cont'd)"),
@@ -544,6 +554,8 @@ def test_header_consumed_record_fires_on_a_heading_holding_its_first_record():
     ("SOCIETY MEMBERSHIPS", "SOCIETY MEMBERSHIPS YEAR JOINED"),
     ("Education", "Education program"),
     ("Conferences", "Conferences Where?"),
+    ("Citations", "Citations h-index=33"),
+    ("MEDICAL LICENSURE", "MEDICAL LICENSURE EXAMPLELAND 4410982"),
     ("Home", "A heading that does not start with its own title"),
 ])
 def test_header_consumed_record_quiet_on_a_heading_and_its_notes(heading, text):

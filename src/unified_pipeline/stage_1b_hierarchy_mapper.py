@@ -601,6 +601,19 @@ def _fallback_header_search(
     return None
 
 
+def _sequence_anchors(current_path: list[str]) -> list[str]:
+    """The headers the sequence search matches in document order: the node
+    (the last entry of `current_path`) after up to two ancestors, its
+    anchors. An ancestor whose normalized text equals the node's own is no
+    anchor (#1254): 1a's synthetic "EDUCATION" over its child "Education"
+    took the child's only exact line, so the child landed on a later line
+    that merely opens with the word (MQJAVH 206). An ancestor of any other
+    text, one that only opens like the node's included, still anchors."""
+    sequence = current_path[-min(3, len(current_path)):]  # last 3 headers for context
+    node = normalize_text(sequence[-1])
+    return [header for header in sequence[:-1] if normalize_text(header) != node] + sequence[-1:]
+
+
 def _locate_node(
     elements: list[dict[str, Any]],
     current_path: list[str],
@@ -623,7 +636,7 @@ def _locate_node(
     is_child = len(current_path) > 1
     if not is_child:
         scope = replace(scope, claimed=frozenset())
-    search_sequence = current_path[-min(3, len(current_path)):]  # last 3 headers for context
+    search_sequence = _sequence_anchors(current_path)
     if is_child and not parent_mapped:
         matches = find_header_in_sequence(
             elements, search_sequence, start_search_idx, scope.end, scope.partial_floor,
