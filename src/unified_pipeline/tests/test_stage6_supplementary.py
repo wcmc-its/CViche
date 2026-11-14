@@ -4069,3 +4069,148 @@ def test_a_sentence_the_s8_citation_printed_before_its_line_month_is_still_no_su
     gen._add_supplementary_subpoints({"K1": [k1], "S8": [talk]})
 
     assert gen._subpoint_placements == []
+
+
+# --- #2004: a mentee's class-of phrase decides no sub-point --------------------
+
+#: An invented mentee whose Mentoring Period prints the line's expected
+#: graduation in place of the year (#2004): its table then holds two words of
+#: another mentee's note besides the "Thesis reader" both tables print.
+_CLASS_MENTEE = {
+    "element_idx_start": 28,
+    "taxonomy_code": "N3A",
+    "text": ("Fenwick, Robin: Gait variability in example runners. "
+             "(Thesis reader) Expected Graduation June 2024."),
+    "extracted_fields": {"mentee_name": "Fenwick, Robin", "site_position": "Thesis reader",
+                         "research_focus": "Gait variability in example runners",
+                         "end_date": "2024-06"},
+}
+
+
+def _noted_mentee(note="(Thesis reader) Expected Graduation October 2028."):
+    """An invented mentee with no dates whose line's note after a tab is
+    prose no row prints: a sub-point under its own table."""
+    return {
+        "element_idx_start": 20,
+        "taxonomy_code": "N3A",
+        "text": f"Quill, Avery: Stride timing in example sprinters.\t{note}",
+        "extracted_fields": {"mentee_name": "Quill, Avery", "site_position": "Thesis reader",
+                             "research_focus": "Stride timing in example sprinters."},
+    }
+
+
+def _mentees_filled(entries, monkeypatch=None):
+    """A generator that rendered `entries` as N3A mentees; with `monkeypatch`,
+    as dev rendered them, before the class-of phrase."""
+    from unified_pipeline.stage6.formatting import values
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(values, "_class_year_phrase", lambda period, source_text: "")
+    gen = WCMTemplateGenerator(verbose=False, supplementary_subpoints=True)
+    gen.doc = Document(gen.template_path)
+    gen._fill_mentoring({"N3A": list(entries)})
+    return gen
+
+
+def _planner_haystack(gen, entries, monkeypatch):
+    """The haystack `_add_supplementary_subpoints` plans `entries` against."""
+    built, original = [], sp.rendered_haystack
+
+    def recording(lines, doc, *args):
+        built.append(original(lines, doc, *args))
+        return built[-1]
+
+    monkeypatch.setattr(sp, "rendered_haystack", recording)
+    gen._add_supplementary_subpoints({"N3A": list(entries)})
+    monkeypatch.setattr(sp, "rendered_haystack", original)
+    (haystack,) = built
+    return haystack
+
+
+def _label_table(doc, *values):
+    table = doc.add_table(rows=len(values), cols=2)
+    for row, (label, value) in zip(table.rows, values, strict=True):
+        row.cells[0].text = label
+        para = row.cells[1].paragraphs[0]
+        for run_text in value:
+            para.add_run(run_text)
+    return table
+
+
+def test_a_label_table_paragraph_read_as_other_lines_is_read_as_those_lines():
+    # The table's words are read as if the paragraph printed the lines, in
+    # its place, once however many runs print it.
+    printed, bare = Document(), Document()
+    table = _label_table(printed, ("Site/Position:", ("Thesis reader",)),
+                         ("Mentoring Period:", ("Class ", "of 2028")),
+                         ("Type of Supervision:", ("Research",)))
+    _label_table(bare, ("Site/Position:", ("Thesis reader",)), ("Mentoring Period:", ("2028-present",)),
+                 ("Type of Supervision:", ("Research",)))
+    para = table.rows[1].cells[1].paragraphs[0]
+
+    read = sp.rendered_haystack([], printed, {para._p: (para.text, ("2028-present",))})
+
+    assert read == sp.rendered_haystack([], bare)
+    assert read.line_tokens == [{"position", "thesis", "reader", "mentoring", "period", "present",
+                                 "supervision", "research"}]
+
+
+def test_a_label_table_paragraph_is_read_as_it_prints_unless_it_still_prints_its_text():
+    printed = Document()
+    table = _label_table(printed, ("Site/Position:", ("Thesis reader",)),
+                         ("Mentoring Period:", ("Expected Graduation June 2024",)))
+    para = table.rows[1].cells[1].paragraphs[0]
+    as_printed = sp.rendered_haystack([], printed)
+
+    assert "graduation" in as_printed.line_tokens[0]
+    assert sp.rendered_haystack([], printed, {para._p: ("Expected Graduation", ("2024",))}) == as_printed
+    assert sp.rendered_haystack([], printed, {}) == as_printed
+
+
+def test_the_planner_reads_a_class_of_period_cell_as_the_period_dev_printed(monkeypatch):
+    head = _mentees_filled([_CLASS_MENTEE])
+    with monkeypatch.context() as patch:
+        dev = _mentees_filled([_CLASS_MENTEE], patch)
+
+    assert "Expected Graduation June 2024" in head._rendered_output_lines()  # it prints
+    assert head._rendered_output_lines(joined_as_lines=True) == dev._rendered_output_lines()
+    assert (_planner_haystack(head, [_CLASS_MENTEE], monkeypatch)
+            == _planner_haystack(dev, [_CLASS_MENTEE], monkeypatch))
+
+
+def test_a_mentee_run_with_no_class_of_period_is_planned_against_the_page_as_it_prints(monkeypatch):
+    entries = [_noted_mentee(), dict(_CLASS_MENTEE, text=_CLASS_MENTEE["text"].replace(
+        "Expected Graduation June 2024", "Graduated June 2024"))]
+    gen = _mentees_filled(entries)
+    as_printed = sp.rendered_haystack(gen._rendered_output_lines() + gen._subpoint_lines, gen.doc)
+
+    assert gen._planner_lines == {}
+    assert _planner_haystack(gen, entries, monkeypatch) == as_printed
+
+
+@pytest.mark.parametrize("note", ["(Thesis reader) Expected Graduation October 2028.",
+                                  "(Thesis reader) Expected Graduation TBA."])
+def test_one_mentees_class_of_phrase_hides_no_other_mentees_sub_point(note, tmp_path, monkeypatch):
+    """Through `generate`: the class-of mentee's table prints its phrase, and
+    the other mentee's note, which that table's words would otherwise vouch
+    for, is still its sub-point (#2004, the #1205 sidecar and the docx)."""
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    input_path = tmp_path / "T2004C_fields.json"
+    input_path.write_text(json.dumps({"document_uid": "T2004C",
+                                      "entries": [_noted_mentee(note), _CLASS_MENTEE]}))
+
+    out = WCMTemplateGenerator(verbose=False, supplementary_subpoints=True).generate(
+        str(input_path), str(tmp_path / "T2004C.docx"), discover_original_doc=False)
+
+    placements = json.loads((tmp_path / "T2004C_render_warnings.json").read_text())[
+        sp.SUBPOINT_PLACEMENTS_KEY]
+    assert [(p["element_idx_start"], p["code"], p["paragraphs"]) for p in placements] == [
+        (20, "N3A", [note])]
+    body = Document(out).element.body
+    assert note in "".join(t.text or "" for t in body.iter(qn("w:delText")))
+    assert "Expected Graduation June 2024" in [
+        "".join(t.text or "" for t in tc.iter(qn("w:t"))) for tc in body.iter(qn("w:tc"))]

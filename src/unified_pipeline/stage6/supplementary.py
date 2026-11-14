@@ -109,6 +109,7 @@ generator passes that table as `excluded_tables`.
 from __future__ import annotations
 
 import copy
+import itertools
 import re
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import NamedTuple
@@ -2523,18 +2524,40 @@ def yields_to_overflow(subpoint: SubPoint, overflow_text: str | None) -> bool:
     return subpoint.code in CLINICAL_LEADERSHIP_CODES and not _carries_overflow(subpoint, overflow_text)
 
 
-def rendered_haystack(lines: list[str], doc: Document) -> _Haystack:
+def rendered_haystack(lines: list[str], doc: Document,
+                      read_as: Mapping[BaseOxmlElement, tuple[str, tuple[str, ...]]] | None = None,
+                      ) -> _Haystack:
     """`_Haystack` over the generator's rendered lines, built the way
     `_recover_unrendered_records` builds its own, plus one token set per
     label/value table: a grant renders one fact per row, so a line naming
     the grant's funder, number and role is rendered though no single row
     holds most of its tokens (YUYVIG DYLJXC: a "<funder> award (<number>),
-    <role> <years>" line, rendered as its own grant table)."""
-    tables = [' '.join(t.text or '' for t in tbl.iter(qn('w:t')))
+    <role> <years>" line, rendered as its own grant table). A table's
+    paragraph that `read_as` (the generator's `_planner_lines`) reads as
+    other lines is read so there too (`_label_table_text`, #2004)."""
+    tables = [_label_table_text(tbl, read_as or {})
               for tbl in doc.element.body.iter(qn('w:tbl')) if _is_label_table(tbl)]
     return _Haystack("\x00".join(_squash(line) for line in lines),
                      [_tokens(text) for text in lines + tables],
                      [distinguishing_values(text) for text in lines + tables])
+
+
+def _label_table_text(tbl: BaseOxmlElement,
+                      read_as: Mapping[BaseOxmlElement, tuple[str, tuple[str, ...]]]) -> str:
+    """`tbl`'s words, its w:t texts in order, but a paragraph `read_as` holds
+    (text, lines) for, while it still prints that text, as those lines in its
+    place: a Mentoring Period cell printing a class-of phrase is read as the
+    period it printed before (#2004), so the phrase's words vouch for no
+    other mentee's note."""
+    texts: list[str] = []
+    for para, runs in itertools.groupby(tbl.iter(qn('w:t')),
+                                        key=lambda t: next(t.iterancestors(qn('w:p')), None)):
+        planned = read_as.get(para)
+        if planned and planned[0] == Paragraph(para, None).text:
+            texts.extend(planned[1])
+        else:
+            texts.extend(t.text or '' for t in runs)
+    return ' '.join(texts)
 
 
 # --- writing -----------------------------------------------------------------

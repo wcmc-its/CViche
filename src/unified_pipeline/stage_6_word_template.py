@@ -2163,7 +2163,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # (text, lines) of paragraphs the #1205 planner's haystack reads as
         # those lines (`_rendered_output_lines(joined_as_lines=True)`): a joined
         # entry paragraph (#2019), a citation without #1570's additions
-        # (`_plan_citation_as`). Keyed by element, as `_bullet_paras` is.
+        # (`_plan_citation_as`), a Mentoring Period cell without its class-of
+        # phrase (`_plan_period_as`, #2004). Keyed by element, as
+        # `_bullet_paras` is.
         self._planner_lines: dict[BaseOxmlElement, tuple[str, tuple[str, ...]]] = {}
         # Which entry each written row renders (#534); fresh per render.
         self._row_receipts = RowReceiptLedger()
@@ -4632,7 +4634,7 @@ Now analyze the text above:"""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
         out_lines = self._rendered_output_lines(joined_as_lines=True) + self._subpoint_lines
-        haystack = supplementary.rendered_haystack(out_lines, self.doc)
+        haystack = supplementary.rendered_haystack(out_lines, self.doc, self._planner_lines)
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
         appendix = self.doc.paragraphs[appendix_idx]._p if appendix_idx is not None else None
         candidates = list(supplementary.anchor_candidates(self.doc, appendix))
@@ -4805,7 +4807,9 @@ Now analyze the text above:"""
         opts in, so the join decides nothing it offers: the joined line
         pools its lines' words, and a source sentence that one sub-line
         paraphrases read as printed (#2024: 11 K1 sub-points lost). So is a
-        citation without #1570's additions (`_plan_citation_as`).
+        citation without #1570's additions (`_plan_citation_as`), and a
+        Mentoring Period cell, in its cell and its row's joined line, without
+        the class-of phrase it prints (`_plan_period_as`, #2004).
         """
         lines: list[str] = []
 
@@ -4818,7 +4822,7 @@ Now analyze the text above:"""
             for row in tbl.rows:
                 cell_texts = []
                 for cell in row.cells:
-                    cell_text = '\n'.join(_paragraph_text(p, include_tracked_insertions)
+                    cell_text = '\n'.join(self._output_text(p, include_tracked_insertions, joined_as_lines)
                                           for p in cell.paragraphs)
                     if cell_text.strip():
                         cell_texts.append(cell_text)
@@ -4829,15 +4833,22 @@ Now analyze the text above:"""
                     add(' | '.join(' '.join(t.split()) for t in cell_texts))
 
         for para in self.doc.paragraphs:
-            text = _paragraph_text(para, include_tracked_insertions)
-            joined = self._planner_lines.get(para._p) if joined_as_lines else None
-            for line in (joined[1] if joined and joined[0] == text else (text,)):
-                add(line)
+            add(self._output_text(para, include_tracked_insertions, joined_as_lines))
         for tbl in self.doc.tables:
             if exclude_instruction_box and self._is_instruction_box_table(tbl):
                 continue
             walk_table(tbl)
         return lines
+
+    def _output_text(self, para: Paragraph, include_tracked_insertions: bool,
+                     joined_as_lines: bool) -> str:
+        """`para`'s text as `_rendered_output_lines` reads it
+        (`_paragraph_text`), or with `joined_as_lines` the lines
+        `_planner_lines` holds for it, one per line, while it still prints
+        the text they were recorded for."""
+        text = _paragraph_text(para, include_tracked_insertions)
+        planned = self._planner_lines.get(para._p) if joined_as_lines else None
+        return '\n'.join(planned[1]) if planned and planned[0] == text else text
 
     def _recover_unrendered_records(self, entries_by_code: dict[str, list[dict]],
                                     cv_owner: Mapping[str, object] | None = None,

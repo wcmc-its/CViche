@@ -32,7 +32,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.sections.mentoring import _normalize_mentee  # noqa: E402
+from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    MenteeRecord,
+    _normalize_mentee,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -493,3 +496,63 @@ def test_a_list_outcome_is_joined_and_a_non_text_one_adds_nothing():
     assert _mentee(outcome=["An abstract", "A chapter"])["Project/Accomplishments:"] == \
         "An abstract; A chapter"
     assert _mentee(outcome={"type": "abstract"})["Project/Accomplishments:"] == ""
+
+
+# --- #2004: a class-of Mentoring Period keeps the period for the #1205 planner --
+
+#: A mentee line whose expected completion is the year its period renders.
+_CLASS_LINE = ("Fenwick, Robin: Gait variability in example runners. "
+               "(Thesis reader) Expected Graduation June 2024.")
+
+
+def _class_record(text=_CLASS_LINE, **fields):
+    fields.setdefault("end_date", "2024-06")
+    return _normalize_mentee({"text": text, "extracted_fields": {
+        "mentee_name": "Fenwick, Robin", "site_position": "Thesis reader", **fields}}, ongoing=False)
+
+
+def test_a_class_of_mentoring_period_keeps_the_period_it_stands_in_for():
+    record = _class_record()
+
+    assert (record.mentoring_period, record.planner_period) == ("Expected Graduation June 2024", "2024")
+
+
+@pytest.mark.parametrize("text, fields, period", [
+    # no phrase: the cell prints the period
+    ("Fenwick, Robin: Gait variability in example runners.", {}, "2024"),
+    # a phrase whose year the period does not render alone
+    (_CLASS_LINE, {"start_date": "2021"}, "2021-2024"),
+])
+def test_a_mentoring_period_printed_as_itself_leaves_the_planner_nothing(text, fields, period):
+    record = _class_record(text, **fields)
+
+    assert (record.mentoring_period, record.planner_period) == (period, "")
+
+
+def _period_paragraph(table):
+    (row,) = [row for row in table.rows if row.cells[0].text == "Mentoring Period:"]
+    return row.cells[1].paragraphs[0]
+
+
+def test_the_planner_reads_a_class_of_period_cell_as_the_period():
+    gen = _generator()
+    gen._planner_lines = {}
+    table = gen._create_mentee_table(_class_record(), gen.doc.add_paragraph("Past Mentees:")._element)
+
+    para = _period_paragraph(table)
+    assert para.text == "Expected Graduation June 2024"  # the cell prints the phrase
+    assert gen._planner_lines == {para._p: ("Expected Graduation June 2024", ("2024",))}
+
+
+@pytest.mark.parametrize("record", [
+    _class_record("Fenwick, Robin: Gait variability in example runners."),
+    # a record built with no planner period: its cell prints the period
+    MenteeRecord(name="Fenwick, Robin", mentoring_period="2024"),
+])
+def test_a_period_cell_printed_as_itself_is_left_to_the_planner_as_it_prints(record):
+    gen = _generator()
+    gen._planner_lines = {}
+    table = gen._create_mentee_table(record, gen.doc.add_paragraph("Past Mentees:")._element)
+
+    assert _period_paragraph(table).text == "2024"
+    assert gen._planner_lines == {}

@@ -53,6 +53,7 @@ from ..formatting import (
     _format_currency,
     _format_mentee_duration,
     _insert_after,
+    _mentee_period,
     _set_cell_vertical_alignment,
     _set_font,
     _set_table_border,
@@ -99,10 +100,12 @@ N2_INSTRUCTION = ("Duplicate table below as needed. Examples include serving "
 MENTEE_NAME_LABEL = 'Name:'
 MENTEE_PROJECT_LABEL = 'Project/Accomplishments:'
 MENTEE_CURRENT_POSITION_LABEL = 'Current Position:'
+# The row whose cell the #1205 planner reads as its period (`_plan_period_as`).
+MENTEE_PERIOD_LABEL = 'Mentoring Period:'
 MENTEE_TABLE_LABELS = (
     MENTEE_NAME_LABEL,
     'Site/Position:',
-    'Mentoring Period:',
+    MENTEE_PERIOD_LABEL,
     MENTEE_PROJECT_LABEL,
     MENTEE_CURRENT_POSITION_LABEL,
     'Type of Supervision:',
@@ -206,6 +209,10 @@ class MenteeRecord:
     current_position: str = ''
     supervision_type: str = ''
     source_entry: Mapping[str, Any] | None = None
+    # The period `mentoring_period` prints the line's class-of phrase in
+    # place of (`_class_year_phrase`, #2004), which the #1205 planner reads
+    # the cell as; '' when the cell prints the period itself.
+    planner_period: str = ''
 
 
 @dataclass(frozen=True)
@@ -1193,16 +1200,19 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     if role and role.casefold() not in supervision_type.casefold():
         supervision_type = f"{supervision_type} ({role})" if supervision_type else role
 
+    mentoring_period = _format_mentee_duration(
+        fields, ongoing=ongoing, source_text=_text(entry.get('text')))
+    period = _mentee_period(fields, ongoing=ongoing, source_text=_text(entry.get('text')))
     return MenteeRecord(
         name=name,
         site_position=site_position,
-        mentoring_period=_format_mentee_duration(
-            fields, ongoing=ongoing, source_text=_text(entry.get('text'))),
+        mentoring_period=mentoring_period,
         project=project,
         current_position=_text(fields.get('current_position'))
         or _source_row_value(_CURRENT_POSITION_ROW_RE, _text(entry.get('text'))),
         supervision_type=supervision_type,
         source_entry=entry,
+        planner_period='' if period == mentoring_period else period,
     )
 
 
@@ -1675,9 +1685,21 @@ class MentoringSection:
 
         if record.source_entry and first_cell_para:
             self._add_entry_comments(first_cell_para, record.source_entry)
+        self._plan_period_as(table, record)
 
         _insert_after(anchor, table._tbl)
         return table
+
+    def _plan_period_as(self, table: Table, record: MenteeRecord) -> None:
+        """Have the #1205 planner read `table`'s Mentoring Period cell, which
+        prints the line's class-of phrase, as `record.planner_period`, the
+        period it printed before (#2004, `_planner_lines`): the phrase's
+        words then vouch for no prose, as another mentee's note sharing them
+        (MEHOQM's shape). Nothing when the cell prints the period itself."""
+        if not record.planner_period:
+            return
+        para = table.rows[MENTEE_TABLE_LABELS.index(MENTEE_PERIOD_LABEL)].cells[1].paragraphs[0]
+        self._planner_lines[para._p] = (para.text, (record.planner_period,))
 
     def _create_mentee_table_with_spacing(
         self,
