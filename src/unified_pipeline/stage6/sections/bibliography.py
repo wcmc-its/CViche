@@ -62,7 +62,14 @@ from unified_pipeline.core.text_norm import is_placeholder_title, norm
 from unified_pipeline.log_redaction import redacted_error_label
 
 from ..fan_out import fallback_text
-from ..formatting import _format_citation, _set_font, with_event_status
+from ..formatting import (
+    _format_citation,
+    _set_font,
+    citation_with_stored_year,
+    event_status_note,
+    presentation_type_note,
+    with_event_status,
+)
 from ..normalization import split_fused_citation_entries
 from ..normalization.owner_alias import (
     OwnerAlias,
@@ -80,19 +87,53 @@ logger = logging.getLogger(__name__)
 
 # The bibliography subsections whose entries are talks or posters at an event,
 # so a "postponed"/"canceled" note on the source line is part of the citation
-# (#1436). An article or chapter has no event to postpone.
+# (#1436), and so is the line's own "Poster presentation" (#1570). An article
+# or chapter has no event to postpone and was not given as a poster.
 _EVENT_STATUS_CODES = frozenset({'S8'})
 
 
-def _with_abstract_status(code: str, citation: str, pub: Mapping) -> str:
-    """`citation` with its source line's event-status note (`with_event_status`)
-    when `code` is an event subsection. A multi-line source is a fused block
-    of several citations (#208) whose note may belong to another of them, so
-    it is left as the citation reads."""
+def _with_abstract_status(code: str, citation: str, pub: Mapping, num: int) -> str:
+    """`citation`, numbered `num`, with its source line's presentation type
+    (`presentation_type_note`, #1570) and then its event-status note
+    (`event_status_note`, #1436), each in parentheses, when `code` is an event
+    subsection. The type is checked against the citation and the note, so
+    one that either already prints is not added again. A note that writes
+    the month the meeting trailer took beside a stored bare year
+    (`WrittenDate.is_month_written_in`) leaves that year bare
+    (`citation_with_stored_year`), so the row prints the month once (VDFTOD
+    106-108, 118; #1570 round 4). A multi-line source is a fused block of
+    several citations (#208) whose type or note may belong to another of
+    them, so it is left as the citation reads."""
+    source = _event_source(code, pub)
+    if not source:
+        return citation
+    resolved = resolve_publication(pub)
+    status = event_status_note(source, citation)
+    if resolved.bare_year_date.is_month_written_in(status):
+        citation = citation_with_stored_year(pub, num)
+    kind = presentation_type_note(source, resolved.title, f"{citation} {status}")
+    return " ".join([citation, *(f"({note})" for note in (kind, status) if note)])
+
+
+def _event_source(code: str, pub: Mapping) -> str:
+    """`pub`'s single-line source when `code` is an event subsection, else ''
+    (`_with_abstract_status`)."""
     source = fallback_text(pub)
     if code not in _EVENT_STATUS_CODES or '\n' in source.strip():
-        return citation
-    return with_event_status(citation, source)
+        return ''
+    return source
+
+
+def _citation_without_line_details(code: str, pub: Mapping, num: int) -> str:
+    """The citation `_fill_bibliography` writes for `pub`, without what
+    #1570 takes from its line: the presentation type, and the month and days
+    beside a stored bare year (`citation_with_stored_year`). Its event-status
+    note is kept (#1436), so this is the citation as it printed before #1570.
+    The #1205 planner reads the row as this: the words #1570 adds must not
+    make a sub-point's prose read as printed (web051, web244)."""
+    citation = citation_with_stored_year(pub, num)
+    source = _event_source(code, pub)
+    return with_event_status(citation, source) if source else citation
 
 
 # #1573 (NECRGC): a source heading that says the owner is not an author of
@@ -879,7 +920,7 @@ class BibliographySection:
                     continue
                 citation_num += 1
                 citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
-                citation_text = _with_abstract_status(code, citation_text, pub)
+                citation_text = _with_abstract_status(code, citation_text, pub, citation_num)
                 source_heading_note = _source_heading_note(citation_text, pub)
                 original_text = enrichment.text
                 enrichment_status = enrichment.enrichment_status
@@ -903,6 +944,8 @@ class BibliographySection:
                                                         cv_owner_last_name, owner_alias)
                 if source_heading_note:
                     _set_font(para.add_run(self._sanitize_run_text(source_heading_note)))
+                self._plan_citation_as(para, citation_text,
+                                       _citation_without_line_details(code, pub, citation_num))
 
                 # Add comment explaining enrichment (no inline text)
                 if enriched_fields:
@@ -928,6 +971,19 @@ class BibliographySection:
 
                 self.stats['entries_inserted'] += 1
         return declined
+
+    def _plan_citation_as(self, para: Paragraph, citation: str, unadded: str) -> None:
+        """Have the #1205 planner read `para`, which prints `citation`, as if
+        it printed `unadded` (`_citation_without_line_details`), so the type
+        and date #1570 adds decide no sub-point (`_planner_lines`). A
+        citation written as a tracked insertion is no text the planner
+        reads, and needs nothing."""
+        printed = para.text
+        written = self._sanitize_run_text(citation)
+        if not printed.startswith(written):
+            return
+        self._planner_lines[para._p] = (
+            printed, (self._sanitize_run_text(unadded) + printed[len(written):],))
 
     def _insert_superseded_citation(self, insert_paragraph: Callable[[], Paragraph],
                                     enrichment: _CitationEnrichment) -> None:
