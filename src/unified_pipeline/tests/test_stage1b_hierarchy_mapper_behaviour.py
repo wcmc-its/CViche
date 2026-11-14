@@ -464,6 +464,8 @@ def test_map_hierarchy_node_never_places_a_heading_that_normalizes_to_nothing():
     ("Board Certification", "Board Certification  Internal Medicine  2005"),
     ("Research Support", "Research Support  Grantsmanship award, 2010"),
     ("Post Graduate Experience", "Post Graduate Experience   Following residency, Example Hospital"),
+    ("Medical Licensure", "MEDICAL LICENSURE  Exampleland #4410982"),
+    ("Medical Licensure", "Medical Licensure: Exampleland: 4410982"),
 ])
 def test_map_hierarchy_node_flags_a_short_run_in_line_whose_record_the_header_consumed(heading, line):
     # #1252 S3 (VPMMFM 20, ZEIGYO 12): the strict match accepts the line, so
@@ -471,7 +473,8 @@ def test_map_hierarchy_node_flags_a_short_run_in_line_whose_record_the_header_co
     # line keeps its element_idx and is flagged, so the record stays content.
     # The head ends at the first gap. A record whose first word only starts
     # with an outline heading ("Grants"), or that opens with "Following", is
-    # still a record.
+    # still a record, and so is one word and a licence number (#1254,
+    # BCTOGR 33, PQASUT 118).
     elements = [_elem(0, "A. Person"), _read_elem(1, line), _elem(2, "Sample record, 2010")]
     mapped, _ = map_hierarchy_node(
         {"text": heading, "level": "H1"}, elements, [], 0, scope=_outline(heading, "Grants"))
@@ -485,11 +488,15 @@ def test_map_hierarchy_node_flags_a_short_run_in_line_whose_record_the_header_co
     ("Professional Service", "Professional Service  Committees (see the Following):"),
     ("Research Support", "Research Support  Grants and Contracts"),
     ("Licensure and Certification", "Licensure and\nCertification: Example State Board, 2005"),
+    ("Medical Licensure", "MEDICAL LICENSURE  EXAMPLELAND 4410982"),
+    ("Medical Licensure", "Medical Licensure: Exampleland: 441"),
 ])
 def test_map_hierarchy_node_does_not_flag_a_short_heading_line_whose_tail_is_no_record(heading, line):
     # A column-header row, a lead-in, and a second heading of the outline
     # (HTNNHG 25/124, web244 819, YOXXOH 279) stay headers. So does a colon
-    # on a later line of the paragraph: it is that line's own label.
+    # on a later line of the paragraph: it is that line's own label. One
+    # word and a number is a record only when the number is long and the
+    # word is not ALL CAPS (#1254).
     elements = [_elem(0, "A. Person"), _read_elem(1, line)]
     mapped, _ = map_hierarchy_node(
         {"text": heading, "level": "H1"}, elements, [], 0, scope=_outline(heading, "Grants and Contracts"))
@@ -1813,6 +1820,72 @@ def test_synthetic_parent_child_still_uses_the_sequence_anchor():
     mapped, _ = map_hierarchy_node(node, elements, [], 0)
     assert mapped["element_idx"] is None
     assert mapped["children"][0]["element_idx"] == 3
+
+
+def test_synthetic_same_text_parent_is_no_anchor_for_its_child():
+    # #1254 (MQJAVH 206): 1a's synthetic "EDUCATION" over its child
+    # "Education" took the child's only exact line as its anchor, so the
+    # child landed on a later line that merely opens with the word, and the
+    # degree lines under its real line fell into the section before.
+    elements = [
+        _elem(0, "A. Person"),
+        _elem(1, "Education"),
+        _elem(2, "Ph.D., Example University, 2001"),
+        _elem(3, "Workshop director, Example Outreach"),
+        _elem(4, "Education Day Program"),
+    ]
+    node = {
+        "text": "EDUCATION",
+        "level": "H1",
+        "text_metadata": {"synthetic": True},
+        "children": [{"text": "Education", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["children"][0]["element_idx"] == 1
+
+
+def test_only_the_same_text_ancestor_leaves_the_sequence():
+    # Of "Scholarship" > "RESEARCH" > "Research", only "RESEARCH" is
+    # dropped: "Scholarship" still anchors, so the "Research" line before it
+    # is not taken, and the node keeps its exact line over the later one.
+    elements = [
+        _elem(0, "Research"),
+        _elem(1, "Scholarship"),
+        _elem(2, "Research"),
+        _elem(3, "Research Day Talks"),
+    ]
+    node = {
+        "text": "Scholarship",
+        "level": "H1",
+        "text_metadata": {"synthetic": True},
+        "children": [{
+            "text": "RESEARCH",
+            "level": "H2",
+            "text_metadata": {"synthetic": True},
+            "children": [{"text": "Research", "level": "H3"}],
+        }],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["children"][0]["children"][0]["element_idx"] == 2
+
+
+def test_a_parent_whose_text_only_opens_like_its_childs_still_anchors():
+    # #1254's inverse: an ancestor is dropped only when its text EQUALS the
+    # node's. "Education and Training" still anchors the child, so the
+    # "Education" line before it is not taken.
+    elements = [
+        _elem(0, "Education"),
+        _elem(1, "Education and Training"),
+        _elem(2, "Education"),
+    ]
+    node = {
+        "text": "Education and Training",
+        "level": "H1",
+        "text_metadata": {"synthetic": True},
+        "children": [{"text": "Education", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["children"][0]["element_idx"] == 2
 
 
 def test_child_may_partial_match_its_mapped_parents_own_line():

@@ -37,6 +37,19 @@ def test_norm_folds_latin_greek_and_cyrillic_accents_only():
     ("Not applicable.", None),
     ("Page 2 of 5", None),
     ("YEAR JOINED", None),
+    # One letter word is a record when a number of four or more digits
+    # comes with it: a licence's state and number (#1254).
+    ("  Exampleland #4410982", "Exampleland #4410982"),
+    (": Exampleland: 4410982", "Exampleland: 4410982"),
+    ("Exampleland 4410", "Exampleland 4410"),
+    ("Exampleland #441", None),
+    ("h-index=33", None),
+    ("(3 total)", None),
+    ("(Since 1995)", None),
+    ("Page 2", None),
+    ("EXAMPLELAND #4410982", None),
+    ("Where?", None),
+    ("4410982", None),
 ])
 def test_record_after_heading_reads_a_record_and_not_a_note(rest, record):
     """#1254, #1252: the run doctor and stage 1b share this test."""

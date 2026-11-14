@@ -133,18 +133,35 @@ _HEADER_NOTE_RE = re.compile(
 #: Separators between a run-in heading and its first record.
 HEADER_SEPARATORS = " \t:;,.-\u2013\u2014"
 #: The fewest letter words a remainder needs to be a record rather than a
-#: stray word ("program", "Where?").
+#: stray word ("program", "Where?"), unless it also holds a long number
+#: (`HEADER_RECORD_NUMBER_MIN_DIGITS`).
 HEADER_RECORD_MIN_WORDS = 2
+#: A remainder of ONE letter word is a record when it also holds a number of
+#: at least this many digits: a licence's state and number ("<State>
+#: #<number>", "<State>: <number>"; #1254, BCTOGR 33, PQASUT 118). A
+#: shorter number is a count or a score ("h-index=33").
+HEADER_RECORD_NUMBER_MIN_DIGITS = 4
 _LETTER_WORD_RE = re.compile(r"[^\W\d_]{2,}")
+_DIGIT_RUN_RE = re.compile(r"\d+")
+
+
+def _has_record_words(rest: str) -> bool:
+    """Whether `rest` holds a record's words: `HEADER_RECORD_MIN_WORDS`
+    letter words, or one letter word and a number of
+    `HEADER_RECORD_NUMBER_MIN_DIGITS` digits or more (#1254)."""
+    words = len(_LETTER_WORD_RE.findall(rest))
+    if words >= HEADER_RECORD_MIN_WORDS:
+        return True
+    return words == 1 and any(
+        len(number) >= HEADER_RECORD_NUMBER_MIN_DIGITS for number in _DIGIT_RUN_RE.findall(rest))
 
 
 def record_after_heading(rest: str) -> str | None:
     """`rest`, the text after a heading's own words, without the separators
-    around it, when it reads as a record: two or more letter words, not a
-    note, not ALL CAPS (a column-header row, "YEAR JOINED"). None otherwise."""
+    around it, when it reads as a record (`_has_record_words`), not a note,
+    not ALL CAPS (a column-header row, "YEAR JOINED"). None otherwise."""
     rest = rest.strip(HEADER_SEPARATORS)
-    if (len(_LETTER_WORD_RE.findall(rest)) < HEADER_RECORD_MIN_WORDS
-            or _HEADER_NOTE_RE.match(rest) or rest.isupper()):
+    if not _has_record_words(rest) or _HEADER_NOTE_RE.match(rest) or rest.isupper():
         return None
     return rest
 

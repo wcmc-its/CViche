@@ -104,14 +104,16 @@ class RowCopy:
 # quality_score.DIMENSIONS / CAP_ONLY_GATES needs one (the contract test pins
 # that).
 _ROW_COPY_BY_SCORER = {
-    # Wording approved by Paul, 2026-10-08 (#1595). The score's one
-    # weighted row since #1595.
+    # Wording approved by Paul, 2026-10-08 (#1595); the share-of-a-retype
+    # clauses follow his 2026-11-14 decision that the score is not a function
+    # of length. The score's one weighted row since #1595.
     scorer.score_doctor_findings: RowCopy(
         "Problems the checker found",
         "Adds up the problems the Run Doctor flagged as warnings, each weighted by how often that "
-        "check has been right and by the minutes that kind of problem usually takes to fix.",
-        "About 3 minutes of estimated cleanup or less keeps the run at Ship. More lowers the "
-        "score toward 60, never below it. A run the Run Doctor did not check is capped at 84.",
+        "check has been right and by the minutes that kind of problem usually takes to fix, then "
+        "compares the total with the time it would take to retype the whole CV.",
+        "Estimated cleanup of about 2% of a full retype or less keeps the run at Ship. More lowers "
+        "the score toward 60, never below it. A run the Run Doctor did not check is capped at 84.",
         "Work through the Run Doctor findings below, most costly first."),
     # The next two rows' scoring sentences: approved by Paul, 2026-10-08
     # (#1595; their points were retired, only the cap remains); the rest is
