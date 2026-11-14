@@ -83,14 +83,15 @@ def test_read_failure_is_counted_and_does_not_stop_the_batch(db, monkeypatch, ca
     assert any(r.exc_info for r in caplog.records)
 
 
-def test_rescore_stale_recomputes_only_runs_on_other_weights(db, monkeypatch):
+def test_rescore_stale_recomputes_only_runs_on_another_scoring_model(db, monkeypatch):
+    """B00001: current weights but no score_model, so absolute minutes; B00003: other weights."""
     _run(db, "B00001", score=60)
     _run(db, "B00002", score=70)
     _run(db, "B00003", score=80)
     _patch_cache(monkeypatch, {
-        "B00001": {"totalScore": 60, "total_weight": 95},
-        "B00002": {"totalScore": 70, "total_weight": script.TOTAL_WEIGHT},
-        "B00003": {"totalScore": 80, "total_weight": 95},
+        "B00001": {"totalScore": 60, "total_weight": script.TOTAL_WEIGHT},
+        "B00002": {"totalScore": 70, "total_weight": script.TOTAL_WEIGHT, "score_model": script.SCORE_MODEL},
+        "B00003": {"totalScore": 80, "total_weight": 95, "score_model": script.SCORE_MODEL},
     })
     recomputed = []
 

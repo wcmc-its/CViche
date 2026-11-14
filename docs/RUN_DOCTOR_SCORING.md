@@ -131,13 +131,29 @@ score = round(max(0, final))
 
 ### The doctor-findings dimension (weight 40)
 
-`score_doctor_findings` reads the run's `<uid>_doctor.json` and estimates the
-minutes of cleanup it names:
+`score_doctor_findings` reads the run's `<uid>_doctor.json`, estimates the
+minutes of cleanup it names, and sets them against the minutes it would take to
+retype the CV by hand:
 
 ```python
 minutes  = sum(precision(finding) * severity_weight * fix_minutes(lint)  for each finding)
-fraction = minutes / (minutes + 5)
+manual   = total_entries * 1          # MANUAL_MINUTES_PER_ENTRY, classified.json meta.total_entries
+share    = minutes / manual
+fraction = share / (share + 0.0333)
 ```
+
+- **The score is not a function of the CV's length** (Paul, 2026-11-14: it
+  should say how much cleanup is needed against doing the conversion by hand).
+  Until then the fraction was `minutes / (minutes + 5)`, absolute minutes, and
+  a long CV scored low for its length: on the 207 labelled runs the score's
+  rank correlation with entry count was -0.52, and it is -0.11 on the share.
+  `MANUAL_MINUTES_PER_ENTRY` is the unit cost of retyping one lost record, so
+  a run that lost every record needs 100% of the manual work. A run whose
+  `classified.json` carries no entry count cannot be sized and is capped at
+  `NOT_CHECKED_CAP`, like a run with no report. Every result records
+  `score_model` (`cleanup_share`); after a deploy,
+  `backfill_quality_score.py --rescore-stale --apply` recomputes the stored
+  scores that lack it, so the two scales are never read side by side.
 
 - **precision** is the finding's hand-checked TP / judged as the review copy's
   gate reads it (#1589): `doctor.precision.finding_precision` over
@@ -154,8 +170,8 @@ fraction = minutes / (minutes + 5)
   0.2, a formatting artifact 0.1, and 0 for a finding that reports how the run
   went (a fallback model, a failed call) rather than a defect. They are asserted,
   not measured: refit them once #1587 records reviewers' correction times.
-- **The 5** (`DOCTOR_HALF_WEIGHT_MINUTES`) is derived, not chosen: it makes
-  `GREEN_MAX_CLEANUP_MINUTES` (3) cost exactly the 15 points between 100 and
+- **The 0.0333** (`DOCTOR_HALF_WEIGHT_SHARE`) is derived, not chosen: it makes
+  `GREEN_MAX_CLEANUP_SHARE` (2%) cost exactly the 15 points between 100 and
   the GREEN line. The penalty never reaches the full 40 points, so more cleanup
   always scores lower, and estimates alone never take a run below YELLOW. RED is
   left to the hard-fail caps ("nothing below YELLOW", Paul on #822, 2026-10-02).
@@ -317,14 +333,39 @@ cap either.
 
 | Score | Band | `quality_gate` verdict |
 |---|---|---|
-| ≥ 85 | GREEN (ship): about 3 minutes of estimated cleanup or less, and checked | PASS |
+| ≥ 85 | GREEN (ship): estimated cleanup is about 2% of retyping the CV or less, and checked | PASS |
 | ≥ 60 | YELLOW (human cleanup needed) | REVIEW |
 | < 60 | RED (re-run / do-not-deliver): a hard-fail cap only | BLOCK |
 
 Gate modes: `off` (always passes), `advisory` (computes, never blocks —
 **default**), `block` (RED fails). The gate never raises on a low score.
 
-`GREEN_MAX_CLEANUP_MINUTES = 3` was set on the fit set, batches EBYSBC, s7ab and
+`GREEN_MAX_CLEANUP_SHARE = 0.02` (2026-11-14) replaces a line in absolute
+minutes. It was read off the 207 labelled runs, re-scored from their stored
+doctor reports (dev `5e325528`, 2026-10-21) with dev `39e3e156`'s weights. The
+median run's estimated cleanup is 1.8% of a retype (10th to 90th percentile:
+0.3% to 4.8%).
+
+| GREEN line | 90+ | 85-89 | 80-84 | 70-79 | <70 | GREEN runs with a verified HIGH |
+|---|---|---|---|---|---|---|
+| 3 minutes, absolute (before) | 48 | 24 | 33 | 79 | 23 | 37 of 72 |
+| 1% of a retype | 39 | 28 | 31 | 94 | 15 | 35 of 67 |
+| 1.5% | 61 | 26 | 45 | 72 | 3 | 51 of 87 |
+| **2% (chosen)** | 73 | 39 | 49 | 45 | 1 | 69 of 112 |
+| 3% | 99 | 57 | 36 | 15 | 0 | 101 of 156 |
+
+The share tracks verified defects per entry better than absolute minutes did
+(batch-stratified rank correlation 0.36 against -0.18) and the absolute count
+of verified defects worse (0.27 against 0.51). Autopsies find a roughly
+constant number of defects per CV whatever its length (-0.68 between entry
+count and verified defects per entry), so the per-entry figures flatter long
+CVs. GREEN runs carrying a verified HIGH stay above half at every line: that is
+the doctor's recall, which no line fixes. Damping repeated findings of one lint
+(square root of the count) was measured too: it helps on absolute minutes but,
+combined with the share, favours long CVs (-0.32 against entry count), so it is
+not applied.
+
+The line this replaces, `GREEN_MAX_CLEANUP_MINUTES = 3`, was set on the fit set, batches EBYSBC, s7ab and
 pilot (62 runs; labels converted from their verified autopsies). 48 of the 62
 carry a verified HIGH, so GREEN can only be honest if it is rare. Runs under
 3.5 estimated minutes: 5, none with a HIGH; under 4: 8, 1 with a HIGH; under 5:
