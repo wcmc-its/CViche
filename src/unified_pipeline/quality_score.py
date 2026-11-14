@@ -26,7 +26,11 @@ weight w costs w * fraction points::
 Since #1595 the score is built from the run doctor's findings
 (``score_doctor_findings``, weight 40): each WARN or ERROR finding costs its
 hand-checked precision times the minutes its kind of defect typically takes to
-fix (``LINT_FIX_MINUTES``), and the estimated minutes set the penalty. The
+fix (``LINT_FIX_MINUTES``). The penalty is set by those minutes as a share of
+the minutes it would take to retype the CV by hand (one
+``MANUAL_MINUTES_PER_ENTRY`` per classified entry), so the score does not fall
+with a CV's length: ten minutes of cleanup on 500 entries scores higher than
+on 50. The
 precision is the one the review copy's gate reads
 (``doctor.precision.finding_precision`` over ``load_gate_ledger``): the
 ``doctor/PRECISION.md`` row of the finding's own shape, with YUYVIG's held-out
@@ -59,13 +63,13 @@ artifacts only the doctor report moves the score: without it the run is capped
 at NOT_CHECKED_CAP.
 
 Bands:
-    >= 85  GREEN   ship: about 3 minutes of estimated cleanup or less
-                   (GREEN_MAX_CLEANUP_MINUTES), and checked by the doctor
+    >= 85  GREEN   ship: estimated cleanup is about 2% of retyping the CV or
+                   less (GREEN_MAX_CLEANUP_SHARE), and checked by the doctor
     >= 60  YELLOW  human cleanup needed
     <  60  RED     re-run / do-not-deliver: reached only through a hard-fail cap
 
-The 85/60 lines date from June 2026; what GREEN means in minutes was set on
-labelled batches (see GREEN_MAX_CLEANUP_MINUTES). The fix minutes are #822's
+The 85/60 lines date from June 2026; what GREEN means as a share of the manual
+work was set on labelled batches (see GREEN_MAX_CLEANUP_SHARE). The fix minutes are #822's
 strawman unit costs, not measured, so treat the minutes as a ranking and GREEN
 as "nothing the doctor reliably flags", never "human-verified correct".
 """
@@ -998,22 +1002,29 @@ _DOCTOR_STATUS_RAN = "ran"
 #: content-loss caps on #822 (2026-10-02, "nothing below YELLOW").
 DOCTOR_FINDINGS_WEIGHT = 100 - BAND_YELLOW
 
-#: The estimated cleanup a GREEN run may need, in minutes. Set on the fit set
-#: (batches EBYSBC, s7ab and pilot, 62 runs with verified defects; #1595): 48
-#: of the 62 carry a verified HIGH, so GREEN can only be honest if it is rare.
-#: Under 3.5 minutes, 5 runs and none with a HIGH; under 4, 8 runs and 1 with a
-#: HIGH; under 5, 14 and 5. Goal 4 in docs/RUN_DOCTOR_SCORING.md asks for under
-#: 1 in 10 GREEN runs with a HIGH, so 3. Refit on each labelled batch.
-GREEN_MAX_CLEANUP_MINUTES = 3.0
+#: Minutes to convert one source entry into the template by hand: what the
+#: whole CV would cost with no pipeline. The same strawman unit as retyping a
+#: lost record, so a run that lost every record needs 100% of the manual work.
+# ponytail: one flat rate per entry; refit per taxonomy code with the fix
+# minutes once #1587 has reviewer correction times.
+MANUAL_MINUTES_PER_ENTRY = FIX_MINUTES_RECORD_LOST
 
-#: The estimated minutes at which the dimension takes half its weight. The
-#: penalty fraction is ``minutes / (minutes + DOCTOR_HALF_WEIGHT_MINUTES)``: 0
+#: The estimated cleanup a GREEN run may need, as a share of retyping the CV by
+#: hand (Paul, 2026-11-14: the score should not be a function of length; it
+#: should say how much cleanup is needed against doing it manually). On the
+#: 207 labelled runs the median share is 1.8% (10th-90th percentile 0.3%-4.8%)
+#: and the score's rank correlation with entry count goes from -0.52 (absolute
+#: minutes) to -0.11. At 2%, 112 of the 207 are GREEN (72 at the 3 absolute
+#: minutes this replaces). docs/RUN_DOCTOR_SCORING.md has the table.
+GREEN_MAX_CLEANUP_SHARE = 0.02
+
+#: The cleanup share at which the dimension takes half its weight. The
+#: penalty fraction is ``share / (share + DOCTOR_HALF_WEIGHT_SHARE)``: 0
 #: with no counted finding, rising ever more slowly and never reaching 1, so
-#: more cleanup always scores lower and long runs stay apart (an exponential
-#: with the same GREEN line rounds every run over about 28 minutes to 60).
-#: Derived so that GREEN_MAX_CLEANUP_MINUTES costs exactly the points between
-#: 100 and the GREEN line: 5 minutes with the constants above.
-DOCTOR_HALF_WEIGHT_MINUTES = GREEN_MAX_CLEANUP_MINUTES * (
+#: more cleanup always scores lower and bad runs stay apart.
+#: Derived so that GREEN_MAX_CLEANUP_SHARE costs exactly the points between
+#: 100 and the GREEN line: about 3.3% with the constants above.
+DOCTOR_HALF_WEIGHT_SHARE = GREEN_MAX_CLEANUP_SHARE * (
     DOCTOR_FINDINGS_WEIGHT - (100 - BAND_GREEN)) / (100 - BAND_GREEN)
 
 #: The cap on a run with no readable doctor report (#1593: IXJMKS scored 97
@@ -1076,12 +1087,26 @@ def estimate_cleanup(findings: Iterable[object]) -> list[LintCost]:
     return sorted(costs, key=lambda c: (-c.minutes, c.lint))
 
 
-def score_doctor_findings(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """The run's estimated cleanup, from its doctor report (#1595).
+def manual_minutes(outputs_dir: Path) -> float | None:
+    """The minutes it would take to retype this CV by hand: its classified
+    entry count times MANUAL_MINUTES_PER_ENTRY. None when classified.json is
+    absent, unreadable or carries no positive ``meta.total_entries``."""
+    classified, _ = _load_first(outputs_dir, "*_classified.json")
+    meta = classified.get("meta") if isinstance(classified, dict) else None
+    entries = meta.get("total_entries") if isinstance(meta, dict) else None
+    if isinstance(entries, bool) or not isinstance(entries, int) or entries <= 0:
+        return None
+    return entries * MANUAL_MINUTES_PER_ENTRY
 
-    The penalty fraction is ``minutes / (minutes + DOCTOR_HALF_WEIGHT_MINUTES)``
-    over `estimate_cleanup`'s total. With no readable report the run was not
-    checked: no penalty, and NOT_CHECKED_CAP keeps it out of GREEN.
+
+def score_doctor_findings(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """The run's estimated cleanup as a share of retyping the CV, from its
+    doctor report (#1595).
+
+    The penalty fraction is ``share / (share + DOCTOR_HALF_WEIGHT_SHARE)``,
+    the share being `estimate_cleanup`'s total over `manual_minutes`. With no
+    readable report, or no entry count to size the manual work, the run has no
+    estimate: no penalty, and NOT_CHECKED_CAP keeps it out of GREEN.
     """
     report, reason = _load_first(outputs_dir, f"*{DOCTOR_REPORT_SUFFIX}")
     findings = report.get("findings") if isinstance(report, dict) else None
@@ -1089,13 +1114,18 @@ def score_doctor_findings(outputs_dir: Path) -> tuple[float, str, int | None]:
         why = _missing_or_unreadable_detail("doctor report", reason) if report is None \
             else "doctor report has no findings list"
         return 0.0, f"{why}: not checked; cap={NOT_CHECKED_CAP}", NOT_CHECKED_CAP
+    manual = manual_minutes(outputs_dir)
+    if manual is None:
+        return 0.0, f"no entry count in classified.json: not sized; cap={NOT_CHECKED_CAP}", NOT_CHECKED_CAP
     costs = estimate_cleanup(findings)
     minutes = sum(c.minutes for c in costs)
+    share = minutes / manual
     top = "; ".join(f"{c.lint} {c.findings}x p={c.precision:.2f} {c.minutes:.1f}min"
                     for c in costs[:_DETAIL_TOP_LINTS])
-    detail = (f"estimated_cleanup_minutes={minutes:.1f} from "
+    detail = (f"estimated_cleanup_minutes={minutes:.1f} of {manual:.0f} manual "
+              f"({share:.1%}) from "
               f"{sum(c.findings for c in costs)} findings" + (f" ({top})" if top else ""))
-    return minutes / (minutes + DOCTOR_HALF_WEIGHT_MINUTES), detail, None
+    return share / (share + DOCTOR_HALF_WEIGHT_SHARE), detail, None
 
 
 #: The WCM template stage 6 renders every CV into (`TEMPLATE_PATH` in

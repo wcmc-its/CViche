@@ -616,8 +616,9 @@ def test_score_run_one_missing_artifact_counts_one_of_five(tmp_path):
     result = score_run(tmp_path)
     assert result["data_complete"] is False
     assert result["missing_evidence"] == ["no classified.json found"]
+    # No entry count, so the cleanup cannot be sized against the manual work.
     assert result["flags"] == [
-        "No hard-fail caps triggered",
+        "HARD-FAIL cap=84: Doctor findings: estimated cleanup, precision-weighted (fraction=0.00)",
         "EVIDENCE INCOMPLETE (1 of 5 artifacts): no classified.json found",
     ]
 
@@ -1358,6 +1359,7 @@ def test_a_run_the_doctor_did_not_check_is_capped_out_of_green(tmp_path, write, 
 
 def test_the_penalty_rises_with_the_estimate_and_never_reaches_the_weight(tmp_path, monkeypatch):
     monkeypatch.setattr(qs, "load_gate_ledger", _ledger(multi_record_coverage=(1, 1)))
+    _write_json(tmp_path, "X_classified.json", _classified(total_entries=100))
     fractions = []
     for n in (0, 1, 5, 500):
         _write_json(tmp_path, "X_doctor.json", {"findings": [_finding("multi_record_coverage")] * n})
@@ -1367,28 +1369,55 @@ def test_the_penalty_rises_with_the_estimate_and_never_reaches_the_weight(tmp_pa
     assert fractions[0] == 0.0
     assert fractions == sorted(fractions) and len(set(fractions)) == 4
     assert fractions[-1] < 1.0
-    assert "estimated_cleanup_minutes=500.0 from 500 findings (multi_record_coverage 500x" in detail
+    assert "estimated_cleanup_minutes=500.0 of 100 manual (500.0%) from 500 findings (multi_record_coverage 500x" in detail
 
 
-def _run_with_minutes(tmp_path, minutes, monkeypatch):
-    """A complete run whose doctor findings cost exactly `minutes`."""
+def _run_with_minutes(tmp_path, minutes, monkeypatch, entries=100):
+    """A complete run of `entries` entries whose doctor findings cost exactly `minutes`."""
     monkeypatch.setattr(qs, "load_gate_ledger", _ledger(multi_record_coverage=(1, 1)))
     _complete_run_dir(tmp_path)
+    _write_json(tmp_path, "X_classified.json",
+                _classified(total_entries=entries, duplicate_entries=0,
+                            code_distribution={"A": entries - 1, "T": 1}))
     n = round(minutes / qs.FIX_MINUTES_RECORD_LOST)
     _write_json(tmp_path, "X_doctor.json", {"findings": [_finding("multi_record_coverage")] * n})
     return score_run(tmp_path)
 
 
-def test_green_means_at_most_the_green_cleanup_minutes(tmp_path, monkeypatch):
-    """The GREEN line sits at GREEN_MAX_CLEANUP_MINUTES: a run at the limit is
-    GREEN, a run one finding over it is not."""
-    assert qs.GREEN_MAX_CLEANUP_MINUTES == 3.0
+def test_green_means_at_most_the_green_cleanup_share(tmp_path, monkeypatch):
+    """The GREEN line sits at GREEN_MAX_CLEANUP_SHARE of retyping the CV: a run
+    at the limit is GREEN, a run one finding over it is not."""
+    assert qs.GREEN_MAX_CLEANUP_SHARE == 0.02
     (tmp_path / "at").mkdir()
     (tmp_path / "over").mkdir()
-    at = _run_with_minutes(tmp_path / "at", 3, monkeypatch)
-    over = _run_with_minutes(tmp_path / "over", 4, monkeypatch)
+    at = _run_with_minutes(tmp_path / "at", 2, monkeypatch)
+    over = _run_with_minutes(tmp_path / "over", 3, monkeypatch)
     assert (at["totalScore"], at["band"]) == (85, "GREEN (ship)")
     assert over["band"].startswith("YELLOW") and over["hard_fail_caps_applied"] == []
+
+
+def test_the_score_does_not_fall_with_the_length_of_the_cv(tmp_path, monkeypatch):
+    """Paul, 2026-11-14: the same share of the manual work scores the same on
+    a short CV and a long one; the same minutes score higher on the long one."""
+    for name in ("short", "long", "long_same_minutes"):
+        (tmp_path / name).mkdir()
+    short = _run_with_minutes(tmp_path / "short", 5, monkeypatch, entries=50)
+    long_ = _run_with_minutes(tmp_path / "long", 50, monkeypatch, entries=500)
+    same_minutes = _run_with_minutes(tmp_path / "long_same_minutes", 5, monkeypatch, entries=500)
+    assert short["totalScore"] == long_["totalScore"] == 70
+    assert same_minutes["totalScore"] == 91
+
+
+@pytest.mark.parametrize("classified", [
+    None, {"meta": {}}, _classified(total_entries=0), _classified(total_entries=True), ["not a dict"]])
+def test_a_run_with_no_entry_count_is_capped_out_of_green(tmp_path, classified):
+    """Without the entry count the cleanup cannot be sized against the manual work."""
+    _write_json(tmp_path, "X_doctor.json", {"findings": []})
+    if classified is not None:
+        _write_json(tmp_path, "X_classified.json", classified)
+    fraction, detail, cap = qs.score_doctor_findings(tmp_path)
+    assert (fraction, cap) == (0.0, qs.NOT_CHECKED_CAP)
+    assert detail.startswith("no entry count"), detail
 
 
 def test_no_amount_of_findings_alone_makes_a_run_red(tmp_path, monkeypatch):
