@@ -43,6 +43,7 @@ from unified_pipeline.stage6.formatting.values import (
     _format_citation,
     _format_currency,
     _format_mentee_duration,
+    presentation_type_note,
 )
 
 
@@ -491,6 +492,15 @@ def test_fallback_s8_entry_drops_an_abstract_number_that_is_the_list_number():
     ('2023-11', 'A Talk on Larks. Nov. 2023.', '2023 Nov'),
     # The line names no month: the stored value renders as it always did.
     ('2011-06', '06/2011 A Talk on Larks.', '2011-06'),
+    # #1570 round 3: a bare stored year takes the month and days the line
+    # writes beside it, unless they end a range from another month.
+    ('2023', 'Rook J. A Talk on Larks. Larchmere, 21-24 October 2023.', '2023 October 21-24'),
+    ('2012', 'A Talk on Larks. Larchmere, September 30 - October 3, 2012.', '2012'),
+    # A journal locator anywhere before the date: the month may be the issue's.
+    ('2008', 'A Talk on Larks. Biol Larks 12(3):45-67, 2008 (presented at the Annual '
+             'Meeting, Larchmere, May 1, 2008).', '2008'),
+    # web204 2363's shape: "Part 1" numbers the issue, "6" is the day.
+    ('2006', 'A Talk on Larks. Annual Meeting, Larchmere, Part 2 MAR 8 2006.', '2006 MAR 8'),
 ])
 def test_fallback_s8_meeting_date_uses_the_month_its_line_writes(year, text, expected_date):
     fields = dict(_S8_MEETING_FIELDS, year=year)
@@ -559,6 +569,49 @@ def test_fallback_s8_meeting_month_the_place_already_prints_keeps_the_stored_dat
     citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
 
     assert citation.endswith('Society; 2004-05; Larchmere, 2-4 May 2004.')
+
+
+def test_fallback_s8_bare_year_month_the_place_already_prints_stays_the_year():
+    """#1570 round 3: a bare stored year takes the same repeat check, so a
+    place that already writes "2-4 May 2004" keeps "2004" alone."""
+    fields = dict(_S8_MEETING_FIELDS, location='Larchmere, 2-4 May 2004')
+    text = 'A Talk on Larks. Annual Meeting, Larchmere, 2-4 May 2004'
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation.endswith('Society; 2004; Larchmere, 2-4 May 2004.')
+
+
+@pytest.mark.parametrize('extra,text,expected_tail', [
+    # web228 1120's shape: the days "12-12" are the abstract number too, and
+    # printed beside the month they dropped it; the month alone keeps it.
+    ({'abstract_number': '12-12'},
+     'A Talk on Larks. Oral, Annual Meeting 12-12 Jun 2017, Larchmere, ZZ.',
+     'Society; 2017 Jun; Larchmere, ZZ. 12-12.'),
+    # Days no other part prints are printed, and the number with them.
+    ({'abstract_number': 'K-20'},
+     'A Talk on Larks. Annual Meeting 17-19 Jun 2017, Larchmere, ZZ, K-20.',
+     'Society; 2017 Jun 17-19; Larchmere, ZZ. K-20.'),
+    # A day the meeting's name or its place already prints: the month alone.
+    ({'conference_name': 'Quillfern Meeting 17'},
+     'A Talk on Larks. Quillfern Meeting 17, Larchmere, ZZ, 17-19 Jun 2017.',
+     'Quillfern Meeting 17; 2017 Jun; Larchmere, ZZ.'),
+    ({'location': 'Larchmere 19, ZZ'},
+     'A Talk on Larks. Annual Meeting, Larchmere 19, ZZ, 17-19 Jun 2017.',
+     'Society; 2017 Jun; Larchmere 19, ZZ.'),
+    # The month alone would still drop the number: the stored year stays.
+    ({'abstract_number': '17 Jun'},
+     'A Talk on Larks. Annual Meeting 17 Jun 2017, Larchmere, ZZ.',
+     'Society; 2017; Larchmere, ZZ. 17 Jun.'),
+])
+def test_fallback_s8_bare_year_date_changes_no_other_trailer_part(extra, text, expected_tail):
+    """#1570 fix round: the line's month and days replace the stored bare
+    year and change nothing else in the trailer."""
+    fields = dict(_S8_MEETING_FIELDS, year='2017', **extra)
+
+    citation, _, _ = _format_citation(_s8_entry(fields, text), 3)
+
+    assert citation.endswith(expected_tail)
 
 
 def test_fallback_journal_trailer_prints_no_abstract_number():
@@ -1682,6 +1735,314 @@ def test_with_event_status_leaves_text_without_a_note_unchanged():
 def test_with_event_status_on_empty_text_is_the_note_alone():
     from unified_pipeline.stage6.formatting.values import with_event_status
     assert with_event_status("", "Venue, 2020 (postponed)") == "(postponed)"
+
+
+# --- #1570: `presentation_type_note`, the poster or oral type an S8 line states ---
+
+_TALK_TITLE = 'A Talk on Larks'
+_TALK_SHOWN = '1. Rook J. A Talk on Larks. Quillfern Meeting; 2004; Larchmere.'
+
+
+@pytest.mark.parametrize('text,expected', [
+    # LPPQAJ 208/210's shapes: the line says how the work was given.
+    ('Rook J. A Talk on Larks. Poster presentation at the Quillfern Meeting, 2004.',
+     'Poster presentation'),
+    ('Rook J. A Talk on Larks. Oral Presentation, Quillfern Meeting, 2004.', 'Oral Presentation'),
+    ('Rook J. A Talk on Larks. poster, Quillfern Meeting, 2004.', 'Poster'),
+    ('Rook J. A Talk on Larks. Poster discussion, Quillfern Meeting.', 'Poster discussion'),
+    ('Rook J. A Talk on Larks. Poster abstract, Quillfern Meeting.', 'Poster abstract'),
+    ('Rook J. A Talk on Larks. Poster talk, Quillfern Meeting.', 'Poster talk'),
+    ('Rook J. A Talk on Larks. Podium talk, Quillfern Meeting.', 'Podium talk'),
+    ('Rook J. A Talk on Larks. Platform session, Quillfern Meeting.', 'Platform session'),
+    ('Rook J. A Talk on Larks. Plenary abstract, Quillfern Meeting.', 'Plenary abstract'),
+    # A spoken type alone only in brackets of its own.
+    ('Rook J. A Talk on Larks (oral). Quillfern Meeting, 2004.', 'Oral'),
+    ('Rook J. A Talk on Larks [Podium]. Quillfern Meeting, 2004.', 'Podium'),
+    # An e-poster in either spelling. The first letter is capitalised unless
+    # the first word already holds a capital, which keeps the line's case.
+    ('Rook J. A Talk on Larks. ePoster session, Quillfern Meeting.', 'ePoster session'),
+    ('Rook J. A Talk on Larks. e-poster, Quillfern Meeting.', 'E-poster'),
+    ('Rook J. A Talk on Larks. e-Poster, Quillfern Meeting.', 'e-Poster'),
+    ('Rook J. A Talk on Larks. ePoster 12, e-poster hall B, Quillfern Meeting.', 'ePoster'),
+    ('Rook J. A Talk on Larks. ORAL PRESENTATION, Quillfern Meeting.', 'ORAL PRESENTATION'),
+    ('Rook J. A Talk on Larks. poster Session, Quillfern Meeting.', 'Poster Session'),
+    # One type written twice is one type; its first phrase is printed.
+    ('Rook J. A Talk on Larks. Poster session 3, poster 12. Quillfern Meeting.', 'Poster session'),
+    # "Best" three words before it is not this occurrence's context (only a
+    # prize word is, anywhere before it), and "top" inside a longer word is
+    # no award.
+    ('Rook J. Best of the annual meeting: poster session, Quillfern Meeting.', 'Poster session'),
+    ('Rook J. Topical larks. Poster session, Quillfern Meeting.', 'Poster session'),
+    # An occurrence in an award context leaves the line's other one.
+    ('Best oral presentation, Quillfern Meeting 2003. Rook J. A Talk on Larks. '
+     'Poster presentation, Quillfern Meeting 2004.', 'Poster presentation'),
+    ('Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting 2004. '
+     'Best oral presentation, Quillfern Meeting 2003.', 'Poster presentation'),
+    # A spoken word that is not joined to the poster is the subject, not a
+    # second type.
+    ('Rook J. Oral microbiome of larks. Poster presentation, Quillfern Meeting.',
+     'Poster presentation'),
+    ('Rook J. A Talk on Larks. Poster at the National Oral Health Meeting.', 'Poster'),
+    ('Rook J. Oral and nasal larks. Poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. A Talk on Larks. Poster at the Oral Biology Meeting.', 'Poster'),
+    # A spoken word inside a longer word is no type, and nor is a poster one.
+    ('Rook J. Extra-oral larks. Poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. Oral posterior larks. Poster presentation, Quillfern Meeting.', 'Poster presentation'),
+    ('Rook J. Poster, Platformer larks, Quillfern Meeting.', 'Poster'),
+    # An oral communication is the oral type the line already states.
+    ('Rook J. A Talk on Larks. Oral presentation (Oral Communication), Quillfern Meeting.',
+     'Oral presentation'),
+    # A spoken type joined to a poster in a judging context is not a type.
+    ('Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting. Judge, oral and '
+     'poster competition.', 'Poster presentation'),
+])
+def test_presentation_type_note_is_the_one_type_the_line_states(text, expected):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
+
+
+def test_presentation_type_note_a_title_naming_another_type_does_not_stand_for_it():
+    text = 'Rook J. Oral Health of Larks. Poster presentation, Quillfern Meeting.'
+    assert presentation_type_note(text, 'Oral Health of Larks', _TALK_SHOWN) == 'Poster presentation'
+
+
+@pytest.mark.parametrize('text', [
+    # No type, or a type word inside another word or without its kind.
+    'Rook J. A Talk on Larks. Quillfern Meeting, 2004.',
+    'Rook J. Posterior Larks. Quillfern Meeting, 2004.',
+    'Rook J. A Talk on Larks. Oral history session, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Oral presentations, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Choral presentation, Quillfern Meeting.',
+    'Rook J. Extra-oral presentation of lark pox. Quillfern Meeting.',
+    # A bare spoken word closing someone else's brackets is not a type.
+    'Rook J. Lark mites (topical vs oral). Quillfern Meeting.',
+    # An award, a judge, a moderator or a chair up to two words before it ...
+    'Rook J. A Talk on Larks. Best Poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Outstanding oral presentation, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Top 10 poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Award for poster presentation, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Prize-winning poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Winner, poster session, Quillfern Meeting.',
+    'Rook J. Judges, poster session, Quillfern Meeting.',
+    'Rook J. Judgement panel, poster session, Quillfern Meeting.',
+    'Rook J. Moderator, oral session, Quillfern Meeting.',
+    'Rook J. Chairperson, platform session, Quillfern Meeting.',
+    'Rook J. Best student research poster, Quillfern Meeting.',
+    # ... or an award right after it.
+    'Rook J. A Talk on Larks. Poster award, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Poster Prize, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Oral presentation competition, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Poster winner, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Poster - judged, Quillfern Meeting.',
+    # Two different types: the line does not say which this work was.
+    'Rook J. A Talk on Larks. Poster and oral presentation, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Poster session; e-poster hall, Quillfern Meeting.',
+    # A spoken type joined to a poster, with no kind of its own, is the
+    # second (5PSTCW 188, web204 2616, 3GSIUG 94's shapes) ...
+    'Rook J. A Talk on Larks. Quillfern Meeting, Larchmere (oral and poster).',
+    'Rook J. A Talk on Larks. Oral and Poster Presentation, Quillfern Meeting.',
+    'Rook J. A Talk on Larks (Submitted as an Oral or Poster Presentation).',
+    'Rook J. A Talk on Larks. Oral & poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. oral/poster session, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Oral, poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Oral and/or poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Oral, and poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Podium or ePoster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Quillfern Oral Poster Presentation.',
+    'Rook J. A Talk on Larks (selected for oral poster session).',
+    'Rook J. A Talk on Larks. Poster and oral, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Poster/Platform, Quillfern Meeting.',
+    # ... and so is an oral communication (web228 2162's shape).
+    'Rook J. A Talk on Larks. Oral Communication/ ePoster session, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Poster session. Oral communications, Quillfern Meeting.',
+    # An oral communication with no poster is still not a type this prints.
+    'Rook J. A Talk on Larks. Oral communication, Quillfern Meeting.',
+])
+def test_presentation_type_note_is_empty_without_one_plain_type(text):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == ''
+
+
+def test_presentation_type_note_is_empty_when_the_title_names_the_type():
+    text = 'Rook J. A Poster on Larks. Poster presentation, Quillfern Meeting.'
+    assert presentation_type_note(text, 'A Poster on Larks', _TALK_SHOWN) == ''
+
+
+@pytest.mark.parametrize('title,phrase', [
+    ('Posterior Larks', 'Poster presentation'),
+    ('Choral Larks', 'Oral presentation'),
+    ('Extra-oral Larks', 'Oral presentation'),
+])
+def test_presentation_type_note_reads_only_whole_type_words_in_the_title_and_row(title, phrase):
+    text = f'Rook J. {title}. {phrase}, Quillfern Meeting.'
+    shown = f'1. Rook J. {title}. Quillfern Meeting; 2004.'
+    assert presentation_type_note(text, title, shown) == phrase
+
+
+@pytest.mark.parametrize('text,shown', [
+    ('Rook J. A Talk on Larks. Oral presentation, Quillfern Meeting.',
+     '1. Rook J. A Talk on Larks (oral). Quillfern Meeting; 2004.'),
+    # The e-poster spellings are one type here too.
+    ('Rook J. A Talk on Larks. e-poster, Quillfern Meeting.',
+     '1. Rook J. A Talk on Larks. Quillfern Meeting ePoster hall; 2004.'),
+])
+def test_presentation_type_note_is_empty_when_the_row_already_prints_the_type(text, shown):
+    assert presentation_type_note(text, _TALK_TITLE, shown) == ''
+
+
+@pytest.mark.parametrize('text', [
+    # #1570 round 3: a prize word anywhere before the type, past the
+    # two-word window: the type is the one the prize was in.
+    'Rook J. A Talk on Larks. Quillfern Meeting, 2004. 1st Prize, Wren Larks libres: e-Poster.',
+    'Rook J. A Talk on Larks. Quillfern Meeting, 2004. 1er Premio Wren libres: e-Poster.',
+    'Rook J. A Talk on Larks. Quillfern Meeting. Prêmio da Wren, sessão: poster.',
+    'Rook J. A Talk on Larks. Quillfern Meeting. Prix de la Wren, session: poster.',
+    'Rook J. A Talk on Larks. Quillfern Meeting. Ganador del Wren, modalidad: poster.',
+    'Rook J. A Talk on Larks. Quillfern Meeting. Vencedor do Wren, modalidade: poster.',
+    'Rook J. A Talk on Larks. Awarded the Wren cup for the poster session, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Winners of the Wren cup, Quillfern Meeting: poster.',
+    'Rook J. A Talk on Larks. Wren Competition, Quillfern Meeting 2004: oral presentation.',
+    # An ordinal is a place when "place" follows it.
+    'Rook J. A Talk on Larks. First place, Quillfern Meeting: oral presentation.',
+    'Rook J. A Talk on Larks. 2nd Place, Quillfern Meeting: poster.',
+])
+def test_presentation_type_note_is_empty_after_a_prize_word_anywhere_before_it(text):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == ''
+
+
+@pytest.mark.parametrize('text,expected', [
+    # A prize word only after the type leaves it to the after-type rule:
+    # an award right after the type is its context ("Poster award"), one
+    # further on is not.
+    ('Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting 2004. '
+     'Awarded the Wren prize.', 'Poster presentation'),
+    ('Rook J. A Talk on Larks. Oral presentation, Quillfern Meeting. 1st place.',
+     'Oral presentation'),
+    # An ordinal without "place" numbers the meeting, and "first" is a title
+    # word; "best" and "top" count only next to the type.
+    ('Rook J. A Talk on Larks. 2nd Annual Quillfern Meeting. Poster presentation.',
+     'Poster presentation'),
+    ('Rook J. The First Larks. Poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. Best practice in larks. Poster presentation, Quillfern Meeting.',
+     'Poster presentation'),
+    ('Rook J. Larks from the top end of the bay. Oral presentation, Quillfern Meeting.',
+     'Oral presentation'),
+    # A prize word inside another word is none.
+    ('Rook J. Larks and awareness. Poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. Breadwinner larks. Poster, Quillfern Meeting.', 'Poster'),
+])
+def test_presentation_type_note_keeps_a_type_no_prize_word_precedes(text, expected):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
+
+
+@pytest.mark.parametrize('text', [
+    # #1570 round 3: a word right before the type that qualifies it names
+    # another format than the type alone.
+    'Rook J. A Talk on Larks. Quillfern Meeting, Sept 2004. (Short Oral presentation)',
+    'Rook J. A Talk on Larks. Quillfern Meeting, 2004. (Scientific Salon Oral Presentation).',
+    'Rook J. A Talk on Larks. Invited oral presentation, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Late-breaking poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Extra-oral poster, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Topical poster session, Quillfern Meeting.',
+    'Rook J. Best of the annual poster session, Quillfern Meeting.',
+    'Rook J. A Talk on Larks. Quillfern Meeting Modalidad e-Poster.',
+    # Spaces alone do not end the clause.
+    'Rook J. A Talk on Larks. Quillfern Symposium  Platform presentation.',
+    # One qualified occurrence is enough: the line names two formats.
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting; virtual poster 12.',
+])
+def test_presentation_type_note_is_empty_when_a_word_qualifies_the_type(text):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == ''
+
+
+@pytest.mark.parametrize('text,expected', [
+    # An article or determiner, a number among them, a preposition or a
+    # conjunction does not qualify the type ...
+    ('Rook J. A Talk on Larks. Accepted for oral presentation, Quillfern Meeting.',
+     'Oral presentation'),
+    ('Rook J. A Talk on Larks. Presented as a poster at the Quillfern Meeting.', 'Poster'),
+    ('Rook J. A Talk on Larks. Presented as poster at the Quillfern Meeting.', 'Poster'),
+    ('Rook J. A Talk on Larks. Shown in our poster session, Quillfern Meeting.', 'Poster session'),
+    ('Rook J. A Talk on Larks. Presented with poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. A Talk on Larks. Abstract and poster presentation, Quillfern Meeting.',
+     'Poster presentation'),
+    ('Rook J. A Talk on Larks. Quillfern Meeting 2004 poster.', 'Poster'),
+    # ... nor does "accepted": the abstract's acceptance, not its format ...
+    ('Rook J. A Talk on Larks. Accepted poster presentation at the Quillfern Meeting.',
+     'Poster presentation'),
+    # ... nor a word that punctuation or a tab sets off, or none at all.
+    ('Poster presentation. Rook J. A Talk on Larks. Quillfern Meeting.', 'Poster presentation'),
+    ('Rook J. A Talk on Larks. Type: poster. Quillfern Meeting.', 'Poster'),
+    ('Rook J. A Talk on Larks, poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. A Talk on Larks (Poster presentation). Quillfern Meeting.', 'Poster presentation'),
+    ('Rook J. A Talk on Larks\tPoster presentation, Quillfern Meeting.', 'Poster presentation'),
+])
+def test_presentation_type_note_keeps_a_type_no_word_qualifies(text, expected):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
+
+
+@pytest.mark.parametrize('text', [
+    # #1570 round 4 (FBNZIP 69's shape): the line says the meeting or the
+    # talk did not take place, so the type names a talk nobody gave.
+    'Rook J. A Talk on Larks. Selected for oral presentation, Quillfern Meeting '
+    '(not held due to a storm).',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting. NOT  HELD.',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting. Cancelled due to a storm.',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting [canceled].',
+    'Rook J. A Talk on Larks. Oral presentation, Quillfern Meeting. Postponed due to a storm.',
+    'Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting (abstract withdrawn).',
+])
+def test_presentation_type_note_is_empty_for_an_event_that_did_not_take_place(text):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == ''
+
+
+@pytest.mark.parametrize('text,expected', [
+    # A meeting that took place keeps its type, online or as planned ...
+    ('Rook J. A Talk on Larks. Poster presentation, Quillfern Meeting, held virtually due to '
+     'a storm.', 'Poster presentation'),
+    ('Rook J. A Talk on Larks. Oral presentation, Quillfern Meeting (held as planned).',
+     'Oral presentation'),
+    # ... and a status word inside a longer word is none.
+    ('Rook J. Uncancelled larks. Poster, Quillfern Meeting.', 'Poster'),
+    ('Rook J. Larks withdrawnness. Poster, Quillfern Meeting.', 'Poster'),
+])
+def test_presentation_type_note_keeps_the_type_of_an_event_that_took_place(text, expected):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
+
+
+@pytest.mark.parametrize('text', [
+    # #1570 round 4 (YIFJUS 228's shape): the line lists two presentations,
+    # so the type it states may be one's only, and the row covers both: two
+    # "Presentation:" or "presentation at" items, two "presented at" items,
+    # or meeting dates in two different months.
+    'Rook J. A Talk on Larks. - Presentation: Quillfern Meeting. March 2008. - Poster '
+    'Presentation: Wren Meeting. May 2008.',
+    'Rook J. A Talk on Larks. Presentation: Quillfern Meeting. Poster Presentation: Wren Meeting.',
+    'Rook J. A Talk on Larks. Poster presentation at the Quillfern Meeting. Poster presentation '
+    'at the Wren Retreat.',
+    'Rook J. A Talk on Larks. Poster. Presented at the Quillfern Meeting and presented at the '
+    'Wren Retreat.',
+    'Rook J. A Talk on Larks (November 2017). Poster session, Quillfern Meeting. Wren Meeting, '
+    'December 2017.',
+    'Rook J. A Talk on Larks. Poster, Quillfern Meeting, May 2008; Wren Meeting, May 2009.',
+])
+def test_presentation_type_note_is_empty_when_the_line_lists_several_presentations(text):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == ''
+
+
+@pytest.mark.parametrize('text,expected', [
+    # One presentation keeps its type: one item of each kind is one
+    # presentation told twice ...
+    ('Rook J. A Talk on Larks. Poster presentation: presented at the Quillfern Meeting, '
+     'May 2008.', 'Poster presentation'),
+    # ... and one month written twice, a range across two months, or a year
+    # written with no month, is one meeting's date.
+    ('Rook J. A Talk on Larks. Poster, Quillfern Meeting, 3-5 May 2008. Updated May 2008.',
+     'Poster'),
+    ('Rook J. A Talk on Larks. Poster, Quillfern Meeting, 30 September 2012 - 3 October 2012.',
+     'Poster'),
+    ('Rook J. A Talk on Larks. Poster, Quillfern Meeting 2003, Larchmere, May 2004.', 'Poster'),
+])
+def test_presentation_type_note_keeps_the_type_of_one_presentation(text, expected):
+    assert presentation_type_note(text, _TALK_TITLE, _TALK_SHOWN) == expected
 
 
 def test_pubmed_title_question_keeps_its_mark_without_a_period():

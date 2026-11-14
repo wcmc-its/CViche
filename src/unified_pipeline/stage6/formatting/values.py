@@ -21,10 +21,16 @@ points 1/2/3 and 8-15).
 import re
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import replace
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from ..normalization import ResolvedPublication, resolve_publication
+from ..normalization import (
+    ResolvedPublication,
+    WrittenDate,
+    resolve_publication,
+    written_month_dates,
+)
 
 # Money is quantized to cents under a named rounding policy rather than
 # whatever a binary float's repr happens to do (round-2 review of #481,
@@ -197,7 +203,8 @@ def _meeting_trailer_parts(pub: ResolvedPublication, shown: str) -> list[str]:
     already prints: a title "Abstract LB-043: ..." keeps its number once, a
     number "2007 10 (Pt 2): 636-43" is left off a line whose meeting and
     place already print the line's every "2007" (RXYBVF 425), and a month the
-    place already writes stays the stored date.
+    place already writes stays the stored date. A stored bare year takes the
+    month the line writes beside it only as `_bare_year_trailer_parts` allows.
     """
     shown_year = " ".join(part for part in (shown, pub.conference_name, pub.location)
                           if part)
@@ -205,6 +212,15 @@ def _meeting_trailer_parts(pub: ResolvedPublication, shown: str) -> list[str]:
     if pub.meeting_date and not _repeats_a_word(pub.meeting_date, shown_year,
                                                 pub.source_text):
         date = pub.meeting_date
+    parts = _meeting_parts(pub, shown, date)
+    if not pub.bare_year_date.year_month:
+        return parts
+    return _bare_year_trailer_parts(pub, shown, shown_year, parts)
+
+
+def _meeting_parts(pub: ResolvedPublication, shown: str, date: str) -> list[str]:
+    """The meeting trailer with `date` as its date, and the abstract number
+    after it unless it would repeat a word (`_meeting_trailer_parts`)."""
     trailer = "; ".join(part for part in (pub.conference_name, date, pub.location)
                         if part)
     parts = [trailer.rstrip('.') + "."]
@@ -212,6 +228,29 @@ def _meeting_trailer_parts(pub: ResolvedPublication, shown: str) -> list[str]:
             pub.abstract_number, f"{shown} {trailer}", pub.source_text):
         parts.append(pub.abstract_number.rstrip('.') + ".")
     return parts
+
+
+def _bare_year_trailer_parts(pub: ResolvedPublication, shown: str, shown_year: str,
+                             stored: list[str]) -> list[str]:
+    """`stored`, the trailer with the stored bare year, with the month and
+    days the line writes beside that year (`ResolvedPublication.bare_year_date`)
+    in place of the year, and nothing else changed (#1570).
+
+    The days are left off when one of their numbers is already a word of
+    another trailer part, and the month too when it would still change
+    another part: web228 1120's days are its abstract number as
+    well, and printing them dropped that number from the line. Neither is
+    printed where it would write a word twice (`_repeats_a_word`).
+    """
+    written = pub.bare_year_date
+    others = _word_counts(" ".join((pub.conference_name, pub.location, pub.abstract_number)))
+    date = written.year_month
+    if written.days and not any(word in others for word in _word_counts(written.days)):
+        date = f"{written.year_month} {written.days}"
+    if _repeats_a_word(date, shown_year, pub.source_text):
+        return stored
+    parts = _meeting_parts(pub, shown, date)
+    return parts if parts[1:] == stored[1:] else stored
 
 
 #: A word of a rendered line, for `_repeats_a_word`. One- and two-letter
@@ -285,12 +324,25 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
         (citation_text, target_name, enriched_fields) tuple
     """
     pub = resolve_publication(entry)
+    return _citation_text(pub, num), pub.target_name, list(pub.enriched_fields)
 
+
+def citation_with_stored_year(entry: dict, num: int) -> str:
+    """`_format_citation`'s text with a stored bare year printed as stored,
+    without the month and days its line writes beside it
+    (`ResolvedPublication.bare_year_date`): the citation as it printed before
+    #1570 gave the meeting trailer that date. The #1205 planner reads an S8
+    row as this, so the date decides nothing it offers."""
+    pub = resolve_publication(entry)
+    return _citation_text(replace(pub, bare_year_date=WrittenDate()), num)
+
+
+def _citation_text(pub: ResolvedPublication, num: int) -> str:
+    """The numbered citation `_format_citation` gives `pub`."""
     # Stage 5d's LLM already wrote this one, and the resolver already topped
     # it up with the editors/publisher its text omitted (#481).
     if pub.formatted_citation:
-        return (f"{num}. {pub.formatted_citation}",
-                pub.target_name, list(pub.enriched_fields))
+        return f"{num}. {pub.formatted_citation}"
 
     parts = []
     if pub.authors:
@@ -309,8 +361,7 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     else:
         parts.extend(_journal_trailer_parts(pub))
     parts.extend(_identifier_parts(pub))
-
-    return f"{num}. " + " ".join(parts), pub.target_name, list(pub.enriched_fields)
+    return f"{num}. " + " ".join(parts)
 
 
 def _format_currency(value: object) -> str:
@@ -425,8 +476,10 @@ def _format_currency(value: object) -> str:
 # An event-status note on a talk or abstract line: "(postponed due to
 # COVID-19)", "[Poster session canceled]", "virtual due to ...". No R or S8
 # schema field holds it, so stage 4 drops it and a postponed talk renders as
-# delivered (NDMRSO: SYWZJA 557, TVZDVF 451/494/496, #1436).
-_EVENT_STATUS_WORD = r'(?:postponed|cancell?ed|virtual(?:ly)?\s+due\s+to)'
+# delivered (NDMRSO: SYWZJA 557, TVZDVF 451/494/496, #1436). The first two
+# say the event did not take place as planned (`_NOT_GIVEN_RE`).
+_EVENT_CALLED_OFF_WORD = r'postponed|cancell?ed'
+_EVENT_STATUS_WORD = rf'(?:{_EVENT_CALLED_OFF_WORD}|virtual(?:ly)?\s+due\s+to)'
 _EVENT_STATUS_WORD_RE = re.compile(rf'\b{_EVENT_STATUS_WORD}\b', re.IGNORECASE)
 # The whole parenthetical or bracket the status word sits in ...
 _BRACKETED_EVENT_STATUS_RE = re.compile(
@@ -457,6 +510,173 @@ def with_event_status(text: str, source_text: str, shown_text: str = '') -> str:
     `shown_text` is anything else the row prints beside `text`."""
     note = event_status_note(source_text, f"{text} {shown_text}")
     return f"{text} ({note})".lstrip() if note else text
+
+
+# The presentation type an S8 line states: "Poster presentation", "Oral
+# session", "(oral)". No S8 schema field holds it, so stage 4 drops it, 5d's
+# citation often does too, and a poster then reads the same as a talk
+# (LPPQAJ 208, 210, 219, 255, #1570).
+_POSTER_HEAD = r'(?:e-?)?poster'
+_SPOKEN_HEAD = r'oral|podium|platform|plenary'
+_POSTER_KIND = r'presentation|session|discussion|abstract|talk'
+_SPOKEN_KIND = r'presentation|session|talk|abstract'
+#: A type as the line writes it. A poster may stand alone; a spoken type
+#: needs its kind ("Oral presentation") or brackets of its own ("(oral)"),
+#: because a bare "oral" is as often the subject ("Oral health").
+_PRESENTATION_TYPE_RE = re.compile(
+    rf'(?<![\w-])(?:{_POSTER_HEAD}(?:\s+(?:{_POSTER_KIND}))?'
+    rf'|(?:{_SPOKEN_HEAD})\s+(?:{_SPOKEN_KIND})'
+    rf'|(?<=[(\[])(?:{_SPOKEN_HEAD})(?=[)\]]))(?![\w-])', re.IGNORECASE)
+#: A type's head word as a word of its own, in a title or a citation.
+_PRESENTATION_HEAD_RE = re.compile(
+    rf'(?<![\w-])(?:{_POSTER_HEAD}|{_SPOKEN_HEAD})(?![\w-])', re.IGNORECASE)
+#: An award, a judging or a session role up to two words before a type
+#: ("Best poster", "Judges, poster session", "Moderator, oral session"): the
+#: type is then not how this work was given.
+_AWARD_OR_ROLE_BEFORE_RE = re.compile(
+    r'\b(?:best|outstanding|top|award|prize|winner|judge\w*|moderat\w*|chair\w*)'
+    r'\W+(?:\w+\W+){0,2}$', re.IGNORECASE)
+#: An award right after a type: "Poster award", "Oral presentation competition".
+_AWARD_AFTER_RE = re.compile(r'\W*(?:award|prize|competition|winner|judg)', re.IGNORECASE)
+#: A word that names a prize, in English, Spanish, Portuguese or French, or
+#: a place in one ("2nd place"). Anywhere before a type, it makes the line a
+#: prize statement that names the type the prize was in, past the two words
+#: `_AWARD_OR_ROLE_BEFORE_RE` reads (#1570 round 3). An ordinal with no
+#: "place" numbers a meeting ("2nd Annual"), and "best" or "top" further
+#: back is title prose ("best practice"), so neither counts here.
+_PRIZE_WORD_RE = re.compile(
+    r'\b(?:award\w*|prize\w*|winner\w*|competition\w*|pr[eéê]mio\w*|prix|ganador\w*'
+    r'|vencedor\w*|(?:\d+(?:st|nd|rd|th)|first|second|third)\s+place)\b', re.IGNORECASE)
+#: The word right before a type in the same clause: only spaces between, no
+#: punctuation and no tab, which sets off a CV's columns.
+_WORD_BEFORE_RE = re.compile(r'(\w+)[ \u00a0]*$')
+#: Words that may stand right before a type without qualifying it: articles
+#: and determiners, prepositions, conjunctions ("Accepted for oral
+#: presentation", "Presented as a poster", "Abstract and poster"), and
+#: "accepted", which says the abstract was taken, not in what format
+#: (LPPQAJ 208). A number is a determiner too ("2004 poster").
+_UNQUALIFYING_WORDS = frozenset({
+    'a', 'an', 'the', 'this', 'that', 'these', 'those', 'each', 'every', 'its', 'their',
+    'our', 'my', 'his', 'her', 'your',
+    'as', 'at', 'by', 'during', 'for', 'from', 'in', 'into', 'of', 'on', 'to', 'via',
+    'with', 'within',
+    'and', 'or', 'but', 'nor',
+    'accepted'})
+#: What may join two types a line names together: nothing, or up to two of
+#: "and", "or", "and/or", "&", "/" and a comma.
+_TYPE_JOINER = r'(?:\s*(?:and/or|and|or|[&/,])\s*){1,2}|\s+'
+#: A spoken type with no kind after it that a line still states as a type:
+#: joined to a poster ("oral and poster", "Oral or Poster Presentation",
+#: "oral/poster", "Oral Poster", "poster, oral"), or as an "Oral
+#: communication" ("Oral Communication/ ePoster session"). A second type
+#: beside the poster, so the line does not say which this work was (5PSTCW
+#: 188, web204 2616, web228 2162; #1570).
+_SPOKEN_HEAD_BESIDE_A_POSTER_RE = re.compile(
+    rf'(?<![\w-])(?:(?P<before>{_SPOKEN_HEAD})(?:{_TYPE_JOINER}){_POSTER_HEAD}(?![\w-])'
+    rf'|{_POSTER_HEAD}(?:{_TYPE_JOINER})(?P<after>{_SPOKEN_HEAD})(?![\w-])'
+    rf'|(?P<communication>{_SPOKEN_HEAD})\s+communication)', re.IGNORECASE)
+#: Words that say the meeting or the talk did not take place: the event
+#: status words for that (`_EVENT_CALLED_OFF_WORD`), "not held" and
+#: "withdrawn". A type would then name a talk nobody gave (FBNZIP 69's
+#: "selected for oral presentation ... (not held due to COVID-19
+#: pandemic)"; #1570 round 4).
+_NOT_GIVEN_RE = re.compile(rf'\b(?:{_EVENT_CALLED_OFF_WORD}|not\s+held|withdrawn)\b',
+                           re.IGNORECASE)
+#: A presentation a line lists, as "presented at <meeting>" ...
+_PRESENTED_AT_RE = re.compile(r'\bpresented\s+at\b', re.IGNORECASE)
+#: ... or as "<type> Presentation: <meeting>" or "presentation at <meeting>".
+_PRESENTATION_AT_RE = re.compile(r'\bpresentation\s*(?::|at\b)', re.IGNORECASE)
+
+
+def _lists_several_presentations(text: str) -> bool:
+    """True when `text` lists two or more presentations of the work: two
+    "presented at" items, two "Presentation:" or "presentation at" items,
+    or meeting dates in two different months (`written_month_dates`). The
+    type the line states may then be one presentation's only, while the row
+    covers them all (YIFJUS 228: a talk at one meeting, a poster at the
+    next; #1570 round 4). One item of each kind is one presentation told
+    twice ("Poster presentation: presented at ...")."""
+    return (len(_PRESENTED_AT_RE.findall(text)) > 1
+            or len(_PRESENTATION_AT_RE.findall(text)) > 1
+            or len(written_month_dates(text)) > 1)
+
+
+def _presentation_head(phrase: str) -> str:
+    """The type `phrase` names, one spelling per type: "eposter" for
+    "e-Poster session", "oral" for "Oral presentation"."""
+    return phrase.split()[0].casefold().replace('-', '')
+
+
+def _presentation_heads(text: str) -> set[str]:
+    """Every type `text` names as a word of its own."""
+    return {_presentation_head(word) for word in _PRESENTATION_HEAD_RE.findall(text)}
+
+
+def _is_award_or_role(text: str, match: re.Match[str]) -> bool:
+    """True when the type `match` found in `text` names an award, a judging
+    or a session role rather than how the work was given."""
+    return bool(_AWARD_OR_ROLE_BEFORE_RE.search(text, 0, match.start())
+                or _AWARD_AFTER_RE.match(text, match.end()))
+
+
+def _is_prize_or_qualified(text: str, match: re.Match[str]) -> bool:
+    """True when the type `match` found in `text` follows a prize word
+    anywhere before it (`_PRIZE_WORD_RE`), or a word right before it in the
+    same clause qualifies it ("Short oral presentation", "Scientific Salon
+    Oral Presentation"): any word but those `_UNQUALIFYING_WORDS` names or a
+    number. Either way the type alone is not what the line says this work
+    was: the prize's category, or another format (#1570 round 3)."""
+    if _PRIZE_WORD_RE.search(text, 0, match.start()):
+        return True
+    word = _WORD_BEFORE_RE.search(text, 0, match.start())
+    return bool(word) and not (word[1].isdigit() or word[1].casefold() in _UNQUALIFYING_WORDS)
+
+
+def _spoken_heads_beside_a_poster(text: str) -> set[str]:
+    """The spoken types `text` states with no kind of their own
+    (`_SPOKEN_HEAD_BESIDE_A_POSTER_RE`), outside an award or role context."""
+    return {(match['before'] or match['after'] or match['communication']).casefold()
+            for match in _SPOKEN_HEAD_BESIDE_A_POSTER_RE.finditer(text)
+            if not _is_award_or_role(text, match)}
+
+
+def _capitalised(phrase: str) -> str:
+    """`phrase` with its first letter capitalised, unless its first word
+    already holds a capital ("ePoster session" stays as written; #1570)."""
+    if any(char.isupper() for char in phrase.split()[0]):
+        return phrase
+    return phrase[0].upper() + phrase[1:]
+
+
+def presentation_type_note(source_text: str, title: str, shown_text: str) -> str:
+    """The presentation type `source_text` states ("Poster presentation",
+    "Oral"), as the line writes it, capitalised (`_capitalised`), or ''.
+
+    '' when the line states none, or two different types, outside an award,
+    judging or session-role context (`_is_award_or_role`): it then does not
+    say how this work was given. A spoken type joined to a poster, or an
+    "oral communication", is a second type though it has no kind
+    (`_spoken_heads_beside_a_poster`). Also '' when the stored `title` or
+    `shown_text` -- what the row already prints, its event-status note
+    included -- names that type, so the type is never printed twice (#1570).
+    And '' when any type the line states follows a prize word or a word that
+    qualifies it (`_is_prize_or_qualified`), so a prize's category or a
+    qualified format is not printed as how the work was given (#1570 round 3).
+    And '' when the line says the meeting or talk did not take place
+    (`_NOT_GIVEN_RE`), or lists several presentations
+    (`_lists_several_presentations`) (#1570 round 4).
+    """
+    if _NOT_GIVEN_RE.search(source_text) or _lists_several_presentations(source_text):
+        return ''
+    matches = [match for match in _PRESENTATION_TYPE_RE.finditer(source_text)
+               if not _is_award_or_role(source_text, match)]
+    heads = {_presentation_head(match[0]) for match in matches}
+    heads |= _spoken_heads_beside_a_poster(source_text)
+    if (not matches or len(heads) != 1
+            or heads & (_presentation_heads(title) | _presentation_heads(shown_text))
+            or any(_is_prize_or_qualified(source_text, match) for match in matches)):
+        return ''
+    return _capitalised(matches[0][0])
 
 
 #: A four-digit year inside a stored date value: "2005" in "2005-Summer" or

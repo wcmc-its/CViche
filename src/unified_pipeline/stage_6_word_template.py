@@ -2160,11 +2160,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # anchor must never resolve to one of them (#548): an ALL-CAPS bullet
         # (the writer does not bold, but the shape test accepts bold too) would pass `_find_header_paragraph`'s shape test.
         self._bullet_paras = set()
-        # Entry paragraphs `_insert_entry_layout` joined from several lines
-        # (#2019): (the joined text, its lines), read by the #1205 planner's
-        # haystack (`_rendered_output_lines(joined_as_lines=True)`). Keyed by
-        # element, as `_bullet_paras` is.
-        self._joined_entry_lines: dict[BaseOxmlElement, tuple[str, tuple[str, ...]]] = {}
+        # (text, lines) of paragraphs the #1205 planner's haystack reads as
+        # those lines (`_rendered_output_lines(joined_as_lines=True)`): a joined
+        # entry paragraph (#2019), a citation without #1570's additions
+        # (`_plan_citation_as`). Keyed by element, as `_bullet_paras` is.
+        self._planner_lines: dict[BaseOxmlElement, tuple[str, tuple[str, ...]]] = {}
         # Which entry each written row renders (#534); fresh per render.
         self._row_receipts = RowReceiptLedger()
         self.stats = {
@@ -3404,7 +3404,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             write_entry_line(para, item.text, layout.title if number == 0 else None)
             self._bullet_paras.add(para._p)
             if len(item.lines) > 1:
-                self._joined_entry_lines[para._p] = (item.text, item.lines)
+                self._planner_lines[para._p] = (item.text, item.lines)
             if item.bulleted:
                 self._apply_entry_bullet(para, level=item.level)
             else:
@@ -4804,7 +4804,8 @@ Now analyze the text above:"""
         each, while its text is still the joined text. The #1205 planner
         opts in, so the join decides nothing it offers: the joined line
         pools its lines' words, and a source sentence that one sub-line
-        paraphrases read as printed (#2024: 11 K1 sub-points lost).
+        paraphrases read as printed (#2024: 11 K1 sub-points lost). So is a
+        citation without #1570's additions (`_plan_citation_as`).
         """
         lines: list[str] = []
 
@@ -4829,7 +4830,7 @@ Now analyze the text above:"""
 
         for para in self.doc.paragraphs:
             text = _paragraph_text(para, include_tracked_insertions)
-            joined = self._joined_entry_lines.get(para._p) if joined_as_lines else None
+            joined = self._planner_lines.get(para._p) if joined_as_lines else None
             for line in (joined[1] if joined and joined[0] == text else (text,)):
                 add(line)
         for tbl in self.doc.tables:

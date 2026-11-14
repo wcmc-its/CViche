@@ -3920,3 +3920,152 @@ def test_a_k_card_is_read_as_its_line_and_its_details():
     assert "Course Director, Example Hall, 2019" in lines
     assert "Weekly seminar for second-year students" in lines
     assert line.text not in lines
+
+
+# --- #1570: what an S8 citation takes from its line decides no sub-point ------
+
+#: A K1 sentence that names the same meeting as the S8 talk below. Its 12
+#: render tokens share 8 with the talk's citation as it printed before #1570
+#: (0.67, under the 0.7 `_record_rendered` asks), and 9 once the citation
+#: prints the line's "August" too (0.75): web051's shape.
+_K1_PRIZE_PROSE = ("Received the Kestrel Prize at the Annual Meeting of the Eastern Example "
+                   "Society, Larchmere, Quebec, Canada, August 2002.")
+
+
+def _k1_with_prose(prose):
+    return {
+        "element_idx_start": 12,
+        "taxonomy_code": "K1",
+        "text": f"Presenter of “Example Ward Rounds”\tFebruary 2021\t{prose}",
+        "extracted_fields": {"course_title": "Example Ward Rounds", "role": "Presenter",
+                             "institution": "Example School of Medicine",
+                             "start_date": "2021-02", "end_date": "2021-02"},
+    }
+
+
+def _s8_talk(year="2002"):
+    """An S8 talk with no stage-5d citation: the fallback prints its stored
+    bare year with the month its line writes ("2002 August"), and the line's
+    "Poster presentation" after the citation (#1570)."""
+    return {
+        "element_idx_start": 40,
+        "taxonomy_code": "S8",
+        "text": ("Rook J. Widget calibration. Poster presentation, Annual Meeting of the "
+                 "Eastern Example Society, Larchmere, Quebec, Canada, August 2002."),
+        "extracted_fields": {"authors": "Rook J", "title": "Widget calibration", "year": year,
+                             "conference_name": "Annual Meeting of the Eastern Example Society",
+                             "location": "Larchmere, Quebec, Canada"},
+    }
+
+
+def _filled(*entries):
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    gen = WCMTemplateGenerator(verbose=False, supplementary_subpoints=True)
+    gen.doc = Document(gen.template_path)
+    gen._fill_teaching({"K1": [entry for entry in entries if entry["taxonomy_code"] == "K1"]})
+    gen._fill_bibliography({"S8": [entry for entry in entries if entry["taxonomy_code"] == "S8"]},
+                           cv_owner={}, document_uid="")
+    return gen
+
+
+def test_an_s8_citation_is_read_by_the_planner_without_its_line_type_and_date():
+    gen = _filled(_s8_talk())
+    (row,) = [p.text for p in gen.doc.paragraphs if "Widget calibration" in p.text]
+    assert row == ("1. Rook J. Widget calibration. Annual Meeting of the Eastern Example Society; "
+                   "2002 August; Larchmere, Quebec, Canada. (Poster presentation)")
+
+    assert ("1. Rook J. Widget calibration. Annual Meeting of the Eastern Example Society; "
+            "2002; Larchmere, Quebec, Canada.") in gen._rendered_output_lines(joined_as_lines=True)
+    assert row not in gen._rendered_output_lines(joined_as_lines=True)
+    # Every other reader of the page reads the row as it prints.
+    assert row in gen._rendered_output_lines()
+
+
+@pytest.mark.parametrize("change,printed_tail,planner_tail", [
+    # The event-status note printed before #1570 too (#1436), so it is kept.
+    # (A meeting held online: a postponed one prints no type, #1570 round 4.)
+    ({"text": ("Rook J. Widget calibration. Poster presentation, Annual Meeting of the Eastern "
+               "Example Society, Larchmere, Quebec, Canada, August 2002. Held virtually due to "
+               "COVID-19.")},
+     "2002 August; Larchmere, Quebec, Canada. (Poster presentation) (virtually due to COVID-19)",
+     "2002; Larchmere, Quebec, Canada. (virtually due to COVID-19)"),
+    # So is the disclaiming heading's note after the citation (#1573).
+    ({"hierarchy": ["Abstracts (not as an author)"]},
+     '2002 August; Larchmere, Quebec, Canada. (Poster presentation) '
+     '(listed under "Abstracts (not as an author)")',
+     '2002; Larchmere, Quebec, Canada. (listed under "Abstracts (not as an author)")'),
+])
+def test_an_s8_citation_is_read_by_the_planner_with_what_it_printed_before(
+        change, printed_tail, planner_tail):
+    talk = {**_s8_talk(), **change}
+    gen = _filled(talk)
+    (row,) = [p.text for p in gen.doc.paragraphs if "Widget calibration" in p.text]
+    assert row.endswith(printed_tail)
+
+    (line,) = [line for line in gen._rendered_output_lines(joined_as_lines=True)
+               if "Widget calibration" in line]
+    assert line.endswith(planner_tail)
+
+
+def test_an_s8_citation_is_read_by_the_planner_as_written_without_control_characters():
+    # The planner's line is the run text the writer sanitised (#552), less
+    # what #1570 added.
+    talk = _s8_talk()
+    talk["extracted_fields"] = {**talk["extracted_fields"], "title": "Widget\x0bcalibration"}
+    gen = _filled(talk)
+
+    (line,) = [line for line in gen._rendered_output_lines(joined_as_lines=True)
+               if "Widgetcalibration" in line]
+    assert line == ("1. Rook J. Widgetcalibration. Annual Meeting of the Eastern Example Society; "
+                    "2002; Larchmere, Quebec, Canada.")
+
+
+def test_an_s8_citation_written_as_a_tracked_insertion_is_not_read_around():
+    # A PubMed-enriched citation is a tracked insertion, which the planner
+    # does not read: its paragraph prints no text for it to read around.
+    talk = {**_s8_talk(), "enrichment_status": "enriched", "enrichment_source": "pmid"}
+    gen = _filled(talk)
+    (para,) = [p for p in gen.doc.paragraphs if p._p.find(qn("w:ins")) is not None]
+
+    assert para._p not in gen._planner_lines
+    assert not [line for line in gen._rendered_output_lines(joined_as_lines=True)
+                if "Widget calibration" in line]
+
+
+def test_an_s8_citation_with_nothing_from_its_line_is_read_as_it_prints():
+    # A stored month takes #1987's date, which the citation printed before
+    # #1570 too, and a line with no type adds none: nothing to read around.
+    talk = _s8_talk(year="2002-08")
+    talk["text"] = talk["text"].replace("Poster presentation, ", "")
+    gen = _filled(talk)
+    (row,) = [p.text for p in gen.doc.paragraphs if "Widget calibration" in p.text]
+    assert "2002 August" in row
+
+    assert row in gen._rendered_output_lines(joined_as_lines=True)
+
+
+def test_the_month_an_s8_citation_takes_from_its_line_does_not_hide_a_sub_point():
+    # web051 N3B 549's shape: printing "August" in the same meeting's S8 row
+    # took the K1 sentence for printed, and its sub-point was not written.
+    k1, talk = _k1_with_prose(_K1_PRIZE_PROSE), _s8_talk()
+    gen = _filled(k1, talk)
+
+    gen._add_supplementary_subpoints({"K1": [k1], "S8": [talk]})
+
+    (placement,) = gen._subpoint_placements
+    assert placement.code == "K1"
+    assert placement.paragraphs == (_K1_PRIZE_PROSE,)
+
+
+def test_a_sentence_the_s8_citation_printed_before_its_line_month_is_still_no_sub_point():
+    # The inverse: a sentence the citation's own words already print is not
+    # offered, whatever the citation adds from its line.
+    prose = ("Annual Meeting of the Eastern Example Society in Larchmere, Quebec, Canada, "
+             "August 2002.")
+    k1, talk = _k1_with_prose(prose), _s8_talk()
+    gen = _filled(k1, talk)
+
+    gen._add_supplementary_subpoints({"K1": [k1], "S8": [talk]})
+
+    assert gen._subpoint_placements == []
