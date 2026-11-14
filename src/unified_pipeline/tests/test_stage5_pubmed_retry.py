@@ -2133,6 +2133,44 @@ def test_owner_drop_guard_wins_over_the_shorter_list(monkeypatch):
     assert 'pubmed_authors_shorter' not in data
 
 
+# #2004: a list at MEDLINE's cap for its year (ten to 1995, 25 for 1996-1999)
+# that names a co-author the CV lacks is no cut by the owner-drop guard's
+# test, so it rendered, without the owner the CV's longer byline names.
+@pytest.mark.parametrize('year, cv, target, pubmed', [
+    (1988, CAPPED_CV, 'Quill JA', CAPPED_CV[:9] + ['Lark L']),
+    (1995, CAPPED_CV, 'Quill JA', CAPPED_CV[:9] + ['Lark L']),
+    (1997, _THIRTY + ['Kemp K', 'Quill JA'], 'Quill JA', _THIRTY + ['Lark L']),
+    # a surname of three letters is the owner's only when spelt the same
+    (1988, CAPPED_CV[:10] + ['Ott JA'], 'Ott JA', CAPPED_CV[:9] + ['Oft J']),
+])
+def test_capped_pubmed_list_that_cut_the_owner_is_withheld(monkeypatch, year, cv, target, pubmed):
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = _capped_entry(', '.join(cv), target)
+    enricher._merge_pubmed_data(entry, {'pmid': PMID, 'year': year, 'authors': pubmed,
+                                        'authors_vancouver': ', '.join(pubmed)})
+    data = entry['enrichment_data']
+    assert data['pubmed_authors'] is None  # stage 6 falls back to the CV's list
+    assert data['pubmed_authors_without_owner'] == ', '.join(pubmed)
+    assert 'pubmed_authors_shorter' not in data
+
+
+@pytest.mark.parametrize('cv, target, pubmed, year', [
+    (CAPPED_CV, 'Quill JA', CAPPED_CV[:9] + ['Lark L'], 2003),   # MEDLINE no longer caps it
+    (CAPPED_CV, 'Quill JA', CAPPED_CV[:9] + ['Lark L'], 1996),   # ten is not 1996's cap
+    (CAPPED_CV, 'Quill JA', CAPPED_CV[:9] + ['Lark L'], None),
+    (CAPPED_CV, 'Quill JA', CAPPED_CV[:8] + ['Lark L'], 1988),   # one short of the cap
+    (CAPPED_CV, 'Quill JA', CAPPED_CV[:9] + ['Quil J'], 1988),   # the owner, one letter off
+    (CAPPED_CV[:10] + ['Ott JA'], 'Ott JA', CAPPED_CV[:9] + ['Ott J'], 1988),  # the owner
+    (CAPPED_CV, 'Quill JA', ['Lark L'] + CAPPED_CV[1:10], 1988),  # another first author
+    (CAPPED_CV[:8] + ['Quill JA'], 'Quill JA', CAPPED_CV[:9] + ['Lark L'], 1988),  # CV shorter
+    (CAPPED_CV[:10] + ['Kemp K'], 'Quill JA', CAPPED_CV[:9] + ['Lark L'], 1988),   # CV lacks the owner
+    # mixed-case initials are not the owner's name
+    (CAPPED_CV[:10] + ['Varn GKTh'], 'GKTh', CAPPED_CV[:9] + ['Lark L'], 1988),
+])
+def test_capped_list_rule_leaves_other_lists_alone(cv, target, pubmed, year):
+    assert not stage5.capped_pubmed_list_drops_the_owner(cv, target, pubmed, year)
+
+
 # A CV byline that does not hold PubMed's list in PubMed's order leaves
 # stage 5 as it was before #1661: PubMed's list renders unless it dropped the
 # owner. The owner, "Owen", is past PubMed's ten in every CV but F1's.
@@ -2157,7 +2195,10 @@ def test_misaligned_cv_byline_leaves_stage5_as_before(monkeypatch, case, owner):
     data = entry['enrichment_data']
     # The guard drops PubMed's list only where every PubMed surname is in
     # the CV and the owner is not among them.
-    dropped = owner == 'Owen O' and case.startswith('F2')
+    # Since #2004 so does a 1988 list at MEDLINE's cap of ten that opens with
+    # the CV's first author and names nobody like the owner (F3, F4: PubMed
+    # names a co-author the CV lacks). F1's CV opens with the owner instead.
+    dropped = owner == 'Owen O' and not case.startswith('F1')
     assert data['pubmed_authors'] == (None if dropped else ', '.join(pubmed))
     assert data.get('pubmed_authors_without_owner') == (', '.join(pubmed) if dropped else None)
     assert 'pubmed_authors_shorter' not in data

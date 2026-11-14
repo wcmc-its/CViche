@@ -66,8 +66,10 @@ def _location_already_in_institution(location: str, institution: str) -> bool:
     location from every institution whose name contains its city -- New York
     University, New York Presbyterian, Boston Children's -- which is most WCM
     faculty CVs (#897). Every renderer that appends a location consults this
-    one predicate (B2 through `_location_remainder`), so the rule cannot drift
-    between them.
+    one predicate (B2 through `_location_remainder`, the others through
+    `_location_to_append`), so the rule cannot drift between them. A tail
+    that is the city alone still lacks the state, which those two add back
+    (`_state_the_institution_lacks`, #2004).
     """
     if not (location and institution):
         return False
@@ -75,8 +77,7 @@ def _location_already_in_institution(location: str, institution: str) -> bool:
     city = parts[0]
     if not city:
         return False
-    tail = r',\s*' + re.escape(city) + r'(?:\s*,\s*([A-Za-z][A-Za-z .]*))?\s*$'
-    found = re.search(tail, institution, re.IGNORECASE)
+    found = _location_tail(city, institution)
     if not found:
         return False
     # Keep the location only when BOTH sides name a US state and the states
@@ -90,14 +91,60 @@ def _location_already_in_institution(location: str, institution: str) -> bool:
     return not (stated and wanted and stated != wanted)
 
 
+def _location_tail(city: str, institution: str) -> re.Match[str] | None:
+    """The institution's comma-led tail naming `city`: ", City", then
+    optionally ", State", then the end of the string. Group 1 is the state
+    part, None when the tail is the city alone."""
+    tail = r',\s*' + re.escape(city) + r'(?:\s*,\s*([A-Za-z][A-Za-z .]*))?\s*$'
+    return re.search(tail, institution, re.IGNORECASE)
+
+
+# The parts of a location whose state alone can still be missing: "<City>,
+# <US state>" (#2004).
+_CITY_AND_STATE_PARTS = 2
+
+
+def _state_the_institution_lacks(location: str, institution: str) -> str:
+    """The state part of a location the institution's tail names only the
+    city of: "Crab Hollow, NY" against "Norvale State University, Crab
+    Hollow" lacks "NY" (#2004). The tail match counts the city as the whole
+    location already present, so the cell dropped the state.
+
+    '' unless the location is exactly "<City>, <US state>", the tail
+    carries no state of its own, and the city is not itself a state name:
+    in "Norvale University, New York" the last part may be the state, not a
+    city still lacking one. A foreign or three-part location keeps the tail
+    match's answer. Read only once `_location_already_in_institution` holds.
+    """
+    parts = [p.strip() for p in location.split(',')]
+    if len(parts) != _CITY_AND_STATE_PARTS or not _us_state(parts[1]) or _us_state(parts[0]):
+        return ''
+    found = _location_tail(parts[0], institution)
+    return parts[1] if found and not found.group(1) else ''
+
+
+def _location_to_append(location: str, institution: str) -> str:
+    """The part of `location` an institution cell appends: all of it,
+    nothing when the institution's comma tail already carries it
+    (`_location_already_in_institution`), or the state alone when that tail
+    is the city alone (`_state_the_institution_lacks`). Education,
+    positions and postdoctoral training read this; B2 reads
+    `_location_remainder`, which also knows an institution that is the
+    place itself."""
+    if not _location_already_in_institution(location, institution):
+        return location
+    return _state_the_institution_lacks(location, institution)
+
+
 def _location_remainder(location: str, institution: str | None) -> str:
     """The part of `location` an institution cell still lacks: '' when the
     institution already carries all of it, the whole location when it
     carries none of it.
 
     Two ways the institution already says it. As a comma-led tail, judged by
-    `_location_already_in_institution`. Or by BEING the place: a conference
-    row whose source names only "Riverton, OR" gets that string as its stage-4
+    `_location_already_in_institution`, less the state a tail of the city
+    alone lacks (`_state_the_institution_lacks`). Or by BEING the place: a
+    conference row whose source names only "Riverton, OR" gets that string as its stage-4
     institution and the same string as its location, so the cell read
     "Riverton, OR, Riverton, OR" (#1257); stage 5b cleans "Riverton, OR" to
     "Riverton" and the cell read "Riverton, Riverton, OR". When the
@@ -108,7 +155,7 @@ def _location_remainder(location: str, institution: str | None) -> str:
     if not (location and institution):
         return location
     if _location_already_in_institution(location, institution):
-        return ''
+        return _state_the_institution_lacks(location, institution)
     held = [p.strip() for p in institution.split(',')]
     wanted = [p.strip() for p in location.split(',')]
     if len(held) > len(wanted) or not all(

@@ -69,7 +69,7 @@ from ..parsing import (
 from ..resolution import (
     _dates_rule_out_donor,
     _get_institution_location,
-    _location_already_in_institution,
+    _location_to_append,
 )
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 from ..supplementary import Revision, SubpointPlacement, write_row_subpoint
@@ -888,10 +888,11 @@ def _position_row_cells(entry: dict, superseded: bool = False,
 
     # "University of Pittsburgh, Pittsburgh, PA" must not gain a second
     # ", Pittsburgh, PA"; "New York University" must still gain its
-    # ", New York, NY" (#897) -- one shared tail predicate decides.
-    location_already_present = _location_already_in_institution(location, institution_base)
+    # ", New York, NY" (#897); an employer ending in its city alone gains the
+    # state alone (#2004) -- one shared tail predicate decides.
+    location = _location_to_append(location, institution_base)
 
-    if location and location_is_enriched and not location_already_present:
+    if location and location_is_enriched:
         # Institution/dept is normal text, ", City, State" is track change
         if institution_base:
             institution_content = [
@@ -900,7 +901,7 @@ def _position_row_cells(entry: dict, superseded: bool = False,
             ]
         else:
             institution_content = [(location, True, "Institution Enrichment")]
-    elif location and not location_already_present:
+    elif location:
         institution_full = f"{institution_base}, {location}" if institution_base else location
         institution_content = [(institution_full, False, "")]
     else:

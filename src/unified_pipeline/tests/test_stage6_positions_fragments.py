@@ -1482,6 +1482,40 @@ def test_a_city_named_employer_still_gets_its_location():
     assert inserted == ", Crab Hollow, NY"
 
 
+def _city_tail_entry(employer, enrichment=None, location=None):
+    entry = _position_entry(1, "Attending Physician", employer,
+                            ("PROFESSIONAL POSITIONS",), "2018-10", "current")
+    if enrichment:
+        entry["institution_enrichment"] = enrichment
+    if location:
+        entry["extracted_fields"]["location"] = location
+    return entry
+
+
+_CRAB_HOLLOW_NY = {"city": "Crab Hollow", "state": "New York", "country_code": "US"}
+
+
+@pytest.mark.parametrize("entry, cell", [
+    # #2004: an employer ending in its city alone gains the state alone --
+    # tracked when enrichment found it, plain when stage 4 read it
+    (_city_tail_entry("Norvale State University, Crab Hollow", enrichment=_CRAB_HOLLOW_NY),
+     [("Norvale State University, Crab Hollow", False, ""),
+      (", NY", True, "Institution Enrichment")]),
+    (_city_tail_entry("Norvale State University, Crab Hollow", location="Crab Hollow, NY"),
+     [("Norvale State University, Crab Hollow, NY", False, "")]),
+    # never: a city that is a state name, or a tail that already has the state
+    (_city_tail_entry("Norvale University, New York", location="New York, NY"),
+     [("Norvale University, New York", False, "")]),
+    (_city_tail_entry("Norvale State University, Crab Hollow, NY", enrichment=_CRAB_HOLLOW_NY),
+     [("Norvale State University, Crab Hollow, NY", False, "")]),
+    (_city_tail_entry("Norvale University, New York",
+                      enrichment={"city": "New York", "state": "New York", "country_code": "US"}),
+     [("Norvale University, New York", False, "")]),
+])
+def test_a_city_only_employer_tail_gains_the_state_alone(entry, cell):
+    assert _position_row_cells(entry)[1] == cell
+
+
 # --- (g) #946: a start-only D1 rank row ended by a promotion ----------------
 #
 # Decision on #946 (2026-09-24): a D1 row with a start and no end keeps

@@ -85,6 +85,7 @@ from .values import (  # noqa: F401
     _format_citation,
     _format_currency,
     _format_mentee_duration,
+    _mentee_period,
     citation_with_stored_year,
     event_status_note,
     presentation_type_note,

@@ -76,7 +76,7 @@ from ..formatting import (
 from ..normalization import _get_cleaned_institution_name
 from ..parsing import _extract_year_from_text
 from ..parsing.dates import OPEN_END, YEAR
-from ..resolution import _get_institution_location, _location_already_in_institution
+from ..resolution import _get_institution_location, _location_to_append
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -448,11 +448,12 @@ class EducationSection:
 
             # "University of Pittsburgh, Pittsburgh, PA" must not gain a second
             # ", Pittsburgh, PA"; "New York University" must still gain its
-            # ", New York, NY" (#897) -- one shared tail predicate decides.
-            location_already_present = _location_already_in_institution(location, institution)
+            # ", New York, NY" (#897); an institution ending in its city alone
+            # gains the state alone (#2004) -- one shared tail predicate decides.
+            location = _location_to_append(location, institution)
 
             # Cell 1: Institution + Location (location may be enriched)
-            if location and location_is_enriched and not location_already_present:
+            if location and location_is_enriched:
                 # Institution is normal text, ", City, State" is track change
                 if institution:
                     institution_content = [
@@ -461,7 +462,7 @@ class EducationSection:
                     ]
                 else:
                     institution_content = [(location, True, "Institution Enrichment")]
-            elif location and not location_already_present:
+            elif location:
                 # Location exists but not from enrichment - all normal text
                 institution_full = f"{institution}, {location}" if institution else location
                 institution_content = [(institution_full, False, "")]

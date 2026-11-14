@@ -1288,6 +1288,30 @@ def test_normalize_keeps_the_location_of_a_city_named_institution():
     assert dup.location == ""
 
 
+@pytest.mark.parametrize("fields, enrichment, location, content", [
+    # #2004: an institution ending in its city alone keeps only the state of
+    # the location -- tracked when enrichment found it, plain when stage 4 read it
+    ({"institution": "Norvale State University, Crab Hollow"},
+     {"city": "Crab Hollow", "state": "New York", "country_code": "US"}, "NY",
+     [("Norvale State University, Crab Hollow", False, ""),
+      (", NY", True, INSTITUTION_ENRICHMENT_REASON)]),
+    ({"institution": "Norvale State University, Crab Hollow", "location": "Crab Hollow, NY"},
+     None, "NY", [("Norvale State University, Crab Hollow, NY", False, "")]),
+    # never: a city that is a state name -- the tail may be the state
+    ({"institution": "Norvale University, New York", "location": "New York, NY"},
+     None, "", [("Norvale University, New York", False, "")]),
+])
+def test_normalize_keeps_the_state_a_city_only_institution_tail_lacks(
+        fields, enrichment, location, content):
+    entry = {"extracted_fields": {"training_type": "Residency", **fields}}
+    if enrichment:
+        entry["institution_enrichment"] = enrichment
+    record = _normalize_training_entry(entry, "C")
+
+    assert record.location == location
+    assert _institution_content(record) == content
+
+
 def test_normalize_appends_role_after_the_specialty():
     assert _normalize_training_entry(
         {"extracted_fields": {"training_type": "Residency", "specialty": "Surgery",

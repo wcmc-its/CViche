@@ -22,6 +22,7 @@ from .institution import (  # noqa: F401
     _get_institution_location,
     _location_already_in_institution,
     _location_remainder,
+    _location_to_append,
     _recover_institution_from_nearby_entries,
 )
 from .owner import _get_cv_owner_name, _is_cv_owner  # noqa: F401

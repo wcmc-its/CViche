@@ -1433,6 +1433,36 @@ def test_format_mentee_duration_keeps_a_single_date_written_in_the_source(
                                    source_text=source_text) == expected
 
 
+@pytest.mark.parametrize('fields,ongoing,source_text,expected', [
+    # #2004: a period that renders only the year of the line's one class-of
+    # or expected-completion phrase renders the phrase, first letter capitalised.
+    ({'end_date': '2031'}, False, 'Example Mentee, MD candidate, Class of 2031', 'Class of 2031'),
+    ({'start_date': '2031'}, True, 'Example Mentee, class   of 2031', 'Class of 2031'),
+    ({'end_date': '2032-05'}, False, 'Example Mentee, PhD student (expected graduation May 2032)',
+     'Expected graduation May 2032'),
+    ({'end_date': '2033'}, False, 'Example Mentee, anticipated completion 2033', 'Anticipated completion 2033'),
+    ({'end_date': '2034'}, False, 'Example Mentee; Expected 2034', 'Expected 2034'),
+    ({'end_date': '2030'}, False, 'Example Mentee, expected defense in Fall 2030',
+     'Expected defense in Fall 2030'),
+    ({'end_date': '2033-12'}, False, 'Example Mentee (anticipated graduation date: Dec. 2033)',
+     'Anticipated graduation date: Dec. 2033'),
+    # Unchanged: an empty period, a range, a second year or a second phrase.
+    ({}, False, 'Example Mentee, Class of 2031', ''),
+    ({'start_date': '2028', 'end_date': '2031'}, False, 'Example Mentee 2028-2031, Class of 2031', '2028-2031'),
+    ({'end_date': '2031'}, False, 'Example Mentee, BA 2027, Class of 2031', '2031'),
+    ({'end_date': '2031'}, False, 'Example Mentee, Class of 2031, expected 2031', '2031'),
+    # Unchanged: the period is another year than the phrase's, or a word.
+    ({'end_date': '2030'}, False, 'Example Mentee, Class of 2031', '2030'),
+    ({'start_date': '2031', 'end_date': 'Present'}, True, 'Example Mentee, Class of 2031', '2031-Present'),
+    # Unchanged: no phrase at all.
+    ({'end_date': '2031'}, False, 'Example Mentee, graduated 2031', '2031'),
+])
+def test_format_mentee_duration_renders_the_class_or_expected_phrase(
+        fields, ongoing, source_text, expected):
+    assert _format_mentee_duration(fields, ongoing=ongoing,
+                                   source_text=source_text) == expected
+
+
 # ---------------------------------------------------------------------------
 # Round-2 review, test-coverage list: the two stage-5d entry conditions
 # ---------------------------------------------------------------------------
