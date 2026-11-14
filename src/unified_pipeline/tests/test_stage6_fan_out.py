@@ -2170,6 +2170,263 @@ class TestStage4GrantRoleFolds:
         assert [c['extracted_fields']['role'] for c in children] == ['Chair', 'Member']
 
 
+# --- #2067: a mentee's head line and accomplishment lines are one table -------
+# Invented names and lines. The shapes are ZDKMKD 115 (two mentees on one
+# entry, its tab segments out of step with its records, one segment written
+# with a typographic apostrophe), 137 (one segment per record, a closed
+# period) and 110 (a member carrying the head's own period).
+
+_ORLA = 'Orla Fenn'
+_TOBIN = 'Tobin Ashe'
+
+
+def _mentee_record(name=_ORLA, start=None, end=None, level=None, **fields):
+    return {'mentee_name': name, 'mentee_level': level, 'start_date': start, 'end_date': end, **fields}
+
+
+_ORLA_LINES = ('Poster shown at Ashby Lantern Symposium (2022)',
+               'Funded by a travel award to Ashby Lantern Symposium',
+               'Talk at Fenwick’s Working Group Meeting (2022)',
+               'Abstract sent to Orchard Review (2023)')
+_ORLA_RECORDS = (
+    _mentee_record(start='2019', end='present', level='Lantern Fellow',
+                   site_position='Co-mentor on Ashby Center award', funding_source='Ashby Center award'),
+    _mentee_record(start='2022', level='Lantern Fellow', site_position='Poster shown at Ashby Lantern Symposium',
+                   research_focus='Lantern'),
+    _mentee_record(level='Lantern Fellow', site_position='Funded by a travel award to Ashby Lantern Symposium',
+                   funding_source='travel award', research_focus='Lantern'),
+    _mentee_record(start='2022', level='Lantern Fellow',
+                   site_position="Talk at Fenwick's Working Group Meeting"),
+    _mentee_record(start='2023', level='Lantern Fellow', site_position='Abstract sent to Orchard Review',
+                   research_focus='Orchard Review'),
+)
+_TOBIN_LINE = 'Article in Orchard Practice (2022)'
+_TOBIN_RECORDS = (
+    _mentee_record(_TOBIN, '2019', 'present', 'Lantern resident', site_position='Lantern resident'),
+    _mentee_record(_TOBIN, '2022', site_position='Article in Orchard Practice'),
+)
+# 8 segments for 7 records: the head's line runs over two of them.
+_TWO_MENTEES_TEXT = '\t'.join((
+    'Orla Fenn, Lantern Fellow (2019- present)', 'Co-mentor on Ashby Center award', *_ORLA_LINES,
+    'Tobin Ashe, Lantern resident (2019-present)', _TOBIN_LINE))
+
+_CLOSED_LINES = ('Abstract at Lantern Society (2020)', 'Article in Orchard Practice (2020)',
+                 'Manuscript in preparation (2022)')
+_CLOSED_RECORDS = (
+    _mentee_record(_TOBIN, '2018', '2021', 'Doctoral candidate'),
+    _mentee_record(_TOBIN, '2020', level='Doctoral candidate', research_focus='Abstract at Lantern Society'),
+    _mentee_record(_TOBIN, '2020', level='Doctoral candidate',
+                   research_focus='Article in Orchard Practice'),
+    _mentee_record(_TOBIN, '2022', level='Doctoral candidate', research_focus='Manuscript in preparation'),
+)
+# One segment per record.
+_CLOSED_TEXT = '\t'.join(('Tobin Ashe, Doctoral candidate (2018-2021)', *_CLOSED_LINES))
+
+# Two records of one mentee, three segments; the member carries the head's
+# own period, as stage 4 copies it.
+_PAIR_TEXT = ('Orla Fenn (2019-present)\tServed as reader on Ashby Lantern Study\t'
+              'Served as scorer on Ashby Lantern Substudy')
+_PAIR_HEAD = _mentee_record(start='2019', end='present', site_position='reader on Ashby Lantern Study',
+                            research_focus='Ashby Lantern Study')
+_PAIR_MEMBER = _mentee_record(start='2019', end='present', site_position='scorer on Ashby Lantern Substudy',
+                              research_focus='Ashby Lantern Substudy')
+
+
+def _mentee_entry(records, text, code='N3A', **entry_keys):
+    return _stage4_entry([copy.deepcopy(dict(record)) for record in records], text=text, code=code, **entry_keys)
+
+
+def _pair(head=None, member=None, text=_PAIR_TEXT, code='N3A'):
+    """`_mentee_entry` of the pair, the head and the member updated."""
+    records = [{**_PAIR_HEAD, **(head or {})}, {**_PAIR_MEMBER, **(member or {})}]
+    return _fan4(_mentee_entry(records, text, code))
+
+
+def _folded_lines(children):
+    return [child.get(fan_out.FOLDED_MENTEE_LINES_KEY) for child in children]
+
+
+class TestStage4MenteeFolds:
+    @pytest.mark.parametrize('code', ['N3A', 'N3B'])
+    def test_each_mentees_records_fold_into_one_table_with_the_heads_period(self, code):
+        orla, tobin = _fan4(_mentee_entry((*_ORLA_RECORDS, *_TOBIN_RECORDS), _TWO_MENTEES_TEXT, code))
+        assert orla['extracted_fields'] == _ORLA_RECORDS[0]
+        assert tobin['extracted_fields'] == _TOBIN_RECORDS[0]
+        # Each line as the CV writes it, the typographic apostrophe and the year included.
+        assert _folded_lines([orla, tobin]) == [list(_ORLA_LINES), [_TOBIN_LINE]]
+
+    def test_the_kept_row_reads_as_the_heads_own_line_unless_it_is_the_parent(self):
+        entry = _mentee_entry((*_ORLA_RECORDS, *_TOBIN_RECORDS), _TWO_MENTEES_TEXT)
+        orla, tobin = _fan4(entry)
+        assert orla[FANNED_OUT_FROM]['index'] == 4
+        assert 'Co-mentor on Ashby Center award' in orla['text']
+        assert 'Orchard Review' not in orla['text']
+        assert tobin['text'] == entry['text']
+        assert tobin[LAST_STAGE4_RECORD]['index'] == 6
+
+    @pytest.mark.parametrize('code', ['N3A', 'N3B'])
+    def test_records_paired_with_their_own_segments_fold_their_segments(self, code):
+        [child] = _fan4(_mentee_entry(_CLOSED_RECORDS, _CLOSED_TEXT, code))
+        assert LAST_STAGE4_RECORD in child
+        assert child['extracted_fields'] == _CLOSED_RECORDS[0]
+        assert child['text'] == _CLOSED_TEXT
+        assert _folded_lines([child]) == [list(_CLOSED_LINES)]
+
+    @pytest.mark.parametrize('member', [
+        {}, {'start_date': '2021', 'end_date': None}, {'start_date': '2021', 'end_date': '2021'},
+        {'start_date': None, 'end_date': None},
+    ], ids=['the_heads_period', 'a_start_alone', 'one_point', 'no_dates'])
+    def test_a_member_with_no_period_of_its_own_folds(self, member):
+        [child] = _pair(member=member)
+        assert child['extracted_fields'] == _PAIR_HEAD
+        assert _folded_lines([child]) == [['Served as scorer on Ashby Lantern Substudy']]
+
+    @pytest.mark.parametrize('member', [{'mentee_level': 'Lantern Fellow'}, {'mentee_level': None}],
+                             ids=['the_heads_level', 'no_level'])
+    def test_a_member_with_the_heads_level_or_none_folds(self, member):
+        [child] = _pair(head={'mentee_level': 'Lantern Fellow'}, member=member)
+        assert _folded_lines([child]) == [['Served as scorer on Ashby Lantern Substudy']]
+
+    @pytest.mark.parametrize('head, member, text', [
+        ({'end_date': None}, {'start_date': None, 'end_date': None}, _PAIR_TEXT),
+        ({'end_date': '2019'}, {'start_date': None, 'end_date': None}, _PAIR_TEXT),
+        ({}, {'start_date': '2020', 'end_date': '2021'}, _PAIR_TEXT),
+        ({}, {'start_date': None, 'end_date': '2021'}, _PAIR_TEXT),
+        ({'mentee_level': 'Lantern Fellow'}, {'mentee_level': 'Lantern resident'},
+         _PAIR_TEXT + ', Lantern resident'),
+        ({}, {}, _PAIR_TEXT.replace('Served as scorer', 'Orla Fenn served as scorer')),
+        ({}, {'site_position': _PAIR_HEAD['site_position'], 'research_focus': _PAIR_HEAD['research_focus'],
+              'start_date': None, 'end_date': None}, _PAIR_TEXT),
+        ({}, {'site_position': _PAIR_HEAD['site_position'], 'research_focus': None,
+              'start_date': None, 'end_date': None}, 'Reader on Ashby Lantern Study (2019-present)'),
+        ({}, {}, _PAIR_TEXT.replace('scorer on Ashby', 'scorer\ton Ashby')),
+        ({}, {}, _PAIR_TEXT + '\tScorer on Ashby Lantern Substudy renewal'),
+    ], ids=['head_one_year', 'head_one_point', 'member_own_period', 'member_end_alone',
+            'member_other_level', 'line_names_the_mentee', 'no_own_value', 'no_own_value_one_line',
+            'no_one_segment_holds_it', 'two_segments_hold_it'])
+    def test_a_run_any_member_of_which_fails_keeps_a_table_per_record(self, head, member, text):
+        children = _pair(head, member, text)
+        assert [child['extracted_fields']['site_position'] for child in children] == [
+            _PAIR_HEAD['site_position'], member.get('site_position', _PAIR_MEMBER['site_position'])]
+        assert _folded_lines(children) == [None, None]
+
+    @pytest.mark.parametrize('head_key, member_key', [('name', 'name'), ('mentee_name', 'name')])
+    def test_a_mentee_named_under_name_folds_too(self, head_key, member_key):
+        # The name is no value of the member's own, under whichever key.
+        records = [{**_PAIR_HEAD, 'mentee_name': None, head_key: _ORLA},
+                   {**_PAIR_MEMBER, 'mentee_name': None, member_key: _ORLA}]
+        [child] = _fan4(_mentee_entry(records, _PAIR_TEXT))
+        assert _folded_lines([child]) == [['Served as scorer on Ashby Lantern Substudy']]
+
+    def test_a_list_value_is_looked_for_as_its_items_joined(self):
+        text = _PAIR_TEXT.replace('Served as scorer on Ashby Lantern Substudy', 'Poster prize; Travel award (2022)')
+        [child] = _pair(member={'site_position': None, 'research_focus': None,
+                                'awards': ['Poster prize', None, 'Travel award']}, text=text)
+        assert _folded_lines([child]) == [['Poster prize; Travel award (2022)']]
+
+    def test_an_object_value_is_not_looked_for_in_the_lines(self):
+        [child] = _pair(member={'additional_info': {'venue': 'Ashby'}})
+        assert _folded_lines([child]) == [['Served as scorer on Ashby Lantern Substudy']]
+
+    def test_a_member_paired_with_its_own_segment_needs_no_value_of_its_own(self):
+        records = [_CLOSED_RECORDS[0], _mentee_record(_TOBIN, '2020', level='Doctoral candidate')]
+        [child] = _fan4(_mentee_entry(records, '\t'.join(_CLOSED_TEXT.split('\t')[:2]), 'N3B'))
+        assert _folded_lines([child]) == [[_CLOSED_LINES[0]]]
+
+    def test_two_members_sharing_one_line_keep_their_own_tables(self):
+        records = [_PAIR_HEAD, _PAIR_MEMBER,
+                   _mentee_record(start='2023', research_focus='Ashby Lantern Substudy')]
+        children = _fan4(_mentee_entry(records, _PAIR_TEXT + '\tAshby Center'))
+        assert len(children) == 3
+        assert _folded_lines(children) == [None, None, None]
+
+    def test_one_mentee_folds_while_the_other_keeps_its_tables(self):
+        tobin = [_TOBIN_RECORDS[0], {**_TOBIN_RECORDS[1], 'end_date': '2023'}]
+        children = _fan4(_mentee_entry((*_ORLA_RECORDS, *tobin), _TWO_MENTEES_TEXT))
+        assert [child['extracted_fields']['mentee_name'] for child in children] == [_ORLA, _TOBIN, _TOBIN]
+        assert _folded_lines(children) == [list(_ORLA_LINES), None, None]
+
+    def test_the_kept_row_stays_though_a_later_record_prints_it_alike(self):
+        # The member prints (level, name, focus, start) as the last record
+        # does, which would drop it as a repeated row (#1445).
+        records = [_mentee_record(start='2019', end='present', level='Lantern Fellow'),
+                   _mentee_record(start='2022', level='Lantern Fellow', site_position='Poster shown at Ashby Meeting'),
+                   _mentee_record(_TOBIN, '2019', 'present', 'Lantern resident'),
+                   _mentee_record(start='2022', level='Lantern Fellow', site_position='Talk given at Ashby Meeting')]
+        text = ('Orla Fenn, Lantern Fellow (2019-present)\tPoster shown at Ashby Meeting (2022)\t'
+                'Tobin Ashe, Lantern resident (2019-present)\tTalk given at Ashby Meeting (2022)')
+        children = _fan4(_mentee_entry(records, text))
+        assert [child['extracted_fields']['mentee_name'] for child in children] == [_ORLA, _TOBIN, _ORLA]
+        assert _folded_lines(children) == [['Poster shown at Ashby Meeting (2022)'], None, None]
+
+    @pytest.mark.parametrize('code', ['N3', 'M2A'])
+    def test_another_code_keeps_a_row_per_record(self, code):
+        children = _pair(member={'start_date': '2021', 'end_date': None}, code=code)
+        assert [child['extracted_fields']['site_position'] for child in children] == [
+            _PAIR_HEAD['site_position'], _PAIR_MEMBER['site_position']]
+        assert _folded_lines(children) == [None, None]
+
+    def test_a_split_dev_declines_is_left_whole(self):
+        entry = _mentee_entry([_PAIR_HEAD, _PAIR_MEMBER], _PAIR_TEXT)
+        entry['extracted_fields']['formatted_text'] = 'Orla Fenn (2019-present)'
+        assert _fan4(entry) == [entry]
+
+    def test_a_grants_role_fold_carries_no_mentee_lines(self):
+        [child] = _grant_children([_grant_record('Laboratory Lead'), _grant_record('Site Committee Member')])
+        assert fan_out.FOLDED_MENTEE_LINES_KEY not in child
+
+
+_W_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+_MENTEE_HEADINGS = ('Current Mentees:', 'Past Mentees:')
+
+
+def _mentee_tables(docx_path):
+    """(heading above, {label: value}) of every mentee table in the .docx body,
+    read from the raw XML: a `w:t` inside a `w:ins` and a `w:delText` count,
+    and a cell's paragraphs and line breaks part its lines."""
+    import zipfile
+
+    from lxml import etree
+
+    with zipfile.ZipFile(docx_path) as docx:
+        body = etree.fromstring(docx.read('word/document.xml')).find(f'{_W_NS}body')
+
+    def text(element):
+        return '\n'.join(''.join('\n' if node.tag == f'{_W_NS}br' else node.text or ''
+                                 for node in p.iter(f'{_W_NS}t', f'{_W_NS}delText', f'{_W_NS}br'))
+                         for p in element.iter(f'{_W_NS}p'))
+
+    tables, heading = [], None
+    for element in body:
+        if element.tag == f'{_W_NS}p' and text(element).strip() in _MENTEE_HEADINGS:
+            heading = text(element).strip()
+        elif element.tag == f'{_W_NS}tbl':
+            rows = {text(cells[0]): text(cells[1]) for cells in
+                    (row.findall(f'{_W_NS}tc') for row in element.iter(f'{_W_NS}tr')) if len(cells) > 1}
+            if 'Name:' in rows:
+                tables.append((heading, rows))
+    return tables
+
+
+def test_a_folded_mentee_renders_as_one_table_under_its_heads_status(tmp_path):
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    entries = [_mentee_entry(_ORLA_RECORDS, '\t'.join(('Orla Fenn, Lantern Fellow (2019- present)',
+                                                       'Co-mentor on Ashby Center award', *_ORLA_LINES))),
+               _mentee_entry(_CLOSED_RECORDS, _CLOSED_TEXT, code='N3B')]
+    source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+    source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': entries}))
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+    tables = {rows['Name:']: (heading, rows) for heading, rows in _mentee_tables(target)}
+    assert len(_mentee_tables(target)) == 2
+    orla_heading, orla = tables[_ORLA]
+    tobin_heading, tobin = tables[_TOBIN]
+    assert (orla_heading, orla['Mentoring Period:']) == ('Current Mentees:', '2019-present')
+    assert (tobin_heading, tobin['Mentoring Period:']) == ('Past Mentees:', '2018-2021')
+    assert orla['Project/Accomplishments:'].split('\n')[-len(_ORLA_LINES):] == list(_ORLA_LINES)
+    assert tobin['Project/Accomplishments:'].split('\n')[-len(_CLOSED_LINES):] == list(_CLOSED_LINES)
+
+
 # --- #1243: stage 5d's one citation on an entry stage 4 split into records ---
 # NDMRSO VYRDHN 607/613: two tab-joined articles, split by stage 4; 5d wrote
 # one citation (of the first) and the split was declined, so the second

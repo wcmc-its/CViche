@@ -61,11 +61,12 @@ import re
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import groupby
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from unified_pipeline.core.credential_lines import OTHER_EDUCATION_CODE
-from unified_pipeline.core.text_norm import norm
+from unified_pipeline.core.text_norm import fold_quotes, norm
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 from unified_pipeline.stage6.formatting.dates import format_date_for_section
 from unified_pipeline.stage6.parsing.dates import (
@@ -1320,6 +1321,145 @@ def _role_folds(records: Sequence[Mapping[str, Any]], rendered: frozenset[str],
     return folds
 
 
+# #2067 (ZDKMKD 110, 115, 137): a CV writes a mentee on one line with the
+# mentoring period ("<mentee>, <level> (2019-present)") and the mentee's
+# accomplishments on the lines under it ("Poster at <meeting> (2022)"). Stage
+# 4 made each line a record of the same mentee, and each printed a mentee
+# table of its own, an accomplishment's year as its Mentoring Period: one
+# mentee as four tables. A run of two or more consecutive records naming one
+# mentee is one mentee (`_mentee_fold`) when its first record, the head, has
+# a period (a start and an end that differ); every other record has no
+# period of its own (no dates, a start alone, one point, or the head's
+# period exactly) and no level but the head's; and every other record has a
+# line of its own -- its tab segment when the segments pair with the
+# records, else the one segment holding every value it does not share with
+# the head -- that does not name the mentee and that no other record has.
+# It renders as one table, the head's, with each other record's line, as the
+# CV writes it, in Project/Accomplishments (`FOLDED_MENTEE_LINES_KEY`, read
+# by `sections/mentoring.py`). A run any record of which fails stays a table
+# per record.
+FOLDED_MENTEE_LINES_KEY = 'folded_mentee_lines'
+_MENTEE_FOLDED_CODES = frozenset({'N3A', 'N3B'})
+_MENTEE_NAME_KEYS = ('mentee_name', 'name')
+_MENTEE_LEVEL_KEY = 'mentee_level'
+_END_KEY = 'end_date'
+# What a list value's items are joined with before it is looked for in a line.
+_MENTEE_VALUE_JOIN = '; '
+
+
+class _MenteeFold(NamedTuple):
+    """The records of one mentee that render as one table: their indexes in
+    order, the head first and the row's own last, and each record's line but
+    the head's, in order."""
+    members: tuple[int, ...]
+    lines: tuple[str, ...]
+
+
+def _compared(value: object) -> str:
+    """A field value or a line as a mentee fold compares it: `norm` after
+    `fold_quotes` (a CV's typographic apostrophe against a field's plain
+    one), a list's items joined, '' for None."""
+    if isinstance(value, (list, tuple)):
+        value = _MENTEE_VALUE_JOIN.join(str(item) for item in value if item)
+    return norm(fold_quotes('' if value is None else str(value)))
+
+
+def _mentee_of(record: Mapping[str, Any]) -> str:
+    """The mentee `record` names (`_MENTEE_NAME_KEYS`), compared; '' for none."""
+    return _compared(next((record[key] for key in _MENTEE_NAME_KEYS if record.get(key)), ''))
+
+
+def _same_mentee_runs(records: Sequence[Mapping[str, Any]]) -> list[tuple[int, ...]]:
+    """Every maximal run of two or more consecutive records naming one mentee."""
+    runs = (tuple(run) for name, run in groupby(range(len(records)), key=lambda i: _mentee_of(records[i]))
+            if name)
+    return [run for run in runs if len(run) >= _MIN_RECORDS]
+
+
+def _period(record: Mapping[str, Any]) -> tuple[str, str]:
+    """`record`'s (start, end), compared."""
+    return _compared(record.get(_START_KEY)), _compared(record.get(_END_KEY))
+
+
+def _has_period(dates: tuple[str, str]) -> bool:
+    """Whether (start, end) is a period: both set, and not one point."""
+    start, end = dates
+    return bool(start and end) and start != end
+
+
+def _joins_head(member: Mapping[str, Any], head: Mapping[str, Any]) -> bool:
+    """Whether `member` adds no period and no level to the head's: no end,
+    an end its start equals, or the head's period exactly; and a blank level
+    or the head's."""
+    start, end = _period(member)
+    level = _compared(member.get(_MENTEE_LEVEL_KEY))
+    return (not end or start == end or (start, end) == _period(head)) \
+        and (not level or level == _compared(head.get(_MENTEE_LEVEL_KEY)))
+
+
+def _values_not_the_heads(member: Mapping[str, Any], head: Mapping[str, Any]) -> list[str]:
+    """`member`'s values, compared, that the head does not hold in the same
+    field: no name, no date and no object."""
+    values = ((key, _compared(value)) for key, value in member.items()
+              if key not in _MENTEE_NAME_KEYS and not _is_date_key(key) and not isinstance(value, Mapping))
+    return [value for key, value in values if value and value != _compared(head.get(key))]
+
+
+def _member_line(member: Mapping[str, Any], head: Mapping[str, Any], segments: Sequence[str],
+                 own_segment: str | None) -> str | None:
+    """`member`'s own line: `own_segment`, its tab segment when the entry's
+    segments pair with its records, else the one segment holding every value
+    it does not share with the head (`_values_not_the_heads`). None when it
+    has no such value, or no one segment holds them all."""
+    if own_segment is not None:
+        return own_segment
+    own = _values_not_the_heads(member, head)
+    hits = [segment for segment in segments if all(value in _compared(segment) for value in own)]
+    return hits[0] if own and len(hits) == 1 else None
+
+
+def _lines_are_own(lines: Sequence[str], mentee: str) -> bool:
+    """Whether no line names the mentee and no two members share one."""
+    compared = [_compared(line) for line in lines]
+    return not any(mentee in line for line in compared) and len(set(compared)) == len(compared)
+
+
+def _mentee_fold(run: tuple[int, ...], records: Sequence[Mapping[str, Any]],
+                 segments: Sequence[str]) -> _MenteeFold | None:
+    """The fold of one run of records naming one mentee (see the comment
+    above), or None when any record of it keeps its own table."""
+    head = records[run[0]]
+    if not _has_period(_period(head)) or not all(_joins_head(records[i], head) for i in run[1:]):
+        return None
+    aligned = len(segments) == len(records)
+    found = [_member_line(records[i], head, segments, segments[i] if aligned else None) for i in run[1:]]
+    lines = [line for line in found if line is not None]
+    if len(lines) != len(found) or not _lines_are_own(lines, _mentee_of(head)):
+        return None
+    return _MenteeFold(run, tuple(lines))
+
+
+def _mentee_folds(records: Sequence[Mapping[str, Any]], text: object) -> list[_MenteeFold]:
+    """The runs of an entry's records, each naming one mentee, that render
+    as one table (see the comment above `FOLDED_MENTEE_LINES_KEY`)."""
+    segments = _segments(text)
+    folds = (_mentee_fold(run, records, segments) for run in _same_mentee_runs(records))
+    return [fold for fold in folds if fold is not None]
+
+
+def _fold_mentee_into(row: dict[str, Any], records: Sequence[Mapping[str, Any]],
+                      texts: Sequence[str], fold: _MenteeFold) -> None:
+    """Make `row`, the run's last record's, the head's table: the head's
+    fields, and its line unless `row` is the parent, whose whole text stays
+    (`_stage4_children`), with every other record's line for
+    Project/Accomplishments (`FOLDED_MENTEE_LINES_KEY`)."""
+    head = fold.members[0]
+    row['extracted_fields'] = copy.deepcopy(dict(records[head]))
+    if LAST_STAGE4_RECORD not in row:
+        row['text'] = texts[head]
+    row[FOLDED_MENTEE_LINES_KEY] = list(fold.lines)
+
+
 def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
                      records_key: str) -> list[dict[str, Any]] | None:
     """One child per record stage 4 kept under `records_key`, or None.
@@ -1351,7 +1491,9 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     prints identically is not emitted (`_repeated_rows`). #1577: nor is an
     earlier B2 record folded into a later one's row (`_record_folds`).
     #2068: nor an earlier grant record whose table differs from a later
-    one's in the owner's role alone (`_role_folds`).
+    one's in the owner's role alone (`_role_folds`). #2067: nor a mentee's
+    record folded into the mentee's one table (`_mentee_folds`), whose row
+    stays though a later record prints it alike.
     """
     code = str(entry.get('taxonomy_code'))
     rendered = _RENDERED_FIELDS.get(code)
@@ -1372,8 +1514,9 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
                for i, record in enumerate(records)]
     folds = _record_folds(records, rendered, code) if code in _FOLDED_CODES else []
     role_folds = _role_folds(records, rendered, code) if code in _ROLE_FOLDED_CODES else []
-    repeated = (_repeated_rows(records, rendered, code)
-                | {i for fold in (*folds, *role_folds) for i in fold.members[:-1]})
+    mentee_folds = _mentee_folds(records, entry.get('text')) if code in _MENTEE_FOLDED_CODES else []
+    repeated = ((_repeated_rows(records, rendered, code) - {fold.members[-1] for fold in mentee_folds})
+                | {i for fold in (*folds, *role_folds, *mentee_folds) for i in fold.members[:-1]})
     citation = {key: fields[key] for key in _CITATION_KEYS if key in fields}
     bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
     earlier = {i: _child(bare, {**copy.deepcopy(record), **(citation if i == cited else {})},
@@ -1393,6 +1536,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
         _fold_into(rows[fold.members[-1]], records, fold)
     for fold in role_folds:
         rows[fold.members[-1]]['extracted_fields'][_FOLDED_ROLE_KEY] = fold.name
+    for mentee in mentee_folds:
+        _fold_mentee_into(rows[mentee.members[-1]], records, texts, mentee)
     return [*earlier.values(), last]
 
 
