@@ -21,6 +21,12 @@ Text is passed through `_strip_taxonomy_code` before `_clean_inline_tabs`,
 because these entries arrive from the classifier still carrying their "S0:"
 prefix more often than most -- an identifier line is short enough that the code
 is a visible fraction of it.
+
+Each bullet is recorded on the row receipt against the entry it renders
+(#534), as the comment hook does for the other bullet writers; without it
+every S0 entry read lost although its bullet prints. An A entry's ORCID iD
+(#817) records the same way; it is not on S0's given list, so nothing changes
+for it there.
 """
 import logging
 
@@ -61,6 +67,7 @@ class ResearcherProfilesSection:
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
+            self._row_receipts.wrote(entry_para._p, entry)  # the bullet is the entry's row receipt (#534)
             run = entry_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
             self._apply_list_bullet(entry_para, level=0)

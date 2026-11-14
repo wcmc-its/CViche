@@ -685,14 +685,226 @@ def test_abstract_number_resolves_only_when_its_line_writes_it(value, text, expe
     ('2023-10', 'A Talk. October 2022.', ''),
     # A month name inside a longer word is not the month.
     ('2023-05', 'A Talk. Dismay 2023.', ''),
+    # A bare year has no month of its own: `bare_year_date` reads its line.
     ('2023', 'A Talk. October 2023.', ''),
     (2023, 'A Talk. October 2023.', ''),
     (None, 'A Talk. October 2023.', ''),
+    # A stored month keeps this path: no day range, and only its own month.
+    ('2008-10-21', 'A Talk. Larchmere, 21-24 October 2008.', '2008 October'),
 ])
 def test_meeting_date_is_the_month_and_day_its_line_writes(year, text, expected):
     entry = {'text': text, 'extracted_fields': {'year': year}}
 
     assert resolve_publication(entry).meeting_date == expected
+
+
+@pytest.mark.parametrize('year,text,expected', [
+    # #1570 round 3: stage 4 stored the line's "October 2015" as "2015".
+    ('2015', 'Rook J. A Talk. Larks Day, Larchmere, October 2015.', '2015 October'),
+    (2015, 'Rook J. A Talk. Larks Day, Larchmere, October 2015.', '2015 October'),
+    # The day, or the range of days, as the line writes it, on either side.
+    ('2018', 'A Talk. Larks Day, Larchmere, 15 Feb. 2018.', '2018 Feb 15'),
+    ('2025', 'A Talk. Larks Day, April 17, 2025, Larchmere.', '2025 April 17'),
+    ('2008', 'A Talk. Larks Day, Larchmere, 21-24 October 2008.', '2008 October 21-24'),
+    ('2008', 'A Talk. Larks Day, Larchmere, 21 – 24 October 2008.', '2008 October 21 – 24'),
+    ('2017', 'A Talk. Larks Day, May 3-5, 2017, Larchmere.', '2017 May 3-5'),
+    # The same month written twice is one month; the first is printed.
+    ('2015', 'A Talk. Larks Day, 3 October 2015. Updated October 2015.', '2015 October 3'),
+    # A month written with another year is not this year's.
+    ('2016', 'A Talk. Larks Day, October 2015; Larchmere, March 2016.', '2016 March'),
+    # A number after a numbering word is not a day; the day after the month
+    # is. (A journal's volume, issue, number or supplement word refuses the
+    # whole date now: see the next test.)
+    ('2006', 'A Talk. Larks Day, Part 2 MAR 8 2006.', '2006 MAR 8'),
+    ('2010', 'A Talk. Larks Day, No 5 April 2010.', '2010 April'),
+    ('2015', 'A Talk. Larks Day, Board 12 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, poster #12 May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Session 3 October 2015.', '2015 October'),
+    ('2015', 'A Talk. Larks Day, Abstract 7 October 2015.', '2015 October'),
+    ('2015', 'A Talk. Larks Day, Abstract No. 7 October 2015.', '2015 October'),
+    # A number before the month that no numbering word precedes is a day.
+    ('2015', 'A Talk. Larks Day, Larchmere 12 October 2015.', '2015 October 12'),
+    ('2015', 'A Talk. Larks Day, Partial 12 October 2015.', '2015 October 12'),
+    ('2015', 'A Talk. Larks Day, Counterpart 12 October 2015.', '2015 October 12'),
+    # A day on both sides of the month: which is the meeting's is not said.
+    ('2016', 'A Talk. Larks Day. First Online: 12 October 12 2016.', '2016 October'),
+    ('2007', 'A Talk. Larks Day, 2 November 1, 2007.', '2007 November'),
+    # A number no month has that many days of is no day either.
+    ('2010', 'A Talk. Larks Day, Hall 45 May 2010.', '2010 May'),
+    ('2010', 'A Talk. Larks Day, May 12-45, 2010.', '2010 May'),
+    ('2013', 'A Talk. Larks Day, March 21-32, 2013.', '2013 March'),
+    ('2015', 'A Talk. Larks Day, 0 May 2015.', '2015 May'),
+    # The last day a month has is a day.
+    ('2015', 'A Talk. Larks Day, October 31, 2015.', '2015 October 31'),
+    # #1570 round 3: a session or room number is no journal locator, nor is
+    # a letter and number after a place word or inside a title, nor a word
+    # in parentheses after a number.
+    ('2008', 'A Talk. Larks Day, Session 4, Hall B2, Larchmere, 21-24 October 2008.',
+     '2008 October 21-24'),
+    ('2015', 'A Talk on p53 in Larks. Larks Day, Larchmere, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Poster P12, Larchmere, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Room 101 (East), May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Room 12B3, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day 2014 T5: Larchmere, May 2015.', '2015 May'),
+    # #1570 round 4: a meeting's own numbers and codes are no journal
+    # locator, after the date as before it, a number after "Abstract",
+    # "Poster", "Board" or "Session" among them ...
+    ('2015', 'A Talk. Larks Day, May 2015, Session 4, Hall B2.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, May 2015. Poster P12, Room 12B.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, May 2015. Abstract 123.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Abstract Number 123, May 2015.', '2015 May'),
+    ('2004', 'A Talk. Larks Day, Larchmere, June 1-4, 2004. Poster No. 232.', '2004 June 1-4'),
+    ('2015', 'A Talk. Larks Day, Board Number 12, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Session No. 4, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Tissue 3, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Grp. 4, May 2015.', '2015 May'),
+    ('2015', 'A Talk. Larks Day, Rooms 12A-14B, May 2015.', '2015 May'),
+    # ... and so is a code with a letter on one end of its range, a title's
+    # letters and numbers, an author's initial before a year, and the date's
+    # own year before a colon.
+    ('2011', 'A Talk. Symposium S2-26. Larks Day, 5-8 October 2011.', '2011 October 5-8'),
+    ('2015', 'A 3D-T2 Talk. Larks Day, April 28, 2015.', '2015 April 28'),
+    ('2015', 'A N1-S1 Talk. Larks Day, April 28, 2015.', '2015 April 28'),
+    ('2015', 'Rook P. 2015. A Talk. Larks Day, May 2015.', '2015 May'),
+    ('2022', 'A Talk. March 15-19, 2022: 69th Larks Day.', '2022 March 15-19'),
+    # A single day, or a range of days, prints whole; a number before it
+    # that is no day (a session's, or one past 31, or a year's last digits)
+    # makes no list of days with it.
+    ('2012', 'A Talk. Larks Forum, 21 October 2012.', '2012 October 21'),
+    ('2012', 'A Talk. Larks Forum 20-21 October 2012.', '2012 October 20-21'),
+    ('2012', 'A Talk. Larks Forum, Session 5, 21 October 2012.', '2012 October 21'),
+    ('2012', 'A Talk. Larks Forum 45, 21 October 2012.', '2012 October 21'),
+    ('2012', 'A Talk. Larks Forum 2011, 21 October 2012.', '2012 October 21'),
+    ('2012', 'A Talk. Larks Forum 7, Larchmere, 21 October 2012.', '2012 October 21'),
+    # A list before a number that is no day leaves the month: no day prints.
+    ('2015', 'A Talk. Larks Day, Halls 20, 45 May 2015.', '2015 May'),
+])
+def test_a_bare_year_takes_the_month_and_days_its_line_writes(year, text, expected):
+    entry = {'text': text, 'extracted_fields': {'year': year}}
+
+    written = resolve_publication(entry).bare_year_date
+    assert " ".join(part for part in written if part) == expected
+
+
+@pytest.mark.parametrize('year,text', [
+    # No month beside the year, or a month name inside a longer word.
+    ('2015', 'A Talk. Larks Day, Larchmere, 2015.'),
+    ('2015', 'A Talk. Larks Day, Dismay 2015.'),
+    ('2015', 'A Talk. Larks Day, December 11-13, Larchmere 2015.'),
+    # The end of a range that began in another month: the meeting began then.
+    ('2012', 'A Talk. Larks Day, September 30 - October 3, 2012.'),
+    ('2012', 'A Talk. Larks Day, 30 September – 3 October 2012.'),
+    # After a journal locator, right after it or further on: the month may
+    # be the issue's, not the meeting's (BLBVPD 2126's shape).
+    ('2008', 'A Talk. Larks Day. Biol Larks 177: A116, Jun 2008.'),
+    ('2008', 'A Talk. Larks Day. Biol Larks 177: 116, Jun 2008.'),
+    ('2008', 'A Talk. Larks Day. Biol Larks 12(3):45-67. June 2008.'),
+    ('1993', 'A Talk. Clin Larks 17(3):212A, 1993 (presented at Larks Day, '
+             'Larchmere, May 9, 1993).'),
+    ('2006', 'A Talk. Biol Larks 7: S41-S41 Suppl. 2 JUL 2006.'),
+    ('2004', 'A Talk. Larks Day. Biol Larks 28(6):S111-S112 Larchmere, May 2004.'),
+    ('2006', 'A Talk. Biol Larks 212 (9): 450 Suppl. S OCT 30 2006.'),
+    ('2008', 'A Talk. Biol Larks 12(3) : 45-67, Larks Day, May 2008.'),
+    # #1570 round 3: a volume and issue, or a page with a letter prefix after
+    # a volume, an issue or a supplement, is a locator with no colon too.
+    ('2006', 'A Talk. Biol Larks 31 (2), A140 Part 2 MAR 8 2006.'),
+    ('2006', 'A Talk. Biol Larks, 31 (2), A140-A140 Part 1 MAR 8 2006.'),
+    ('2006', 'A Talk. Biol Larks 31 (2), 140-141, May 2006.'),
+    ('2006', 'A Talk. Biol Larks 31(Suppl. 1), 140, May 2006.'),
+    ('2017', 'A Talk. Biol Larks, Vol. 9, Issue 2, E260-261. October 2017.'),
+    ('2017', 'A Talk. Biol Larks 66 Suppl. (1) A223. June 2017.'),
+    ('2015', 'A Talk. Biol Larks 12, e1234. May 2015.'),
+    ('2015', 'A Talk. Biol Larks, Volume 6, Supplement, Page S14, October 2015.'),
+    ('2006', 'A Talk. Biol Larks 7, S12 Pt 2 JUL 4 2006.'),
+    ('2006', 'A Talk. Biol Larks 7, S12-S14 Suppl 2 JUL 2006.'),
+    # #1570 round 4: a journal locator anywhere in the line, before the date
+    # or after it, where the month is the journal issue's: a volume, an
+    # issue, a number or a supplement with its number or token (C6HDHA 34
+    # and 36's shapes), a page marker with its page, a range of pages with
+    # the same letter at both ends (C6HDHA 35's), a lettered page numbered
+    # within its session, a volume and its issue (QZAGWC 221's, after the
+    # date), or a volume and page.
+    ('2018', 'A Talk. Larks Soc. Vol 138, Number Suppl_1, November 2018.'),
+    ('2018', 'A Talk. Larks Soc. Number Suppl_1, November 2018.'),
+    ('2018', 'A Talk. Biol Larks, Issue Supplement_1, May 2018.'),
+    ('2018', 'A Talk. Biol Larks, Supplement_1, May 2018.'),
+    ('2018', 'A Talk. Biol Larks Suppl_1, May 2018.'),
+    ('2005', 'A Talk. Biol Larks Vol (13), October 2005.'),
+    ('2010', 'A Talk. Biol Larks No. 5, April 2010.'),
+    ('2019', 'A Talk. Larks Soc. Vol. 47, 01.2019. February 2019.'),
+    ('2018', 'A Talk. Biol Larks, Volume 197, Issue Supplement_1, May 2018, Page A4577.'),
+    ('2018', 'A Talk. Biol Larks, May 2018, Page A4577.'),
+    ('2015', 'A Talk. Proc Larks Symp, pp. 1498-1501, 16-19 April 2015.'),
+    ('2015', 'A Talk. Larks Day, 16 April 2015. Abstract book p. 69.'),
+    ('1986', 'A Talk. Proc Larks, Pages 311, March 1986.'),
+    ('2014', 'A Talk. Larks Day, 14-18 Sept 2014. Abstract Book: Page 44.'),
+    ('2015', 'A Talk. Larks Day, May 2015. Abstract book, Pages: 12-14.'),
+    ('2018', 'A Talk. Biol Larks, 570A-571A, October 2018.'),
+    ('2016', 'A Talk. Larks Day, Sept 2016. Biol Larks, S744 - S745.'),
+    ('2016', 'A Talk. Biol Larks, Apr 2016, S11.002.'),
+    ('2016', 'A Talk. Biol Larks. Apr 2016, 86 (16 Supplement) S11.002.'),
+    ('2016', 'A Talk. Biol Larks. Apr 2016, 86 (16 Supplement).'),
+    ('2017', 'A Talk. Larks Day, 17 Jun 2017. Biol Larks 34 (2).'),
+    ('2017', 'A Talk. Larks Day, 17 Jun 2017. Biol Larks 34, A116.'),
+    ('2017', 'A Talk. Larks Day 17 Jun 2017, Larchmere. Biol Larks 34(2):151-152.'),
+    ('2010', 'A Talk. Biol Larks Vol. 31 No. 5 April 2010, p 12.'),
+    ('2014', 'A Talk. Biol Larks V28:No.9 September 2014.'),
+    ('2015', 'A Talk. Larks Day, Suppl. 2 October 2015.'),
+    ('2015', 'A Talk. Biol Larks Vol 3 May 2015.'),
+    ('2015', 'A Talk. Biol Larks Volume 3 May 2015.'),
+    ('2015', 'A Talk. Biol Larks Number 3 May 2015.'),
+    ('2015', 'A Talk. Biol Larks Issue 3 May 2015.'),
+    ('2015', 'A Talk. Biol Larks Supplement 2 October 2015.'),
+    ('2010', 'A Talk. Larks Day, page 45 May 2010.'),
+    # #1570 round 4: the last day of a list of days, or of a range the date
+    # would print only the end of (TMQETQ 421 and 422's shape).
+    ('2012', 'A Talk. Larks Forum 20, 21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20 and 21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20 AND 21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20 & 21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20/21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20 to 21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20 through 21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20 thru 21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 20—21 October 2012.'),
+    ('2012', 'A Talk. Larks Forum 18-19, 21 October 2012.'),
+    # Two months written for the year: which one is the meeting's is not said.
+    ('2015', 'A Talk. Larks Day, October 2015; Wren Day, November 2015.'),
+    ('2015', 'A Talk. Larks Day, September 30, 2015 - October 3, 2015.'),
+    # Not a bare year: a season, or a range, keeps its stored value.
+    ('Fall 2015', 'A Talk. Larks Day, October 2015.'),
+    ('2015-2016', 'A Talk. Larks Day, October 2015.'),
+])
+def test_a_bare_year_keeps_no_month_its_line_does_not_pin_down(year, text):
+    entry = {'text': text, 'extracted_fields': {'year': year}}
+
+    resolved = resolve_publication(entry)
+    assert resolved.bare_year_date == ('', '')
+    assert resolved.meeting_date == ''
+
+
+@pytest.mark.parametrize('line,note,expected', [
+    # #1570 round 4 (VDFTOD 106-108, 118's shape): a note the row prints
+    # after the citation writes the month the bare year takes, as the line
+    # writes it or in another spelling.
+    ('A Talk. Larks Day, April 2020.', 'April 2020 - *Cancelled due to a storm', True),
+    ('A Talk. Larks Day, April 2020.', 'Apr. 2020 session cancelled', True),
+    ('A Talk. Larks Day, April 2020.', 'APRIL session postponed', True),
+    ('A Talk. Larks Day, September 2020.', 'Sept. 2020 session cancelled', True),
+    ('A Talk. Larks Day, Sept 2020.', 'September session cancelled', True),
+    # Another month, a month name inside a word, or no month at all.
+    ('A Talk. Larks Day, April 2020.', 'May 2020 - Cancelled due to a storm', False),
+    ('A Talk. Larks Day, April 2020.', 'Aprils cancelled', False),
+    ('A Talk. Larks Day, March 2020.', 'Grammar session cancelled', False),
+    ('A Talk. Larks Day, April 2020.', 'cancelled due to a storm', False),
+    ('A Talk. Larks Day, April 2020.', '', False),
+    # A bare year the line writes no month beside takes no month to repeat.
+    ('A Talk. Larks Day, 2020.', 'April 2020 - Cancelled due to a storm', False),
+])
+def test_a_bare_year_month_is_found_in_a_note_in_any_spelling(line, note, expected):
+    entry = {'text': line, 'extracted_fields': {'year': '2020'}}
+
+    assert resolve_publication(entry).bare_year_date.is_month_written_in(note) is expected
 
 
 # ---------------------------------------------------------------------------

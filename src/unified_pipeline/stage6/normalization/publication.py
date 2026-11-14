@@ -44,7 +44,7 @@ renderer:
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
 
@@ -129,6 +129,25 @@ class PubMedEnrichment(TypedDict, total=False):
     pubmed_pages: str
 
 
+class WrittenDate(NamedTuple):
+    """A month as an entry's line writes it beside a stored bare year, with
+    that year ("2008 October"), and the day or days it writes beside the
+    month ("21-24", '' for none)."""
+    year_month: str = ''
+    days: str = ''
+
+    def is_month_written_in(self, text: str) -> bool:
+        """True when `text` writes this date's month, in any spelling
+        `_MONTH_NAME_TO_NUM` names ("Apr", "APRIL"): a row that prints
+        `text` beside the date would write the month twice (VDFTOD 106-108,
+        118; #1570 round 4)."""
+        if not self.year_month:
+            return False
+        month = _MONTH_NAME_TO_NUM[self.year_month.split()[1].lower()]
+        return any(_MONTH_NAME_TO_NUM[word.lower()] == month
+                   for word in _MONTH_NAME_RE.findall(text))
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedPublication:
     """One publication entry, resolved: every field is the text to print.
@@ -166,6 +185,11 @@ class ResolvedPublication:
     #: '' when the line names no such month; the meeting trailer then prints
     #: `year` as it always did.
     meeting_date: str = ''
+    #: The month, and the day or days, the entry's line writes beside a
+    #: stored bare year: ("2008 October", "21-24") for a stored "2008"
+    #: (`_bare_year_date`, #1570). Empty for any other stored year; the
+    #: meeting trailer then prints `year`, or `meeting_date`.
+    bare_year_date: WrittenDate = WrittenDate()
     #: The entry's own line, which the S8 fallback checks its abstract number
     #: and meeting month against so it prints no word twice (#1570).
     source_text: str = ''
@@ -232,12 +256,91 @@ _OPENING_NUMBER_RE = re.compile(r'\s*\*?\s*[\[(]?\s*(?P<number>\d+)')
 #: A month name or abbreviation. The `\.?\s+` after it in the pattern below
 #: makes the alternation's order immaterial: "Sep" in "Sept." backtracks.
 _MONTH_WORD = '|'.join(_MONTH_NAME_TO_NUM)
+#: A month name or abbreviation as a word of its own (`WrittenDate`).
+_MONTH_NAME_RE = re.compile(rf'\b(?:{_MONTH_WORD})\b', re.IGNORECASE)
 #: A month written next to its year in an entry's line, with the day on
 #: either side when the line gives one: "October 2023", "Nov. 2023",
 #: "12 September 2018", "May 22, 2000".
 _WRITTEN_MONTH_DATE_RE = re.compile(
     rf'\b(?:(?P<day_before>\d{{1,2}})\s+)?(?P<month>{_MONTH_WORD})\.?\s+'
     r'(?:(?P<day_after>\d{1,2}),?\s+)?(?P<year>\d{4})(?!\d)', re.IGNORECASE)
+#: A day, or a range of days, written beside a month: "12", "21-24", "3 – 5".
+_WRITTEN_DAYS = r'\d{1,2}(?:\s*[-–]\s*\d{1,2})?'
+#: `_WRITTEN_MONTH_DATE_RE` with a range of days on either side, read for a
+#: stored bare year, which has no day of its own to check them against:
+#: "21-24 October 2008", "May 3-5, 2017".
+_WRITTEN_MONTH_DAYS_RE = re.compile(
+    rf'\b(?:(?P<day_before>{_WRITTEN_DAYS})\s+)?(?P<month>{_MONTH_WORD})\.?\s+'
+    rf'(?:(?P<day_after>{_WRITTEN_DAYS}),?\s+)?(?P<year>\d{{4}})(?!\d)', re.IGNORECASE)
+#: A stored year and nothing else: "2015", not "Fall 2015" or "2015-10".
+_BARE_YEAR_RE = re.compile(r'\d{4}')
+#: Text ending in a dash: a date right after it ends a range that began in
+#: another month ("September 30 - October 3, 2012").
+_RANGE_DASH_END_RE = re.compile(r'[-–]\s*$')
+#: A journal locator ("177: A116", "12(3):45-67"): a date anywhere before
+#: or after one may be the journal issue's, not the meeting's (GNONHA,
+#: #1570; BLBVPD 2126: a volume, issue and page, then the meeting in
+#: brackets).
+_JOURNAL_LOCATOR_RE = re.compile(r'\d+\s*(?:\([^)]*\))?\s*:\s*[A-Za-z]?\d')
+#: A journal locator with no colon (#1570 round 3: a volume, issue and
+#: lettered page, then "Part 1" and the issue's date): a volume and its issue
+#: in brackets ("20 (4)", "50(Suppl. 1)", "86 (16 Supplement)"), or a page or
+#: range of pages with a letter prefix ("A586", "S12-S14", "e1234"). A
+#: lettered page stands right after a volume, an issue or a supplement (a
+#: number, a closing bracket, or "Vol."/"Issue"/"Suppl.", with
+#: "p."/"pp."/"Page" between if the line writes one), and before
+#: punctuation, the date, or "Part"/"Pt"/"Suppl". A letter and number after
+#: any other word is a room, a poster or a title's own ("Hall B2", "Poster
+#: P12", "p53"), and "Session 4" has no letter.
+_JOURNAL_ISSUE_OR_PAGE_RE = re.compile(
+    r'\d+\s*\(\s*(?:suppl(?:ement)?\.?\s*)?\d+[A-Za-z]?(?:\s*[-–]\s*\d+)?'
+    r'(?:\s*suppl(?:ement)?\.?)?\s*\)'
+    r'|(?:\d|\)|\b(?:vol(?:ume)?|issue|suppl(?:ement)?)\.?)\s*[,.:;]?\s*(?:(?:p|pp|page)\.?\s*)?'
+    r'(?<![\w-])[A-Za-z]\d+(?:\s*[-–]\s*[A-Za-z]?\d+)?(?=\s*(?:[.,;)]|$|(?:part|pt|suppl)\b))',
+    re.IGNORECASE)
+#: A journal's volume, issue, number or supplement with its number or token
+#: (#1570 round 4: "Vol 138, Number Suppl_1, November 2018", where the month
+#: is the journal issue's): "Vol. 47", "Vol (13)", "Volume 197", "Issue 2",
+#: "No. 5", "Number 3", "Suppl_1", "Supplement_1", "Suppl. 2" ("Number
+#: Suppl_1" by its token). A number after "Abstract", "Poster", "Board" or
+#: "Session" numbers the meeting's item, not a journal's ("Poster No. 232"),
+#: and "No" with no period is as often the word.
+_JOURNAL_PART_RE = re.compile(
+    r'(?<![\w-])(?:vol(?:ume)?|issue|suppl(?:ement)?'
+    r'|(?<!abstract )(?<!poster )(?<!board )(?<!session )(?:no\.|number))'
+    r'(?:_\d|\.?\s*[(#]?\s*\d)', re.IGNORECASE)
+#: A page marker with its page: "p. 69", "pp.1498-1501", "Page A4577",
+#: "Pages 311" (#1570 round 4). A capital "P." is an author's initial ("Rook
+#: P. 2015"), and "p53" with no period a title's gene.
+_PAGE_MARKER_RE = re.compile(r'(?<![\w.])(?:pp?\.|(?i:pages?)\b[.:]?)\s*[A-Za-z]?\d')
+#: A range of pages with the same letter at both ends ("570A-571A", "S744 -
+#: S745"), or a lettered page numbered within its session ("S11.002"), as a
+#: journal's meeting supplement prints them (#1570 round 4: C6HDHA 35,
+#: QZAGWC 221). A letter on one end only is as often a session's code
+#: ("Symposium S2-26"), and two different letters a title's ("3D-T2").
+_LETTERED_PAGES_RE = re.compile(
+    r'(?<![\w.-])(?:(?P<before>[A-Za-z])\d+\s*[-–]\s*(?P=before)\d+'
+    r'|\d+(?P<after>[A-Za-z])\s*[-–]\s*\d+(?P=after)'
+    r'|[A-Za-z]\d+\.\d{3})(?![\w-])', re.IGNORECASE)
+#: Every shape of journal locator `_writes_a_journal_locator` reads.
+_JOURNAL_LOCATORS = (_JOURNAL_LOCATOR_RE, _JOURNAL_ISSUE_OR_PAGE_RE, _JOURNAL_PART_RE,
+                     _PAGE_MARKER_RE, _LETTERED_PAGES_RE)
+#: Text ending in a day and what joins it to the next day of a list, or of a
+#: range the date patterns do not read whole: a comma, "&", "/", an em dash,
+#: "and", "to", "through" or "thru" ("20, 21 October 2012"; #1570 round 4).
+_DAY_LIST_END_RE = re.compile(
+    r'(?<!\d)(?P<day>\d{1,2})\s*(?:[,&/—]|and|to|through|thru)\s*$', re.IGNORECASE)
+#: Words that number a part of a journal, a book or a meeting. A number
+#: right after one is not a day: "Part 2 MAR 8 2006" printed "2006 MAR 2"
+#: (web204 2363's shape, #1570), and "No. 5 April 2010" and "Board 12 May 2015"
+#: read the same way.
+_NUMBERING_WORDS = ('part', 'vol', 'volume', 'no', 'number', 'issue', 'suppl',
+                    'supplement', 'session', 'abstract', 'board')
+#: Text ending in a numbering word ("Part ", "No. ", "#").
+_NUMBERING_WORD_END_RE = re.compile(
+    rf"(?:\b(?:{'|'.join(_NUMBERING_WORDS)})\.?|#)\s*$", re.IGNORECASE)
+#: The days a month has at most: a larger number beside it is not a day.
+_LAST_DAY_OF_MONTH = 31
 
 
 def _abstract_number(value: object, source_text: str) -> str:
@@ -255,6 +358,85 @@ def _abstract_number(value: object, source_text: str) -> str:
     if opening and number.isdigit() and int(number) == int(opening['number']):
         return ''
     return number if re.search(rf'(?<!\w){re.escape(number)}(?!\w)', source_text) else ''
+
+
+def _plausible_days(source_text: str, match: re.Match[str], group: str) -> str:
+    """The day or days `match`'s `group` writes, or '' when they are not
+    plausibly days: a number outside 1-31, or one written right after a
+    numbering word (`_NUMBERING_WORDS`)."""
+    days = match[group]
+    if not days or _NUMBERING_WORD_END_RE.search(source_text, 0, match.start(group)):
+        return ''
+    numbers = [int(number) for number in re.findall(r'\d+', days)]
+    return days if all(1 <= number <= _LAST_DAY_OF_MONTH for number in numbers) else ''
+
+
+def _writes_a_journal_locator(source_text: str, start: int, end: int) -> bool:
+    """True when `source_text` writes a journal locator (`_JOURNAL_LOCATORS`)
+    before `start` or after `end`, the date's span: the month the date
+    writes may then be the journal issue's, not the meeting's (#1570 round
+    4: C6HDHA 34-37 before it, QZAGWC 221 after it). The date itself is not
+    read, so its own year is no volume ("March 15-19, 2022: 69th Annual
+    Meeting")."""
+    return any(locator.search(source_text, 0, start) or locator.search(source_text, end)
+               for locator in _JOURNAL_LOCATORS)
+
+
+def _ends_a_day_list(source_text: str, date: re.Match[str]) -> bool:
+    """True when the day `date` writes before its month is the last of a
+    list of days, or of a range, that a plausible day opens
+    (`_DAY_LIST_END_RE`, `_plausible_days`): the date would print that last
+    day alone ("20, 21 October 2012" printed "2012 October 21", TMQETQ 421,
+    422; #1570 round 4)."""
+    listed = _DAY_LIST_END_RE.search(source_text, 0, date.start('day_before'))
+    return bool(listed) and bool(_plausible_days(source_text, listed, 'day'))
+
+
+def _bare_year_date(value: object, source_text: str) -> WrittenDate:
+    """The month, and the day or days, the entry's line writes beside a
+    stored bare year (`WrittenDate`), or an empty one when the year is not
+    bare or the line does not pin the month down.
+
+    Stage 4 stores "21-24 October 2008" as "2008" too, and the S8 fallback
+    then lost the month and days 5d's citation kept (QQGKXR 483, ECXGAT
+    980; #1570 round 3). Every month the line writes with that year has to
+    be the same month, because a line that writes two does not say which is
+    the meeting's. The first is taken, unless it ends a range that began in
+    another month, or the line writes a journal locator before it or after
+    it (`_writes_a_journal_locator`), where the month may be the issue's: a
+    number before the month that is no day is the locator's, not the
+    date's ("Vol 3 May 2015"). Its days are taken as the line writes them
+    when they stand on one side of the month and are plausibly days
+    (`_plausible_days`); days on both sides leave which is the meeting's
+    open ("12 October 12 2016"), so only the month is taken. Days that end
+    a list the date would cut (`_ends_a_day_list`) leave the year bare.
+    """
+    stored = _scalar_text(value)
+    if not _BARE_YEAR_RE.fullmatch(stored):
+        return WrittenDate()
+    dates = [match for match in _WRITTEN_MONTH_DAYS_RE.finditer(source_text)
+             if match['year'] == stored]
+    if len({_MONTH_NAME_TO_NUM[match['month'].lower()] for match in dates}) != 1:
+        return WrittenDate()
+    first = dates[0]
+    before = _plausible_days(source_text, first, 'day_before')
+    after = _plausible_days(source_text, first, 'day_after')
+    start = first.start() if before else first.start('month')
+    if (_RANGE_DASH_END_RE.search(source_text, 0, first.start())
+            or _writes_a_journal_locator(source_text, start, first.end())
+            or before and _ends_a_day_list(source_text, first)):
+        return WrittenDate()
+    return WrittenDate(f"{stored} {first['month']}", '' if before and after else before or after)
+
+
+def written_month_dates(text: str) -> set[tuple[str, int]]:
+    """The year and month of each date `text` writes with both
+    (`_WRITTEN_MONTH_DAYS_RE`), but one that ends a range begun in another
+    month: "30 September 2012 - 3 October 2012" is one meeting's dates, and
+    two are two meetings' (YIFJUS 228; #1570 round 4)."""
+    return {(match['year'], _MONTH_NAME_TO_NUM[match['month'].lower()])
+            for match in _WRITTEN_MONTH_DAYS_RE.finditer(text)
+            if not _RANGE_DASH_END_RE.search(text, 0, match.start())}
 
 
 def _meeting_date(value: object, source_text: str) -> str:
@@ -462,6 +644,7 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         location=_text(fields.get('location')),
         abstract_number=_abstract_number(fields.get('abstract_number'), source_text),
         meeting_date=_meeting_date(fields.get('year'), source_text),
+        bare_year_date=_bare_year_date(fields.get('year'), source_text),
         source_text=source_text,
         volume=(_scalar_text(enrichment.get('pubmed_volume'))
                 or _scalar_text(fields.get('volume'))),

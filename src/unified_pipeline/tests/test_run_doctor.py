@@ -2873,6 +2873,37 @@ def test_534_row_receipt_lint_reads_a_split_parent_by_its_children():
                                    "Q1 60.1: Pretend Board, Chair"]
 
 
+@pytest.mark.parametrize("section, fill, entry", [
+    ("board_certification", "_fill_board_certification",
+     {"taxonomy_code": "F2", "element_idx_start": 41, "text": "Imaginary Board of Pretend Medicine, 2005",
+      "extracted_fields": {"board": "Imaginary Board of Pretend Medicine", "certification_date": "2005"}}),
+    ("licensure", "_fill_licensure",
+     {"taxonomy_code": "F1", "element_idx_start": 42, "text": "Imaginary State 765432",
+      "extracted_fields": {"state": "Imaginary State", "license_number": "765432"}}),
+])
+def test_534_a_written_licence_or_board_row_later_removed_fires_the_lint(section, fill, entry):
+    """Recall control for Licensure and Board Certification joining the linted
+    sections (#534): the row each writer records for its entry, removed after
+    it was written, is reported under the entry's taxonomy code; while the
+    row is in the document nothing is."""
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._row_receipts.begin_section(section)
+    getattr(gen, fill)([entry])
+
+    def report():
+        return {"row_receipts": [r.to_json() for r in gen._row_receipts.receipts({section: [entry]})]}
+
+    assert lint_renderer_row_receipts(report()) == []
+    row, = gen._row_receipts.elements_for(entry)
+    row.getparent().remove(row)
+    finding, = lint_renderer_row_receipts(report())
+    assert finding["message"].startswith(
+        f"taxonomy code {entry['taxonomy_code']}: 1 of the 1 entries handed to the {section} renderer")
+
+
 def test_stage6_warnings_reemits_appendix_diversion_with_code_and_count():
     """#531: an appendix_diversion sidecar entry re-emits as a WARN whose
     message names the code and the count -- lint_stage6_warnings reads only

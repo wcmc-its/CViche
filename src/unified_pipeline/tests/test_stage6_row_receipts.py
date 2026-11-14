@@ -6,7 +6,9 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_row_receipts.py -p no:cacheprovider
 """
 
+import json
 import sys
+import zipfile
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -14,13 +16,19 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
+from lxml import etree  # noqa: E402
 
+from unified_pipeline.doctor.lints.render import (  # noqa: E402
+    lint_renderer_row_receipts,
+)
 from unified_pipeline.stage6.row_receipts import (  # noqa: E402
     LINTED_SECTIONS,
     LOST_TEXT_CHARS,
     DiscardingLedger,
     RowReceiptLedger,
 )
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
 def _entry(idx, text="Fictional Award, Imaginary Society, 2001", code="H"):
@@ -121,6 +129,15 @@ def test_only_listed_sections_are_linted_and_text_is_capped():
     assert receipts[0].to_json()["lost"][0]["element_idx_start"] == 1
 
 
+def test_534_licensure_and_board_certification_receipts_are_linted():
+    """Both sections record every row they write and set aside what they
+    write none for on purpose (#2084), so their receipts are linted; an
+    unlisted section's still is not."""
+    receipts = _ledger().receipts({"licensure": [], "board_certification": [], "presentations": []})
+    assert [(r.section, r.linted) for r in receipts] == [
+        ("licensure", True), ("board_certification", True), ("presentations", False)]
+
+
 def test_the_discarding_default_records_nothing():
     """A generator built without `__init__` writes through this one."""
     table, ledger, entry = _table(), DiscardingLedger(), _entry(1)
@@ -172,3 +189,82 @@ def test_elements_for_an_entry_are_its_own_in_write_order():
     assert ledger.elements_for(sibling) == [siblings]
     assert ledger.elements_for(_entry(19, code="B1")) == []
     assert DiscardingLedger().elements_for(entry) == []
+
+
+_W_TEXT_TAGS = (qn("w:t"), qn("w:delText"))
+_WCM_SOURCE_HEADINGS = ("PERSONAL DATA", "EMPLOYMENT STATUS", "LICENSURE, BOARD CERTIFICATION",
+                        "INSTITUTIONAL/HOSPITAL AFFILIATION", "HONORS, AWARDS", "BIBLIOGRAPHY")
+_PRINTED_NPI = "NPI Number 1234567893"
+
+
+def _body_paragraph_texts(docx_path: Path) -> list[str]:
+    """Every body paragraph's text, table cells included, read from the raw
+    XML: `w:t` inside a `w:ins` and `w:delText` count, which python-docx's
+    `paragraph.text` skips."""
+    with zipfile.ZipFile(docx_path) as docx:
+        body = etree.fromstring(docx.read("word/document.xml")).find(qn("w:body"))
+    return ["".join(t.text or "" for t in p.iter(*_W_TEXT_TAGS)) for p in body.iter(qn("w:p"))]
+
+
+def _wcm_source(path: Path) -> Path:
+    """A synthetic WCM-format source whose filled E block also prints an NPI line."""
+    doc = Document()
+    for heading in _WCM_SOURCE_HEADINGS:
+        doc.add_paragraph(heading)
+        if heading == "EMPLOYMENT STATUS":
+            doc.add_paragraph("Name of Current Employer(s): Imaginary Medical College")
+            doc.add_paragraph(_PRINTED_NPI)
+    doc.save(str(path))
+    return path
+
+
+def _wire_entries() -> list[dict]:
+    def entry(idx, code, text, **fields):
+        return {"element_idx_start": idx, "taxonomy_code": code, "text": text, "extracted_fields": fields,
+                "hierarchy": ["LICENSURE, BOARD CERTIFICATION"] if code in ("F1", "F2") else []}
+    return [
+        entry(0, "A", "Name: Pat Q. Example, MD"),
+        {**entry(1, "T", "Name of Current Employer(s): Imaginary Medical College"),
+         "hierarchy": ["EMPLOYMENT STATUS"]},
+        entry(10, "S0", "[S0] ORCID\t0000-0002-1111-2222"),
+        entry(11, "S0", "Invented Scholar profile page"),
+        entry(30, "F1", _PRINTED_NPI, npi_number="1234567893"),
+        entry(31, "F1", "NPI Number 2345678903", npi_number="2345678903"),
+        entry(41, "F2", "Imaginary Board of Pretend Medicine, 2005",
+              board="Imaginary Board of Pretend Medicine", certification_date="2005"),
+        entry(60, "H", "Name of award\tOrganization\tDate awarded"),
+        entry(61, "H", "Pretend Honor Award, Organization of Invented Things (1999)"),
+        entry(62, "H", "2018 Teaching Award, Example University", award_name="Teaching Award",
+              granting_body="Example University", date="2018"),
+    ]
+
+
+def test_534_generate_receipts_s0_bullets_header_rows_copied_lines_and_lints_f1_f2(tmp_path):
+    """Wire test through `generate()` (#534): the S0 bullets are written, the
+    yearless honors header row is set aside and the award line the header
+    check drops stays lost, the NPI line the copied E block prints is
+    elsewhere and the one nothing prints stays lost, and Licensure and Board
+    Certification are linted, so the doctor reports exactly the two real
+    losses. What the document holds is read from its XML, w:ins included."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None  # the LLM pass; no credential, deterministic
+    input_path, output_path = tmp_path / "in.json", tmp_path / "out.docx"
+    input_path.write_text(json.dumps({"document_uid": "TEST34", "entries": _wire_entries()}))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None,
+                 original_doc_path=str(_wcm_source(tmp_path / "source.docx")))
+    sidecar = json.loads((tmp_path / "TEST34_render_warnings.json").read_text())
+    receipts = {r["section"]: r for r in sidecar["row_receipts"]}
+
+    def counts(section):
+        r = receipts[section]
+        return r["linted"], r["written"], r["elsewhere"], [e["element_idx_start"] for e in r["lost"]]
+
+    assert counts("researcher_profiles") == (False, 2, 0, [])
+    assert counts("honors") == (True, 1, 1, [61])
+    assert counts("licensure") == (True, 0, 1, [31])
+    assert counts("board_certification") == (True, 1, 0, [])
+    paragraphs = _body_paragraph_texts(output_path)
+    assert {"ORCID: 0000-0002-1111-2222", "Invented Scholar profile page", _PRINTED_NPI} <= set(paragraphs)
+    assert not any("2345678903" in p or "Pretend Honor Award" in p for p in paragraphs)
+    assert sorted(f["message"].split(":")[0] for f in lint_renderer_row_receipts(sidecar)) == [
+        "taxonomy code F1", "taxonomy code H"]

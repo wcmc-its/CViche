@@ -117,7 +117,9 @@ from .publication import (  # noqa: F401
     PublicationFields,
     PubMedEnrichment,
     ResolvedPublication,
+    WrittenDate,
     resolve_publication,
+    written_month_dates,
 )
 from .records import (  # noqa: F401
     grant_heading_is_past,
