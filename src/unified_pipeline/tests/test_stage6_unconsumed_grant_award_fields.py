@@ -32,6 +32,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6 import fan_out  # noqa: E402
 from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     MenteeRecord,
     _normalize_mentee,
@@ -496,6 +497,39 @@ def test_a_list_outcome_is_joined_and_a_non_text_one_adds_nothing():
     assert _mentee(outcome=["An abstract", "A chapter"])["Project/Accomplishments:"] == \
         "An abstract; A chapter"
     assert _mentee(outcome={"type": "abstract"})["Project/Accomplishments:"] == ""
+
+
+# --- a folded mentee's other records' lines ride in Project/Accomplishments ----
+# #2067 (ZDKMKD): fan-out folds a mentee's accomplishment records into the
+# head record's table and hands over each one's line as the CV writes it.
+# Invented values.
+
+def _folded_project(lines, **fields):
+    entry = {"extracted_fields": {"mentee_name": "Wren Talbot", **fields},
+             fan_out.FOLDED_MENTEE_LINES_KEY: lines}
+    return _normalize_mentee(entry, ongoing=True).project
+
+
+def test_folded_lines_follow_everything_the_cell_already_writes_in_order():
+    assert _folded_project(["Poster shown at Ashby Meeting (2022)", "Abstract sent to Orchard Review (2023)"],
+                           research_focus="Example focus", awards="Example Award") == (
+        "Example focus\nAwards: Example Award\n"
+        "Poster shown at Ashby Meeting (2022)\nAbstract sent to Orchard Review (2023)")
+
+
+def test_folded_lines_stand_alone_in_an_empty_cell():
+    assert _folded_project(["Poster shown at Ashby Meeting (2022)"]) == "Poster shown at Ashby Meeting (2022)"
+
+
+def test_a_folded_line_the_cell_already_holds_is_not_repeated():
+    assert _folded_project(["poster shown at ashby meeting (2022)", "Manuscript in preparation (2024)"],
+                           research_focus="Poster shown at Ashby Meeting (2022)") == (
+        "Poster shown at Ashby Meeting (2022)\nManuscript in preparation (2024)")
+
+
+def test_no_folded_lines_leave_the_cell_as_it_was():
+    assert _folded_project([], research_focus="Example focus") == "Example focus"
+    assert _normalize_mentee({"extracted_fields": {"mentee_name": "Wren Talbot"}}, ongoing=True).project == ""
 
 
 # --- #2004: a class-of Mentoring Period keeps the period for the #1205 planner --

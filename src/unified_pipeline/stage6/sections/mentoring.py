@@ -48,7 +48,12 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
-from ..fan_out import LAST_STAGE4_RECORD, OWN_TEXT_KEY, fallback_text
+from ..fan_out import (
+    FOLDED_MENTEE_LINES_KEY,
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+    fallback_text,
+)
 from ..formatting import (
     _format_currency,
     _format_mentee_duration,
@@ -1015,6 +1020,17 @@ def _plain_text(value: object) -> str:
 _MENTEE_OUTCOME_KEY = 'outcome'
 
 
+def _with_folded_lines(project: str, lines: Sequence[str]) -> str:
+    """`project` with each line of a record folded into this mentee's table
+    (`fan_out.FOLDED_MENTEE_LINES_KEY`, #2067) after it, as the CV writes
+    the line, one per line, in order; a line the cell already holds is not
+    repeated."""
+    for line in lines:
+        if line.casefold() not in project.casefold():
+            project = f"{project}\n{line}" if project else line
+    return project
+
+
 # A US visa category ("J-1 Research Scholar", "H-1B"), which stage 4 sometimes
 # files as a mentee's `funding_source` (WFOZBS, 3 mentees). It is the mentee's
 # status, not an award, so it joins Site/Position instead of printing as
@@ -1160,6 +1176,8 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     the thesis is the project, and the narrative (a program or scholarship
     note) follows it, as the Appendix line it came from printed both. A past
     mentee's off-schema `outcome` (`_MENTEE_OUTCOME_KEY`) follows the project.
+    The lines of the mentee's other records fan-out folded into this table
+    come last (`_with_folded_lines`, #2067).
     """
     fields = entry.get('extracted_fields') or {}
 
@@ -1189,6 +1207,7 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     goals = goals_match.group(1).strip() if goals_match else ''
     if goals and goals.casefold() not in project.casefold():
         project = f"{project}\nGoals: {goals}" if project else f"Goals: {goals}"
+    project = _with_folded_lines(project, entry.get(FOLDED_MENTEE_LINES_KEY) or ())
 
     supervision_type = _text(fields.get('supervision_type'))
     if not supervision_type:
