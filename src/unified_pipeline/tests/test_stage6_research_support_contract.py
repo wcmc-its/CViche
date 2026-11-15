@@ -34,14 +34,18 @@ Run with:
 """
 
 import ast
+import json
 import logging
 import sys
+import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
 import docx
 import pytest
+from docx.oxml.ns import qn
 from docx.table import Table
+from lxml import etree
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -529,6 +533,237 @@ def test_an_unfunded_protocol_study_renders_under_current_funding_with_its_warni
     tables = _tables_under(gen, CURRENT)
     assert [_cells(t)[research_support.AWARD_SOURCE_LABEL] for t in tables] == ['', '']
     assert len(gen._section_failures) == 2
+
+
+# --- #2062: Award Source names the part of a larger award the line names --------
+
+PART_AGENCY = 'Imaginary Health Institute'
+PART_NUMBER = 'P01 ZZ012345'
+PART_TITLE = 'Synthetic Kestrel Signalling'
+# What Award Source reads without the change: the agency and the number.
+PART_SOURCE = f'{PART_AGENCY} ({PART_NUMBER})'
+
+
+def _part_record(**fields):
+    return {'agency': PART_AGENCY, 'title': PART_TITLE, 'grant_number': PART_NUMBER,
+            'pi_role': 'Co-Investigator', **fields}
+
+
+def _part_cells(text, code='M2B', **fields):
+    """The rendered cells of a grant whose own line is `text`."""
+    record = _part_record(**fields)
+    return _cells(_generator()._create_grant_table(record, code, _entry(code, text=text, **record)))
+
+
+def _part_source(text, code='M2B', **fields):
+    return _part_cells(text, code, **fields)[research_support.AWARD_SOURCE_LABEL]
+
+
+@pytest.mark.parametrize(('text', 'phrase'), [
+    # SUB: a sub-award, subcontract, sub-project or sub-grant, in any spelling.
+    (f'{PART_AGENCY}\t{PART_NUMBER}\tSubcontract to Example University\t2019-2022',
+     'Subcontract to Example University'),
+    (f'{PART_NUMBER}\tSub-award from Example University', 'Sub-award from Example University'),
+    (f'{PART_NUMBER}\tSub- Award, Example University', 'Sub- Award'),
+    (f'{PART_NUMBER} (subawards to Example College)', 'subawards to Example College'),
+    (f'{PART_NUMBER}\tSubproject 3, Example University', 'Subproject 3'),
+    (f'{PART_NUMBER}\tSub-grant to Example University 2019-present', 'Sub-grant to Example University'),
+    (f'{PART_NUMBER}\tSubcontract to Example University. The aims were to grow kestrels',
+     'Subcontract to Example University'),
+    # The keyword before the number: the number at the clause's edge is trimmed.
+    (f'Subcontract from Example University {PART_NUMBER}', 'Subcontract from Example University'),
+    (f'{PART_NUMBER} Subcontract to Example University', 'Subcontract to Example University'),
+    # The first clause that survives the guards, in text order.
+    ('Total costs of subcontract: $5,000\tSubcontract to Example University',
+     'Subcontract to Example University'),
+])
+def test_a_subaward_named_on_the_line_is_added_to_the_award_source(text, phrase):
+    """#2062: the owner's award is a subcontract of the larger award whose
+    number Award Source carries; the line's own words for it follow."""
+    cells = _part_cells(text)
+    assert cells[research_support.AWARD_SOURCE_LABEL] == f'{PART_SOURCE}; {phrase}'
+    assert phrase in text
+
+
+@pytest.mark.parametrize(('text', 'phrase'), [
+    # PILOT: "pilot" before an award noun. Dates before the clause are trimmed
+    # and the clause ends at the comma (the OXCCQM 79 shape, invented words).
+    ('07/2015-06/2016 Pilot study grant from the Imaginary Cancer Center, funded by Example Foundation',
+     'Pilot study grant from the Imaginary Cancer Center'),
+    (f'{PART_NUMBER}\tPilot and Feasibility Award\tImaginary Diabetes Center', 'Pilot and Feasibility Award'),
+    (f'{PART_NUMBER}\tPilot Funds from Imaginary Center', 'Pilot Funds from Imaginary Center'),
+    (f'{PART_NUMBER}\tPilot research funding, Imaginary Center', 'Pilot research funding'),
+    (f'{PART_NUMBER}\t2019-2021 Pilot Project funded by, Imaginary Center', 'Pilot Project'),
+    (f'{PART_NUMBER}\tKestrel Center, Pilot Program', 'Pilot Program'),
+    (f'{PART_NUMBER}\tDevelopmental Project Award, Imaginary SPORE in Kestrel Cancer',
+     'Developmental Project Award'),
+])
+def test_a_pilot_award_named_on_the_line_is_added_to_the_award_source(text, phrase):
+    assert _part_source(text) == f'{PART_SOURCE}; {phrase}'
+
+
+@pytest.mark.parametrize(('text', 'phrase'), [
+    # PROJ: a program project's numbered project, capital P, then a colon.
+    (f'{PART_NUMBER}\tProject 2: Kestrel Signalling in Example Cells', 'Project 2'),
+    (f'{PART_NUMBER}\tProject IV: Kestrel Signalling in Example Cells', 'Project IV'),
+])
+def test_a_numbered_project_named_on_the_line_is_added_to_the_award_source(text, phrase):
+    assert _part_source(text) == f'{PART_SOURCE}; {phrase}'
+
+
+def test_the_award_part_changes_award_source_and_no_other_row(monkeypatch):
+    """Every other row, "Your role" and the PI cell included, renders exactly
+    as it does without the change."""
+    text = f'{PART_NUMBER}\tPilot study grant from Imaginary Center\tRole: Co-Investigator'
+    changed = _rows(_generator()._create_grant_table(_part_record(), 'M2B', _entry('M2B', text=text)))
+    assert changed[0] == (research_support.AWARD_SOURCE_LABEL,
+                          f'{PART_SOURCE}; Pilot study grant from Imaginary Center')
+    monkeypatch.setattr(research_support, 'with_award_part', lambda rows, *_: rows)
+    unchanged = _rows(_generator()._create_grant_table(_part_record(), 'M2B', _entry('M2B', text=text)))
+    assert unchanged[0] == (research_support.AWARD_SOURCE_LABEL, PART_SOURCE)
+    assert changed[1:] == unchanged[1:]
+    assert dict(changed)[research_support.YOUR_ROLE_LABEL] == 'Co-Investigator'
+
+
+@pytest.mark.parametrize('words', [13, 14])
+def test_an_award_part_clause_up_to_the_word_limit_is_added(words):
+    phrase = 'Subcontract to ' + ' '.join(f'Kestrel{n}' for n in range(words - 2))
+    assert _part_source(f'{PART_NUMBER}\t{phrase}') == f'{PART_SOURCE}; {phrase}'
+
+
+@pytest.mark.parametrize('text', [
+    # Over AWARD_PART_MAX_WORDS: prose about the award, not the name of its part.
+    f'{PART_NUMBER}\tSubcontract to ' + ' '.join(f'Kestrel{n}' for n in range(13)),
+    # The number inside the clause, not at its edge.
+    f'Subcontract under {PART_NUMBER} to Example University',
+    # An amount or a label word in the clause.
+    f'{PART_NUMBER}\tTotal costs of subcontract: $5,000',
+    f'{PART_NUMBER}\tSubcontract award $50000 to Example University',
+    f'{PART_NUMBER}\tSubcontract for 1,200 kestrel samples',
+    f'{PART_NUMBER}\tSub-Project ID: 4417',
+    # A role word in the clause, or a bare role label before it.
+    f'{PART_NUMBER}\tSubcontract PI: Jane Smith',
+    f'{PART_NUMBER}\tDirector, Pilot Program',
+    f'{PART_NUMBER}\t• Director, Pilot Program',
+    f'{PART_NUMBER}\tLeader: Pilot Project',
+    # "pilot" with no award noun after it.
+    f'{PART_NUMBER}\tA pilot study of kestrel signalling',
+    f'{PART_NUMBER}\tA pilot trial of kestrel signalling',
+    f'{PART_NUMBER}\tWe pilot-test kestrel tools',
+    f'{PART_NUMBER}\tFunds to pilot kestrel tools',
+    # "core" and "funded by" alone.
+    f'{PART_NUMBER}\tImaginary Imaging Core\tCore B',
+    f'{PART_NUMBER}\tfunded by Example Agency',
+    # Not a numbered project: lowercase, a year, no colon.
+    f'{PART_NUMBER}\tthe entire project 9/30/02',
+    f'{PART_NUMBER}\tKestrel project 2: aims',
+    f'{PART_NUMBER}\tProject 2022: Kestrel Signalling',
+    f'{PART_NUMBER}\tProject 2 of the kestrel program',
+    # No keyword at all.
+    f'{PART_NUMBER}\tKestrel Signalling in Example Cells',
+    '',
+])
+def test_a_line_naming_no_award_part_leaves_award_source_alone(text):
+    assert _part_source(text) == PART_SOURCE
+
+
+def test_a_grant_whose_line_is_null_leaves_award_source_alone():
+    record = _part_record()
+    table = _generator()._create_grant_table(record, 'M2B', {**_entry('M2B', **record), 'text': None})
+    assert _cells(table)[research_support.AWARD_SOURCE_LABEL] == PART_SOURCE
+
+
+@pytest.mark.parametrize(('text', 'fields'), [
+    # The role already names the pilot project.
+    (f'{PART_NUMBER}\tPilot Project, Imaginary Center', {'pi_role': 'PI of Pilot Project'}),
+    # A note names the subcontract; case, spacing, hyphens and a plural do not matter.
+    (f'{PART_NUMBER}\tSubcontract to Example University', {'notes': 'Subcontract'}),
+    (f'{PART_NUMBER}\tSubcontracts to Example University', {'notes': 'subcontract'}),
+    (f'{PART_NUMBER}\tsubaward to Example University', {'notes': 'Sub-award'}),
+    # The costs cell names it.
+    (f'{PART_NUMBER}\tSubcontract to Example University', {'annual_direct_costs': '$4,000 (subcontract)'}),
+    # The title names it.
+    (f'{PART_NUMBER}\tPilot Project, Imaginary Center', {'title': 'A pilot project of kestrel signalling'}),
+    (f'{PART_NUMBER}\tProject 2: Kestrel Signalling', {'title': 'Kestrel Program Project 2 Signalling'}),
+    # Award Source names it.
+    (f'{PART_NUMBER}\tSubaward to Example University', {'agency': 'Imaginary Health Institute subaward'}),
+])
+def test_an_award_part_a_rendered_cell_already_names_is_not_repeated(text, fields):
+    cells = _part_cells(text, **fields)
+    assert cells[research_support.AWARD_SOURCE_LABEL] == f"{fields.get('agency', PART_AGENCY)} ({PART_NUMBER})"
+    assert any(word in ' '.join(cells.values()).casefold() for word in ('pilot', 'sub', 'project 2'))
+
+
+def test_a_number_award_source_holds_in_another_case_still_gains_the_part():
+    """Award Source holds the number when the agency already carries it, in
+    any case (`award_source_text` then appends nothing)."""
+    agency = f'{PART_AGENCY} {PART_NUMBER.lower()}'
+    source = _part_source(f'{PART_NUMBER}\tSubcontract to Example University', agency=agency)
+    assert source == f'{agency}; Subcontract to Example University'
+
+
+@pytest.mark.parametrize('fields', [
+    # No number at all, or a number only the title holds: Award Source names
+    # no larger award to misread.
+    {'grant_number': ''},
+    {'title': f'{PART_TITLE} ({PART_NUMBER})'},
+])
+def test_an_award_source_without_the_grant_number_gains_no_part(fields):
+    cells = _part_cells(f'{PART_NUMBER}\tSubcontract to Example University', **fields)
+    assert cells[research_support.AWARD_SOURCE_LABEL] == PART_AGENCY
+
+
+def test_a_protocol_number_row_gains_no_award_part():
+    """#1694: a protocol number with no funder renders under its own label;
+    Award Source is empty and stays so."""
+    record = {'title': PROTOCOL_TITLE, 'grant_number': '7305918264'}
+    entry = _entry('M2B', text='7305918264\tSubcontract to Example University', **record)
+    cells = _cells(_generator()._create_grant_table(record, 'M2B', entry))
+    assert cells[research_support.AWARD_SOURCE_LABEL] == ''
+    assert cells[research_support.PROTOCOL_NUMBER_LABEL] == '7305918264'
+
+
+@pytest.mark.parametrize(('code', 'gains_part'), [('M2B', True), ('M2A', False)])
+def test_the_award_part_reads_only_the_rows_that_render(code, gains_part):
+    """Past (Completed) Funding omits Non-financial support, so a word only
+    that row holds is in no rendered cell there; under Current Research
+    Funding the row renders and already names it."""
+    text = f'{PART_NUMBER}\tSubcontract to Example University'
+    source = _part_source(text, code, non_financial_support='Subcontract services')
+    expected = f'{PART_SOURCE}; Subcontract to Example University' if gains_part else PART_SOURCE
+    assert source == expected
+
+
+_W_TEXT_TAGS = (qn('w:t'), qn('w:delText'))
+
+
+def _docx_table_rows(docx_path):
+    """Every table row's cell texts, read from word/document.xml: `w:t` inside
+    a `w:ins` and `w:delText` count, which python-docx's `cell.text` skips."""
+    with zipfile.ZipFile(docx_path) as package:
+        body = etree.fromstring(package.read('word/document.xml')).find(qn('w:body'))
+    return [[''.join(t.text or '' for t in tc.iter(*_W_TEXT_TAGS)) for tc in tr.iter(qn('w:tc'))]
+            for tr in body.iter(qn('w:tr'))]
+
+
+def test_generate_writes_the_award_part_into_the_award_source_cell(tmp_path):
+    """Wire test through `generate()` (#2062): the Past (Completed) Funding
+    table's Award Source cell carries the line's subcontract phrase, and its
+    role cell reads as the record states it."""
+    owner = {'text': 'Name: Ada Testowner', 'taxonomy_code': 'A', 'extracted_fields': {},
+             'element_idx_start': 0}
+    grant = {'text': f'{PART_AGENCY}\t{PART_NUMBER}\tSubcontract to Example University\t2015-2017',
+             'taxonomy_code': 'M2B', 'element_idx_start': 40,
+             'extracted_fields': {**_part_record(), 'start_date': '2015', 'end_date': '2017'}}
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    input_path, output_path = tmp_path / 'in.json', tmp_path / 'out.docx'
+    input_path.write_text(json.dumps({'document_uid': 'T2062A', 'entries': [owner, grant]}))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+    rows = _docx_table_rows(output_path)
+    award_sources = [row[1] for row in rows if row[:1] == [research_support.AWARD_SOURCE_LABEL]]
+    assert f'{PART_SOURCE}; Subcontract to Example University' in award_sources
+    assert [research_support.YOUR_ROLE_LABEL, 'Co-Investigator'] in rows
 
 
 # --- #839: a decline appends to _declined_grant_entries -------------------------
