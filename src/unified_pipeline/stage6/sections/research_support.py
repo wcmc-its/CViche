@@ -1455,6 +1455,166 @@ def award_source_text(agency: str, title: str, grant_number: str) -> str:
     return agency
 
 
+# #2062 (OXCCQM 79): the owner's award can be one part of a larger award -- a
+# subcontract, a center's pilot grant, a program project's numbered project.
+# Award Source then carries the larger award's number, and when no cell says
+# which part, the table reads as the owner's own award of that number. The
+# source line's own words for the part are added to Award Source
+# (`with_award_part`).
+#
+# A word naming such a part: sub-award / subcontract / sub-project / sub-grant;
+# "pilot" before an award noun ("Pilot study grant", "Pilot Award"; not "pilot
+# study", "pilot trial", "pilot-test"); "Developmental Project (Award)"; a
+# program project's "Project 4:" (capital P, one or two digits or a roman
+# numeral, then a colon).
+AWARD_PART_KEYWORD_RE = re.compile(
+    r'(?<![\w-])(?:sub-?\s?(?:awards?|contracts?|projects?|grants?)'
+    r'|pilot(?=(?:\s+(?:study|research|and\s+feasibility|&\s+feasibility))?\s+(?:grants?|awards?|projects?|programs?'
+    r'|funds?|funding)\b)'
+    r'|developmental\s+project(?:\s+awards?)?'
+    r'|(?-i:Project)\s+(?:\d{1,2}|(?-i:[IVX]{1,4}))(?=\s*:))(?![\w-])', re.IGNORECASE)
+# Any word of that family in a rendered cell: the table already names the part.
+AWARD_PART_WORD_RE = re.compile(r'(?<![\w-])(pilot|sub-?\s?(?:award|contract|project|grant)s?|developmental\s+project'
+                                r'|project\s+(?:\d{1,2}|[ivx]{1,4}))(?![\w-])', re.IGNORECASE)
+# Clause boundaries on a grant line: a cell (tab, newline, " | "), a comma that
+# is not a thousands separator, ; : ( ) [ ], a quote, or a sentence end (a
+# period after two lowercase letters).
+AWARD_PART_CLAUSE_BOUNDARY_RE = re.compile(
+    r'\t|\n|\s\|\s|(?<!\d),|,(?!\d{3})|[;:()\[\]"“”]|(?<=[a-z]{2})\.(?=\s|$)')
+# What a clause's two edges may lose: dates, date ranges, "present", bullets
+# and dashes; and at the end, lowercase function words.
+_AWARD_PART_EDGE = r'(?:\s|[-–—*•∙.]|\d{1,2}/(?:\d{1,2}/)?\d{2,4}|(?:19|20)\d{2}|present\b)+'
+AWARD_PART_LEADING_EDGE_RE = re.compile('^' + _AWARD_PART_EDGE, re.IGNORECASE)
+AWARD_PART_TRAILING_EDGE_RE = re.compile(_AWARD_PART_EDGE + '$', re.IGNORECASE)
+AWARD_PART_TRAILING_WORDS_RE = re.compile(
+    r'(?:\s+(?:for|the|of|from|by|to|and|a|an|in|at|with|funded|supported))+$')
+# A clause holding an amount, a label word or a role word labels a figure, an
+# identifier or the owner's role ("Total costs of subcontract", "Sub-Project
+# ID", "Subcontract PI"), not the award's part.
+AWARD_PART_AMOUNT_RE = re.compile(r'\$|\b\d{1,3}(?:,\d{3})+\b')
+AWARD_PART_LABEL_WORD_RE = re.compile(
+    r'(?<![\w-])(?:total|costs?|amount|direct|indirect|budget|salary|effort|period|id|number|no)(?![\w-])',
+    re.IGNORECASE)
+AWARD_PART_ROLE_WORD_RE = re.compile(
+    r'(?<![\w-])(?:p\.?\s?i\.?s?|principal\s+investigators?|co-?\s?i|co-?investigators?|investigators?'
+    r'|director|leader|role)(?![\w-])', re.IGNORECASE)
+AWARD_PART_CLAUSE_DISQUALIFIERS = (AWARD_PART_AMOUNT_RE, AWARD_PART_LABEL_WORD_RE, AWARD_PART_ROLE_WORD_RE)
+# A longer clause is prose about the award, not the name of its part.
+AWARD_PART_MAX_WORDS = 14
+# Joins the source's phrase to the Award Source value.
+AWARD_PART_SEPARATOR = '; '
+# Two spellings of one word compare equal: "Sub-Award" and "subaward".
+_AWARD_PART_FOLD_RE = re.compile(r'[\s-]+')
+
+
+def _folded(text: str) -> str:
+    """`text` case-folded, with its spaces and hyphens removed."""
+    return _AWARD_PART_FOLD_RE.sub('', text.casefold())
+
+
+def _award_part_rendered(text: str, cells: list[str]) -> bool:
+    """True when a rendered cell already holds an award-part word of the
+    source (`AWARD_PART_WORD_RE`): "PI of Pilot Project" as the role, a
+    "Subcontract" note."""
+    rendered = _folded(' '.join(cells))
+    return any(_folded(match.group(1)).rstrip('s') in rendered
+               for match in AWARD_PART_WORD_RE.finditer(text))
+
+
+def _clause_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """The bounds of the clause holding `text[start:end]`."""
+    left = max((m.end() for m in AWARD_PART_CLAUSE_BOUNDARY_RE.finditer(text, 0, start)), default=0)
+    boundary = AWARD_PART_CLAUSE_BOUNDARY_RE.search(text, end)
+    return left, boundary.start() if boundary else len(text)
+
+
+def _follows_bare_role_label(text: str, left: int) -> bool:
+    """True when the clause right before `left` is a bare role label joined
+    by "," or ":" ("Director, Pilot Program"). It never reaches into another
+    cell: every cell boundary is a clause boundary too."""
+    if not text[:left].endswith((',', ':')):
+        return False
+    previous_left = max((m.end() for m in AWARD_PART_CLAUSE_BOUNDARY_RE.finditer(text, 0, left - 1)), default=0)
+    previous = text[previous_left:left - 1].strip(' •*-–')
+    return AWARD_PART_ROLE_WORD_RE.fullmatch(previous) is not None
+
+
+def _edge_cut(segment: str, grant_number: str) -> tuple[int, int]:
+    """How much one trim step cuts off the start and the end of `segment`:
+    the grant number, else a leading edge, else a trailing edge, else trailing
+    function words. (0, 0) when nothing is left to cut."""
+    if segment.startswith(grant_number):
+        return len(grant_number), 0
+    if segment.endswith(grant_number):
+        return 0, len(grant_number)
+    lead = AWARD_PART_LEADING_EDGE_RE.match(segment)
+    if lead:
+        return lead.end(), 0
+    for trailing_re in (AWARD_PART_TRAILING_EDGE_RE, AWARD_PART_TRAILING_WORDS_RE):
+        tail = trailing_re.search(segment)
+        if tail:
+            return 0, len(segment) - tail.start()
+    return 0, 0
+
+
+def _trim_clause(text: str, left: int, right: int, grant_number: str) -> tuple[int, int]:
+    """`[left, right)` narrowed at its two edges only, so the phrase stays one
+    contiguous run of the source."""
+    while left < right:
+        cut_left, cut_right = _edge_cut(text[left:right], grant_number)
+        if not (cut_left or cut_right):
+            break
+        left, right = left + cut_left, right - cut_right
+    return left, right
+
+
+def _clause_phrase(text: str, keyword: re.Match[str], grant_number: str) -> str | None:
+    """The trimmed clause around `keyword`, or None when that clause labels an
+    amount or a role, follows a bare role label, runs past
+    `AWARD_PART_MAX_WORDS` or still holds the grant number."""
+    left, right = _clause_span(text, keyword.start(), keyword.end())
+    clause = text[left:right]
+    if any(rx.search(clause) for rx in AWARD_PART_CLAUSE_DISQUALIFIERS) or _follows_bare_role_label(text, left):
+        return None
+    left, right = _trim_clause(text, left, right, grant_number)
+    phrase = text[left:right]
+    if len(phrase.split()) > AWARD_PART_MAX_WORDS or grant_number in phrase:
+        return None
+    return phrase
+
+
+def award_part_phrase(text: str | None, grant_number: str, cells: list[str]) -> str | None:
+    """The source's own phrase naming the owner's award as a part of a larger
+    one, or None: the first award-part clause (`AWARD_PART_KEYWORD_RE`) that
+    `_clause_phrase` keeps, unless a rendered cell already names the part.
+    `grant_number` is the number Award Source holds, never empty."""
+    text = text or ''
+    if _award_part_rendered(text, cells):
+        return None
+    phrases = (_clause_phrase(text, keyword, grant_number) for keyword in AWARD_PART_KEYWORD_RE.finditer(text))
+    return next((phrase for phrase in phrases if phrase is not None), None)
+
+
+def with_award_part(rows: list[tuple[str, object]], raw_text: str | None,
+                    grant_number: str) -> list[tuple[str, object]]:
+    """The rendered rows, with the source's award-part phrase added to Award
+    Source (`award_part_phrase`, #2062) when Award Source holds the grant
+    number. Every other row, "Your role" included, is returned unchanged.
+
+    `rows` are the rows that render, after `PAST_FUNDING_OMITTED_LABELS` has
+    dropped any, so a word only an omitted row holds is in no cell."""
+    cells = [str(value) if value else '' for _, value in rows]
+    award_source = next((cell for (label, _), cell in zip(rows, cells, strict=True)
+                         if label == AWARD_SOURCE_LABEL), '')
+    if not grant_number or grant_number.casefold() not in award_source.casefold():
+        return rows
+    phrase = award_part_phrase(raw_text, grant_number, cells)
+    if phrase is None:
+        return rows
+    return [(label, f'{value}{AWARD_PART_SEPARATOR}{phrase}' if label == AWARD_SOURCE_LABEL else value)
+            for label, value in rows]
+
+
 def protocol_number_rows(grant_number: str, title: str) -> list[tuple[str, str]]:
     """The protocol number's own row, unless the title already holds it --
     the same-fact-via-two-paths guard Award Source applies (#829)."""
@@ -2197,6 +2357,7 @@ class ResearchSupportSection:
         ]
         if code == PAST_GRANT_CODE:
             rows = [row for row in rows if row[0] not in PAST_FUNDING_OMITTED_LABELS]
+        rows = with_award_part(rows, raw_text, grant_number)
 
         # Create a new table with 2 columns
         table = self.doc.add_table(rows=len(rows), cols=2)
