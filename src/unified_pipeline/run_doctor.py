@@ -270,7 +270,9 @@ Lints, ranked by the severity of the failure class they catch:
                           attended as continuing education taught or as
                           abstracts (NECRGC, #1691), a thesis-committee
                           block as institutional committees, a 'see section'
-                          line or bare URL as a record, a journal article
+                          line or bare URL as a record, a group lead-in,
+                          continuation heading, column-header row or
+                          footnote as a record (INFO), a journal article
                           with volume and pages as a non-peer-reviewed report
                           among peer-reviewed siblings (EBYSBC E11/E30); WARN
 14s. segmentation_collapse stage 1b placed under half of stage 1a's headings,
