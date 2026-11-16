@@ -100,6 +100,82 @@ def test_a_degree_row_and_a_training_program_director_coded_b1_are_quiet():
                "Education")) == []
 
 
+# --- training_title_misfiled: a training title the two rules above do not read ---
+
+@pytest.mark.parametrize("text, code", [
+    # the title is its own field after an institution and a date
+    ("Invented General Hospital      7/2004-6/2007\tResident\tExampleville", "D3"),
+    ("Invented University | Resident in Example Pathology | March 2031 to August 2034", "D3"),
+    ("Invented University | Clinical Fellow | 2034-2036", "B1"),
+    # a single start date, or a date the older rules do not read, before the title
+    ("06/2008 Post-Doctoral Scholar, Research, Invented Agency, Exampleville", "D3"),
+    ("2031\tPost-doctoral fellow\tInvented University, Department of Example Studies", "D3"),
+    ("Feb. 2031-Nov. 2032 Postdoctoral Research Fellow\tInvented University", "D1"),
+    ("2031\u201132 Chief Resident B Example Medicine, Invented Hospital", "D2"),
+    ("b) Predoctoral Fellow (Example Agency); Department of Example, Invented University; 2031-2035", "D3"),
+    # the wider title list
+    ("2033 - 2037 Postdoctoral Research Associate, Invented University", "D2"),
+    ("9/31-8/32 Predoctoral Example Fellow, Invented University", "D3"),
+    ("April, 2031 - March, 2034 Postdoctoral Trainee in Medicine, Invented Hospital", "D3"),
+    ("1999-2001 Trainee, Example Genetics Training Program, Invented University", "D3"),
+    ("2031-36 Graduate Student. Department of Example, Invented University\tA project on widgets.", "M1"),
+    ("2011-2012 Research Fellow, Invented University", "M1"),
+])
+def test_a_training_title_the_older_rules_miss_is_flagged(text, code):
+    findings = _run(_entry(text, code, "Experience", idx=22))
+    assert _shapes(findings) == ["training_title_misfiled"]
+    assert findings[0]["severity"] == "INFO"
+    assert "the source points to C (training)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith(f"entry 22 ({code}): ")
+
+
+def test_a_training_title_coded_as_an_honor_outside_an_honors_heading_is_flagged():
+    row = "2001-2003 Postdoctoral Research Fellow, Invented Institute"
+    assert _shapes(_run(_entry(row, "H", "Positions"))) == ["training_title_misfiled"]
+    # Listed under honors by its owner, the row is a distinction and keeps its H.
+    assert _run(_entry(row, "H", "Honors and Awards")) == []
+    assert _run(_entry("1993 Chief Resident, Department of Example, Invented University", "H",
+                       "Honors", "National")) == []
+
+
+def test_a_training_title_an_older_rule_reports_is_not_reported_twice():
+    findings = _run(
+        _entry("2002-2005 Postdoctoral Fellow in Example Medicine, Invented University", "D3",
+               "Appointments"),
+        _entry("Intern (Example Medicine)\tInvented General Hospital 1991-1992", "B1", "Education"))
+    assert sorted(_shapes(findings)) == ["training_as_appointment", "training_as_degree"]
+
+
+@pytest.mark.parametrize("text, code", [
+    ("Program Director, Internal Medicine Residency, Invented Hospital", "D2"),
+    ("Resident Veterinarian, Invented Farm, 1984-1986", "D3"),
+    ("1984 Resident Veterinarian, Invented Farm", "D3"),
+    ("Artist in Residence, Invented Arts Center, 2010", "D3"),
+    ("Fellow of the American College of Example Studies", "H"),
+    ("Senior Fellow, Invented Institute", "D1"),
+    ("2014 Fellow, Invented Heart Association (elected 2014)", "D1"),
+    ("Faculty Fellow, Invented Hall", "D1"),
+    ("Postdoctoral Fellowship Award, Invented Foundation", "H"),
+    ("Mentor to graduate students", "M1"),
+    ("Graduate Student Advisory Committee", "D3"),
+    ("2012-2015 Research Fellow, Invented University, then Senior Lecturer in Example Studies", "D1"),
+    ("2012 Research Fellow, Invented University, then Senior Lecturer in Example Studies", "D1"),
+    ("NRSA Postdoctoral Fellowship F32 EX000000, Example Institute, $52,000", "M2B"),
+    ("2001-2004 Resident, Example Medicine, Invented General Hospital", "C"),
+    # an award named for its trainees, a role over them, and words after a
+    # comma that only begin like a title
+    ("2016 Resident Teaching Award, Invented Hospital", "H"),
+    ("March 2031 - April 2033 Intern Coordinator\tInvented Pharmacy", "D3"),
+    ("Medical Staff, Invented Hospital, Resident supervision in the clinic", "D2"),
+    ("Attending Staff Physician and Chief Resident     2031-2032\tInvented Hospital", "D2"),
+])
+def test_a_role_an_honor_or_a_coded_training_row_is_no_misfiled_training_title(text, code):
+    """Under a heading that names no honors, so the quiet is the line's own.
+    Only this shape is asserted: training_as_appointment reads the resident
+    veterinarian and the research fellow by its own, older pattern."""
+    assert "training_title_misfiled" not in _shapes(_run(_entry(text, code, "Experience")))
+
+
 def test_board_certification_filed_as_membership_is_flagged():
     findings = _run(_entry("ABIM, Internal Medicine 2001, 2011", "I", "Post Graduate Experience"))
     assert _shapes(findings) == ["board_certification_misfiled"]
