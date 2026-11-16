@@ -577,6 +577,60 @@ def test_text_rendered_codes_write_the_text_and_no_field(tmp_path, code):
     assert _rendered_markers(tmp_path, code) == (set(), True)
 
 
+def _asked_for_fields(code):
+    """The fields stage 4 is asked to extract for `code`: the active schema,
+    which is the config file's `extract: true` fields over the built-in ones."""
+    from unified_pipeline.stage4.schemas import get_active_schemas
+
+    return set(get_active_schemas()[code]['fields'])
+
+
+def _field_rendering_codes():
+    from unified_pipeline.stage4.schemas import get_active_schemas
+
+    return sorted(set(get_active_schemas()) - fan_out._TEXT_RENDERED_CODES)
+
+
+@pytest.mark.parametrize('code', _field_rendering_codes())
+def test_every_field_stage_4_is_asked_for_is_rendered_or_declared(tmp_path, code):
+    """CODING_STANDARDS 7.3 (#817): a field stage 4 is asked for and no
+    renderer writes is dropped with no warning (`grant_number`, 97 of 213
+    values). The unwritten fields of each code are exactly the declared ones,
+    so a new schema field needs a renderer slot or a stated reason, and a
+    declaration a renderer has overtaken has to go."""
+    markers = {name: 'Zq' + name.replace('_', 'x') + 'Z' for name in _asked_for_fields(code)}
+    body = _rendered_body(tmp_path, code, markers)
+    unwritten = {name for name, marker in markers.items() if marker not in body}
+    declared = {*fan_out.DELIBERATELY_UNRENDERED.get(code, {}), *fan_out.UNRENDERED_GAPS.get(code, {})}
+    assert unwritten == declared
+
+
+def test_an_undeclared_unwritten_field_fails_the_contract(tmp_path, monkeypatch):
+    """The contract test's own positive control: a field no renderer names,
+    added to a schema, is reported as unwritten."""
+    from unified_pipeline.stage4 import schemas
+
+    active = schemas.get_active_schemas()
+    active['H']['fields'] = [*active['H']['fields'], 'sponsor_city']
+    monkeypatch.setattr(schemas, '_LOADED_SCHEMAS', active)
+    markers = {name: 'Zq' + name.replace('_', 'x') + 'Z' for name in _asked_for_fields('H')}
+    body = _rendered_body(tmp_path, 'H', markers)
+    assert {name for name, marker in markers.items() if marker not in body} == {'sponsor_city'}
+
+
+def test_unrendered_declarations_name_asked_for_fields_once_with_a_reason():
+    """A field is unrendered by design or as a gap, not both; every entry
+    states why; and none names a text-rendered code, whose fields no section
+    reads at all."""
+    for registry in (fan_out.DELIBERATELY_UNRENDERED, fan_out.UNRENDERED_GAPS):
+        assert not set(registry) & fan_out._TEXT_RENDERED_CODES
+        for code, reasons in registry.items():
+            assert set(reasons) <= _asked_for_fields(code), code
+            assert all(reason.strip() for reason in reasons.values()), code
+    for code in set(fan_out.DELIBERATELY_UNRENDERED) & set(fan_out.UNRENDERED_GAPS):
+        assert not set(fan_out.DELIBERATELY_UNRENDERED[code]) & set(fan_out.UNRENDERED_GAPS[code]), code
+
+
 def test_stopwords_are_exactly_the_connectives():
     """A content word added here would let a fan-out drop it silently."""
     assert fan_out._STOPWORDS == {'a', 'an', 'and', 'at', 'for', 'in', 'of', 'on', 'the', 'to'}
