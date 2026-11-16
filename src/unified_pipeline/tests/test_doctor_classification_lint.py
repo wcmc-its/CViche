@@ -813,6 +813,95 @@ def test_the_lint_reports_exactly_what_the_stage3b_credential_pin_recodes_1577(t
     assert (_shapes(_run(entry)) == ["credential_misfiled"]) is pinned
 
 
+# --- banner_line_as_record (BAN-1) ------------------------------------------
+
+_DATED_PROFESSOR = _entry("2015-present Professor of Medicine, Invented University", "D1",
+                          "Academic Appointments", idx=40)
+
+
+@pytest.mark.parametrize("text,code,heading", [
+    ("Title: Professor of Medicine", "D1", "Personal Data"),
+    ("CURRENT POSITIONS: Director, Invented Service\tInvented General Hospital", "O", "1. Personal"),
+    ("Current rank: Associate Professor", "D1", "A. Identifying data:"),
+    ("Date appointed: July 1, 2031", "D1", "Personal Information"),
+    ("Appointment at Invented: Assistant Professor of Medicine (tenure track)", "D1", "Contact"),
+    ("Position: Attending Physician, Invented General Hospital", "D2", "BIOGRAPHY"),
+])
+def test_a_labelled_banner_line_coded_as_a_record_is_reported_as_info(text, code, heading):
+    findings = _run(_entry(text, code, heading, idx=4), _DATED_PROFESSOR)
+    assert _shapes(findings) == ["banner_line_as_record"]
+    assert findings[0]["severity"] == "INFO"
+    assert "the source points to T (not a record)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith(f"entry 4 ({code}): ")
+
+
+def test_an_undated_banner_line_with_a_dated_twin_further_down_is_reported():
+    banner = _entry("Professor of Medicine\tInvented University School of Medicine\t1 Invented Avenue",
+                    "D1", "Personal Data", idx=4)
+    chair = _entry("Chair, Department of Invented Studies", "O", "Personal Data", idx=5)
+    dated_chair = _entry("2019 - Chair, Department of Invented Studies, Invented University", "O",
+                         "Leadership", idx=60)
+    findings = _run(banner, chair, _DATED_PROFESSOR, dated_chair)
+    assert _shapes(findings) == ["banner_line_as_record"]
+    assert "2 entries under 'Personal Data' coded D1, O" in findings[0]["message"]
+
+
+def test_a_banner_line_before_the_first_heading_is_in_the_opening_block():
+    """An entry with no heading at all, ahead of the CV's first section."""
+    assert _shapes(_run(_entry("Clinical Professor of Invented Studies", "D1", idx=1),
+                        _entry("2020-present Clinical Professor of Invented Studies", "D1",
+                               "Appointments", idx=30))) == ["banner_line_as_record"]
+
+
+def test_a_dated_appointment_under_personal_data_with_no_twin_is_quiet():
+    assert _run(_entry("2015-present Professor of Medicine, Invented University", "D1",
+                       "Personal Data")) == []
+
+
+def test_an_address_or_phone_line_coded_a_is_quiet():
+    assert _run(_entry("Title: Professor of Medicine\t1 Invented Avenue\tPhone: 555-0100", "A",
+                       "Personal Data", idx=4), _DATED_PROFESSOR) == []
+
+
+def test_a_dated_row_under_a_real_current_positions_heading_is_quiet():
+    """A section of the CV's own, past its opening block: its rows are records,
+    labelled or undated as they may be."""
+    assert _run(
+        _entry("Invented Person, MD", "A", "Personal Data", idx=1),
+        _entry("2001-2005 Assistant Professor of Medicine, Invented University", "D1",
+               "Academic Appointments", idx=20),
+        _entry("2018-present Director, Invented Service, Invented General Hospital", "O",
+               "Current Positions", idx=30),
+        _entry("Title: Director, Invented Service", "O", "Current Positions", idx=31),
+        _entry("Director, Invented Service", "O", "Current Positions", idx=32),
+        _entry("2018-present Director, Invented Service", "O", "Leadership", idx=50)) == []
+
+
+def test_an_undated_banner_line_with_no_dated_twin_is_quiet():
+    """A CV whose appointments list no dates has no dated record for the
+    banner line to copy; nor has one whose dated record is another post."""
+    banner = _entry("Professor of Medicine\tInvented University", "D1", "Personal Data", idx=4)
+    assert _run(banner, _entry("Professor of Medicine, Invented University", "D1",
+                               "Appointments", idx=40)) == []
+    assert _run(banner, _entry("2001-2005 Assistant Professor of Surgery, Invented University", "D1",
+                               "Appointments", idx=40)) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Professor",                                   # one title word pairs with every rank held
+    "Professor of Medicine, 6/07-present",         # a month and a two-digit year is a date
+    "Professional Experience: Professor of Medicine",  # a section label, not a banner label
+])
+def test_a_one_word_title_a_short_date_and_a_section_label_are_quiet(text):
+    assert _run(_entry(text, "D1", "Personal Data", idx=4), _DATED_PROFESSOR) == []
+
+
+@pytest.mark.parametrize("heading", ["Personal Statement", "Biographical Sketch", "Personal Interests"])
+def test_a_prose_heading_is_no_banner_heading(heading):
+    assert _run(_entry("Invented Person, MD", "A", "Personal Data", idx=1),
+                _entry("Title: Professor of Medicine", "D1", heading, idx=4), _DATED_PROFESSOR) == []
+
+
 # --- pinned_heading_empty (#1949) ------------------------------------------
 
 def _node(title, code, confidence, *children, alternative=None):
