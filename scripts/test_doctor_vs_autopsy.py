@@ -6,11 +6,15 @@
 Pins what the scores depend on: which finding formats yield an entry index
 (and which must not), which stage-6 message maps to which shape, how hits,
 matches, recall and verdict tallies are counted, and that every input the
-tool cannot score exits 2 instead of printing a number.
+tool cannot score exits 2 instead of printing a number. For --source-fixed:
+which uncaught findings the stage-3b replay calls fixed at source, that an
+unreplayable run is counted, and that the flag changes nothing else.
 """
 import contextlib
+import copy
 import io
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -268,6 +272,217 @@ def test_inputs_that_cannot_be_scored_exit_2():
         assert err.startswith("doctor_vs_autopsy: ") and named in err, (why, err)
 
 
+# --- --source-fixed -----------------------------------------------------------
+
+TALKS, HONORS = "INVITED PRESENTATIONS", "HONORS AND AWARDS"
+REPEATED_TEXT = "Synthetic Teaching Prize, Example Institute, 2019"
+
+
+def _entry(idx, code, hierarchy=TALKS, text=None, **extra):
+    text = text or f"Workshop faculty, Example Society, session {idx}"  # distinct: not a repeat
+    return {"element_idx_start": idx, "hierarchy": [hierarchy], "text": text, "taxonomy_code": code,
+            "taxonomy_confidence": 0.95, "classification_reasoning": "professional education",
+            "classification_source": "llm", **extra}
+
+
+def _stage_3a():
+    """A talks heading stage 3a mapped to R at full confidence: the header pin's smallest case."""
+    return {"mappings": [{"title": TALKS, "taxonomy_options": [{"code": "R", "confidence": 1.0}]}]}
+
+
+def _stage_3a_as_stored():
+    """The same heading as a stored artifact may hold it, before stage 3b's own
+    normalisation: a padded code, a confidence in quotes, an option with no code
+    and a node that is not an object."""
+    return {"mappings": ["not a node", {"title": TALKS, "taxonomy_options": [
+        {"code": " R ", "confidence": "1.0"}, {"code": ""}]}]}
+
+
+def _stage_3b():
+    return {"entries": [
+        _entry(10.0, "K4"),  # the pin recodes a K4 under a confident R heading
+        _entry(11, "R"),  # already R: nothing touches it
+        _entry(12, "K4"),  # recoded too, but a lint catches its finding
+        _entry(20, "H", HONORS, REPEATED_TEXT),
+        _entry(21, "H", HONORS, REPEATED_TEXT.replace("2019", "2020"),  # a sibling, not a repeat
+               is_duplicate=True, duplicate_note="stored mark"),
+        _entry(30, "H", HONORS, REPEATED_TEXT.replace("Teaching", "Mentoring")),
+        _entry(31, "H", HONORS, REPEATED_TEXT.replace("Teaching", "Mentoring"),  # a real repeat
+               is_duplicate=True, duplicate_note="stored mark"),
+    ]}
+
+
+def _source_fixed_inputs(tmp):
+    """TSTAAA has both artifacts; TSTBBB's stage 3b path names no file; TSTCCC's
+    report has no artifacts map at all."""
+    stage_3a, stage_3b = Path(tmp) / "3a.json", Path(tmp) / "3b.json"
+    stage_3a.write_text(json.dumps(_stage_3a()))
+    stage_3b.write_text(json.dumps(_stage_3b()))
+    reports = {
+        UID_A: {"artifacts": {"stage_3a": str(stage_3a), "stage_3b": str(stage_3b), "stage_4": None},
+                "findings": [_finding("implausible_year", "entry 12 (K4): start_date=1900")]},
+        UID_B: {"artifacts": {"stage_3a": str(stage_3a), "stage_3b": str(Path(tmp) / "absent.json")},
+                "findings": []},
+        UID_C: {"findings": []},
+    }
+    labels = [
+        {"uid": UID_A, "batch": "BATCH1", "findings": [
+            _verified("TSTAAA-01", 10, stage="3b"), _verified("TSTAAA-02", 11, stage="3b"),
+            _verified("TSTAAA-03", 12, stage="3b"), _verified("TSTAAA-04", [20, 21], stage="3b"),
+            _verified("TSTAAA-05", 31, stage="4"), _verified("TSTAAA-06", None, stage="3b"),
+            _verified("TSTAAA-07", 99, stage="4")]},  # an index the stored run has no entry for
+        {"uid": UID_B, "batch": "BATCH1", "findings": [_verified("TSTBBB-01", 10, stage="3b"),
+                                                       _verified("TSTBBB-02", 11, stage="3b")]},
+        {"uid": UID_C, "batch": "BATCH1", "findings": [_verified("TSTCCC-01", 10, stage=None)]},
+    ]
+    return _write_inputs(tmp, reports, labels)
+
+
+def test_replay_stage3b_reports_each_entry_before_and_after_and_changes_no_input():
+    stage_3a, stage_3b = _stage_3a(), _stage_3b()
+    before = copy.deepcopy((stage_3a, stage_3b))
+    replayed = dva.replay_stage3b(stage_3a, stage_3b)
+    assert (stage_3a, stage_3b) == before
+    assert replayed == {
+        10: ("K4", "R", False, False), 11: ("R", "R", False, False), 12: ("K4", "R", False, False),
+        20: ("H", "H", False, False), 21: ("H", "H", True, False),
+        30: ("H", "H", False, False), 31: ("H", "H", True, True)}
+    assert [idx for idx, r in replayed.items() if r.source_fixed] == [10, 12, 21]
+
+
+def test_replay_stage3b_normalises_a_copy_of_the_stored_mappings():
+    stage_3a, stage_3b = _stage_3a_as_stored(), {"entries": [_entry(10, "K4")]}
+    before = copy.deepcopy(stage_3a)
+    with dva._stage3b_warnings_off():  # stage 3b warns about the option it drops
+        assert dva.replay_stage3b(stage_3a, stage_3b) == {10: ("K4", "R", False, False)}
+    assert stage_3a == before
+
+
+def test_replay_stage3b_replays_an_entry_that_has_no_hierarchy():
+    for stored in ({**_entry(10, "K4"), "hierarchy": None},
+                   {k: v for k, v in _entry(10, "K4").items() if k != "hierarchy"}):
+        replayed = dva.replay_stage3b(_stage_3a(), {"entries": [stored, _entry(11, "K4")]})
+        assert replayed == {10: ("K4", "K4", False, False), 11: ("K4", "R", False, False)}, stored
+
+
+def test_replay_stage3b_lets_a_fixed_sub_entry_stand_for_its_index():
+    stage_3b = {"entries": [_entry("474.1", "R"), _entry("474.6", "K4"), _entry(None, "K4")]}
+    assert dva.replay_stage3b(_stage_3a(), stage_3b) == {474: ("K4", "R", False, False)}
+    # whichever comes first: a later sub-entry nothing touches does not undo it
+    stage_3b = {"entries": [_entry("474.1", "K4"), _entry("474.6", "R")]}
+    assert dva.replay_stage3b(_stage_3a(), stage_3b) == {474: ("K4", "R", False, False)}
+
+
+def test_replay_stage3b_runs_the_whole_cv_pins_after_the_header_pin():
+    # a consultancy filed as a committee seat, under a heading stage 3a did not map
+    stage_3b = {"entries": [_entry(5, "Q2", "SERVICE", "Consultant, Example Pharma Inc., 2018-2020")]}
+    assert dva.replay_stage3b(_stage_3a(), stage_3b) == {5: ("Q2", "D3", False, False)}
+
+
+def test_source_fixed_counts_only_uncaught_findings_the_replay_changes():
+    with tempfile.TemporaryDirectory() as tmp:
+        split = dva.build_report(*_source_fixed_inputs(tmp), source_fixed=True)["recall"]["source_fixed"]
+    # TSTAAA-03 is recoded as well, but a lint caught it; TSTAAA-06 has no index
+    assert split["source_fixed_ids"] == ["TSTAAA-01", "TSTAAA-04"]
+    assert (split["uncaught"], split["source_fixed"]) == (8, 2)
+    # TSTBBB's two stage-3b findings are one run not replayed, not two
+    assert split["by_stage"] == {"3b": {"uncaught": 5, "source_fixed": 2, "runs_not_replayed": 1},
+                                 "4": {"uncaught": 2, "source_fixed": 0, "runs_not_replayed": 0},
+                                 dva.NO_CLASS: {"uncaught": 1, "source_fixed": 0, "runs_not_replayed": 1}}
+
+
+def test_source_fixed_counts_a_run_it_cannot_replay_and_never_guesses_its_findings():
+    with tempfile.TemporaryDirectory() as tmp:
+        split = dva.build_report(*_source_fixed_inputs(tmp), source_fixed=True)["recall"]["source_fixed"]
+    assert (split["runs_not_replayed"], split["uncaught_not_replayed"]) == (2, 3)
+    assert sorted(split["not_replayed"]) == [UID_B, UID_C]
+    assert "cannot read" in split["not_replayed"][UID_B]
+    assert "names no stage_3a / stage_3b artifact" in split["not_replayed"][UID_C]
+    assert not {"TSTBBB-01", "TSTBBB-02", "TSTCCC-01"} & set(split["source_fixed_ids"])
+
+
+def test_source_fixed_counts_a_run_whose_artifact_path_is_null_as_not_replayed():
+    for nulled in (dva.STAGE_3A_ARTIFACT, dva.STAGE_3B_ARTIFACT):
+        with tempfile.TemporaryDirectory() as tmp:
+            doctor, labels_dir = _source_fixed_inputs(tmp)
+            reports = json.loads(doctor.read_text())
+            reports[UID_A]["artifacts"][nulled] = None
+            doctor.write_text(json.dumps(reports))
+            split = dva.build_report(doctor, labels_dir, source_fixed=True)["recall"]["source_fixed"]
+        assert "names no stage_3a / stage_3b artifact" in split["not_replayed"][UID_A], nulled
+        assert split["source_fixed"] == 0, nulled
+
+
+def test_source_fixed_counts_a_malformed_artifact_as_not_replayed():
+    # in turn: a non-numeric index, KeyError, TypeError, TypeError, AttributeError, OverflowError
+    for broken in ({"entries": [{"element_idx_start": "abc"}]}, {}, {"entries": None}, [],
+                   {"entries": ["not an entry"]}, {"entries": [_entry(float("inf"), "K4")]}):
+        with tempfile.TemporaryDirectory() as tmp:
+            doctor, labels_dir = _source_fixed_inputs(tmp)
+            (Path(tmp) / "3b.json").write_text(json.dumps(broken))
+            split = dva.build_report(doctor, labels_dir, source_fixed=True)["recall"]["source_fixed"]
+        assert UID_A in split["not_replayed"], (broken, split)
+        assert split["source_fixed"] == 0, (broken, split)
+
+
+def test_source_fixed_flag_adds_one_block_and_one_line_and_nothing_else():
+    with tempfile.TemporaryDirectory() as tmp:
+        doctor, labels_dir = _source_fixed_inputs(tmp)
+        off_json, on_json = Path(tmp) / "off.json", Path(tmp) / "on.json"
+        off = _run_main([doctor, labels_dir, "--json", off_json])
+        on = _run_main([doctor, labels_dir, "--json", on_json, "--source-fixed"])
+        off_text, on_report = off_json.read_text(), json.loads(on_json.read_text())
+    assert (off[0], on[0], off[2], on[2]) == (0, 0, "", "")
+    line = ("  of 8 uncaught, 2 no longer reproduce at source on this checkout (stage-3b pins / "
+            "duplicate marking); 2 runs not replayed (3 uncaught findings unjudged)")
+    assert on[1] == off[1].rstrip("\n") + "\n" + line + "\n", on[1]
+    assert "uncaught" not in off[1] and "source_fixed" not in off_text
+    assert on_report["recall"].pop("source_fixed")["source_fixed"] == 2
+    assert json.dumps(on_report, indent=1, sort_keys=True) + "\n" == off_text
+
+
+def test_source_fixed_leaves_the_stage_3b_log_level_as_it_found_it():
+    log = logging.getLogger(dva.STAGE3B_LOGGER)
+    before = log.level
+    log.setLevel(logging.DEBUG)  # a level the replay does not itself set
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dva.build_report(*_source_fixed_inputs(tmp), source_fixed=True)
+        assert log.level == logging.DEBUG
+    finally:
+        log.setLevel(before)
+
+
+class _Records(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+
+    def emit(self, record):
+        self.seen.append(record.getMessage())
+
+
+def test_source_fixed_keeps_stage_3b_warnings_out_of_the_report():
+    # stage 3b warns, naming the heading, when it drops the option that has no code
+    handler, log = _Records(), logging.getLogger(dva.STAGE3B_LOGGER)
+    propagate, log.propagate = log.propagate, False  # the control below must not reach stderr
+    log.addHandler(handler)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            stage_3a, stage_3b = Path(tmp) / "3a.json", Path(tmp) / "3b.json"
+            stage_3a.write_text(json.dumps(_stage_3a_as_stored()))
+            stage_3b.write_text(json.dumps(_stage_3b()))
+            replayed = dva.replay_run(dva.RunArtifacts(str(stage_3a), str(stage_3b)))
+        during_replay_run = list(handler.seen)
+        dva.replay_stage3b(_stage_3a_as_stored(), _stage_3b())  # the control: unguarded, it warns
+    finally:
+        log.removeHandler(handler)
+        log.propagate = propagate
+    assert replayed[10].source_fixed
+    assert during_replay_run == [], during_replay_run
+    assert any(TALKS in message for message in handler.seen), handler.seen
+
+
 if __name__ == "__main__":
     test_finding_idxs_reads_every_emitter_format()
     test_finding_idxs_ignores_numbers_that_are_not_entry_indices()
@@ -278,4 +493,16 @@ if __name__ == "__main__":
     test_findings_with_no_class_or_credit_are_grouped_not_dropped()
     test_recall_text_lists_big_groups_and_sums_the_small_ones()
     test_inputs_that_cannot_be_scored_exit_2()
+    test_replay_stage3b_reports_each_entry_before_and_after_and_changes_no_input()
+    test_replay_stage3b_normalises_a_copy_of_the_stored_mappings()
+    test_replay_stage3b_replays_an_entry_that_has_no_hierarchy()
+    test_replay_stage3b_lets_a_fixed_sub_entry_stand_for_its_index()
+    test_replay_stage3b_runs_the_whole_cv_pins_after_the_header_pin()
+    test_source_fixed_counts_only_uncaught_findings_the_replay_changes()
+    test_source_fixed_counts_a_run_it_cannot_replay_and_never_guesses_its_findings()
+    test_source_fixed_counts_a_run_whose_artifact_path_is_null_as_not_replayed()
+    test_source_fixed_counts_a_malformed_artifact_as_not_replayed()
+    test_source_fixed_flag_adds_one_block_and_one_line_and_nothing_else()
+    test_source_fixed_leaves_the_stage_3b_log_level_as_it_found_it()
+    test_source_fixed_keeps_stage_3b_warnings_out_of_the_report()
     print("ok")
