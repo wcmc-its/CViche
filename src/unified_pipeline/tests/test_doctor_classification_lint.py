@@ -209,6 +209,9 @@ def test_a_training_title_an_older_rule_reports_is_not_reported_twice():
     ("Novartis Fellow, Invented Institute, 2010", "D1"),
     ("Mayo Fellow, Invented Institute, 2010", "D1"),
     ("Attending Staff Physician and Chief Resident     2031-2032\tInvented Hospital", "D2"),
+    # a date closed by a colon opens a second post stage 2 merged into the row
+    ("Apr. 2031 - Apr. 2032: Associate Scientist\tApr. 2028 - Mar. 2031: Postdoctoral Scholar, "
+     "Invented University", "D3"),
 ])
 def test_a_role_an_honor_or_a_coded_training_row_is_no_misfiled_training_title(text, code):
     """Under a heading that names no honors, so the quiet is the line's own.
