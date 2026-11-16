@@ -20,6 +20,10 @@ course or a technologist certificate coded F1 or F2, or a licence or board
 certification coded B2 or I, by `core.credential_lines`, the module stage
 3b's credential pin, the WCM table corrector and stage 6's licensure guard
 read too.
+`non_record_line_as_record` reports a line that is no record at all and
+carries a record code: a group lead-in ending in a colon, a continuation
+heading, a column-header row, a footnote or legend, a bare date stamp
+(S3B-NRL in doctor/PRECISION.md).
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -81,6 +85,8 @@ from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_c
 from unified_pipeline.stage3b.header_pin import (
     _GRANT_CODES,
     HEADER_PIN_MIN_CONFIDENCE,
+    _names_authors,
+    is_lead_in,
 )
 from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE
@@ -118,7 +124,14 @@ CREDENTIAL_MISFILED_SHAPE = "credential_misfiled"
 #: The older WARN shapes that already report part of what credential_misfiled
 #: reads: an entry one of them reports is not reported twice.
 CREDENTIAL_WARN_SHAPES = frozenset({"board_certification_misfiled", "life_support_as_license"})
-SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO"}
+#: A line that is no record (a group label, a continuation heading, a
+#: footnote, a column-header row) coded as one, which stage 6 renders as a
+#: junk row. INFO until its hits are read on a fresh batch (S3B-NRL in
+#: doctor/PRECISION.md has the stored-run measurement).
+NON_RECORD_LINE_SHAPE = "non_record_line_as_record"
+NON_RECORD_LINE_EXPECTED = "T (not a record)"
+SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO",
+                  NON_RECORD_LINE_SHAPE: "INFO"}
 #: The home a credential_misfiled finding points to, by code.
 CREDENTIAL_HOME_EXPECTED = {
     OTHER_EDUCATION_CODE: "B2 (other education: an exam, permit, course or certificate, not a licence or board)",
@@ -473,6 +486,113 @@ def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
     return entry.code == MEMBERSHIP_CODE and is_honorific_fellowship(entry.text, entry.heading_path)
 
 
+# --- non_record_line_as_record ----------------------------------------------
+#
+# Each sub-shape is one named pattern; `_is_non_record_line` reports them all
+# under one shape name. All of them read the entry's whole text, so a record
+# with a label inside it ("Course Director: <course>, 2010-2015") is none.
+
+#: A four-digit year or a slash date. A lead-in, a continuation heading, a
+#: column row or a heading's own words carrying one is as often a record cut
+#: short ("<year>: <meeting>, <role>, <city>:"), so those four
+#: sub-shapes read undated lines only.
+_LINE_DATE_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)|(?<!\d)\d{1,2}/\d{1,2}(?:/\d{2,4})?(?!\d)")
+#: "<heading> (continued)", "<heading> (cont)", "<heading>, CONTINUED": the
+#: heading a page break repeats.
+_CONTINUATION_HEADING_RE = re.compile(r"[\s(,]cont(?:inued|['’]d|\.)?\W*$", re.IGNORECASE)
+#: A line that is only a date: "7/16/18", "28Aug2021", "April 3, 2017".
+_BARE_DATE_STAMP_RE = re.compile(
+    r"^\W*(?:\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{1,2}\s?[A-Za-z]{3,9}\.?\s?\d{2,4}"
+    r"|[A-Za-z]{3,9}\.?\s\d{1,2}(?:st|nd|rd|th)?,?\s\d{4})\W*$")
+#: A footnote or legend: a footnote mark, then what the mark stands for
+#: ("*Held virtually", "* denotes corresponding author", "†Co-senior
+#: authors"). The mark alone is not enough: many CVs open a real record with
+#: "*" as an authorship or in-rank mark. A remark on the row beside it
+#: ("*This work was ...") is left out: it is as often a research narrative
+#: (M1) or a citation count (S0), which are records.
+_LEGEND_NOTE_RE = re.compile(
+    r"^[\s(]*[*†‡§¥]+\s*(?:=\s*)?(?:denot(?:es?|ing)|designat(?:es?|ing)|indicat(?:es?|ing)|marks|signif(?:y|ies)"
+    r"|held|served\s+as|presenters?|winners?|co-(?:first|second|senior|corresponding)"
+    r"|oral\s+presentations?\W*$)\b", re.IGNORECASE)
+#: "Note: ...", "Notes: ...", "Section Notes: ...", "(Note: ...)".
+_NOTE_LABEL_RE = re.compile(r"^[\s(*]*(?:section\s+)?notes?\s*:", re.IGNORECASE)
+#: A Word hyperlink field with no text of its own: `HYPERLINK "<url>"`, then
+#: at most the URL again. A citation that opens with a field leftover is a
+#: record, so the pattern runs to the end of the line.
+_FIELD_LEFTOVER_RE = re.compile(
+    r'^\W*(?:HYPERLINK\s+"[^"]*"\s*(?:\\[a-z]\s+"[^"]*"\s*)*(?:(?:https?://|www\.)\S+)?\s*)+$')
+#: A count of the rows of a list: "Local-48, Grand rounds-15".
+_COUNT_SUMMARY_RE = re.compile(
+    r"^\W*(?:[A-Za-z][A-Za-z ]*?\s?[-–:]\s?\d{1,3}\s*[,;]\s*)+[A-Za-z][A-Za-z ]*?\s?[-–:]\s?\d{1,3}\W*$")
+#: Codes a field leftover or a count summary may carry besides T: S0 takes a
+#: bare profile URL and a publication count (core/taxonomy_v7.json).
+_URL_OR_COUNT_CODES = frozenset({UNCLASSIFIED_CODE, PROFILE_SUMMARY_CODE})
+#: Words that head a table column and name nothing by themselves, and words
+#: that head one but also name things ("Student Leadership Fellowship" is an
+#: award). A line of COLUMN_ROW_MIN_WORDS or more words, every one from
+#: either set and one or more from the first, is the table's header row
+#: ("Period Fellowship Project Student"), which stage 2 read as a paragraph.
+COLUMN_LABEL_WORDS = frozenset({
+    "name", "names", "date", "dates", "year", "years", "period", "term", "semester", "title", "titles",
+    "role", "roles", "description", "details", "number", "no", "status", "amount", "location",
+    "institution", "country", "docket", "filed", "issued", "enrollment", "cr", "hrs", "hours",
+})
+COLUMN_SUBJECT_WORDS = frozenset({
+    "position", "positions", "current", "course", "courses", "project", "projects", "student", "students",
+    "fellowship", "scholarship", "degree", "dissertation", "thesis", "training", "application", "sponsor",
+    "agency", "undergraduate", "graduate", "grad", "leadership", "source", "of",
+})
+COLUMN_ROW_MIN_WORDS = 3
+_COLUMN_WORD_SPLIT_RE = re.compile(r"[\s/]+")
+_COLUMN_WORD_STRIP = ".,;:()#"
+#: What the comparison of a line with its leaf heading ignores.
+_NOT_A_LETTER_OR_DIGIT_RE = re.compile(r"[\W_]+")
+
+
+def _is_column_header_row(text: str) -> bool:
+    """COLUMN_ROW_MIN_WORDS or more different words, every one a column
+    word and one or more of them a column label."""
+    words = {word.strip(_COLUMN_WORD_STRIP).lower() for word in _COLUMN_WORD_SPLIT_RE.split(text)} - {""}
+    return (len(words) >= COLUMN_ROW_MIN_WORDS and words <= COLUMN_LABEL_WORDS | COLUMN_SUBJECT_WORDS
+            and not words.isdisjoint(COLUMN_LABEL_WORDS))
+
+
+def _repeats_leaf_heading(text: str, leaf: str) -> bool:
+    """The line is its own leaf heading over again, or the last words of it
+    ("(Refereed)" under "Regional (Refereed)")."""
+    line = _NOT_A_LETTER_OR_DIGIT_RE.sub(" ", text).strip().lower()
+    heading = _NOT_A_LETTER_OR_DIGIT_RE.sub(" ", leaf).strip().lower()
+    return bool(line) and (line == heading or heading.endswith(" " + line))
+
+
+def _is_undated_non_record(text: str, leaf: str) -> bool:
+    """The four sub-shapes read on an undated line only: a group lead-in
+    (`is_lead_in`, stage 3b's own test) that is no author list cut at its
+    colon, a continuation heading, a column-header row, the leaf heading
+    repeated."""
+    if _LINE_DATE_RE.search(text):
+        return False
+    return ((is_lead_in(text) and not _names_authors(text))
+            or bool(_CONTINUATION_HEADING_RE.search(text))
+            or _is_column_header_row(text)
+            or _repeats_leaf_heading(text, leaf))
+
+
+def _is_non_record_line(entry: _ClassifiedEntry) -> bool:
+    """A record code on page furniture, a note or a group label: a lead-in
+    ending in a colon, a continuation heading, a column-header row, the leaf
+    heading repeated, a bare date stamp, a footnote or legend, a Word field
+    leftover or a count summary. Stage 6 renders each as a junk row."""
+    if entry.code == UNCLASSIFIED_CODE:
+        return False
+    text = entry.text.strip()
+    if _FIELD_LEFTOVER_RE.search(text) or _COUNT_SUMMARY_RE.search(text):
+        return entry.code not in _URL_OR_COUNT_CODES
+    leaf = entry.heading_path[-1] if entry.heading_path else ""
+    return bool(_BARE_DATE_STAMP_RE.search(text) or _LEGEND_NOTE_RE.search(text)
+                or _NOTE_LABEL_RE.search(text) or _is_undated_non_record(text, leaf))
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -521,6 +641,8 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
         if _is_fellowship_as_membership(entry):
             groups[(FELLOWSHIP_AS_MEMBERSHIP_SHAPE, "H (an elected or honorific fellowship)",
                     entry.heading_path)].append(entry)
+        if _is_non_record_line(entry):
+            groups[(NON_RECORD_LINE_SHAPE, NON_RECORD_LINE_EXPECTED, entry.heading_path)].append(entry)
         if credential_home is not None and not guarded and not reported & CREDENTIAL_WARN_SHAPES:
             groups[(CREDENTIAL_MISFILED_SHAPE, CREDENTIAL_HOME_EXPECTED[credential_home.code],
                     entry.heading_path)].append(entry)

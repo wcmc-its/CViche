@@ -170,6 +170,115 @@ def test_cross_reference_inside_a_record_is_quiet():
     assert _run(_entry("1987-92 NIH R01 (see above), total $500,000", "M2B", "Grants")) == []
 
 
+_NON_RECORD = "non_record_line_as_record"
+
+
+@pytest.mark.parametrize("text, code, heading", [
+    # a lead-in ending in a colon that introduces a group
+    ("At the University of Invented:", "K1", "Courses Taught"),
+    ("Jane Doe (postdoctoral fellow):", "N4", "Mentees' Awards"),
+    ("Referee for these journals:", "Q4D", "Editorial Activities"),
+    ("Sponsor:\tAmount:\tStatus:", "M2B", "Invented Support"),
+    # a continuation heading
+    ("PRESENTATIONS - Community Engagement (continued)", "K5", "PRESENTATIONS - Community Engagement"),
+    ("Academic Appointments (cont)", "D1", "Academic Appointments"),
+    ("INVENTED WORKSHOPS, CONTINUED", "B2", "Workshops"),
+    # the leaf heading, or the tail of it, over again
+    ("Invented Service Roles", "P", "Invented Service Roles"),
+    ("(Refereed)", "R", "Regional (Refereed)"),
+    # a bare date stamp
+    ("7/16/18", "M2B", "Completed Trials"),
+    ("28Aug2021", "A", "Personal Data"),
+    ("April 3, 2017", "R", "Talks"),
+    # a footnote or legend
+    ("*Held virtually", "R", "Oral Presentations"),
+    ("* denotes corresponding author", "S1", "Publications"),
+    ("†Co-senior authors", "S1", "Publications"),
+    ("* Oral presentation", "S8", "Abstracts"),
+    ("Note: trainees are underlined", "S8", "Abstracts"),
+    ("Section Notes: GS marks a graduate student", "S1", "Publications"),
+    # a table column-header row
+    ("Period Fellowship Project Student", "N3", "Trainees"),
+    ("Name Years Degree Title", "N3", "Trainees"),
+    ("Term Course Title/Number Hours Enrollment", "K1", "Teaching"),
+    # a Word field leftover and a count summary
+    ('HYPERLINK "http://example.org/widgets"', "S1", "Publications"),
+    ("Local-48, Grand rounds-15", "R", "Invited Lectures"),
+])
+def test_a_non_record_line_coded_as_a_record_is_one_info_finding(text, code, heading):
+    findings = _run(_entry(text, code, heading))
+    assert _shapes(findings) == [_NON_RECORD]
+    assert findings[0]["severity"] == "INFO"
+    assert "the source points to T (not a record)" in findings[0]["message"]
+
+
+def test_a_record_with_a_label_and_more_text_after_its_colon_is_quiet():
+    assert _run(_entry("Course Director: Physiology 101, 2010-2015", "K3", "Teaching")) == []
+
+
+def test_a_citation_opening_with_the_cvs_own_authorship_mark_is_quiet():
+    assert _run(_entry("*Quill J, Brook A. A trial of things. J Invented Med 2019;1:2-3.", "S1",
+                       "Publications")) == []
+
+
+def test_a_mentee_record_is_quiet():
+    assert _run(_entry("Jane Doe, PhD (2015-2019)", "N3B", "Trainees")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "At the University of Invented:", "Academic Appointments (cont)", "*Held virtually", "7/16/18",
+    "Name Years Degree Title"])
+def test_a_non_record_line_already_coded_t_is_quiet(text):
+    assert _run(_entry(text, "T", "Academic Appointments")) == []
+
+
+def test_a_one_word_degree_or_society_row_with_a_year_is_quiet():
+    assert _run(_entry("FACS, 2010", "I", "Memberships")) == []
+
+
+def test_a_short_undated_committee_name_is_quiet():
+    assert _run(_entry("Admissions Committee", "P", "Committees")) == []
+
+
+@pytest.mark.parametrize("text, code", [
+    # a dated line ending in a colon is as often a record cut short
+    ("2001: Invented Society, Invited Speaker, Springfield:", "R"),
+    ("Invented Symposium, Springfield, 3/14/92, (posters):", "R"),
+    # an author list cut at its colon
+    ("12. Quill, A.B., Brook, C.D., and Panel, E.F.:", "S1"),
+    # a lead-in is short: a long sentence ending in a colon is left to the reader
+    ("The invented course met weekly in the spring term for second-year students and covered "
+     "these topics in order:", "K3"),
+    # a starred record: a footnote mark alone is no legend
+    ("*Invented Tumor Board, weekly case review", "L1"),
+    ("*Invented Review Committee, Member 2020 - Present", "P"),
+    # a record that only ends with "(continued)" after its dates
+    ("Jan 2003-Mar 2003 Invented Design Team, Springfield (continued)", "P"),
+    # an award made of column words, and two column words
+    ("Student Leadership Fellowship", "H"),
+    ("Course Title", "K1"),
+    # a citation that opens with a Word field leftover is still a citation
+    ('HYPERLINK "http://example.org/1" Quill AB, Brook CD. A trial of things. J Invented Med.', "S1"),
+])
+def test_record_lines_that_look_like_non_records_are_quiet(text, code):
+    assert _run(_entry(text, code, "Invented Heading")) == []
+
+
+@pytest.mark.parametrize("text", ['HYPERLINK "https://example.org/profile" https://example.org/profile',
+                                  "Articles-48, Chapters-15"])
+def test_a_field_leftover_or_a_count_summary_coded_s0_is_quiet(text):
+    # S0 takes a bare profile URL and a publication count; any other code is a finding.
+    assert _run(_entry(text, "S0", "Bibliography")) == []
+    assert _shapes(_run(_entry(text, "S1", "Bibliography"))) == [_NON_RECORD]
+
+
+def test_a_line_matching_two_sub_shapes_is_reported_once():
+    # A continuation heading that is also its leaf heading over again.
+    findings = _run(_entry("Invented Talks (continued)", "R", "Invented Talks (continued)"))
+    assert _shapes(findings) == [_NON_RECORD]
+    assert "1 entry" in findings[0]["message"]
+
+
 def test_journal_article_coded_s5_among_peer_reviewed_siblings_is_flagged():
     siblings = [_entry(_ARTICLE, "S1", "Publications", "Reviews and Guidelines", idx=i)
                 for i in range(S5_MIN_SIBLINGS)]
