@@ -286,6 +286,45 @@ _NON_ANCHOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
 # Pinned by `test_text_rendered_codes_write_the_text_and_no_field`.
 _TEXT_RENDERED_CODES = frozenset({'E', 'G', 'J', 'K2', 'K3', 'K4', 'K5', 'L1', 'L2', 'M1', 'M2', 'N1', 'N4', 'S0', 'T'})
 
+# CODING_STANDARDS 7.3 (#817): every field the active stage-4 schema asks for
+# is written by its section's renderer or is named in one of the two maps
+# below, code -> field -> why. `test_every_field_stage_4_is_asked_for_is_
+# rendered_or_declared` renders one entry per code with a marker in every
+# asked-for field and requires the unwritten ones to be exactly these, so a
+# field added to a schema with no renderer slot fails, and so does an entry
+# here that a renderer has started to write. The text-rendered codes above are
+# outside it: their sections write the entry's text and read no field.
+_OWNER_AMONG_AUTHORS = ("read to find the owner among the authors (bolding, citation matching); "
+                        "its words already print in `authors`")
+# By design: the field is read for something other than printing it.
+DELIBERATELY_UNRENDERED: Mapping[str, Mapping[str, str]] = MappingProxyType({
+    'A': {'name': "the owner's name prints from the run's owner record; this field only tells "
+                  "a third party's contact block from the owner's (`personal_data._is_third_party_record`)"},
+    **{code: {'target_name': _OWNER_AMONG_AUTHORS}
+       for code in ('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9')},
+})
+
+_ONLY_IN_5D_CITATION = ("no stage reads the field: it reaches the document only inside stage 5d's "
+                        "`formatted_citation`, which is built from the entry's text")
+_K1_DATE = ("read only to reconcile stage 5c's own range (`teaching._envelope_token`): "
+            "a K1 row with no 5c text prints no date")
+_IDENTIFIER_FROM_LICENSURE = ("the template's slot is filled from licensure entries "
+                              "(`licensure._claim_identifier_slot`); the Personal Data field is not read")
+# Not by design: stage 4 is asked for the field and no renderer writes it.
+# This map may shrink, by adding the renderer slot or by no longer asking for
+# the field (`extract: false`); it does not grow.
+UNRENDERED_GAPS: Mapping[str, Mapping[str, str]] = MappingProxyType({
+    'A': {'dea_number': _IDENTIFIER_FROM_LICENSURE, 'npi_number': _IDENTIFIER_FROM_LICENSURE},
+    'K1': {'end_date': _K1_DATE, 'start_date': _K1_DATE},
+    'Q4': {'narrative': "the editorial table has no cell for it"},
+    'S3': {'edition': _ONLY_IN_5D_CITATION, 'editors': _ONLY_IN_5D_CITATION, 'isbn': _ONLY_IN_5D_CITATION},
+    'S5': {'publication_venue': _ONLY_IN_5D_CITATION, 'report_number': _ONLY_IN_5D_CITATION,
+           'url': _ONLY_IN_5D_CITATION},
+    'S7': {'status': _ONLY_IN_5D_CITATION, 'target_journal': _ONLY_IN_5D_CITATION},
+    'S8': {'abstract_number': _ONLY_IN_5D_CITATION},
+    'S9': {'media_type': _ONLY_IN_5D_CITATION, 'url': _ONLY_IN_5D_CITATION, 'venue': _ONLY_IN_5D_CITATION},
+})
+
 # Keys a stage-5 formatter writes for the WHOLE entry (5c teaching prose, 5d
 # citation). An entry that carries one already has a rendering of all its
 # records; a child copying it would repeat the whole list once per record.
