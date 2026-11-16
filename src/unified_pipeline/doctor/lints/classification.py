@@ -41,8 +41,13 @@ already put right, and which licence or board records stage 6's licensure
 guard regroups under their credential's own code, whose credential_misfiled
 and life_support_as_license shapes it has put right.
 
-`lint_pinned_heading_empty` (#1949) is the one lint here that also reads
-stage 3a: a heading 3a mapped to code X at the header-pin floor whose entries
+It reads stage 3a too, when the run has it, for the talk_as_abstract shape:
+an author-less S8 under a heading path stage 3a maps to R (stage 3b's R pin's
+own reading, `leaf_run_header_code`), which stage 6 prints among the Abstracts
+and leaves out of Invitations to Speak.
+
+`lint_pinned_heading_empty` (#1949) reads stage 3a as well: a heading 3a
+mapped to code X at the header-pin floor whose entries
 3b coded anything but X, so X's template slot gets none of them (XAXVYB's
 N1 heading, #1938).
 
@@ -79,8 +84,13 @@ from unified_pipeline.core.honor_lines import (
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_context
 from unified_pipeline.stage3b.header_pin import (
+    _ABSTRACT_CODE,
+    _CONTRIBUTED_WORK,
     _GRANT_CODES,
+    _INVITED_TALK_PIN,
     HEADER_PIN_MIN_CONFIDENCE,
+    _has_author_list,
+    leaf_run_header_code,
 )
 from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE
@@ -118,7 +128,24 @@ CREDENTIAL_MISFILED_SHAPE = "credential_misfiled"
 #: The older WARN shapes that already report part of what credential_misfiled
 #: reads: an entry one of them reports is not reported twice.
 CREDENTIAL_WARN_SHAPES = frozenset({"board_certification_misfiled", "life_support_as_license"})
-SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO"}
+#: A talk the author filed under an invited-talks heading, coded S8: stage 6
+#: prints it among the Abstracts as a citation with no authors, and the
+#: Invitations to Speak table misses it. Stage 3b's R pin recodes such a row
+#: only when the model is unsure and every mapped heading level agrees, so
+#: this reports what the pin leaves. INFO: measured on the stored runs the
+#: shape was written from (TAA-1 in doctor/PRECISION.md), not a fresh batch.
+TALK_AS_ABSTRACT_SHAPE = "talk_as_abstract"
+SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO",
+                  TALK_AS_ABSTRACT_SHAPE: "INFO"}
+#: An authorship mark at the head of a line, after an optional list number
+#: ("*", "†": the CV's key says what each stands for), and the same before a
+#: quoted title. Some CVs mark their contributed work this way and write its
+#: authors as full names with degrees, which stage 3b's author-list test does
+#: not read; a CV that marks its talks the same way has no marked abstract
+#: with an author list.
+_AUTHORSHIP_MARK_LEAD = r"^\s*(?:\d{1,4}[.)]\s*)?(?:[*†‡§]\s*)+"
+_AUTHORSHIP_MARK_LEAD_RE = re.compile(_AUTHORSHIP_MARK_LEAD)
+_MARKED_QUOTED_TITLE_RE = re.compile(_AUTHORSHIP_MARK_LEAD + r"[\"“”]")
 #: The home a credential_misfiled finding points to, by code.
 CREDENTIAL_HOME_EXPECTED = {
     OTHER_EDUCATION_CODE: "B2 (other education: an exam, permit, course or certificate, not a licence or board)",
@@ -318,6 +345,8 @@ class _ClassifiedEntry(NamedTuple):
     #: The code's reasoning: a credential_misfiled row made F2 by stage 3b's
     #: board-block rule opens no board block for the row after it.
     reasoning: str = ""
+    #: Stage 3b's duplicate mark: the entry is a second copy of another one.
+    is_duplicate: bool = False
 
 
 def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
@@ -328,6 +357,7 @@ def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
             heading_path=tuple(str(h) for h in entry.get("hierarchy") or ()),
             text=str(entry.get("text") or ""),
             reasoning=str(entry.get("classification_reasoning") or ""),
+            is_duplicate=bool(entry.get("is_duplicate")),
         )
         for entry in stage3b.get("entries", [])
     ]
@@ -473,6 +503,51 @@ def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
     return entry.code == MEMBERSHIP_CODE and is_honorific_fellowship(entry.text, entry.heading_path)
 
 
+def _stage3a_mapping_index(stage3a: dict) -> dict:
+    """Stage 3a's heading mappings, indexed as stage 3b indexes them."""
+    mappings = copy.deepcopy(stage3a.get("mappings") or [])
+    _normalize_taxonomy_mappings(mappings)
+    return build_mapping_index(mappings)
+
+
+def _invited_talk_paths(entries: list[_ClassifiedEntry], stage3a: dict | None) -> frozenset[tuple[str, ...]]:
+    """The heading paths whose leaf-side run of mapped levels says R at the
+    header-pin floor, with a real section title in the run
+    (`leaf_run_header_code`, stage 3b's R pin's own reading of stage 3a).
+    Empty without stage 3a."""
+    if not stage3a:
+        return frozenset()
+    mapping_index = _stage3a_mapping_index(stage3a)
+    return frozenset(
+        path for path in {entry.heading_path for entry in entries}
+        if leaf_run_header_code(get_taxonomy_context(list(path), mapping_index)) == _INVITED_TALK_PIN)
+
+
+def _marks_contributed_work(entries: list[_ClassifiedEntry]) -> bool:
+    """Whether the CV opens an abstract that has an author list with an
+    authorship mark: its marks are on contributed work."""
+    return any(entry.code == _ABSTRACT_CODE and _AUTHORSHIP_MARK_LEAD_RE.match(entry.text)
+               and _has_author_list(entry.text) for entry in entries)
+
+
+def _is_talk_as_abstract(entry: _ClassifiedEntry, under_invited_talks: bool,
+                         marks_contributed_work: bool) -> bool:
+    """An S8 entry under a heading stage 3a maps to R, with no author list
+    and no contributed-work marker (stage 3b's R pin's own two tests): the
+    owner's talk, which stage 6 prints among the Abstracts with no authors
+    and leaves out of Invitations to Speak. The R pin recodes it only when
+    the model is unsure and every mapped level agrees; this reports the
+    confident answers and the mixed paths it leaves. A duplicate-marked
+    entry renders nowhere and is left out, and so is a line that opens with
+    an authorship mark before a quoted title on a CV that marks its
+    contributed work (`_marks_contributed_work`)."""
+    if not under_invited_talks or entry.code != _ABSTRACT_CODE or entry.is_duplicate:
+        return False
+    if _has_author_list(entry.text) or _CONTRIBUTED_WORK.search(entry.text):
+        return False
+    return not (marks_contributed_work and _MARKED_QUOTED_TITLE_RE.match(entry.text))
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -485,14 +560,19 @@ def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
     return message, evidence
 
 
-def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[dict]:
+def lint_section_consistency(stage3b: dict, stage4: dict | None = None,
+                             stage3a: dict | None = None) -> list[dict]:
     """Stage-3b codes that contradict the entry's own heading, text or
     siblings (EBYSBC E11/E30). One finding per shape and heading path.
     `stage4`, when the run has it, says which grant records stage 6 lists
     under Honors (`_rerouted_to_honors`) and which licence or board records
-    it regroups (`_regrouped_by_stage6`)."""
+    it regroups (`_regrouped_by_stage6`). `stage3a`, when the run has it,
+    says which heading paths are invited talks (`_invited_talk_paths`);
+    without it the talk_as_abstract shape reports nothing."""
     entries = _classified_entries(stage3b)
     rerouted, regrouped = _rerouted_to_honors(stage4), _regrouped_by_stage6(stage4)
+    invited_talk_paths = _invited_talk_paths(entries, stage3a)
+    marks_contributed_work = _marks_contributed_work(entries)
     siblings: dict[tuple[str, ...], Counter] = defaultdict(Counter)
     for entry in entries:
         siblings[entry.heading_path][entry.code] += 1
@@ -521,6 +601,8 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
         if _is_fellowship_as_membership(entry):
             groups[(FELLOWSHIP_AS_MEMBERSHIP_SHAPE, "H (an elected or honorific fellowship)",
                     entry.heading_path)].append(entry)
+        if _is_talk_as_abstract(entry, entry.heading_path in invited_talk_paths, marks_contributed_work):
+            groups[(TALK_AS_ABSTRACT_SHAPE, "R (invited talk)", entry.heading_path)].append(entry)
         if credential_home is not None and not guarded and not reported & CREDENTIAL_WARN_SHAPES:
             groups[(CREDENTIAL_MISFILED_SHAPE, CREDENTIAL_HOME_EXPECTED[credential_home.code],
                     entry.heading_path)].append(entry)
@@ -575,9 +657,7 @@ def lint_pinned_heading_empty(stage3b: dict, stage3a: dict) -> list[dict]:
     or a child of X, where X has a template slot (#1949). X's slot renders
     empty and the heading's rows land elsewhere. Notes (T) are not records.
     One finding per heading."""
-    mappings = copy.deepcopy(stage3a.get("mappings") or [])
-    _normalize_taxonomy_mappings(mappings)
-    mapping_index = build_mapping_index(mappings)
+    mapping_index = _stage3a_mapping_index(stage3a)
 
     records = [entry for raw, entry in zip(stage3b.get("entries", []), _classified_entries(stage3b),
                                            strict=True)

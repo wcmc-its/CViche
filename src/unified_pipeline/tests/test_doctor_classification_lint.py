@@ -910,6 +910,122 @@ def test_malformed_stage3a_options_are_dropped_not_raised_1949():
     assert stage3a["mappings"][0]["taxonomy_options"][0] == "N1", "the loaded artifact is not mutated"
 
 
+
+# --- talk_as_abstract --------------------------------------------------------
+
+_TALKS_3A = {"mappings": [
+    _node("INVITED LECTURES", "R", 1.0, _node("National", "R", 1.0)),
+    _node("PUBLICATIONS", "S1", 0.9, _node("Lectures by Invitation", "R", 1.0),
+          _node("Abstracts", "S8", 1.0)),
+    _node("TEACHING", "K1", 0.9, _node("Local", "R", 1.0)),
+    _node("PRESENTATIONS", "R", HEADER_PIN_MIN_CONFIDENCE - 0.01, alternative="S8")]}
+_TALK = "\u201cWidgets in Practice.\u201d Invented Society Annual Meeting, Springfield, May 2031"
+_MARKED_TALK = "*\u2020 " + _TALK
+_MARKED_ABSTRACT = ("* Quill AB, Brook CD. A study of widgets. Invented Society Annual Meeting, "
+                    "Springfield, May 2030")
+
+
+def _talks(*entries, stage3a=_TALKS_3A):
+    findings = lint_section_consistency({"entries": list(entries)}, None, stage3a)
+    return [f for f in findings if f["message"].startswith("talk_as_abstract")]
+
+
+def test_an_author_less_s8_under_an_invited_talks_heading_is_reported_as_info():
+    """One finding per heading path; a confident S8, which stage 3b's R pin leaves, counts."""
+    confident = {**_entry(_TALK, "S8", "INVITED LECTURES", idx=41), "taxonomy_confidence": 0.95}
+    findings = _talks(confident, _entry("Gadgets Today, Invented Congress, 2032", "S8",
+                                        "INVITED LECTURES", idx=43))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "section_consistency"
+    assert findings[0]["severity"] == "INFO"
+    assert ("talk_as_abstract: 2 entries under 'INVITED LECTURES' coded S8; "
+            "the source points to R (invited talk)") == findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("entry 41 (S8): ")
+
+
+def test_an_r_sub_heading_under_a_parent_mapped_elsewhere_is_reported():
+    """The leaf-side run says R though the parent maps S1: the mixed path the R pin leaves."""
+    assert len(_talks(_entry(_TALK, "S8", "PUBLICATIONS", "Lectures by Invitation"))) == 1
+
+
+def test_a_scope_sub_heading_under_an_invited_talks_heading_is_reported():
+    assert len(_talks(_entry(_TALK, "S8", "INVITED LECTURES", "National"))) == 1
+
+
+def test_an_s8_with_an_author_list_under_an_invited_heading_is_quiet():
+    cited = "Doe J, Roe A. Widgets in Practice. Invented Society Meeting, 2019"
+    assert _talks(_entry(cited, "S8", "INVITED LECTURES")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Widgets in Practice. Poster, Invented Society Annual Meeting, 2031",
+    "Widgets in Practice (abstract). Invented Society Annual Meeting, 2031",
+])
+def test_an_s8_that_names_contributed_work_is_quiet(text):
+    assert _talks(_entry(text, "S8", "INVITED LECTURES")) == []
+
+
+def test_a_marked_quoted_title_is_quiet_on_a_cv_that_marks_its_contributed_work():
+    """The authors after the title are full names the author-list test does not read."""
+    abstract = _entry(_MARKED_ABSTRACT, "S8", "PUBLICATIONS", "Abstracts", idx=90)
+    marked = _entry(_MARKED_TALK, "S8", "INVITED LECTURES", idx=41)
+    numbered = _entry("7. " + _MARKED_TALK, "S8", "INVITED LECTURES", idx=43)
+    assert _talks(marked, numbered, abstract) == []
+
+
+def test_a_marked_quoted_title_is_reported_when_the_cv_marks_no_contributed_work():
+    unmarked = _entry(_MARKED_ABSTRACT.lstrip("* "), "S8", "PUBLICATIONS", "Abstracts", idx=90)
+    assert len(_talks(_entry(_MARKED_TALK, "S8", "INVITED LECTURES"), unmarked)) == 1
+
+
+def test_a_marked_line_with_no_quoted_title_is_reported_beside_marked_contributed_work():
+    """A mark alone is the CV's own key (rank, invitation), not authorship of this line."""
+    abstract = _entry(_MARKED_ABSTRACT, "S8", "PUBLICATIONS", "Abstracts", idx=90)
+    marked = _entry("*Widgets in Practice, Invented Society Annual Meeting, May 2031", "S8",
+                    "INVITED LECTURES")
+    assert len(_talks(marked, abstract)) == 1
+
+
+def test_a_marked_talk_coded_r_does_not_mark_contributed_work():
+    """Only a marked S8 with an author list says the marks are on contributed work."""
+    talk_by_name = _entry("* Quill AB, Brook CD. Widgets, Invented Society, 2030", "R",
+                          "INVITED LECTURES", idx=39)
+    assert len(_talks(_entry(_MARKED_TALK, "S8", "INVITED LECTURES"), talk_by_name)) == 1
+
+
+def test_an_s8_under_a_heading_3a_maps_to_s8_is_quiet():
+    assert _talks(_entry(_TALK, "S8", "PUBLICATIONS", "Abstracts")) == []
+
+
+def test_an_s8_under_a_heading_3a_maps_to_r_below_the_floor_is_quiet():
+    assert _talks(_entry(_TALK, "S8", "PRESENTATIONS")) == []
+
+
+def test_an_s8_under_a_bare_scope_heading_with_no_section_title_in_its_run_is_quiet():
+    """TEACHING maps K1, so the R run is the scope word alone."""
+    assert _talks(_entry(_TALK, "S8", "TEACHING", "Local")) == []
+
+
+@pytest.mark.parametrize("code", ["R", "K4", "S1"])
+def test_only_an_s8_is_a_talk_filed_as_an_abstract(code):
+    assert _talks(_entry(_TALK, code, "INVITED LECTURES")) == []
+
+
+def test_a_duplicate_marked_s8_is_quiet():
+    duplicate = {**_entry(_TALK, "S8", "INVITED LECTURES"), "is_duplicate": True}
+    assert _talks(duplicate) == []
+
+
+def test_without_stage_3a_the_talk_shape_is_silent_and_the_other_shapes_are_unchanged():
+    entries = [_entry(_TALK, "S8", "INVITED LECTURES", idx=41),
+               _entry("2001-2004 Resident, Invented Hospital", "D1", "APPOINTMENTS", idx=5)]
+    without = lint_section_consistency({"entries": entries})
+    assert _shapes(without) == ["training_as_appointment"]
+    assert lint_section_consistency({"entries": entries}, None, {}) == without
+    with_3a = lint_section_consistency({"entries": entries}, None, _TALKS_3A)
+    assert [f for f in with_3a if not f["message"].startswith("talk_as_abstract")] == without
+    assert _TALKS_3A["mappings"][0]["taxonomy_options"] == [{"code": "R", "confidence": 1.0}]
+
 # --- degree_row_not_degree (#1415) -----------------------------------------
 
 _DEGREE_HEADER = ["Degree, include field of study", "Institution, city and state",
