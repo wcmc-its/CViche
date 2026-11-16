@@ -485,119 +485,72 @@ def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
 #: The codes a banner line is given: a faculty appointment (D1), a hospital
 #: appointment (D2) or a leadership role (O).
 BANNER_RECORD_CODES = frozenset({"D1", "D2", "O"})
-#: The leaf heading of the opening block: the "Personal Data" stage 1b gives
-#: the lines above a CV's first heading (207 of the 214 stored runs open
-#: under it, 4 under "Personal Information", 2 under "Contact" or "Contact
-#: Information"), and the CV's own heading of that kind, which follows it
-#: ("I. Personal Information", "A. Identifying Data:", "Biographical").
-#: Matched whole: "Personal Statement" and "Biographical Sketch" are prose.
+#: The whole leaf heading of the opening block, less a closing colon: the
+#: "Personal Data" stage 1b gives the lines above a CV's first heading, and
+#: the CV's own heading of that kind ("1. Personal history", "A. Identifying
+#: data:", "Biography"). Each alternative is the heading of a banner line in
+#: the 214 stored runs; "Personal Statement" is prose.
 _BANNER_HEADING_RE = re.compile(
-    r"\W*(?:(?:[ivx]{1,4}|[a-z]|\d{1,2})[.):]\s*)?"
-    r"(?:personal(?:\s+(?:data|details|information|history))?"
-    r"|identifying\s+(?:data|information)"
-    r"|biograph(?:y|ical|ic)(?:\s+(?:data|information))?"
-    r"|(?:professional\s+)?contact(?:\s+(?:information|details))?)\W*$", re.IGNORECASE)
-#: The label of an appointment date and nothing else: "Date appointed:",
-#: "Date of Appointment to <school> Faculty:".
-_APPOINTMENT_DATE_LABEL = r"date\s+(?:of\s+)?appoint(?:ed|ment)(?:\s+to\s+[^:]*)?"
-#: A banner line's label, up to its colon: "Title:", "Current Position:",
-#: "PRESENT POSITIONS:", "Current rank:", "Appointment at <school>:",
-#: "Current position, <date> - Present:" (a date between the label and its
-#: colon, within `BANNER_LABEL_DATE_MAX_CHARS`), an appointment date's label,
-#: and an appointment form's "Term:", "Reason for Appointment:" and "Proposed
-#: for Promotion to:".
-BANNER_LABEL_DATE_MAX_CHARS = 40
+    r"(?:[a-z\d]\. )?(?:personal(?: (?:data|details|history))?|identifying data|biography)",
+    re.IGNORECASE)
+#: How a banner line's label opens; the label runs to a colon on its line.
+#: "Title:", "Current Position:", "PRESENT POSITIONS:", "Professional Title:",
+#: "Appointment at <school>:", "Current position, <date> - Present:", "Date of
+#: Appointment to <school> Faculty:", and an appointment form's "Term:",
+#: "Reason for Appointment:" and "Proposed for Promotion to:".
 _BANNER_LABEL_RE = re.compile(
-    r"\W*(?:(?:(?:current|present|professional|academic|faculty|primary)\s+)?"
-    r"(?:title|position|rank|appointment|affiliation)s?(?:\s+at\s+\w+)?"
-    rf"(?:,(?=[^:]*\d)[^:]{{1,{BANNER_LABEL_DATE_MAX_CHARS}}})?"
-    rf"|{_APPOINTMENT_DATE_LABEL}|term|reason\s+for\s+appointment"
-    r"|proposed\s+for\s+\w+(?:\s+(?:to|as))?)\s*:", re.IGNORECASE)
-#: A line that is only an appointment date's label is no post under any
-#: heading stage 1b attached it to, as long as it is one of the CV's first
-#: `BANNER_OPENING_ENTRIES` entries: the two such lines of the 214 stored
-#: runs are the 5th and the 10th entry, one of them under a licensure heading.
-_BANNER_APPOINTMENT_DATE_RE = re.compile(rf"\W*{_APPOINTMENT_DATE_LABEL}\s*:", re.IGNORECASE)
-BANNER_OPENING_ENTRIES = 20
-#: A date on a record: a four-digit year, or a month and a two-digit year
-#: ("6/07-present").
-_BANNER_DATE_RE = re.compile(r"(?:19|20)\d{2}|\b\d{1,2}/\d{2}\b")
+    r"(?:(?:current |present |professional |date of )?(?:title|position|appointment|affiliation)"
+    r"|term|reason|proposed).*:", re.IGNORECASE)
+#: The label of an appointment date and nothing else. It is no post under
+#: any heading stage 1b attached it to: the one such line of the 214 stored
+#: runs sits under a licensure heading.
+BANNER_APPOINTMENT_DATE_LABEL = "date appointed:"
 #: A banner line's title is its first tab-separated part.
 BANNER_PART_SEPARATOR = "\t"
-#: The title words a dated record must repeat to be the banner line's twin:
-#: one shared word ("Professor") pairs a banner with every rank the owner
-#: ever held.
-BANNER_TWIN_MIN_TITLE_WORDS = 2
-#: The name a line gives a university: "<Name> University", "University of
-#: <Name>". A dated record at another university is another post, however
-#: alike its title.
-_BANNER_UNIVERSITY_RE = re.compile(r"University\s+of\s+(\w+)|(\w+)\s+University(?!\s+of\b)", re.IGNORECASE)
+#: The name a line gives a university: "<Name> University". A dated record
+#: at another university is another post, however alike its title.
+_BANNER_UNIVERSITY_RE = re.compile(r"\w+ University")
 
 
-def _banner_title_words(text: str) -> frozenset[str]:
-    """The words of the line's first part, which names the post."""
-    title = text.split(BANNER_PART_SEPARATOR, maxsplit=1)[0]
-    return frozenset(word.lower() for word in _WORD_RE.findall(title))
-
-
-def _in_banner_block(entries: list[_ClassifiedEntry]) -> list[bool]:
-    """Per entry, whether it sits in the CV's opening block: under a leaf
-    heading `_BANNER_HEADING_RE` names, or before the first entry of the
-    first heading it does not name."""
-    past_banner = False
-    flags = []
-    for entry in entries:
-        leaf = entry.heading_path[-1] if entry.heading_path else ""
-        named = bool(_BANNER_HEADING_RE.match(leaf))
-        past_banner = past_banner or bool(leaf and not named)
-        flags.append(named or not past_banner)
-    return flags
-
-
-def _university_names(text: str) -> frozenset[str]:
-    return frozenset((after_of or before).lower() for after_of, before in _BANNER_UNIVERSITY_RE.findall(text))
+def _in_banner_block(entry: _ClassifiedEntry) -> bool:
+    """Whether the entry's leaf heading is one `_BANNER_HEADING_RE` names."""
+    return any(_BANNER_HEADING_RE.fullmatch(leaf.rstrip(":")) for leaf in entry.heading_path[-1:])
 
 
 def _at_another_university(line: str, record: str) -> bool:
     """Whether the banner line and the dated record each name a university
     and share none."""
-    mine, theirs = _university_names(line), _university_names(record)
+    mine, theirs = (frozenset(_BANNER_UNIVERSITY_RE.findall(text)) for text in (line, record))
     return bool(mine and theirs) and mine.isdisjoint(theirs)
 
 
-def _has_dated_twin(entry: _ClassifiedEntry, later: list[_ClassifiedEntry]) -> bool:
-    """Whether a later appointment or leadership record carries a date and
-    every title word of this line, which carries none, and is not a post at
-    another university."""
-    words = _banner_title_words(entry.text)
-    if len(words) < BANNER_TWIN_MIN_TITLE_WORDS or _BANNER_DATE_RE.search(entry.text):
+def _has_dated_twin(entry: _ClassifiedEntry, entries: list[_ClassifiedEntry]) -> bool:
+    """Whether the line carries no year and an appointment or leadership
+    record of the CV carries one, and every word of the line's first part,
+    and is not a post at another university."""
+    if _SUBHEADING_YEAR_RE.search(entry.text):
         return False
-    return any(other.code in BANNER_RECORD_CODES and _BANNER_DATE_RE.search(other.text)
+    title = entry.text.split(BANNER_PART_SEPARATOR)[0]
+    words = {word.lower() for word in _WORD_RE.findall(title)}
+    return any(other.code in BANNER_RECORD_CODES and _SUBHEADING_YEAR_RE.search(other.text)
                and words <= {word.lower() for word in _WORD_RE.findall(other.text)}
                and not _at_another_university(entry.text, other.text)
-               for other in later)
-
-
-def _has_banner_label(entry: _ClassifiedEntry, at: int, in_block: bool) -> bool:
-    """Whether the line opens with a banner label and its colon: any label
-    of `_BANNER_LABEL_RE` in the opening block, an appointment date's label
-    among the CV's first `BANNER_OPENING_ENTRIES` entries."""
-    if in_block:
-        return bool(_BANNER_LABEL_RE.match(entry.text))
-    return at < BANNER_OPENING_ENTRIES and bool(_BANNER_APPOINTMENT_DATE_RE.match(entry.text))
+               for other in entries)
 
 
 def _banner_lines(entries: list[_ClassifiedEntry]) -> list[bool]:
     """Per entry, whether it is a line of the opening banner coded D1, D2 or
-    O (`BANNER_RECORD_CODES`): one that opens with a banner label and its
-    colon (`_has_banner_label`), or one in the opening block
-    (`_in_banner_block`) that is undated with a dated twin further down
-    (`_has_dated_twin`). Stage 6 renders it as a row with no dates beside
-    the dated record of that post."""
+    O (`BANNER_RECORD_CODES`): one that opens with an appointment date's
+    label, or one in the opening block (`_in_banner_block`) that opens with
+    a banner label or is undated with a dated twin (`_has_dated_twin`).
+    Stage 6 renders it as a row with no dates beside the dated record of
+    that post."""
     return [entry.code in BANNER_RECORD_CODES
-            and (_has_banner_label(entry, at, in_block)
-                 or (in_block and _has_dated_twin(entry, entries[at + 1:])))
-            for at, (entry, in_block) in enumerate(zip(entries, _in_banner_block(entries), strict=True))]
+            and (entry.text.lower().startswith(BANNER_APPOINTMENT_DATE_LABEL)
+                 or (_in_banner_block(entry)
+                     and (bool(_BANNER_LABEL_RE.match(entry.text))
+                          or _has_dated_twin(entry, entries))))
+            for entry in entries]
 
 
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
