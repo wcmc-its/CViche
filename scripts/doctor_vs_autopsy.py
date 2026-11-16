@@ -2,6 +2,7 @@
 """Score one doctor_gate.py findings JSON against verified autopsy labels (#819).
 
     python3 scripts/doctor_vs_autopsy.py <doctor_gate.json> <labels_dir> [--json OUT]
+                                         [--source-fixed]
 
 The doctor's per-lint precision used to be re-measured by hand on every batch
 and recorded nowhere the lint could see (#819). This scores an arm's findings
@@ -43,6 +44,21 @@ A null class or stage is grouped as "(none)".
 A finding with no index (`element_idx_start: null`) is counted apart: no hit
 can match it. The autopsy's own `doctor_caught` verdicts are tallied beside it.
 
+--source-fixed adds one split of the UNCAUGHT indexed findings: those that no
+longer reproduce at source. The scoreboard doctors stored runs, so a stage-3b
+miscoding the pipeline has since fixed where it arises (a header pin, the
+duplicate marking) is still in the stored run, has no lint because new runs no
+longer do it, and would count as a doctor miss for ever. For each run with an
+uncaught finding, this checkout's stage-3b post-processing is replayed over the
+stored `stage_3a` / `stage_3b` artifacts the doctor report names
+(`replay_stage3b`); a finding is source_fixed when, at one of its entry
+indices, the taxonomy code changes or a stored duplicate mark is no longer
+made. It says the entry is treated differently now, not that the new treatment
+is the one the verifier wanted. Only the deterministic passes are replayed (no
+LLM), over the codes the stored run ended with. A run whose artifacts are
+missing or unreadable is counted as not replayed and its findings stay
+unjudged. Without the flag the output is unchanged.
+
 Label schema, one `<uid>.json` per run. Ids, codes and counts only -- no CV text:
 
     {"uid": "ABCDEF", "batch": "EBYSBC",
@@ -65,12 +81,17 @@ that recorded failures, a malformed label, or no run that is both doctored and
 labelled exits 2 -- "nothing to score" is not a score.
 """
 import argparse
+import contextlib
 import json
+import logging
 import re
 import sys
 from collections import Counter
+from collections.abc import Iterator
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
@@ -82,6 +103,16 @@ from unified_pipeline.doctor.precision import (  # noqa: E402
     STAGE6_LINT,
     stage6_shape,
 )
+from unified_pipeline.stage3b.classify import detect_duplicates  # noqa: E402
+from unified_pipeline.stage3b.context import (  # noqa: E402
+    build_mapping_index,
+    get_taxonomy_context,
+)
+from unified_pipeline.stage3b.header_pin import (  # noqa: E402
+    apply_header_pin,
+    apply_non_seat_pins,
+)
+from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings  # noqa: E402
 
 STATUS_RAN = "ran"
 FAILED_KEY = "_failed"  # doctor_gate.py's top-level failure map
@@ -91,6 +122,12 @@ NO_CLASS = "(none)"
 CLASS_GROUPS = ("batch_class", "class_ref", "stage")
 CLASS_TEXT_MIN = 3  # the text table lists a class with this many findings; --json lists all
 EXIT_INPUT_ERROR = 2
+
+ARTIFACTS_KEY = "artifacts"  # run_doctor's per-run map of artifact name -> path
+STAGE_3A_ARTIFACT = "stage_3a"
+STAGE_3B_ARTIFACT = "stage_3b"
+DUPLICATE_MARK_KEYS = ("is_duplicate", "duplicate_note")  # what detect_duplicates writes
+STAGE3B_LOGGER = "unified_pipeline.stage3b"
 
 # An entry index at the START of a message or one evidence string -- the
 # formats doctor/lints/*.py and the stage-6 sidecar write: "entry 128 (M2B):"
@@ -143,6 +180,25 @@ class Labels:
     uids: set[str] = field(default_factory=set)
     verified: list[Verified] = field(default_factory=list)
     reviews: list[Review] = field(default_factory=list)
+
+
+class Replayed(NamedTuple):
+    """One stored stage-3b entry, as stored and as this checkout's replay leaves it."""
+    old_code: str | None
+    new_code: str | None
+    was_dup: bool
+    is_dup: bool
+
+    @property
+    def source_fixed(self) -> bool:
+        """Recoded, or stored as a duplicate and no longer marked one."""
+        return self.old_code != self.new_code or (self.was_dup and not self.is_dup)
+
+
+class RunArtifacts(NamedTuple):
+    """The two stored artifacts of one run that the replay reads."""
+    stage_3a: str | None
+    stage_3b: str | None
 
 
 @dataclass
@@ -250,6 +306,92 @@ def load_labels(labels_dir: Path) -> Labels:
     return labels
 
 
+def load_artifacts(doctor_json: Path) -> dict[str, RunArtifacts]:
+    """Each doctored run's stage 3a / 3b artifact paths; a run the doctor
+    recorded none for is absent."""
+    reports = _read_json(doctor_json)
+    if not isinstance(reports, dict):
+        raise InputError(f"{doctor_json}: not a doctor_gate.py findings map")
+    found = {}
+    for uid, report in reports.items():
+        paths = report.get(ARTIFACTS_KEY) if isinstance(report, dict) and uid != FAILED_KEY else None
+        if isinstance(paths, dict):
+            found[uid] = RunArtifacts(paths.get(STAGE_3A_ARTIFACT), paths.get(STAGE_3B_ARTIFACT))
+    return found
+
+
+def _replay_pins(mappings: list[dict], entries: list[dict]) -> list[dict]:
+    """The entries after this checkout's header and non-seat pins, in the stored
+    order. Each hierarchy group is pinned as one classification call, as stage 3b
+    groups them."""
+    mappings = deepcopy(mappings)
+    _normalize_taxonomy_mappings(mappings)
+    index = build_mapping_index(mappings)
+    groups: dict[tuple, list[int]] = {}
+    for position, entry in enumerate(entries):
+        groups.setdefault(tuple(entry.get("hierarchy") or ()), []).append(position)
+    pinned = list(entries)
+    for hierarchy, positions in groups.items():
+        context = get_taxonomy_context(list(hierarchy), index)
+        group, _ = apply_header_pin(deepcopy([entries[p] for p in positions]), context, batch_size=None)
+        for position, entry in zip(positions, group, strict=True):
+            pinned[position] = entry
+    return apply_non_seat_pins(pinned)[0]
+
+
+def _replay_duplicates(entries: list[dict]) -> list[dict]:
+    """The entries as this checkout's duplicate marking leaves them, the stored marks removed first."""
+    unmarked = [{k: v for k, v in deepcopy(entry).items() if k not in DUPLICATE_MARK_KEYS}
+                for entry in entries]
+    return detect_duplicates(unmarked)[0]
+
+
+def replay_stage3b(stage_3a: dict, stage_3b: dict) -> dict[int, Replayed]:
+    """This checkout's stage-3b post-processing over one stored run, by entry index.
+
+    Pure: takes the two loaded artifacts, changes neither. The key is an
+    entry's element_idx_start, truncated as `as_idx_set` does; where several
+    entries share one (stage-2 sub-entries), the first that is source_fixed
+    stands for the index, else the first. An entry with no index is left out:
+    no finding can name it.
+    """
+    entries = stage_3b["entries"]
+    pinned, marked = _replay_pins(stage_3a["mappings"], entries), _replay_duplicates(entries)
+    by_idx: dict[int, Replayed] = {}
+    for stored, recoded, remarked in zip(entries, pinned, marked, strict=True):
+        replayed = Replayed(stored.get("taxonomy_code"), recoded.get("taxonomy_code"),
+                            bool(stored.get("is_duplicate")), bool(remarked.get("is_duplicate")))
+        for idx in as_idx_set(stored.get("element_idx_start")):
+            if idx not in by_idx or (replayed.source_fixed and not by_idx[idx].source_fixed):
+                by_idx[idx] = replayed
+    return by_idx
+
+
+@contextlib.contextmanager
+def _stage3b_warnings_off() -> Iterator[None]:
+    """The replayed stage-3b code logs heading titles; this report is ids, codes and counts."""
+    log = logging.getLogger(STAGE3B_LOGGER)
+    level = log.level
+    log.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        log.setLevel(level)
+
+
+def replay_run(artifacts: RunArtifacts | None) -> dict[int, Replayed]:
+    """Load one run's stored stage 3a / 3b and replay them; InputError, naming
+    why, when the run cannot be replayed."""
+    if artifacts is None or not (artifacts.stage_3a and artifacts.stage_3b):
+        raise InputError("the doctor report names no stage_3a / stage_3b artifact")
+    stage_3a, stage_3b = _read_json(Path(artifacts.stage_3a)), _read_json(Path(artifacts.stage_3b))
+    try:
+        with _stage3b_warnings_off():
+            return replay_stage3b(stage_3a, stage_3b)
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
+        raise InputError(f"malformed stage 3a / 3b artifact ({type(e).__name__}: {e})") from e
+
+
 def _score_hit(row: LintRow, hit: Hit, by_uid: dict[str, list[Verified]]) -> None:
     row.hits += 1
     if hit.severity in LOUD_SEVERITIES:
@@ -289,11 +431,15 @@ def _tally(findings: list[Verified], caught: set[str], attr: str) -> dict[str, d
     return {k: {"findings": n, "caught": hit[k]} for k, n in totals.most_common()}
 
 
+def _caught_ids(rows: dict[str, LintRow]) -> set[str]:
+    return {cid for row in rows.values() for cid in row.caught_ids}
+
+
 def score_recall(rows: dict[str, LintRow], labels: Labels) -> dict:
     """Verified findings matched by at least one hit, by five groupings, and
     the autopsy's own credit (doctor_caught) for comparison."""
     indexed = [v for v in labels.verified if v.idxs]
-    caught = {cid for row in rows.values() for cid in row.caught_ids}
+    caught = _caught_ids(rows)
     credited = [v for v in labels.verified if v.autopsy_credit is not None]
     return {
         "overall": {"findings": len(indexed), "caught": sum(v.id in caught for v in indexed)},
@@ -306,8 +452,46 @@ def score_recall(rows: dict[str, LintRow], labels: Labels) -> dict:
     }
 
 
-def build_report(doctor_json: Path, labels_dir: Path) -> dict:
-    """Load both inputs and score them; InputError when there is nothing to score."""
+def _replay_uncaught(uncaught: list[Verified],
+                     artifacts: dict[str, RunArtifacts]) -> tuple[list[Verified], dict[str, str]]:
+    """(the uncaught findings that are source_fixed, why each unreplayable run was not replayed)."""
+    by_uid: dict[str, list[Verified]] = {}
+    for v in uncaught:
+        by_uid.setdefault(v.uid, []).append(v)
+    fixed, not_replayed = [], {}
+    for uid, findings in sorted(by_uid.items()):
+        try:
+            replayed = replay_run(artifacts.get(uid))
+        except InputError as e:
+            not_replayed[uid] = str(e)  # counted and reported; its findings stay unjudged
+            continue
+        fixed += [v for v in findings
+                  if any(i in replayed and replayed[i].source_fixed for i in v.idxs)]
+    return fixed, not_replayed
+
+
+def score_source_fixed(rows: dict[str, LintRow], labels: Labels,
+                       artifacts: dict[str, RunArtifacts]) -> dict:
+    """Of the indexed findings no hit matched, those this checkout's stage-3b
+    replay treats differently, overall and by the finding's stage."""
+    caught = _caught_ids(rows)
+    uncaught = [v for v in labels.verified if v.idxs and v.id not in caught]
+    fixed, not_replayed = _replay_uncaught(uncaught, artifacts)
+    stages, fixed_stages = Counter(v.stage for v in uncaught), Counter(v.stage for v in fixed)
+    return {
+        "uncaught": len(uncaught), "source_fixed": len(fixed),
+        "runs_not_replayed": len(not_replayed),
+        "uncaught_not_replayed": sum(v.uid in not_replayed for v in uncaught),
+        "not_replayed": not_replayed,
+        "by_stage": {stage: {"uncaught": n, "source_fixed": fixed_stages[stage]}
+                     for stage, n in stages.most_common()},
+        "source_fixed_ids": sorted(v.id for v in fixed),
+    }
+
+
+def build_report(doctor_json: Path, labels_dir: Path, source_fixed: bool = False) -> dict:
+    """Load both inputs and score them; InputError when there is nothing to score.
+    `source_fixed` adds recall's source_fixed block (--source-fixed)."""
     hits, doctored = load_hits(doctor_json)
     labels = load_labels(labels_dir)
     scored = doctored & labels.uids
@@ -317,13 +501,16 @@ def build_report(doctor_json: Path, labels_dir: Path) -> dict:
     labels.reviews = [r for r in labels.reviews if r.uid in scored]
     rows = score_lints([h for h in hits if h.uid in scored], labels)
     unscored = [h for h in hits if h.uid not in scored]
+    recall = score_recall(rows, labels)
+    if source_fixed:
+        recall["source_fixed"] = score_source_fixed(rows, labels, load_artifacts(doctor_json))
     return {
         "doctor_json": str(doctor_json), "labels_dir": str(labels_dir),
         "runs": {"doctored": len(doctored), "labelled": len(labels.uids), "scored": len(scored),
                  "labelled_not_doctored": sorted(labels.uids - doctored)},
         "unscored_hits": {"hits": len(unscored), "uids": sorted({h.uid for h in unscored})},
         "lints": [{**asdict(row), "caught_ids": sorted(row.caught_ids)} for row in rows.values()],
-        "recall": score_recall(rows, labels),
+        "recall": recall,
     }
 
 
@@ -365,7 +552,15 @@ def _recall_lines(recall: dict) -> list[str]:
              f"partial {credit.get('partial', 0)} of {credit['judged']} judged"]
     for group in ("by_severity", "by_batch", *(f"by_{g}" for g in CLASS_GROUPS)):
         lines.append(_group_line(group, recall[group]))
+    if "source_fixed" in recall:
+        lines.append(_source_fixed_line(recall["source_fixed"]))
     return lines
+
+
+def _source_fixed_line(split: dict) -> str:
+    return (f"  of {split['uncaught']} uncaught, {split['source_fixed']} no longer reproduce at source "
+            f"on this checkout (stage-3b pins / duplicate marking); {split['runs_not_replayed']} runs "
+            f"not replayed ({split['uncaught_not_replayed']} uncaught findings unjudged)")
 
 
 def render_text(report: dict) -> str:
@@ -386,9 +581,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("doctor_json", type=Path, help="doctor_gate.py findings JSON")
     parser.add_argument("labels_dir", type=Path, help="directory of <uid>.json labels")
     parser.add_argument("--json", type=Path, default=None, help="also write the report here")
+    parser.add_argument("--source-fixed", action="store_true",
+                        help="split the uncaught findings by whether this checkout's stage-3b "
+                             "replay of the stored run still reproduces them")
     args = parser.parse_args(argv)
     try:
-        report = build_report(args.doctor_json, args.labels_dir)
+        report = build_report(args.doctor_json, args.labels_dir, source_fixed=args.source_fixed)
     except InputError as e:
         print(f"doctor_vs_autopsy: {e}", file=sys.stderr)
         return EXIT_INPUT_ERROR
