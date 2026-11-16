@@ -1952,7 +1952,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("enrichment_pubtype_mismatch", lint_enrichment_pubtype_mismatch,
              ("stage_5_enrichment",)),
     LintSpec("section_consistency", lint_section_consistency, ("stage_3b",),
-             optional=("stage_4",)),
+             optional=("stage_4", "stage_3a")),
     LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
