@@ -388,7 +388,7 @@ def replay_run(artifacts: RunArtifacts | None) -> dict[int, Replayed]:
     try:
         with _stage3b_warnings_off():
             return replay_stage3b(stage_3a, stage_3b)
-    except (AttributeError, KeyError, TypeError, ValueError) as e:
+    except (AttributeError, KeyError, OverflowError, TypeError) as e:
         raise InputError(f"malformed stage 3a / 3b artifact ({type(e).__name__}: {e})") from e
 
 
@@ -478,12 +478,14 @@ def score_source_fixed(rows: dict[str, LintRow], labels: Labels,
     uncaught = [v for v in labels.verified if v.idxs and v.id not in caught]
     fixed, not_replayed = _replay_uncaught(uncaught, artifacts)
     stages, fixed_stages = Counter(v.stage for v in uncaught), Counter(v.stage for v in fixed)
+    lost_stages = Counter(stage for _, stage in {(v.uid, v.stage) for v in uncaught if v.uid in not_replayed})
     return {
         "uncaught": len(uncaught), "source_fixed": len(fixed),
         "runs_not_replayed": len(not_replayed),
         "uncaught_not_replayed": sum(v.uid in not_replayed for v in uncaught),
         "not_replayed": not_replayed,
-        "by_stage": {stage: {"uncaught": n, "source_fixed": fixed_stages[stage]}
+        "by_stage": {stage: {"uncaught": n, "source_fixed": fixed_stages[stage],
+                             "runs_not_replayed": lost_stages[stage]}
                      for stage, n in stages.most_common()},
         "source_fixed_ids": sorted(v.id for v in fixed),
     }
