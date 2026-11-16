@@ -137,15 +137,12 @@ CREDENTIAL_WARN_SHAPES = frozenset({"board_certification_misfiled", "life_suppor
 TALK_AS_ABSTRACT_SHAPE = "talk_as_abstract"
 SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO",
                   TALK_AS_ABSTRACT_SHAPE: "INFO"}
-#: An authorship mark at the head of a line, after an optional list number
-#: ("*", "†": the CV's key says what each stands for), and the same before a
-#: quoted title. Some CVs mark their contributed work this way and write its
-#: authors as full names with degrees, which stage 3b's author-list test does
-#: not read; a CV that marks its talks the same way has no marked abstract
-#: with an author list.
-_AUTHORSHIP_MARK_LEAD = r"^\s*(?:\d{1,4}[.)]\s*)?(?:[*†‡§]\s*)+"
-_AUTHORSHIP_MARK_LEAD_RE = re.compile(_AUTHORSHIP_MARK_LEAD)
-_MARKED_QUOTED_TITLE_RE = re.compile(_AUTHORSHIP_MARK_LEAD + r"[\"“”]")
+#: How a line opens when an authorship mark stands before a quoted title: a
+#: contributed abstract whose authors follow the title as full names with
+#: degrees, which stage 3b's author-list test does not read. The two forms the
+#: stored runs hold (TAA-1); a mark before an unquoted title is the CV's own
+#: key (rank, invitation) and says nothing of authorship.
+_MARKED_QUOTED_TITLE_LEADS = ("*“", "*† “")
 #: The home a credential_misfiled finding points to, by code.
 CREDENTIAL_HOME_EXPECTED = {
     OTHER_EDUCATION_CODE: "B2 (other education: an exam, permit, course or certificate, not a licence or board)",
@@ -523,15 +520,7 @@ def _invited_talk_paths(entries: list[_ClassifiedEntry], stage3a: dict | None) -
         if leaf_run_header_code(get_taxonomy_context(list(path), mapping_index)) == _INVITED_TALK_PIN)
 
 
-def _marks_contributed_work(entries: list[_ClassifiedEntry]) -> bool:
-    """Whether the CV opens an abstract that has an author list with an
-    authorship mark: its marks are on contributed work."""
-    return any(entry.code == _ABSTRACT_CODE and _AUTHORSHIP_MARK_LEAD_RE.match(entry.text)
-               and _has_author_list(entry.text) for entry in entries)
-
-
-def _is_talk_as_abstract(entry: _ClassifiedEntry, under_invited_talks: bool,
-                         marks_contributed_work: bool) -> bool:
+def _is_talk_as_abstract(entry: _ClassifiedEntry, under_invited_talks: bool) -> bool:
     """An S8 entry under a heading stage 3a maps to R, with no author list
     and no contributed-work marker (stage 3b's R pin's own two tests): the
     owner's talk, which stage 6 prints among the Abstracts with no authors
@@ -539,13 +528,12 @@ def _is_talk_as_abstract(entry: _ClassifiedEntry, under_invited_talks: bool,
     the model is unsure and every mapped level agrees; this reports the
     confident answers and the mixed paths it leaves. A duplicate-marked
     entry renders nowhere and is left out, and so is a line that opens with
-    an authorship mark before a quoted title on a CV that marks its
-    contributed work (`_marks_contributed_work`)."""
+    an authorship mark before a quoted title (`_MARKED_QUOTED_TITLE_LEADS`)."""
     if not under_invited_talks or entry.code != _ABSTRACT_CODE or entry.is_duplicate:
         return False
     if _has_author_list(entry.text) or _CONTRIBUTED_WORK.search(entry.text):
         return False
-    return not (marks_contributed_work and _MARKED_QUOTED_TITLE_RE.match(entry.text))
+    return not entry.text.startswith(_MARKED_QUOTED_TITLE_LEADS)
 
 
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
@@ -572,7 +560,6 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None,
     entries = _classified_entries(stage3b)
     rerouted, regrouped = _rerouted_to_honors(stage4), _regrouped_by_stage6(stage4)
     invited_talk_paths = _invited_talk_paths(entries, stage3a)
-    marks_contributed_work = _marks_contributed_work(entries)
     siblings: dict[tuple[str, ...], Counter] = defaultdict(Counter)
     for entry in entries:
         siblings[entry.heading_path][entry.code] += 1
@@ -601,7 +588,7 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None,
         if _is_fellowship_as_membership(entry):
             groups[(FELLOWSHIP_AS_MEMBERSHIP_SHAPE, "H (an elected or honorific fellowship)",
                     entry.heading_path)].append(entry)
-        if _is_talk_as_abstract(entry, entry.heading_path in invited_talk_paths, marks_contributed_work):
+        if _is_talk_as_abstract(entry, entry.heading_path in invited_talk_paths):
             groups[(TALK_AS_ABSTRACT_SHAPE, "R (invited talk)", entry.heading_path)].append(entry)
         if credential_home is not None and not guarded and not reported & CREDENTIAL_WARN_SHAPES:
             groups[(CREDENTIAL_MISFILED_SHAPE, CREDENTIAL_HOME_EXPECTED[credential_home.code],

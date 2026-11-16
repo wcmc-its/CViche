@@ -920,9 +920,6 @@ _TALKS_3A = {"mappings": [
     _node("TEACHING", "K1", 0.9, _node("Local", "R", 1.0)),
     _node("PRESENTATIONS", "R", HEADER_PIN_MIN_CONFIDENCE - 0.01, alternative="S8")]}
 _TALK = "\u201cWidgets in Practice.\u201d Invented Society Annual Meeting, Springfield, May 2031"
-_MARKED_TALK = "*\u2020 " + _TALK
-_MARKED_ABSTRACT = ("* Quill AB, Brook CD. A study of widgets. Invented Society Annual Meeting, "
-                    "Springfield, May 2030")
 
 
 def _talks(*entries, stage3a=_TALKS_3A):
@@ -938,8 +935,8 @@ def test_an_author_less_s8_under_an_invited_talks_heading_is_reported_as_info():
     assert len(findings) == 1
     assert findings[0]["lint"] == "section_consistency"
     assert findings[0]["severity"] == "INFO"
-    assert ("talk_as_abstract: 2 entries under 'INVITED LECTURES' coded S8; "
-            "the source points to R (invited talk)") == findings[0]["message"]
+    assert findings[0]["message"] == ("talk_as_abstract: 2 entries under 'INVITED LECTURES' coded S8; "
+                                      "the source points to R (invited talk)")
     assert findings[0]["evidence"][0].startswith("entry 41 (S8): ")
 
 
@@ -965,32 +962,23 @@ def test_an_s8_that_names_contributed_work_is_quiet(text):
     assert _talks(_entry(text, "S8", "INVITED LECTURES")) == []
 
 
-def test_a_marked_quoted_title_is_quiet_on_a_cv_that_marks_its_contributed_work():
-    """The authors after the title are full names the author-list test does not read."""
-    abstract = _entry(_MARKED_ABSTRACT, "S8", "PUBLICATIONS", "Abstracts", idx=90)
-    marked = _entry(_MARKED_TALK, "S8", "INVITED LECTURES", idx=41)
-    numbered = _entry("7. " + _MARKED_TALK, "S8", "INVITED LECTURES", idx=43)
-    assert _talks(marked, numbered, abstract) == []
+@pytest.mark.parametrize("lead", ["*", "*\u2020 "])
+def test_a_line_that_opens_with_an_authorship_mark_before_a_quoted_title_is_quiet(lead):
+    """A contributed abstract: its authors follow the title as full names the author-list test
+    does not read."""
+    assert _talks(_entry(lead + _TALK, "S8", "INVITED LECTURES")) == []
 
 
-def test_a_marked_quoted_title_is_reported_when_the_cv_marks_no_contributed_work():
-    unmarked = _entry(_MARKED_ABSTRACT.lstrip("* "), "S8", "PUBLICATIONS", "Abstracts", idx=90)
-    assert len(_talks(_entry(_MARKED_TALK, "S8", "INVITED LECTURES"), unmarked)) == 1
-
-
-def test_a_marked_line_with_no_quoted_title_is_reported_beside_marked_contributed_work():
-    """A mark alone is the CV's own key (rank, invitation), not authorship of this line."""
-    abstract = _entry(_MARKED_ABSTRACT, "S8", "PUBLICATIONS", "Abstracts", idx=90)
-    marked = _entry("*Widgets in Practice, Invented Society Annual Meeting, May 2031", "S8",
-                    "INVITED LECTURES")
-    assert len(_talks(marked, abstract)) == 1
-
-
-def test_a_marked_talk_coded_r_does_not_mark_contributed_work():
-    """Only a marked S8 with an author list says the marks are on contributed work."""
-    talk_by_name = _entry("* Quill AB, Brook CD. Widgets, Invented Society, 2030", "R",
-                          "INVITED LECTURES", idx=39)
-    assert len(_talks(_entry(_MARKED_TALK, "S8", "INVITED LECTURES"), talk_by_name)) == 1
+@pytest.mark.parametrize("text", [
+    "*Widgets in Practice, Invented Society Annual Meeting, May 2031",
+    "*\u2020 Widgets in Practice, Invented Society Annual Meeting, May 2031",
+    "Keynote: *" + _TALK,
+    "Keynote: *\u2020 " + _TALK,
+])
+def test_a_mark_before_an_unquoted_title_or_inside_the_line_is_reported(text):
+    """A mark alone is the CV's own key (rank, invitation), not authorship of this line; only
+    the line's own opening counts."""
+    assert len(_talks(_entry(text, "S8", "INVITED LECTURES"))) == 1
 
 
 def test_an_s8_under_a_heading_3a_maps_to_s8_is_quiet():
@@ -1022,9 +1010,10 @@ def test_without_stage_3a_the_talk_shape_is_silent_and_the_other_shapes_are_unch
     without = lint_section_consistency({"entries": entries})
     assert _shapes(without) == ["training_as_appointment"]
     assert lint_section_consistency({"entries": entries}, None, {}) == without
+    assert lint_section_consistency({"entries": entries}, None, {"mappings": None}) == without
     with_3a = lint_section_consistency({"entries": entries}, None, _TALKS_3A)
     assert [f for f in with_3a if not f["message"].startswith("talk_as_abstract")] == without
-    assert _TALKS_3A["mappings"][0]["taxonomy_options"] == [{"code": "R", "confidence": 1.0}]
+    assert len(with_3a) == len(without) + 1
 
 # --- degree_row_not_degree (#1415) -----------------------------------------
 
