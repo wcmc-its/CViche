@@ -47,7 +47,7 @@ can match it. The autopsy's own `doctor_caught` verdicts are tallied beside it.
 --source-fixed adds one split of the UNCAUGHT indexed findings: those that no
 longer reproduce at source. The scoreboard doctors stored runs, so a stage-3b
 miscoding the pipeline has since fixed where it arises (a header pin, the
-duplicate marking) is still in the stored run, has no lint because new runs no
+duplicate marking, a leadership-level demotion it no longer makes) is still in the stored run, has no lint because new runs no
 longer do it, and would count as a doctor miss for ever. For each run with an
 uncaught finding, this checkout's stage-3b post-processing is replayed over the
 stored `stage_3a` / `stage_3b` artifacts the doctor report names
@@ -99,6 +99,9 @@ if str(_SRC) not in sys.path:
 
 # The shapes are the run-time ledger's (doctor/precision.py), so this scorer
 # and the review copy's precision gate (#1589) name a stage-6 message alike.
+from unified_pipeline.core.validators.leadership_level_corrector import (  # noqa: E402
+    correct_leadership_level,
+)
 from unified_pipeline.doctor.precision import (  # noqa: E402
     STAGE6_LINT,
     stage6_shape,
@@ -127,6 +130,7 @@ ARTIFACTS_KEY = "artifacts"  # run_doctor's per-run map of artifact name -> path
 STAGE_3A_ARTIFACT = "stage_3a"
 STAGE_3B_ARTIFACT = "stage_3b"
 DUPLICATE_MARK_KEYS = ("is_duplicate", "duplicate_note")  # what detect_duplicates writes
+LEADERSHIP_CORRECTION_KEY = "leadership_level_correction"  # what correct_leadership_level writes
 STAGE3B_LOGGER = "unified_pipeline.stage3b"
 
 # An entry index at the START of a message or one evidence string -- the
@@ -346,6 +350,18 @@ def _replay_duplicates(entries: list[dict]) -> list[dict]:
     return detect_duplicates(unmarked)[0]
 
 
+def _replay_leadership(entry: dict) -> str | None:
+    """The code this checkout's leadership-level corrector leaves a stored
+    entry with. Only a demotion the stored run made and still carries is
+    replayed, from the code the model gave (#1707: 'Program Director' was
+    demoted from O to P until #1732); any other entry keeps its stored code."""
+    code, correction = entry.get("taxonomy_code"), entry.get(LEADERSHIP_CORRECTION_KEY)
+    if not isinstance(correction, dict) or correction.get("to") != code:
+        return code
+    model_answer = {"taxonomy_code": correction.get("from"), "text": entry.get("text", "")}
+    return correct_leadership_level(model_answer).get("taxonomy_code")
+
+
 def replay_stage3b(stage_3a: dict, stage_3b: dict) -> dict[int, Replayed]:
     """This checkout's stage-3b post-processing over one stored run, by entry index.
 
@@ -359,7 +375,10 @@ def replay_stage3b(stage_3a: dict, stage_3b: dict) -> dict[int, Replayed]:
     pinned, marked = _replay_pins(stage_3a["mappings"], entries), _replay_duplicates(entries)
     by_idx: dict[int, Replayed] = {}
     for stored, recoded, remarked in zip(entries, pinned, marked, strict=True):
-        replayed = Replayed(stored.get("taxonomy_code"), recoded.get("taxonomy_code"),
+        new_code = recoded.get("taxonomy_code")
+        if new_code == stored.get("taxonomy_code"):  # no pin recodes it
+            new_code = _replay_leadership(stored)
+        replayed = Replayed(stored.get("taxonomy_code"), new_code,
                             bool(stored.get("is_duplicate")), bool(remarked.get("is_duplicate")))
         for idx in as_idx_set(stored.get("element_idx_start")):
             if idx not in by_idx or (replayed.source_fixed and not by_idx[idx].source_fixed):
@@ -561,8 +580,9 @@ def _recall_lines(recall: dict) -> list[str]:
 
 def _source_fixed_line(split: dict) -> str:
     return (f"  of {split['uncaught']} uncaught, {split['source_fixed']} no longer reproduce at source "
-            f"on this checkout (stage-3b pins / duplicate marking); {split['runs_not_replayed']} runs "
-            f"not replayed ({split['uncaught_not_replayed']} uncaught findings unjudged)")
+            f"on this checkout (stage-3b pins / duplicate marking / leadership demotion); "
+            f"{split['runs_not_replayed']} runs not replayed "
+            f"({split['uncaught_not_replayed']} uncaught findings unjudged)")
 
 
 def render_text(report: dict) -> str:

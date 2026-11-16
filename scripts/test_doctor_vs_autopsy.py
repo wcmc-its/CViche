@@ -379,6 +379,21 @@ def test_replay_stage3b_runs_the_whole_cv_pins_after_the_header_pin():
     assert dva.replay_stage3b(_stage_3a(), stage_3b) == {5: ("Q2", "D3", False, False)}
 
 
+def test_replay_stage3b_undoes_a_leadership_demotion_this_checkout_no_longer_makes():
+    demoted = {"leadership_level_correction": {"from": "O", "to": "P"}}
+    stage_3b = {"entries": [
+        _entry(5, "P", "POSITIONS", "Program Director, Example Residency, 2015-2020", **demoted),
+        _entry(6, "P", "POSITIONS", "Example Curriculum Task Force, 2016", **demoted),  # still demoted
+        _entry(7, "P", "POSITIONS", "Program Director, Example Fellowship, 2012"),  # the model's own P
+        _entry(8, "K3", "POSITIONS", "Program Director, Example Clerkship, 2010", **demoted),  # recoded since
+        _entry(9, "P", "POSITIONS", "Program Director, Example Course",
+               leadership_level_correction="not a correction"),
+    ]}
+    assert dva.replay_stage3b(_stage_3a(), stage_3b) == {
+        5: ("P", "O", False, False), 6: ("P", "P", False, False), 7: ("P", "P", False, False),
+        8: ("K3", "K3", False, False), 9: ("P", "P", False, False)}
+
+
 def test_source_fixed_counts_only_uncaught_findings_the_replay_changes():
     with tempfile.TemporaryDirectory() as tmp:
         split = dva.build_report(*_source_fixed_inputs(tmp), source_fixed=True)["recall"]["source_fixed"]
@@ -434,7 +449,7 @@ def test_source_fixed_flag_adds_one_block_and_one_line_and_nothing_else():
         off_text, on_report = off_json.read_text(), json.loads(on_json.read_text())
     assert (off[0], on[0], off[2], on[2]) == (0, 0, "", "")
     line = ("  of 8 uncaught, 2 no longer reproduce at source on this checkout (stage-3b pins / "
-            "duplicate marking); 2 runs not replayed (3 uncaught findings unjudged)")
+            "duplicate marking / leadership demotion); 2 runs not replayed (3 uncaught findings unjudged)")
     assert on[1] == off[1].rstrip("\n") + "\n" + line + "\n", on[1]
     assert "uncaught" not in off[1] and "source_fixed" not in off_text
     assert on_report["recall"].pop("source_fixed")["source_fixed"] == 2
