@@ -19,6 +19,8 @@ from unified_pipeline.doctor.lints.classification import (  # noqa: E402
     DEGREE_CELL_QUOTE_CHARS,
     S5_MIN_SIBLINGS,
     SECTION_CONSISTENCY_EVIDENCE_MAX,
+    STUDENT_TRAINING_EXPECTED,
+    TRAINING_EXPECTED,
     lint_degree_row_not_degree,
     lint_pinned_heading_empty,
     lint_section_consistency,
@@ -102,31 +104,51 @@ def test_a_degree_row_and_a_training_program_director_coded_b1_are_quiet():
 
 # --- training_title_misfiled: a training title the two rules above do not read ---
 
-@pytest.mark.parametrize("text, code", [
-    # the title is its own field after an institution and a date
-    ("Invented General Hospital      7/2004-6/2007\tResident\tExampleville", "D3"),
-    ("Invented University | Resident in Example Pathology | March 2031 to August 2034", "D3"),
-    ("Invented University | Clinical Fellow | 2034-2036", "B1"),
+@pytest.mark.parametrize("text, code, expected", [
+    # the title is its own tab- or comma-separated field after an institution or a date
+    ("Invented General Hospital      7/2004-6/2007\tResident\tExampleville", "D3", TRAINING_EXPECTED),
+    ("Invented University, Resident in Example Pathology, March 2031 - August 2034", "D3", TRAINING_EXPECTED),
+    ("Invented University, Clinical Fellow, 2034-2036", "B1", TRAINING_EXPECTED),
+    ("Invented General Hospital, 2004-2007, Resident", "D3", TRAINING_EXPECTED),
+    ("Invented University\tPostdoctoral Scholar\t2031-2033", "D3", TRAINING_EXPECTED),
     # a single start date, or a date the older rules do not read, before the title
-    ("06/2008 Post-Doctoral Scholar, Research, Invented Agency, Exampleville", "D3"),
-    ("2031\tPost-doctoral fellow\tInvented University, Department of Example Studies", "D3"),
-    ("Feb. 2031-Nov. 2032 Postdoctoral Research Fellow\tInvented University", "D1"),
-    ("2031\u201132 Chief Resident B Example Medicine, Invented Hospital", "D2"),
-    ("b) Predoctoral Fellow (Example Agency); Department of Example, Invented University; 2031-2035", "D3"),
+    ("06/2008 Post-Doctoral Scholar, Research, Invented Agency, Exampleville", "D3", TRAINING_EXPECTED),
+    ("2031\tPost-doctoral fellow\tInvented University, Department of Example Studies", "D3",
+     TRAINING_EXPECTED),
+    ("Feb. 2031-Nov. 2032 Postdoctoral Research Fellow\tInvented University", "D1", TRAINING_EXPECTED),
+    ("2031\u201132 Chief Resident B Example Medicine, Invented Hospital", "D2", TRAINING_EXPECTED),
+    ("April, 2031 - March, 2034 Postdoctoral Trainee in Medicine, Invented Hospital", "D3",
+     TRAINING_EXPECTED),
     # the wider title list
-    ("2033 - 2037 Postdoctoral Research Associate, Invented University", "D2"),
-    ("9/31-8/32 Predoctoral Example Fellow, Invented University", "D3"),
-    ("April, 2031 - March, 2034 Postdoctoral Trainee in Medicine, Invented Hospital", "D3"),
-    ("1999-2001 Trainee, Example Genetics Training Program, Invented University", "D3"),
-    ("2031-36 Graduate Student. Department of Example, Invented University\tA project on widgets.", "M1"),
-    ("2011-2012 Research Fellow, Invented University", "M1"),
+    ("2033 - 2037 Postdoctoral Research Associate, Invented University", "D2", TRAINING_EXPECTED),
+    ("2031-2033 Postdoctoral Clinical Research Fellow, Invented University", "D3", TRAINING_EXPECTED),
+    ("1999-2001 Trainee, Example Genetics Training Program, Invented University", "D3", TRAINING_EXPECTED),
+    ("2011-2012 Research Fellow, Invented University", "M1", TRAINING_EXPECTED),
+    ("2012-2014 Research Fellow, Invented University, with one graduate student", "M1", TRAINING_EXPECTED),
+    # a title before the doctorate: training or education, the finding says so
+    ("b) Predoctoral Fellow (Example Agency); Department of Example, Invented University; 2031-2035", "D3",
+     STUDENT_TRAINING_EXPECTED),
+    ("9/31-8/32 Predoctoral Example Fellow, Invented University", "D3", STUDENT_TRAINING_EXPECTED),
+    ("2030-2034 Pre-doctoral Trainee, Invented University", "D3", STUDENT_TRAINING_EXPECTED),
+    ("2028-2030 Predoctoral student, Invented University", "M1", STUDENT_TRAINING_EXPECTED),
+    ("Invented University, Graduate Student, 2028-2030", "D3", STUDENT_TRAINING_EXPECTED),
+    ("2031-36 Graduate Student. Department of Example, Invented University\tA project on widgets.", "M1",
+     STUDENT_TRAINING_EXPECTED),
 ])
-def test_a_training_title_the_older_rules_miss_is_flagged(text, code):
+def test_a_training_title_the_older_rules_miss_is_flagged(text, code, expected):
     findings = _run(_entry(text, code, "Experience", idx=22))
     assert _shapes(findings) == ["training_title_misfiled"]
     assert findings[0]["severity"] == "INFO"
-    assert "the source points to C (training)" in findings[0]["message"]
+    assert findings[0]["message"].endswith(f"the source points to {expected}")
     assert findings[0]["evidence"][0].startswith(f"entry 22 ({code}): ")
+
+
+def test_a_student_title_and_a_trainee_title_under_one_heading_are_two_findings():
+    findings = _run(_entry("2028-2030 Graduate Student, Invented University", "M1", "Experience", idx=3),
+                    _entry("2031-2033 Postdoctoral Scholar, Invented University", "M1", "Experience", idx=4))
+    assert _shapes(findings) == ["training_title_misfiled", "training_title_misfiled"]
+    assert [f["message"].split("the source points to ")[1] for f in findings] == [
+        STUDENT_TRAINING_EXPECTED, TRAINING_EXPECTED]
 
 
 def test_a_training_title_coded_as_an_honor_outside_an_honors_heading_is_flagged():
@@ -136,6 +158,9 @@ def test_a_training_title_coded_as_an_honor_outside_an_honors_heading_is_flagged
     assert _run(_entry(row, "H", "Honors and Awards")) == []
     assert _run(_entry("1993 Chief Resident, Department of Example, Invented University", "H",
                        "Honors", "National")) == []
+    # Only an H row is the owner's distinction: a position code under the same heading is misfiled.
+    assert _shapes(_run(_entry("2001-2003 Postdoctoral Research Associate, Invented Institute", "D3",
+                               "Honors and Awards"))) == ["training_title_misfiled"]
 
 
 def test_a_training_title_an_older_rule_reports_is_not_reported_twice():
@@ -153,6 +178,7 @@ def test_a_training_title_an_older_rule_reports_is_not_reported_twice():
     ("Artist in Residence, Invented Arts Center, 2010", "D3"),
     ("Fellow of the American College of Example Studies", "H"),
     ("Senior Fellow, Invented Institute", "D1"),
+    ("Invented Institute, Senior Fellow, 2010", "D1"),
     ("2014 Fellow, Invented Heart Association (elected 2014)", "D1"),
     ("Faculty Fellow, Invented Hall", "D1"),
     ("Postdoctoral Fellowship Award, Invented Foundation", "H"),
@@ -160,8 +186,12 @@ def test_a_training_title_an_older_rule_reports_is_not_reported_twice():
     ("Graduate Student Advisory Committee", "D3"),
     ("2012-2015 Research Fellow, Invented University, then Senior Lecturer in Example Studies", "D1"),
     ("2012 Research Fellow, Invented University, then Senior Lecturer in Example Studies", "D1"),
+    ("2015-2017 Postdoctoral Scholar, Invented University, then Assistant Professor", "M1"),
+    ("2010-2012 Research Fellow, Invented University, and Instructor in Example Medicine", "M1"),
     ("NRSA Postdoctoral Fellowship F32 EX000000, Example Institute, $52,000", "M2B"),
     ("2001-2004 Resident, Example Medicine, Invented General Hospital", "C"),
+    # a student row coded as a degree is in education already
+    ("2028-2030 Graduate Student, Invented University", "B1"),
     # an award named for its trainees, a role over them, and words after a
     # comma that only begin like a title
     ("2016 Resident Teaching Award, Invented Hospital", "H"),
