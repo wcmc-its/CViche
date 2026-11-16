@@ -6535,6 +6535,32 @@ def test_section_consistency_reads_stage4_for_what_stage6_lists_under_honors_157
     assert honor_as_funding() == []
 
 
+def test_section_consistency_reads_stage3a_for_the_invited_talks_headings(tmp_path):
+    """The registry passes the run's stage 3a to section_consistency
+    (optional, after stage 4): an author-less S8 under a heading 3a maps to
+    R is a talk_as_abstract finding; without stage 3a the shape is silent
+    and the lint still runs."""
+    root = tmp_path / "outputs"
+    talk = {"element_idx_start": 46, "element_idx_end": 46, "taxonomy_code": "S8",
+            "text": "Widgets in Practice, Invented Society Annual Meeting, May 2031",
+            "hierarchy": ["INVITED LECTURES"]}
+    resident = {"element_idx_start": 5, "element_idx_end": 5, "taxonomy_code": "D1",
+                "text": "2001-2004 Resident, Invented Hospital", "hierarchy": ["APPOINTMENTS"]}
+    _write_stage(root, "stage_3b_classified_entries", f"{_UID}_cv_classified.json",
+                 {"document_uid": _UID, "entries": [talk, resident]})
+
+    def shapes():
+        return sorted(f["message"].split(":")[0] for f in run_doctor(root, _UID)["findings"]
+                      if f["lint"] == "section_consistency")
+
+    assert shapes() == ["training_as_appointment"]
+    _write_stage(root, "stage_3a_header_mappings", f"{_UID}_cv_header_taxonomy.json",
+                 {"document_uid": _UID, "mappings": [
+                     {"title": "INVITED LECTURES", "children": [],
+                      "taxonomy_options": [{"code": "R", "confidence": 1.0}]}]})
+    assert shapes() == ["talk_as_abstract", "training_as_appointment"]
+
+
 def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()

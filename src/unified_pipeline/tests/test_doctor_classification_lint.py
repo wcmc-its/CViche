@@ -19,6 +19,8 @@ from unified_pipeline.doctor.lints.classification import (  # noqa: E402
     DEGREE_CELL_QUOTE_CHARS,
     S5_MIN_SIBLINGS,
     SECTION_CONSISTENCY_EVIDENCE_MAX,
+    STUDENT_TRAINING_EXPECTED,
+    TRAINING_EXPECTED,
     lint_degree_row_not_degree,
     lint_pinned_heading_empty,
     lint_section_consistency,
@@ -100,6 +102,124 @@ def test_a_degree_row_and_a_training_program_director_coded_b1_are_quiet():
                "Education")) == []
 
 
+# --- training_title_misfiled: a training title the two rules above do not read ---
+
+@pytest.mark.parametrize("text, code, expected", [
+    # the title is its own tab-, comma- or bar-separated field after an institution or a date
+    ("Invented University | Postdoctoral Scholar | 2031-2033", "D3", TRAINING_EXPECTED),
+    ("Invented General Hospital      7/2004-6/2007\tResident\tExampleville", "D3", TRAINING_EXPECTED),
+    ("Invented University, Resident in Example Pathology, March 2031 - August 2034", "D3", TRAINING_EXPECTED),
+    ("Invented University, Clinical Fellow, 2034-2036", "B1", TRAINING_EXPECTED),
+    ("Invented General Hospital, 2004-2007, Resident", "D3", TRAINING_EXPECTED),
+    ("Invented University\tPostdoctoral Scholar\t2031-2033", "D3", TRAINING_EXPECTED),
+    # a single start date, or a date the older rules do not read, before the title
+    ("06/2008 Post-Doctoral Scholar, Research, Invented Agency, Exampleville", "D3", TRAINING_EXPECTED),
+    ("2031\tPost-doctoral fellow\tInvented University, Department of Example Studies", "D3",
+     TRAINING_EXPECTED),
+    ("Feb. 2031-Nov. 2032 Postdoctoral Research Fellow\tInvented University", "D1", TRAINING_EXPECTED),
+    ("2031\u201132 Chief Resident B Example Medicine, Invented Hospital", "D2", TRAINING_EXPECTED),
+    ("March 2031 Postdoctoral Scholar, Invented University", "D3", TRAINING_EXPECTED),
+    ("5. Research Fellow\tInvented Hospital", "D3", TRAINING_EXPECTED),
+    ("April, 2031 - March, 2034 Postdoctoral Trainee in Medicine, Invented Hospital", "D3",
+     TRAINING_EXPECTED),
+    # the wider title list
+    ("2033 \u2013 2037 Postdoctoral Research Associate, Invented University", "D2", TRAINING_EXPECTED),
+    ("2031-2033 Postdoctoral Clinical Research Fellow, Invented University", "D3", TRAINING_EXPECTED),
+    ("1999-2001 Trainee, Example Genetics Training Program, Invented University", "D3", TRAINING_EXPECTED),
+    ("2011-2012 Research Fellow, Invented University", "M1", TRAINING_EXPECTED),
+    ("2012-2014 Research Fellow, Invented University, with one graduate student", "M1", TRAINING_EXPECTED),
+    # a title before the doctorate: training or education, the finding says so
+    ("b) Predoctoral Fellow (Example Agency); Department of Example, Invented University; 2031-2035", "D3",
+     STUDENT_TRAINING_EXPECTED),
+    ("9/31-8/32 Predoctoral Example Fellow, Invented University", "D3", STUDENT_TRAINING_EXPECTED),
+    ("2030-2034 Pre-doctoral Trainee, Invented University", "D3", STUDENT_TRAINING_EXPECTED),
+    ("2028-2030 Predoctoral student, Invented University", "M1", STUDENT_TRAINING_EXPECTED),
+    ("Invented University, Graduate Student, 2028-2030", "D3", STUDENT_TRAINING_EXPECTED),
+    ("2031-36 Graduate Student. Department of Example, Invented University\tA project on widgets.", "M1",
+     STUDENT_TRAINING_EXPECTED),
+])
+def test_a_training_title_the_older_rules_miss_is_flagged(text, code, expected):
+    findings = _run(_entry(text, code, "Experience", idx=22))
+    assert _shapes(findings) == ["training_title_misfiled"]
+    assert findings[0]["severity"] == "INFO"
+    assert findings[0]["message"].endswith(f"the source points to {expected}")
+    assert findings[0]["evidence"][0].startswith(f"entry 22 ({code}): ")
+
+
+def test_a_student_title_and_a_trainee_title_under_one_heading_are_two_findings():
+    findings = _run(_entry("2028-2030 Graduate Student, Invented University", "M1", "Experience", idx=3),
+                    _entry("2031-2033 Postdoctoral Scholar, Invented University", "M1", "Experience", idx=4))
+    assert _shapes(findings) == ["training_title_misfiled", "training_title_misfiled"]
+    assert [f["message"].split("the source points to ")[1] for f in findings] == [
+        "C or B (training or education)", "C (training)"]
+
+
+def test_a_training_title_coded_as_an_honor_outside_an_honors_heading_is_flagged():
+    row = "2001-2003 Postdoctoral Research Fellow, Invented Institute"
+    assert _shapes(_run(_entry(row, "H", "Positions"))) == ["training_title_misfiled"]
+    # Listed under honors by its owner, at any level of the heading path, the row is a distinction.
+    assert _run(_entry(row, "H", "Curriculum Vitae", "Honors and Awards")) == []
+    assert _run(_entry("1993 Chief Resident, Department of Example, Invented University", "H",
+                       "Honors", "National")) == []
+
+
+def test_a_fellow_row_under_a_heading_that_says_its_rows_were_elected_is_no_training_title():
+    row = "2014 Fellow, Invented Heart Association"
+    assert _shapes(_run(_entry(row, "D1", "Positions"))) == ["training_title_misfiled"]
+    assert _run(_entry(row, "D1", "Elected Positions")) == []
+
+
+def test_a_training_title_an_older_rule_reports_is_not_reported_twice():
+    findings = _run(
+        _entry("2002-2005 Postdoctoral Fellow in Example Medicine, Invented University", "D3",
+               "Appointments"),
+        _entry("Intern (Example Medicine)\tInvented General Hospital 1991-1992", "B1", "Education"))
+    assert sorted(_shapes(findings)) == ["training_as_appointment", "training_as_degree"]
+
+
+@pytest.mark.parametrize("text, code", [
+    ("Program Director, Internal Medicine Residency, Invented Hospital", "D2"),
+    ("Resident Veterinarian, Invented Farm, 1984-1986", "D3"),
+    ("1984 Resident Veterinarian, Invented Farm", "D3"),
+    ("Artist in Residence, Invented Arts Center, 2010", "D3"),
+    ("Fellow of the American College of Example Studies", "H"),
+    ("Senior Fellow, Invented Institute", "D1"),
+    ("Invented Institute, Senior Fellow, 2010", "D1"),
+    ("2014 Fellow, Invented Heart Association (elected 2014)", "D1"),
+    ("Faculty Fellow, Invented Hall", "D1"),
+    ("Postdoctoral Fellowship Award, Invented Foundation", "H"),
+    ("Mentor to graduate students", "M1"),
+    ("Graduate Student Advisory Committee", "D3"),
+    ("2012-2015 Research Fellow, Invented University, then Senior Lecturer in Example Studies", "D1"),
+    ("2012 Research Fellow, Invented University, then Senior Lecturer in Example Studies", "D1"),
+    ("2015-2017 Postdoctoral Scholar, Invented University, then Assistant Professor", "M1"),
+    ("2010-2012 Research Fellow, Invented University, and Instructor in Example Medicine", "M1"),
+    ("NRSA Postdoctoral Fellowship F32 EX000000, Example Institute, $52,000", "M2B"),
+    ("2001-2004 Resident, Example Medicine, Invented General Hospital", "C"),
+    # a student row coded as a degree is in education already
+    ("2028-2030 Graduate Student, Invented University", "B1"),
+    # a role over trainees, a title in the middle of a field, and a word
+    # that only begins like "in" after a title
+    ("March 2031 - April 2033 Intern Coordinator\tInvented Pharmacy", "D3"),
+    ("Supervisor of one postdoctoral scholar, Invented University", "D3"),
+    ("Postdoctoral Scholar Initiative, Invented University", "D3"),
+    # a first word that only begins like a month is no date
+    ("Marketing Intern, Invented Company, 2001", "D3"),
+    ("Decorating Intern, Invented Company, 2001", "D3"),
+    ("Novartis Fellow, Invented Institute, 2010", "D1"),
+    ("Mayo Fellow, Invented Institute, 2010", "D1"),
+    ("Attending Staff Physician and Chief Resident     2031-2032\tInvented Hospital", "D2"),
+    # a date closed by a colon opens a second post stage 2 merged into the row
+    ("Apr. 2031 - Apr. 2032: Associate Scientist\tApr. 2028 - Mar. 2031: Postdoctoral Scholar, "
+     "Invented University", "D3"),
+])
+def test_a_role_an_honor_or_a_coded_training_row_is_no_misfiled_training_title(text, code):
+    """Under a heading that names no honors, so the quiet is the line's own.
+    Only this shape is asserted: training_as_appointment reads the resident
+    veterinarian and the research fellow by its own, older pattern."""
+    assert "training_title_misfiled" not in _shapes(_run(_entry(text, code, "Experience")))
+
+
 def test_board_certification_filed_as_membership_is_flagged():
     findings = _run(_entry("ABIM, Internal Medicine 2001, 2011", "I", "Post Graduate Experience"))
     assert _shapes(findings) == ["board_certification_misfiled"]
@@ -168,6 +288,159 @@ def test_bare_url_coded_s0_is_quiet_but_a_cross_reference_coded_s0_is_not():
 
 def test_cross_reference_inside_a_record_is_quiet():
     assert _run(_entry("1987-92 NIH R01 (see above), total $500,000", "M2B", "Grants")) == []
+
+
+_NON_RECORD = "non_record_line_as_record"
+
+
+@pytest.mark.parametrize("text, code, heading", [
+    # a lead-in ending in a colon that introduces a group
+    ("At the University of Invented:", "K1", "Courses Taught"),
+    ("Jane Doe (postdoctoral fellow):", "N4", "Mentees' Awards"),
+    ("Referee for these journals:", "Q4D", "Editorial Activities"),
+    ("Sponsor:\tAmount:\tStatus:", "M2B", "Invented Support"),
+    # digits and a slash that are no year and no slash date
+    ("Invented Course 201 students:", "N3", "Trainees"),
+    ("Year 1/Year 2 students:", "N3", "Trainees"),
+    ("Invented Ward B/4 staff:", "L1", "Clinical Service"),
+    # a continuation heading
+    ("PRESENTATIONS - Community Engagement (continued)", "K5", "PRESENTATIONS - Community Engagement"),
+    ("Academic Appointments (cont)", "D1", "Academic Appointments"),
+    ("INVENTED WORKSHOPS, CONTINUED", "B2", "Workshops"),
+    # the leaf heading, or the tail of it, over again
+    ("Invented Service Roles", "P", "Invented Service Roles"),
+    ("(Refereed)", "R", "Regional (Refereed)"),
+    # a bare date stamp
+    ("7/16/18", "M2B", "Completed Trials"),
+    ("11/3/2019", "A", "Personal Data"),
+    # a footnote or legend
+    ("*Held virtually", "R", "Oral Presentations"),
+    ("* denotes corresponding author", "S1", "Publications"),
+    ("* Oral presentation", "S8", "Abstracts"),
+    ("*Presenters underlined when not the owner", "S8", "Posters"),
+    ("*winner of the Invented Poster Award for the best student poster.", "N4", "Trainees"),
+    ("* Served as a research mentor for the trainee", "N2", "Book Chapters"),
+    ("Note: trainees are underlined", "S8", "Abstracts"),
+    ("Section Notes: GS marks a graduate student", "S1", "Publications"),
+    ("(Note: trainees in italics are students)", "S8", "Abstracts"),
+    # a table column-header row
+    ("Period Fellowship Project Student", "N3", "Trainees"),
+    ("Name Years Degree Title", "N3", "Trainees"),
+    ("Period Project Student", "N3", "Trainees"),
+    ("Names Dates Dissertation/Thesis Title", "N3A", "Trainees"),
+    ("Year Semester Course No. Title Cr. Hrs. Enrollment", "K1", "Teaching"),
+    ("Docket Number Filed Issued Country Application Date", "M2D", "Patents"),
+    ("Role Description Leadership Training", "L3", "Leadership"),
+    ("Period Scholarship Undergraduate Grad Student", "N3", "Trainees"),
+    ("Name Current Position Title of Project", "N3", "Trainees"),
+    # the leaf heading with other punctuation between its words
+    ("Regional - Refereed", "R", "Regional (Refereed)"),
+    # a count summary
+    ("Local-48, Grand rounds-15", "R", "Invited Lectures"),
+])
+def test_a_non_record_line_coded_as_a_record_is_one_info_finding(text, code, heading):
+    findings = _run(_entry(text, code, heading))
+    assert _shapes(findings) == [_NON_RECORD]
+    assert findings[0]["severity"] == "INFO"
+    assert "the source points to T (not a record)" in findings[0]["message"]
+
+
+def test_a_record_with_a_label_and_more_text_after_its_colon_is_quiet():
+    assert _run(_entry("Course Director: Physiology 101, 2010-2015", "K3", "Teaching")) == []
+
+
+def test_a_citation_opening_with_the_cvs_own_authorship_mark_is_quiet():
+    assert _run(_entry("*Quill J, Brook A. A trial of things. J Invented Med 2019;1:2-3.", "S1",
+                       "Publications")) == []
+
+
+def test_a_mentee_record_is_quiet():
+    assert _run(_entry("Jane Doe, PhD (2015-2019)", "N3B", "Trainees")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "At the University of Invented:", "Academic Appointments (cont)", "*Held virtually", "7/16/18",
+    "Name Years Degree Title"])
+def test_a_non_record_line_already_coded_t_is_quiet(text):
+    assert _run(_entry(text, "T", "Academic Appointments")) == []
+
+
+def test_a_one_word_degree_or_society_row_with_a_year_is_quiet():
+    assert _run(_entry("FACS, 2010", "I", "Memberships")) == []
+
+
+def test_a_short_undated_committee_name_is_quiet():
+    assert _run(_entry("Admissions Committee", "P", "Committees")) == []
+
+
+@pytest.mark.parametrize("text, code", [
+    # a dated line ending in a colon is as often a record cut short
+    ("2001: Invented Society, Invited Speaker, Springfield:", "R"),
+    ("Invented Scholars of 1998:", "H"),
+    ("Invented Symposium, Springfield, 3/14/92, (posters):", "R"),
+    # an author list cut at its colon
+    ("12. Quill, A.B., Brook, C.D., and Panel, E.F.:", "S1"),
+    # a lead-in is short: a long sentence ending in a colon is left to the reader
+    ("The invented course met weekly in the spring term for second-year students and covered "
+     "these topics in order:", "K3"),
+    # a starred record: a footnote mark alone is no legend
+    ("*Invented Tumor Board, weekly case review", "L1"),
+    ("*Invented Review Committee, Member 2020 - Present", "P"),
+    # a record that only ends with "(continued)" after its dates
+    ("Jan 2003-Mar 2003 Invented Design Team, Springfield (continued)", "P"),
+    # an award made of column words, and two column words
+    ("Student Leadership Fellowship", "H"),
+    ("Invented Scholar of the Year", "H"),
+    ("Course Title", "K1"),
+    # a record that opens, or ends, with a full date is no bare date stamp
+    ("7/16/18 Invented Trial of things, site investigator", "M2B"),
+    ("Invented Talk, Springfield, 7/16/18", "R"),
+    # a word that only starts or ends like "continued"
+    ("Member, Invented Contracts Committee", "P"),
+    ("Invented drug registry, discontinued", "M1"),
+    # a starred record whose first word is a legend word: a role closed by a comma, or a dated line
+    ("*Presenter, Invented Annual Meeting, Springfield, 2019", "R"),
+    ("*Winner, Invented Teaching Prize, 2018", "H"),
+    ("*Winner, Invented Teaching Prize", "H"),
+    ("*Winner: Invented Teaching Prize", "H"),
+    ("*Held at the Invented Annual Meeting, Springfield, 2019", "R"),
+    # a legend word with no footnote mark, or with the mark further in
+    ("Held weekly, Invented Tumor Board case review", "L1"),
+    ("Invented Seminar Series *held jointly with Invented College", "K5"),
+    ("*Oral presentation at the Invented Annual Meeting, Springfield", "R"),
+    # a starred record whose first word only begins with a legend word
+    ("*Heldman Lecture, Invented College", "H"),
+    # "notes" inside a title, and a title opening "Notes on"
+    ("Invented Lecture Notes: Cardiology for Students", "S3"),
+    ("Notes on an invented method. J Invented Med 2019;1:2-3.", "S5"),
+    # counts after, or before, a record's own words
+    ("Invented Grand Rounds (weekly). Local-48, Regional-15", "R"),
+    ("Local-48, Regional-15 sessions for the invented house staff", "R"),
+    # one label and number is no count of a list's rows
+    ("Invented Trial Phase-2", "M2B"),
+])
+def test_record_lines_that_look_like_non_records_are_quiet(text, code):
+    assert _run(_entry(text, code, "Invented Heading")) == []
+
+
+def test_a_line_ending_its_headings_last_word_without_being_it_is_quiet():
+    assert _run(_entry("Doctoral", "C", "Postdoctoral")) == []
+    assert _run(_entry("Admissions Committee", "P", "Institutional Committees")) == []
+    # only the heading's last words: a word from its start or its middle is a record's own
+    assert _run(_entry("Service", "P", "Committees and Service Activities")) == []
+    assert _run(_entry("Committees", "P", "Committees and Service Activities")) == []
+
+
+def test_the_heading_a_line_repeats_is_the_leaf_of_its_path():
+    assert _shapes(_run(_entry("(Refereed)", "R", "Invented Talks", "Regional (Refereed)"))) == [_NON_RECORD]
+    assert _run(_entry("Invented Talks", "R", "Invented Talks", "Regional (Refereed)")) == []
+
+
+def test_a_line_matching_two_sub_shapes_is_reported_once():
+    # A continuation heading that is also its leaf heading over again.
+    findings = _run(_entry("Invented Talks (continued)", "R", "Invented Talks (continued)"))
+    assert _shapes(findings) == [_NON_RECORD]
+    assert "1 entry" in findings[0]["message"]
 
 
 def test_journal_article_coded_s5_among_peer_reviewed_siblings_is_flagged():
@@ -813,6 +1086,145 @@ def test_the_lint_reports_exactly_what_the_stage3b_credential_pin_recodes_1577(t
     assert (_shapes(_run(entry)) == ["credential_misfiled"]) is pinned
 
 
+# --- banner_line_as_record (BAN-1) ------------------------------------------
+
+_DATED_PROFESSOR = _entry("2015-present Professor of Medicine, Invented University", "D1",
+                          "Academic Appointments", idx=40)
+
+
+@pytest.mark.parametrize("text,code,headings", [
+    ("Title: Professor of Medicine", "D1", ["Personal Data"]),
+    ("CURRENT POSITIONS: Director, Invented Service\tInvented General Hospital", "O", ["1. Personal"]),
+    ("PRESENT TITLE: Associate Professor", "D1", ["A. Identifying data:"]),
+    ("Professional Title: Invented Professor of Chemistry", "D1", ["Personal Details"]),
+    ("Appointment at Invented: Assistant Professor of Medicine (tenure track)", "D1",
+     ["PERSONAL HISTORY"]),
+    ("Position: Attending Physician, Invented General Hospital", "D2", ["BIOGRAPHY"]),
+    ("CURRENT AFFILIATION: Associate Professor, Invented University", "D1", ["Personal Data"]),
+    ("Term: Primary Appointment: beginning September 1, 2031", "D1", ["Personal Data"]),
+    ("Reason for Appointment: to build the Invented Service", "D1", ["Personal Data"]),
+    ("Proposed for Promotion to: Associate Professor, Invented Track", "D1", ["Personal Data"]),
+    ("Date of Appointment to Invented University Faculty: 9/1/31", "D1", ["Personal Data"]),
+    ("Current position, Jan 1 2031 - Present: Clinical Professor, Invented Service", "D1",
+     ["Personal Data"]),
+    # the leaf heading names the block, whatever is above it
+    ("Title: Professor of Medicine", "D1", ["Curriculum Vitae", "Personal Data"]),
+    # an appointment date's label alone is no post under any heading
+    ("DATE APPOINTED: May 1, 2031", "D1", ["Licensure"]),
+])
+def test_a_labelled_banner_line_coded_as_a_record_is_reported_as_info(text, code, headings):
+    findings = _run(_entry(text, code, *headings, idx=4))
+    assert _shapes(findings) == ["banner_line_as_record"]
+    assert findings[0]["severity"] == "INFO"
+    assert "the source points to T (not a record)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith(f"entry 4 ({code}): ")
+
+
+@pytest.mark.parametrize("text", [
+    "Title Professor of Medicine",                  # no colon
+    "Former Title: Instructor in Medicine",         # the label does not open the line
+    "Department: Medicine",                         # no banner label
+    "Professional Experience: Professor of Medicine",  # a section label
+    "Date appointed May 1, 2031",                   # an appointment date's words, no colon
+    "Original date appointed: May 1, 2031",         # that label does not open the line
+    "Title Professor of Medicine\nPhone: 555-0100",  # the colon is on another line
+])
+def test_a_line_that_opens_with_no_banner_label_is_quiet(text):
+    assert _run(_entry(text, "D1", "Personal Data", idx=4)) == []
+
+
+def test_an_address_or_phone_line_coded_a_is_quiet():
+    assert _run(_entry("Title: Professor of Medicine\t1 Invented Avenue\tPhone: 555-0100", "A",
+                       "Personal Data", idx=4), _DATED_PROFESSOR) == []
+
+
+@pytest.mark.parametrize("headings", [
+    [],                               # no heading at all
+    ["Personal Statement"],           # prose: the heading goes on past the phrase
+    ["Summary of Personal Data"],     # the phrase does not open the heading
+    ["12. Personal Data"],            # one letter or digit numbers the heading
+    ["A) Personal Data"],             # and a full stop closes the number
+    ["A Personal Data"],              # which the full stop must follow
+    ["1.Personal Data"],              # with a space after it
+    ["Personal Data", "Education"],   # the leaf heading is not the root's
+])
+def test_a_line_outside_the_opening_block_is_quiet(headings):
+    assert _run(_entry("Title: Professor of Medicine", "D1", *headings, idx=4),
+                _entry("Professor of Medicine", "D1", *headings, idx=5), _DATED_PROFESSOR) == []
+
+
+def test_a_dated_row_under_a_real_current_positions_heading_is_quiet():
+    """A section of the CV's own: its rows are records, labelled or undated
+    as they may be."""
+    assert _run(
+        _entry("2018-present Director, Invented Service, Invented General Hospital", "O",
+               "Current Positions", idx=30),
+        _entry("Title: Director, Invented Service", "O", "Current Positions", idx=31),
+        _entry("Director, Invented Service", "O", "Current Positions", idx=32)) == []
+
+
+def test_an_undated_banner_line_with_a_dated_twin_is_reported():
+    """The dated record repeats the first part's words, in any case and with
+    or without more, wherever its year sits; the parts after the first are
+    the banner's address."""
+    banner = _entry("PROFESSOR OF MEDICINE\tInvented University School of Medicine\t1 Invented Avenue",
+                    "D1", "Personal Data", idx=4)
+    chair = _entry("Chair, Department of Invented Studies", "O", "Personal Data", idx=5)
+    dated_chair = _entry("CHAIR, DEPARTMENT OF INVENTED STUDIES, 1998-2004", "O",
+                         "Leadership", idx=60)
+    findings = _run(banner, chair, _DATED_PROFESSOR, dated_chair)
+    assert _shapes(findings) == ["banner_line_as_record"]
+    assert "2 entries under 'Personal Data' coded D1, O" in findings[0]["message"]
+
+
+def test_a_dated_appointment_under_personal_data_is_quiet():
+    """A record with its own year is no dateless copy, twin or no twin."""
+    assert _run(_entry("Professor of Medicine, Invented University, 1998-present", "D1",
+                       "Personal Data", idx=4), _DATED_PROFESSOR) == []
+
+
+def test_an_undated_banner_line_with_no_dated_twin_is_quiet():
+    """A CV whose appointments list no dates has no dated record for the
+    banner line to copy; nor has one whose dated record is another post."""
+    banner = _entry("Professor of Medicine\tInvented University", "D1", "Personal Data", idx=4)
+    assert _run(banner, _entry("Professor of Medicine, Invented University", "D1",
+                               "Appointments", idx=40)) == []
+    assert _run(banner, _entry("2001-2005 Assistant Professor of Surgery, Invented University", "D1",
+                               "Appointments", idx=40)) == []
+
+
+def test_a_dated_row_that_is_no_appointment_is_no_twin():
+    """An honor that repeats the banner's title words is not the dated
+    record of that post."""
+    assert _run(_entry("Professor of Medicine\tInvented University", "D1", "Personal Data", idx=4),
+                _entry("2015 Professor of Medicine Teaching Award, Invented University", "H",
+                       "Honors", idx=70)) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Professor of Medicine\tsince 1998",  # its year sits in a later part: the line is dated
+    "\u2022\tProfessor of Medicine",       # a bullet's first part has no words to repeat
+    "Professor\tInvented University",     # one word repeats in most records
+])
+def test_a_dated_or_wordless_banner_line_has_no_twin(text):
+    assert _run(_entry(text, "D1", "Personal Data", idx=4), _DATED_PROFESSOR) == []
+
+
+@pytest.mark.parametrize("banner_at,twin_at,reported", [
+    ("Invented University", "Unrelated University", False),
+    ("Invented University", "Invented University", True),
+    ("Invented University", "Invented General Hospital", True),   # the twin names no university
+    ("Invented General Hospital", "Unrelated University", True),  # the banner names none
+    ("Invented University and Unrelated University", "Unrelated University", True),  # they share one
+])
+def test_a_dated_twin_at_another_university_is_another_post(banner_at, twin_at, reported):
+    findings = _run(
+        _entry(f"Attending Physician\t{banner_at} Medical Group", "D2", "Personal Data", idx=4),
+        _entry(f"2011 - 2014 Associate Professor, Attending Physician, {twin_at}", "D1",
+               "Appointments", idx=40))
+    assert (_shapes(findings) == ["banner_line_as_record"]) is reported
+
+
 # --- pinned_heading_empty (#1949) ------------------------------------------
 
 def _node(title, code, confidence, *children, alternative=None):
@@ -909,6 +1321,119 @@ def test_malformed_stage3a_options_are_dropped_not_raised_1949():
     assert _pinned(stage3a, _entry(_DIRECTOR, "O", "MENTORING")) == []
     assert stage3a["mappings"][0]["taxonomy_options"][0] == "N1", "the loaded artifact is not mutated"
 
+
+
+# --- talk_as_abstract --------------------------------------------------------
+
+_TALKS_3A = {"mappings": [
+    _node("INVITED LECTURES", "R", 1.0, _node("National", "R", 1.0)),
+    _node("PUBLICATIONS", "S1", 0.9, _node("Lectures by Invitation", "R", 1.0),
+          _node("Abstracts", "S8", 1.0)),
+    _node("TEACHING", "K1", 0.9, _node("Local", "R", 1.0)),
+    _node("PRESENTATIONS", "R", HEADER_PIN_MIN_CONFIDENCE - 0.01, alternative="S8")]}
+_TALK = "\u201cWidgets in Practice.\u201d Invented Society Annual Meeting, Springfield, May 2031"
+
+
+def _talks(*entries, stage3a=_TALKS_3A):
+    findings = lint_section_consistency({"entries": list(entries)}, None, stage3a)
+    return [f for f in findings if f["message"].startswith("talk_as_abstract")]
+
+
+def test_an_author_less_s8_under_an_invited_talks_heading_is_reported_as_info():
+    """One finding per heading path; a confident S8, which stage 3b's R pin leaves, counts."""
+    confident = {**_entry(_TALK, "S8", "INVITED LECTURES", idx=41), "taxonomy_confidence": 0.95}
+    findings = _talks(confident, _entry("Gadgets Today, Invented Congress, 2032", "S8",
+                                        "INVITED LECTURES", idx=43))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "section_consistency"
+    assert findings[0]["severity"] == "INFO"
+    assert findings[0]["message"] == ("talk_as_abstract: 2 entries under 'INVITED LECTURES' coded S8; "
+                                      "the source points to R (invited talk)")
+    assert findings[0]["evidence"][0].startswith("entry 41 (S8): ")
+
+
+def test_only_the_s8_under_the_invited_heading_is_reported_when_the_cv_has_one():
+    """The invited-talks heading counts for its own entries, not for the CV's."""
+    findings = _talks(_entry(_TALK, "S8", "INVITED LECTURES", idx=41),
+                      _entry(_TALK, "S8", "PUBLICATIONS", "Abstracts", idx=90))
+    assert len(findings) == 1
+    assert "1 entry under 'INVITED LECTURES'" in findings[0]["message"]
+
+
+def test_an_r_sub_heading_under_a_parent_mapped_elsewhere_is_reported():
+    """The leaf-side run says R though the parent maps S1: the mixed path the R pin leaves."""
+    assert len(_talks(_entry(_TALK, "S8", "PUBLICATIONS", "Lectures by Invitation"))) == 1
+
+
+def test_a_scope_sub_heading_under_an_invited_talks_heading_is_reported():
+    assert len(_talks(_entry(_TALK, "S8", "INVITED LECTURES", "National"))) == 1
+
+
+def test_an_s8_with_an_author_list_under_an_invited_heading_is_quiet():
+    cited = "Doe J, Roe A. Widgets in Practice. Invented Society Meeting, 2019"
+    assert _talks(_entry(cited, "S8", "INVITED LECTURES")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Widgets in Practice. Poster, Invented Society Annual Meeting, 2031",
+    "Widgets in Practice (abstract). Invented Society Annual Meeting, 2031",
+])
+def test_an_s8_that_names_contributed_work_is_quiet(text):
+    assert _talks(_entry(text, "S8", "INVITED LECTURES")) == []
+
+
+@pytest.mark.parametrize("lead", ["*", "*\u2020 "])
+def test_a_line_that_opens_with_an_authorship_mark_before_a_quoted_title_is_quiet(lead):
+    """A contributed abstract: its authors follow the title as full names the author-list test
+    does not read."""
+    assert _talks(_entry(lead + _TALK, "S8", "INVITED LECTURES")) == []
+
+
+@pytest.mark.parametrize("text", [
+    "*Widgets in Practice, Invented Society Annual Meeting, May 2031",
+    "*\u2020 Widgets in Practice, Invented Society Annual Meeting, May 2031",
+    "Keynote: *" + _TALK,
+    "Keynote: *\u2020 " + _TALK,
+])
+def test_a_mark_before_an_unquoted_title_or_inside_the_line_is_reported(text):
+    """A mark alone is the CV's own key (rank, invitation), not authorship of this line; only
+    the line's own opening counts."""
+    assert len(_talks(_entry(text, "S8", "INVITED LECTURES"))) == 1
+
+
+def test_an_s8_under_a_heading_3a_maps_to_s8_is_quiet():
+    assert _talks(_entry(_TALK, "S8", "PUBLICATIONS", "Abstracts")) == []
+
+
+def test_an_s8_under_a_heading_3a_maps_to_r_below_the_floor_is_quiet():
+    assert _talks(_entry(_TALK, "S8", "PRESENTATIONS")) == []
+
+
+def test_an_s8_under_a_bare_scope_heading_with_no_section_title_in_its_run_is_quiet():
+    """TEACHING maps K1, so the R run is the scope word alone."""
+    assert _talks(_entry(_TALK, "S8", "TEACHING", "Local")) == []
+
+
+@pytest.mark.parametrize("code", ["R", "K4", "S1"])
+def test_only_an_s8_is_a_talk_filed_as_an_abstract(code):
+    assert _talks(_entry(_TALK, code, "INVITED LECTURES")) == []
+
+
+def test_a_duplicate_marked_s8_is_quiet():
+    duplicate = {**_entry(_TALK, "S8", "INVITED LECTURES"), "is_duplicate": True}
+    assert _talks(duplicate) == []
+
+
+def test_without_stage_3a_the_talk_shape_is_silent_and_the_other_shapes_are_unchanged():
+    entries = [_entry(_TALK, "S8", "INVITED LECTURES", idx=41),
+               _entry("2001-2004 Resident, Invented Hospital", "D1", "APPOINTMENTS", idx=5)]
+    without = lint_section_consistency({"entries": entries})
+    assert _shapes(without) == ["training_as_appointment"]
+    assert lint_section_consistency({"entries": entries}, None, {}) == without
+    assert lint_section_consistency({"entries": entries}, None, {"mappings": None}) == without
+    with_3a = lint_section_consistency({"entries": entries}, None, _TALKS_3A)
+    assert [f for f in with_3a if not f["message"].startswith("talk_as_abstract")] == without
+    assert len(with_3a) == len(without) + 1
 
 # --- degree_row_not_degree (#1415) -----------------------------------------
 

@@ -19,7 +19,16 @@ fellowship coded I, which renders as a membership and is missing from Honors.
 course or a technologist certificate coded F1 or F2, or a licence or board
 certification coded B2 or I, by `core.credential_lines`, the module stage
 3b's credential pin, the WCM table corrector and stage 6's licensure guard
-read too.
+read too. `banner_line_as_record` (BAN-1 in doctor/PRECISION.md) is a line
+of the CV's opening banner ("Title: Professor of ...") coded D1, D2 or O,
+which renders as a dateless copy of the dated record further down.
+`non_record_line_as_record` reports a line that is no record at all and
+carries a record code: a group lead-in ending in a colon, a continuation
+heading, a column-header row, a footnote or legend, a bare date stamp
+(S3B-NRL in doctor/PRECISION.md). `training_title_misfiled` reads a
+training title where the two training rules do not look: as its own field later in the line, after a
+single date, or from a longer title list, coded as a position, a research
+activity, a degree or an honor.
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -41,8 +50,13 @@ already put right, and which licence or board records stage 6's licensure
 guard regroups under their credential's own code, whose credential_misfiled
 and life_support_as_license shapes it has put right.
 
-`lint_pinned_heading_empty` (#1949) is the one lint here that also reads
-stage 3a: a heading 3a mapped to code X at the header-pin floor whose entries
+It reads stage 3a too, when the run has it, for the talk_as_abstract shape:
+an author-less S8 under a heading path stage 3a maps to R (stage 3b's R pin's
+own reading, `leaf_run_header_code`), which stage 6 prints among the Abstracts
+and leaves out of Invitations to Speak.
+
+`lint_pinned_heading_empty` (#1949) reads stage 3a as well: a heading 3a
+mapped to code X at the header-pin floor whose entries
 3b coded anything but X, so X's template slot gets none of them (XAXVYB's
 N1 heading, #1938).
 
@@ -79,11 +93,20 @@ from unified_pipeline.core.honor_lines import (
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_context
 from unified_pipeline.stage3b.header_pin import (
+    _ABSTRACT_CODE,
+    _CONTRIBUTED_WORK,
     _GRANT_CODES,
+    _INVITED_TALK_PIN,
     HEADER_PIN_MIN_CONFIDENCE,
+    _has_author_list,
+    _is_trainee_title,
+    _names_authors,
+    is_lead_in,
+    leaf_run_header_code,
 )
 from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE
+from unified_pipeline.stage6.parsing.entry_card import _MONTH
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     heading_names_teaching_role,
@@ -118,7 +141,44 @@ CREDENTIAL_MISFILED_SHAPE = "credential_misfiled"
 #: The older WARN shapes that already report part of what credential_misfiled
 #: reads: an entry one of them reports is not reported twice.
 CREDENTIAL_WARN_SHAPES = frozenset({"board_certification_misfiled", "life_support_as_license"})
-SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO"}
+#: A line of the CV's opening banner coded as an appointment or a leadership
+#: role: stage 6 renders it as one more row, with no dates, beside the dated
+#: record of the same post further down. 42 of 43 entries true on the 214
+#: stored runs (BAN-1 in doctor/PRECISION.md). INFO until its precision is
+#: read on a fresh batch, as credential_misfiled started.
+BANNER_LINE_SHAPE = "banner_line_as_record"
+#: A line that is no record (a group label, a continuation heading, a
+#: footnote, a column-header row) coded as one, which stage 6 renders as a
+#: junk row. INFO until its hits are read on a fresh batch (S3B-NRL in
+#: doctor/PRECISION.md has the stored-run measurement).
+NON_RECORD_LINE_SHAPE = "non_record_line_as_record"
+NON_RECORD_LINE_EXPECTED = "T (not a record)"
+#: A training title the two older training rules do not read, coded as a
+#: position, a research activity, a degree or an honor. INFO until its hits
+#: over the stored runs (TTM-1 in doctor/PRECISION.md) are promoted.
+TRAINING_TITLE_MISFILED_SHAPE = "training_title_misfiled"
+#: The older WARN shapes that read a training title at the opening of the
+#: line: an entry one of them reports is not reported twice.
+TRAINING_WARN_SHAPES = frozenset({"training_as_appointment", "training_as_degree"})
+#: A talk the author filed under an invited-talks heading, coded S8: stage 6
+#: prints it among the Abstracts as a citation with no authors, and the
+#: Invitations to Speak table misses it. Stage 3b's R pin recodes such a row
+#: only when the model is unsure and every mapped heading level agrees, so
+#: this reports what the pin leaves. INFO: measured on the stored runs the
+#: shape was written from (TAA-1 in doctor/PRECISION.md), not a fresh batch.
+TALK_AS_ABSTRACT_SHAPE = "talk_as_abstract"
+SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO",
+                  CREDENTIAL_MISFILED_SHAPE: "INFO",
+                  BANNER_LINE_SHAPE: "INFO",
+                  NON_RECORD_LINE_SHAPE: "INFO",
+                  TRAINING_TITLE_MISFILED_SHAPE: "INFO",
+                  TALK_AS_ABSTRACT_SHAPE: "INFO"}
+#: How a line opens when an authorship mark stands before a quoted title: a
+#: contributed abstract whose authors follow the title as full names with
+#: degrees, which stage 3b's author-list test does not read. The two forms the
+#: stored runs hold (TAA-1); a mark before an unquoted title is the CV's own
+#: key (rank, invitation) and says nothing of authorship.
+_MARKED_QUOTED_TITLE_LEADS = ("*“", "*† “")
 #: The home a credential_misfiled finding points to, by code.
 CREDENTIAL_HOME_EXPECTED = {
     OTHER_EDUCATION_CODE: "B2 (other education: an exam, permit, course or certificate, not a licence or board)",
@@ -232,6 +292,73 @@ _TRAINING_PROGRAM_ROLE_RE = re.compile(r"director|coordinator|chair", re.IGNOREC
 DEGREE_CODES = frozenset({"B1"})
 
 
+#: Investigator-initiated research activities, and honors and awards.
+RESEARCH_ACTIVITY_CODE = "M1"
+HONOR_CODE = "H"
+#: What a training row is filed as when training_title_misfiled reports it:
+#: a position, a research activity, a degree or an honor. The Postdoctoral
+#: Training table prints none of them.
+TRAINING_TITLE_WRONG_CODES = APPOINTMENT_CODES | DEGREE_CODES | {RESEARCH_ACTIVITY_CODE, HONOR_CODE}
+#: Where a field of a row ends: a tab, a comma or a table-cell bar.
+_FIELD_BREAK_RE = re.compile(r"[\t,|]")
+#: What a row or a field opens with before its title: a list marker ("b)",
+#: "5."), then a date, a date range or a run of date-only fields ("Feb. 2031-Nov.
+#: 2032", "06/2008", "2031<tab>"). A month is a whole month name or its
+#: abbreviation, so "Marketing Intern" and "Mayo Fellow" keep their first word.
+_FIELD_LEAD_RE = re.compile(rf"(?:[a-z]\))?(?:{_MONTH}|\d|[\s/.\u2011\u2013-])*", re.IGNORECASE)
+#: The training titles `header_pin._TRAINEE_TITLE` does not hold: a
+#: postdoctoral scholar, associate, research associate or trainee, a
+#: postdoctoral fellow named with "clinical research", a predoctoral fellow,
+#: trainee or student, a bare research fellow, a graduate student and a bare
+#: trainee ("Trainee, <program>"). Each ends its field: a field break, a
+#: full stop or a bracket follows it, or it goes on "in <specialty>". So "Graduate Student Advisory Committee", "Postdoctoral
+#: Scholar Award" and "Research Fellowship" are no title. A bare clinical
+#: fellow is the pin's own title.
+_WIDER_TRAINEE_TITLE_RE = re.compile(
+    r"(?:post-?doctoral\s+(?:(?:clinical\s+)?research\s+)?(?:scholar|associate|trainee|fellow)"
+    r"|pre-?doctoral\s+(?:\w+\s+)?(?:fellow|trainee|student)"
+    r"|research\s+fellow"
+    r"|graduate\s+student"
+    r"|trainee)(?=\s*(?:[\t,|.(]|in\b))", re.IGNORECASE)
+#: How a title before the doctorate opens (a predoctoral one or a graduate
+#: student): the row is training or education, and which of the two the
+#: title alone does not say.
+_STUDENT_TITLE_RE = re.compile(r"pre-?doctoral|graduate", re.IGNORECASE)
+#: What a training_title_misfiled finding points to: the training table, or,
+#: for a student title, training or education. A student title coded as a
+#: degree is already in education and is not reported.
+TRAINING_EXPECTED = "C (training)"
+STUDENT_TRAINING_EXPECTED = "C or B (training or education)"
+#: A faculty rank on the same line: "Research Fellow" beside "Lecturer" is a
+#: rank outside the United States, and a row that names an instructor post
+#: and a fellowship is the faculty row.
+_FACULTY_RANK_RE = re.compile(r"professor|lecturer|instructor", re.IGNORECASE)
+
+
+def _trainee_title_start(text: str) -> int | None:
+    """Where the row's training title begins: at the opening of the row or
+    of a later tab-, comma- or bar-separated field, once that field's date
+    is read. The title is one stage 3b's content pin reads
+    (`_is_trainee_title`) or one of the wider list. None when the row names
+    no training title."""
+    for field_start in [0, *(field.end() for field in _FIELD_BREAK_RE.finditer(text))]:
+        start = _FIELD_LEAD_RE.match(text, field_start).end()
+        if _is_trainee_title(text[start:]) or _WIDER_TRAINEE_TITLE_RE.match(text, start):
+            return start
+    return None
+
+
+def _is_student_title(text: str) -> bool:
+    """Whether the row's training title is a predoctoral or graduate-student one."""
+    start = _trainee_title_start(text)
+    return start is not None and bool(_STUDENT_TITLE_RE.match(text, start))
+
+
+def _training_title_expected(text: str) -> str:
+    """The home a training_title_misfiled finding names for the row."""
+    return STUDENT_TRAINING_EXPECTED if _is_student_title(text) else TRAINING_EXPECTED
+
+
 def _homed_in_other_education(text: str) -> bool:
     """Whether the line, read as a board certification, is an exam, a course
     or another B2 credential (`misfiled_credential_home`): "Diplomate,
@@ -318,6 +445,8 @@ class _ClassifiedEntry(NamedTuple):
     #: The code's reasoning: a credential_misfiled row made F2 by stage 3b's
     #: board-block rule opens no board block for the row after it.
     reasoning: str = ""
+    #: Stage 3b's duplicate mark: the entry is a second copy of another one.
+    is_duplicate: bool = False
 
 
 def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
@@ -328,6 +457,7 @@ def _classified_entries(stage3b: dict) -> list[_ClassifiedEntry]:
             heading_path=tuple(str(h) for h in entry.get("hierarchy") or ()),
             text=str(entry.get("text") or ""),
             reasoning=str(entry.get("classification_reasoning") or ""),
+            is_duplicate=bool(entry.get("is_duplicate")),
         )
         for entry in stage3b.get("entries", [])
     ]
@@ -473,6 +603,231 @@ def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
     return entry.code == MEMBERSHIP_CODE and is_honorific_fellowship(entry.text, entry.heading_path)
 
 
+#: The codes a banner line is given: a faculty appointment (D1), a hospital
+#: appointment (D2) or a leadership role (O).
+BANNER_RECORD_CODES = frozenset({"D1", "D2", "O"})
+#: The whole leaf heading of the opening block, less a closing colon: the
+#: "Personal Data" stage 1b gives the lines above a CV's first heading, and
+#: the CV's own heading of that kind ("1. Personal history", "A. Identifying
+#: data:", "Biography"). Each alternative is the heading of a banner line in
+#: the 214 stored runs; "Personal Statement" is prose.
+_BANNER_HEADING_RE = re.compile(
+    r"(?:[a-z\d]\. )?(?:personal(?: (?:data|details|history))?|identifying data|biography)",
+    re.IGNORECASE)
+#: How a banner line's label opens; the label runs to a colon on its line.
+#: "Title:", "Current Position:", "PRESENT POSITIONS:", "Professional Title:",
+#: "Appointment at <school>:", "Current position, <date> - Present:", "Date of
+#: Appointment to <school> Faculty:", and an appointment form's "Term:",
+#: "Reason for Appointment:" and "Proposed for Promotion to:".
+_BANNER_LABEL_RE = re.compile(
+    r"(?:(?:current |present |professional |date of )?(?:title|position|appointment|affiliation)"
+    r"|term|reason|proposed).*:", re.IGNORECASE)
+#: The label of an appointment date and nothing else. It is no post under
+#: any heading stage 1b attached it to: the one such line of the 214 stored
+#: runs sits under a licensure heading.
+BANNER_APPOINTMENT_DATE_LABEL = "date appointed:"
+#: A banner line's title is its first tab-separated part.
+BANNER_PART_SEPARATOR = "\t"
+#: Words a banner title needs before a dated record that repeats them is its
+#: twin: a bullet's empty first part repeats in every record, and one word
+#: ("Professor") in most.
+BANNER_TWIN_MIN_TITLE_WORDS = 2
+#: The name a line gives a university: "<Name> University". A dated record
+#: at another university is another post, however alike its title.
+_BANNER_UNIVERSITY_RE = re.compile(r"\w+ University")
+
+
+def _in_banner_block(entry: _ClassifiedEntry) -> bool:
+    """Whether the entry's leaf heading is one `_BANNER_HEADING_RE` names."""
+    return any(_BANNER_HEADING_RE.fullmatch(leaf.rstrip(":")) for leaf in entry.heading_path[-1:])
+
+
+def _at_another_university(line: str, record: str) -> bool:
+    """Whether the banner line and the dated record each name a university
+    and share none."""
+    mine, theirs = (frozenset(_BANNER_UNIVERSITY_RE.findall(text)) for text in (line, record))
+    return bool(mine and theirs) and mine.isdisjoint(theirs)
+
+
+def _has_dated_twin(entry: _ClassifiedEntry, entries: list[_ClassifiedEntry]) -> bool:
+    """Whether the line carries no year and an appointment or leadership
+    record of the CV carries one, and every word of the line's first part,
+    and is not a post at another university."""
+    if _SUBHEADING_YEAR_RE.search(entry.text):
+        return False
+    title = entry.text.split(BANNER_PART_SEPARATOR)[0]
+    words = {word.lower() for word in _WORD_RE.findall(title)}
+    if len(words) < BANNER_TWIN_MIN_TITLE_WORDS:
+        return False
+    return any(other.code in BANNER_RECORD_CODES and _SUBHEADING_YEAR_RE.search(other.text)
+               and words <= {word.lower() for word in _WORD_RE.findall(other.text)}
+               and not _at_another_university(entry.text, other.text)
+               for other in entries)
+
+
+def _banner_lines(entries: list[_ClassifiedEntry]) -> list[bool]:
+    """Per entry, whether it is a line of the opening banner coded D1, D2 or
+    O (`BANNER_RECORD_CODES`): one that opens with an appointment date's
+    label, or one in the opening block (`_in_banner_block`) that opens with
+    a banner label or is undated with a dated twin (`_has_dated_twin`).
+    Stage 6 renders it as a row with no dates beside the dated record of
+    that post."""
+    return [entry.code in BANNER_RECORD_CODES
+            and (entry.text.lower().startswith(BANNER_APPOINTMENT_DATE_LABEL)
+                 or (_in_banner_block(entry)
+                     and (bool(_BANNER_LABEL_RE.match(entry.text))
+                          or _has_dated_twin(entry, entries))))
+            for entry in entries]
+# --- non_record_line_as_record ----------------------------------------------
+#
+# Each sub-shape is one named pattern; `_is_non_record_line` reports them all
+# under one shape name. All of them read the entry's whole text, so a record
+# with a label inside it ("Course Director: <course>, 2010-2015") is none.
+
+#: A four-digit year or a slash date. A lead-in, a continuation heading or
+#: a legend carrying one is as often a record ("<year>: <meeting>, <role>,
+#: <city>:", "*Held at <meeting>, <year>"), so those three sub-shapes read
+#: undated lines only.
+_LINE_DATE_RE = re.compile(r"(?:19|20)\d\d|\d/\d")
+#: "<heading> (continued)", "<heading> (cont)", "<heading>, CONTINUED": the
+#: heading a page break repeats.
+_CONTINUATION_HEADING_RE = re.compile(r"[\s(]cont(?:inued)?\W*$", re.IGNORECASE)
+#: A line that is only a slash date: "7/16/18".
+_BARE_DATE_STAMP_RE = re.compile(r"^\d+/\d+/\d+$")
+#: A footnote or legend: an asterisk, then what it stands for ("*Held
+#: virtually", "* denotes corresponding author", "*Presenters underlined").
+#: The asterisk alone is not enough: many CVs open a real record with it as
+#: an authorship or in-rank mark, and a record's own first word can be a
+#: legend word, so a role closed by a comma or colon ("*Winner, <prize>",
+#: "*Winner: <prize>") is none.
+_LEGEND_NOTE_RE = re.compile(
+    r"^\*\s*(?:(?:denotes|held|served as|presenters|winner)\b(?![,:])|oral presentation$)", re.IGNORECASE)
+#: "Note: ...", "Notes: ...", "Section Notes: ...", "(Note: ...)".
+_NOTE_LABEL_RE = re.compile(r"^\(?(?:section )?notes?:", re.IGNORECASE)
+#: A count of the rows of a list, two labels or more: "Local-48, Grand
+#: rounds-15".
+_COUNT_PAIR = r"[A-Za-z ]+-\d+"
+_COUNT_SUMMARY_RE = re.compile(rf"^(?:{_COUNT_PAIR},)+{_COUNT_PAIR}$")
+#: Words that head a table column and name nothing by themselves, and words
+#: that head one but also name things ("Student Leadership Fellowship" is an
+#: award). A line of COLUMN_ROW_MIN_WORDS or more words, every one from
+#: either set and one or more from the first, is the table's header row
+#: ("Period Fellowship Project Student"), which stage 2 read as a paragraph.
+#: Each word is one a stored run's header row carries (S3B-NRL).
+COLUMN_LABEL_WORDS = frozenset({
+    "name", "names", "date", "dates", "year", "years", "period", "semester", "title", "role",
+    "description", "number", "no", "country", "docket", "filed", "issued", "enrollment", "cr", "hrs",
+})
+COLUMN_SUBJECT_WORDS = frozenset({
+    "position", "current", "course", "project", "student", "fellowship", "scholarship", "degree",
+    "dissertation", "thesis", "training", "application", "undergraduate", "grad", "leadership", "of",
+})
+COLUMN_ROW_MIN_WORDS = 3
+#: "Dissertation/Thesis" is two column words.
+_COLUMN_WORD_JOINER = "/"
+#: "No.", "Hrs.": a column word's own full stop.
+_COLUMN_WORD_STRIP = "."
+#: What the comparison of a line with its leaf heading ignores.
+_NOT_A_LETTER_OR_DIGIT_RE = re.compile(r"\W+")
+
+
+def _is_column_header_row(text: str) -> bool:
+    """COLUMN_ROW_MIN_WORDS or more different words, every one a column
+    word and one or more of them a column label."""
+    words = {word.strip(_COLUMN_WORD_STRIP).lower() for word in text.replace(_COLUMN_WORD_JOINER, " ").split()}
+    return (len(words) >= COLUMN_ROW_MIN_WORDS and words <= COLUMN_LABEL_WORDS | COLUMN_SUBJECT_WORDS
+            and not words.isdisjoint(COLUMN_LABEL_WORDS))
+
+
+def _repeats_leaf_heading(text: str, leaf: str) -> bool:
+    """The line is its own leaf heading over again, or the last words of it
+    ("(Refereed)" under "Regional (Refereed)")."""
+    line = _NOT_A_LETTER_OR_DIGIT_RE.sub(" ", text).strip().lower()
+    heading = _NOT_A_LETTER_OR_DIGIT_RE.sub(" ", leaf).strip().lower()
+    return bool(line) and (line == heading or heading.endswith(" " + line))
+
+
+def _is_undated_non_record(text: str) -> bool:
+    """The three sub-shapes read on an undated line only: a group lead-in
+    (`is_lead_in`, stage 3b's own test) that is no author list cut at its
+    colon, a continuation heading, a legend."""
+    if _LINE_DATE_RE.search(text):
+        return False
+    return ((is_lead_in(text) and not _names_authors(text))
+            or bool(_CONTINUATION_HEADING_RE.search(text))
+            or bool(_LEGEND_NOTE_RE.search(text)))
+
+
+def _is_non_record_line(entry: _ClassifiedEntry) -> bool:
+    """A record code on page furniture, a note or a group label: a lead-in
+    ending in a colon, a continuation heading, a footnote or legend, a
+    column-header row, the leaf heading repeated, a bare date stamp, a count
+    summary. Stage 6 renders each as a junk row."""
+    if entry.code == UNCLASSIFIED_CODE:
+        return False
+    text = entry.text
+    leaf = entry.heading_path[-1] if entry.heading_path else ""
+    return bool(_BARE_DATE_STAMP_RE.search(text) or _NOTE_LABEL_RE.search(text)
+                or _COUNT_SUMMARY_RE.search(text) or _is_column_header_row(text)
+                or _repeats_leaf_heading(text, leaf) or _is_undated_non_record(text))
+
+
+def _is_training_title_misfiled(entry: _ClassifiedEntry) -> bool:
+    """A position, research-activity, degree or honor code on a row whose
+    own title says it is training (`_trainee_title_start`): an intern, a
+    resident, a postdoctoral, predoctoral, clinical or research fellow, a
+    postdoctoral scholar or associate, a graduate student or a trainee. The
+    Postdoctoral Training table misses the row. A row that names a faculty
+    rank or a role over a training program is the faculty row, and an
+    elected or honorific fellowship (`is_honorific_fellowship`) or a row
+    its owner listed under honors is the honor. A predoctoral or
+    graduate-student row coded as a degree is in education already. For a
+    position code stage 3b's content pin reads the opening title by the
+    same test, so on a fresh run this reports what the pin does not reach."""
+    if entry.code not in TRAINING_TITLE_WRONG_CODES or _trainee_title_start(entry.text) is None:
+        return False
+    if _FACULTY_RANK_RE.search(entry.text) or _TRAINING_PROGRAM_ROLE_RE.search(entry.text):
+        return False
+    if entry.code in DEGREE_CODES and _is_student_title(entry.text):
+        return False
+    return not (any(heading_names_honors(level) for level in entry.heading_path)
+                or is_honorific_fellowship(entry.text, entry.heading_path))
+def _stage3a_mapping_index(stage3a: dict) -> dict:
+    """Stage 3a's heading mappings, indexed as stage 3b indexes them."""
+    mappings = copy.deepcopy(stage3a.get("mappings") or [])
+    _normalize_taxonomy_mappings(mappings)
+    return build_mapping_index(mappings)
+
+
+def _invited_talk_paths(entries: list[_ClassifiedEntry], stage3a: dict | None) -> frozenset[tuple[str, ...]]:
+    """The heading paths whose leaf-side run of mapped levels says R at the
+    header-pin floor, with a real section title in the run
+    (`leaf_run_header_code`, stage 3b's R pin's own reading of stage 3a).
+    Empty without stage 3a."""
+    if not stage3a:
+        return frozenset()
+    mapping_index = _stage3a_mapping_index(stage3a)
+    return frozenset(
+        path for path in {entry.heading_path for entry in entries}
+        if leaf_run_header_code(get_taxonomy_context(list(path), mapping_index)) == _INVITED_TALK_PIN)
+
+
+def _is_talk_as_abstract(entry: _ClassifiedEntry, under_invited_talks: bool) -> bool:
+    """An S8 entry under a heading stage 3a maps to R, with no author list
+    and no contributed-work marker (stage 3b's R pin's own two tests): the
+    owner's talk, which stage 6 prints among the Abstracts with no authors
+    and leaves out of Invitations to Speak. The R pin recodes it only when
+    the model is unsure and every mapped level agrees; this reports the
+    confident answers and the mixed paths it leaves. A duplicate-marked
+    entry renders nowhere and is left out, and so is a line that opens with
+    an authorship mark before a quoted title (`_MARKED_QUOTED_TITLE_LEADS`)."""
+    if not under_invited_talks or entry.code != _ABSTRACT_CODE or entry.is_duplicate:
+        return False
+    if _has_author_list(entry.text) or _CONTRIBUTED_WORK.search(entry.text):
+        return False
+    return not entry.text.startswith(_MARKED_QUOTED_TITLE_LEADS)
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -485,21 +840,26 @@ def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
     return message, evidence
 
 
-def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[dict]:
+def lint_section_consistency(stage3b: dict, stage4: dict | None = None,
+                             stage3a: dict | None = None) -> list[dict]:
     """Stage-3b codes that contradict the entry's own heading, text or
     siblings (EBYSBC E11/E30). One finding per shape and heading path.
     `stage4`, when the run has it, says which grant records stage 6 lists
     under Honors (`_rerouted_to_honors`) and which licence or board records
-    it regroups (`_regrouped_by_stage6`)."""
+    it regroups (`_regrouped_by_stage6`). `stage3a`, when the run has it,
+    says which heading paths are invited talks (`_invited_talk_paths`);
+    without it the talk_as_abstract shape reports nothing."""
     entries = _classified_entries(stage3b)
     rerouted, regrouped = _rerouted_to_honors(stage4), _regrouped_by_stage6(stage4)
+    invited_talk_paths = _invited_talk_paths(entries, stage3a)
     siblings: dict[tuple[str, ...], Counter] = defaultdict(Counter)
     for entry in entries:
         siblings[entry.heading_path][entry.code] += 1
 
     groups: dict[tuple[str, str, tuple[str, ...]], list[_ClassifiedEntry]] = defaultdict(list)
-    for entry, in_attendance_context, credential_home in zip(
-            entries, _attendance_contexts(entries), _misfiled_credentials(entries), strict=True):
+    for entry, in_attendance_context, credential_home, is_banner_line in zip(
+            entries, _attendance_contexts(entries), _misfiled_credentials(entries),
+            _banner_lines(entries), strict=True):
         guarded = entry.idx in regrouped
         reported = set()
         for rule in HEADING_CODE_RULES:
@@ -521,6 +881,15 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
         if _is_fellowship_as_membership(entry):
             groups[(FELLOWSHIP_AS_MEMBERSHIP_SHAPE, "H (an elected or honorific fellowship)",
                     entry.heading_path)].append(entry)
+        if is_banner_line:
+            groups[(BANNER_LINE_SHAPE, "T (not a record)", entry.heading_path)].append(entry)
+        if _is_non_record_line(entry):
+            groups[(NON_RECORD_LINE_SHAPE, NON_RECORD_LINE_EXPECTED, entry.heading_path)].append(entry)
+        if _is_training_title_misfiled(entry) and not reported & TRAINING_WARN_SHAPES:
+            groups[(TRAINING_TITLE_MISFILED_SHAPE, _training_title_expected(entry.text),
+                    entry.heading_path)].append(entry)
+        if _is_talk_as_abstract(entry, entry.heading_path in invited_talk_paths):
+            groups[(TALK_AS_ABSTRACT_SHAPE, "R (invited talk)", entry.heading_path)].append(entry)
         if credential_home is not None and not guarded and not reported & CREDENTIAL_WARN_SHAPES:
             groups[(CREDENTIAL_MISFILED_SHAPE, CREDENTIAL_HOME_EXPECTED[credential_home.code],
                     entry.heading_path)].append(entry)
@@ -575,9 +944,7 @@ def lint_pinned_heading_empty(stage3b: dict, stage3a: dict) -> list[dict]:
     or a child of X, where X has a template slot (#1949). X's slot renders
     empty and the heading's rows land elsewhere. Notes (T) are not records.
     One finding per heading."""
-    mappings = copy.deepcopy(stage3a.get("mappings") or [])
-    _normalize_taxonomy_mappings(mappings)
-    mapping_index = build_mapping_index(mappings)
+    mapping_index = _stage3a_mapping_index(stage3a)
 
     records = [entry for raw, entry in zip(stage3b.get("entries", []), _classified_entries(stage3b),
                                            strict=True)

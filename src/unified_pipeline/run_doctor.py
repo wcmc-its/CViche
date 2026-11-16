@@ -270,7 +270,9 @@ Lints, ranked by the severity of the failure class they catch:
                           attended as continuing education taught or as
                           abstracts (NECRGC, #1691), a thesis-committee
                           block as institutional committees, a 'see section'
-                          line or bare URL as a record, a journal article
+                          line or bare URL as a record, a group lead-in,
+                          continuation heading, column-header row or
+                          footnote as a record (INFO), a journal article
                           with volume and pages as a non-peer-reviewed report
                           among peer-reviewed siblings (EBYSBC E11/E30); WARN
 14s. segmentation_collapse stage 1b placed under half of stage 1a's headings,
@@ -1950,7 +1952,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("enrichment_pubtype_mismatch", lint_enrichment_pubtype_mismatch,
              ("stage_5_enrichment",)),
     LintSpec("section_consistency", lint_section_consistency, ("stage_3b",),
-             optional=("stage_4",)),
+             optional=("stage_4", "stage_3a")),
     LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
