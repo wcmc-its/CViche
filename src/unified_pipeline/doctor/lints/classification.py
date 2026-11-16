@@ -19,7 +19,9 @@ fellowship coded I, which renders as a membership and is missing from Honors.
 course or a technologist certificate coded F1 or F2, or a licence or board
 certification coded B2 or I, by `core.credential_lines`, the module stage
 3b's credential pin, the WCM table corrector and stage 6's licensure guard
-read too.
+read too. `banner_line_as_record` (BAN-1 in doctor/PRECISION.md) is a line
+of the CV's opening banner ("Title: Professor of ...") coded D1, D2 or O,
+which renders as a dateless copy of the dated record further down.
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -118,7 +120,14 @@ CREDENTIAL_MISFILED_SHAPE = "credential_misfiled"
 #: The older WARN shapes that already report part of what credential_misfiled
 #: reads: an entry one of them reports is not reported twice.
 CREDENTIAL_WARN_SHAPES = frozenset({"board_certification_misfiled", "life_support_as_license"})
-SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO"}
+#: A line of the CV's opening banner coded as an appointment or a leadership
+#: role: stage 6 renders it as one more row, with no dates, beside the dated
+#: record of the same post further down. 42 of 43 entries true on the 214
+#: stored runs (BAN-1 in doctor/PRECISION.md). INFO until its precision is
+#: read on a fresh batch, as credential_misfiled started.
+BANNER_LINE_SHAPE = "banner_line_as_record"
+SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO", CREDENTIAL_MISFILED_SHAPE: "INFO",
+                  BANNER_LINE_SHAPE: "INFO"}
 #: The home a credential_misfiled finding points to, by code.
 CREDENTIAL_HOME_EXPECTED = {
     OTHER_EDUCATION_CODE: "B2 (other education: an exam, permit, course or certificate, not a licence or board)",
@@ -473,6 +482,83 @@ def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
     return entry.code == MEMBERSHIP_CODE and is_honorific_fellowship(entry.text, entry.heading_path)
 
 
+#: The codes a banner line is given: a faculty appointment (D1), a hospital
+#: appointment (D2) or a leadership role (O).
+BANNER_RECORD_CODES = frozenset({"D1", "D2", "O"})
+#: The whole leaf heading of the opening block, less a closing colon: the
+#: "Personal Data" stage 1b gives the lines above a CV's first heading, and
+#: the CV's own heading of that kind ("1. Personal history", "A. Identifying
+#: data:", "Biography"). Each alternative is the heading of a banner line in
+#: the 214 stored runs; "Personal Statement" is prose.
+_BANNER_HEADING_RE = re.compile(
+    r"(?:[a-z\d]\. )?(?:personal(?: (?:data|details|history))?|identifying data|biography)",
+    re.IGNORECASE)
+#: How a banner line's label opens; the label runs to a colon on its line.
+#: "Title:", "Current Position:", "PRESENT POSITIONS:", "Professional Title:",
+#: "Appointment at <school>:", "Current position, <date> - Present:", "Date of
+#: Appointment to <school> Faculty:", and an appointment form's "Term:",
+#: "Reason for Appointment:" and "Proposed for Promotion to:".
+_BANNER_LABEL_RE = re.compile(
+    r"(?:(?:current |present |professional |date of )?(?:title|position|appointment|affiliation)"
+    r"|term|reason|proposed).*:", re.IGNORECASE)
+#: The label of an appointment date and nothing else. It is no post under
+#: any heading stage 1b attached it to: the one such line of the 214 stored
+#: runs sits under a licensure heading.
+BANNER_APPOINTMENT_DATE_LABEL = "date appointed:"
+#: A banner line's title is its first tab-separated part.
+BANNER_PART_SEPARATOR = "\t"
+#: Words a banner title needs before a dated record that repeats them is its
+#: twin: a bullet's empty first part repeats in every record, and one word
+#: ("Professor") in most.
+BANNER_TWIN_MIN_TITLE_WORDS = 2
+#: The name a line gives a university: "<Name> University". A dated record
+#: at another university is another post, however alike its title.
+_BANNER_UNIVERSITY_RE = re.compile(r"\w+ University")
+
+
+def _in_banner_block(entry: _ClassifiedEntry) -> bool:
+    """Whether the entry's leaf heading is one `_BANNER_HEADING_RE` names."""
+    return any(_BANNER_HEADING_RE.fullmatch(leaf.rstrip(":")) for leaf in entry.heading_path[-1:])
+
+
+def _at_another_university(line: str, record: str) -> bool:
+    """Whether the banner line and the dated record each name a university
+    and share none."""
+    mine, theirs = (frozenset(_BANNER_UNIVERSITY_RE.findall(text)) for text in (line, record))
+    return bool(mine and theirs) and mine.isdisjoint(theirs)
+
+
+def _has_dated_twin(entry: _ClassifiedEntry, entries: list[_ClassifiedEntry]) -> bool:
+    """Whether the line carries no year and an appointment or leadership
+    record of the CV carries one, and every word of the line's first part,
+    and is not a post at another university."""
+    if _SUBHEADING_YEAR_RE.search(entry.text):
+        return False
+    title = entry.text.split(BANNER_PART_SEPARATOR)[0]
+    words = {word.lower() for word in _WORD_RE.findall(title)}
+    if len(words) < BANNER_TWIN_MIN_TITLE_WORDS:
+        return False
+    return any(other.code in BANNER_RECORD_CODES and _SUBHEADING_YEAR_RE.search(other.text)
+               and words <= {word.lower() for word in _WORD_RE.findall(other.text)}
+               and not _at_another_university(entry.text, other.text)
+               for other in entries)
+
+
+def _banner_lines(entries: list[_ClassifiedEntry]) -> list[bool]:
+    """Per entry, whether it is a line of the opening banner coded D1, D2 or
+    O (`BANNER_RECORD_CODES`): one that opens with an appointment date's
+    label, or one in the opening block (`_in_banner_block`) that opens with
+    a banner label or is undated with a dated twin (`_has_dated_twin`).
+    Stage 6 renders it as a row with no dates beside the dated record of
+    that post."""
+    return [entry.code in BANNER_RECORD_CODES
+            and (entry.text.lower().startswith(BANNER_APPOINTMENT_DATE_LABEL)
+                 or (_in_banner_block(entry)
+                     and (bool(_BANNER_LABEL_RE.match(entry.text))
+                          or _has_dated_twin(entry, entries))))
+            for entry in entries]
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -498,8 +584,9 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
         siblings[entry.heading_path][entry.code] += 1
 
     groups: dict[tuple[str, str, tuple[str, ...]], list[_ClassifiedEntry]] = defaultdict(list)
-    for entry, in_attendance_context, credential_home in zip(
-            entries, _attendance_contexts(entries), _misfiled_credentials(entries), strict=True):
+    for entry, in_attendance_context, credential_home, is_banner_line in zip(
+            entries, _attendance_contexts(entries), _misfiled_credentials(entries),
+            _banner_lines(entries), strict=True):
         guarded = entry.idx in regrouped
         reported = set()
         for rule in HEADING_CODE_RULES:
@@ -521,6 +608,8 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
         if _is_fellowship_as_membership(entry):
             groups[(FELLOWSHIP_AS_MEMBERSHIP_SHAPE, "H (an elected or honorific fellowship)",
                     entry.heading_path)].append(entry)
+        if is_banner_line:
+            groups[(BANNER_LINE_SHAPE, "T (not a record)", entry.heading_path)].append(entry)
         if credential_home is not None and not guarded and not reported & CREDENTIAL_WARN_SHAPES:
             groups[(CREDENTIAL_MISFILED_SHAPE, CREDENTIAL_HOME_EXPECTED[credential_home.code],
                     entry.heading_path)].append(entry)
