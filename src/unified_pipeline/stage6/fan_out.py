@@ -310,6 +310,9 @@ _K1_DATE = ("read only to reconcile stage 5c's own range (`teaching._envelope_to
             "a K1 row with no 5c text prints no date")
 _IDENTIFIER_FROM_LICENSURE = ("the template's slot is filled from licensure entries "
                               "(`licensure._claim_identifier_slot`); the Personal Data field is not read")
+_S8_ABSTRACT_NUMBER = ("printed only by the meeting trailer of an entry with no 5d citation, and only "
+                       "when the entry's own line writes it outside its list number "
+                       "(`publication._abstract_number`); the probe's neutral line never does")
 # Not by design: stage 4 is asked for the field and no renderer writes it.
 # This map may shrink, by adding the renderer slot or by no longer asking for
 # the field (`extract: false`); it does not grow.
@@ -321,7 +324,7 @@ UNRENDERED_GAPS: Mapping[str, Mapping[str, str]] = MappingProxyType({
     'S5': {'publication_venue': _ONLY_IN_5D_CITATION, 'report_number': _ONLY_IN_5D_CITATION,
            'url': _ONLY_IN_5D_CITATION},
     'S7': {'status': _ONLY_IN_5D_CITATION, 'target_journal': _ONLY_IN_5D_CITATION},
-    'S8': {'abstract_number': _ONLY_IN_5D_CITATION},
+    'S8': {'abstract_number': _S8_ABSTRACT_NUMBER},
     'S9': {'media_type': _ONLY_IN_5D_CITATION, 'url': _ONLY_IN_5D_CITATION, 'venue': _ONLY_IN_5D_CITATION},
 })
 
