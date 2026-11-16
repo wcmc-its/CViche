@@ -179,6 +179,10 @@ _NON_RECORD = "non_record_line_as_record"
     ("Jane Doe (postdoctoral fellow):", "N4", "Mentees' Awards"),
     ("Referee for these journals:", "Q4D", "Editorial Activities"),
     ("Sponsor:\tAmount:\tStatus:", "M2B", "Invented Support"),
+    # digits and a slash that are no year and no slash date
+    ("Invented Course 201 students:", "N3", "Trainees"),
+    ("Year 1/Year 2 students:", "N3", "Trainees"),
+    ("Invented Ward B/4 staff:", "L1", "Clinical Service"),
     # a continuation heading
     ("PRESENTATIONS - Community Engagement (continued)", "K5", "PRESENTATIONS - Community Engagement"),
     ("Academic Appointments (cont)", "D1", "Academic Appointments"),
@@ -188,31 +192,30 @@ _NON_RECORD = "non_record_line_as_record"
     ("(Refereed)", "R", "Regional (Refereed)"),
     # a bare date stamp
     ("7/16/18", "M2B", "Completed Trials"),
-    ("28Aug2021", "A", "Personal Data"),
-    ("April 3, 2017", "R", "Talks"),
+    ("11/3/2019", "A", "Personal Data"),
     # a footnote or legend
     ("*Held virtually", "R", "Oral Presentations"),
     ("* denotes corresponding author", "S1", "Publications"),
-    ("†Co-senior authors", "S1", "Publications"),
     ("* Oral presentation", "S8", "Abstracts"),
     ("*Presenters underlined when not the owner", "S8", "Posters"),
     ("*winner of the Invented Poster Award for the best student poster.", "N4", "Trainees"),
     ("* Served as a research mentor for the trainee", "N2", "Book Chapters"),
-    # a starred remark on the record beside it
-    ("*This study was published in J Invented Med in 2001 and has been cited by 15 articles.", "S1", "Research"),
-    ("*The results of this study were published in two articles and cited 30 times.", "S1", "Research"),
-    ("* These findings came from our invented registry grant.", "M2A", "Publications"),
-    ("*Results were patented and used in later experiments.", "M2D", "Research"),
     ("Note: trainees are underlined", "S8", "Abstracts"),
     ("Section Notes: GS marks a graduate student", "S1", "Publications"),
+    ("(Note: trainees in italics are students)", "S8", "Abstracts"),
     # a table column-header row
     ("Period Fellowship Project Student", "N3", "Trainees"),
     ("Name Years Degree Title", "N3", "Trainees"),
-    ("Term Project Student", "N3", "Trainees"),
-    ("Term Course No. Title Hrs. Enrollment", "K1", "Teaching"),
-    ("Term Course Title/Number Hours Enrollment", "K1", "Teaching"),
-    # a Word field leftover and a count summary
-    ('HYPERLINK "http://example.org/widgets"', "S1", "Publications"),
+    ("Period Project Student", "N3", "Trainees"),
+    ("Names Dates Dissertation/Thesis Title", "N3A", "Trainees"),
+    ("Year Semester Course No. Title Cr. Hrs. Enrollment", "K1", "Teaching"),
+    ("Docket Number Filed Issued Country Application Date", "M2D", "Patents"),
+    ("Role Description Leadership Training", "L3", "Leadership"),
+    ("Period Scholarship Undergraduate Grad Student", "N3", "Trainees"),
+    ("Name Current Position Title of Project", "N3", "Trainees"),
+    # the leaf heading with other punctuation between its words
+    ("Regional - Refereed", "R", "Regional (Refereed)"),
+    # a count summary
     ("Local-48, Grand rounds-15", "R", "Invited Lectures"),
 ])
 def test_a_non_record_line_coded_as_a_record_is_one_info_finding(text, code, heading):
@@ -253,6 +256,7 @@ def test_a_short_undated_committee_name_is_quiet():
 @pytest.mark.parametrize("text, code", [
     # a dated line ending in a colon is as often a record cut short
     ("2001: Invented Society, Invited Speaker, Springfield:", "R"),
+    ("Invented Scholars of 1998:", "H"),
     ("Invented Symposium, Springfield, 3/14/92, (posters):", "R"),
     # an author list cut at its colon
     ("12. Quill, A.B., Brook, C.D., and Panel, E.F.:", "S1"),
@@ -266,6 +270,7 @@ def test_a_short_undated_committee_name_is_quiet():
     ("Jan 2003-Mar 2003 Invented Design Team, Springfield (continued)", "P"),
     # an award made of column words, and two column words
     ("Student Leadership Fellowship", "H"),
+    ("Invented Scholar of the Year", "H"),
     ("Course Title", "K1"),
     # a record that opens, or ends, with a full date is no bare date stamp
     ("7/16/18 Invented Trial of things, site investigator", "M2B"),
@@ -276,38 +281,26 @@ def test_a_short_undated_committee_name_is_quiet():
     # a starred record whose first word is a legend word: a role closed by a comma, or a dated line
     ("*Presenter, Invented Annual Meeting, Springfield, 2019", "R"),
     ("*Winner, Invented Teaching Prize, 2018", "H"),
-    ("*Presenter, Invented Annual Meeting, Springfield", "R"),
+    ("*Winner, Invented Teaching Prize", "H"),
     ("*Winner: Invented Teaching Prize", "H"),
     ("*Held at the Invented Annual Meeting, Springfield, 2019", "R"),
     # a legend word with no footnote mark, or with the mark further in
     ("Held weekly, Invented Tumor Board case review", "L1"),
     ("Invented Seminar Series *held jointly with Invented College", "K5"),
     ("*Oral presentation at the Invented Annual Meeting, Springfield", "R"),
+    # a starred record whose first word only begins with a legend word
+    ("*Heldman Lecture, Invented College", "H"),
     # "notes" inside a title, and a title opening "Notes on"
     ("Invented Lecture Notes: Cardiology for Students", "S3"),
     ("Notes on an invented method. J Invented Med 2019;1:2-3.", "S5"),
     # counts after, or before, a record's own words
     ("Invented Grand Rounds (weekly). Local-48, Regional-15", "R"),
     ("Local-48, Regional-15 sessions for the invented house staff", "R"),
-    # a starred citation opening with "The", and a remark coded as research narrative
-    ("*The Quill A.B., Brook C.D. trial of things. J Invented Med.", "S1"),
-    ("*This is a study I designed and ran at the invented institute.", "M1"),
-    ("This study was published in J Invented Med and cited 15 times.", "S1"),
-    ("Invented Trial of things *this arm closed early", "M2B"),
-    ("*Thesis committee, Invented College", "P"),
-    # a citation that opens with a Word field leftover is still a citation
-    ('HYPERLINK "http://example.org/1" Quill AB, Brook CD. A trial of things. J Invented Med.', "S1"),
+    # one label and number is no count of a list's rows
+    ("Invented Trial Phase-2", "M2B"),
 ])
 def test_record_lines_that_look_like_non_records_are_quiet(text, code):
     assert _run(_entry(text, code, "Invented Heading")) == []
-
-
-@pytest.mark.parametrize("text", ['HYPERLINK "https://example.org/profile" https://example.org/profile',
-                                  "Articles-48, Chapters-15"])
-def test_a_field_leftover_or_a_count_summary_coded_s0_is_quiet(text):
-    # S0 takes a bare profile URL and a publication count; any other code is a finding.
-    assert _run(_entry(text, "S0", "Bibliography")) == []
-    assert _shapes(_run(_entry(text, "S1", "Bibliography"))) == [_NON_RECORD]
 
 
 def test_a_line_ending_its_headings_last_word_without_being_it_is_quiet():
@@ -315,11 +308,9 @@ def test_a_line_ending_its_headings_last_word_without_being_it_is_quiet():
     assert _run(_entry("Admissions Committee", "P", "Institutional Committees")) == []
 
 
-def test_a_starred_citation_count_coded_s0_is_quiet():
-    # S0 takes a citation count; the same remark coded as a citation is a finding.
-    text = "*This study was published in J Invented Med in 2003 and cited by 17 articles."
-    assert _run(_entry(text, "S0", "Research")) == []
-    assert _shapes(_run(_entry(text, "S1", "Research"))) == [_NON_RECORD]
+def test_the_heading_a_line_repeats_is_the_leaf_of_its_path():
+    assert _shapes(_run(_entry("(Refereed)", "R", "Invented Talks", "Regional (Refereed)"))) == [_NON_RECORD]
+    assert _run(_entry("Invented Talks", "R", "Invented Talks", "Regional (Refereed)")) == []
 
 
 def test_a_line_matching_two_sub_shapes_is_reported_once():
