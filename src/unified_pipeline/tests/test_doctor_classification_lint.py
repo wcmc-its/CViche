@@ -940,6 +940,14 @@ def test_an_author_less_s8_under_an_invited_talks_heading_is_reported_as_info():
     assert findings[0]["evidence"][0].startswith("entry 41 (S8): ")
 
 
+def test_only_the_s8_under_the_invited_heading_is_reported_when_the_cv_has_one():
+    """The invited-talks heading counts for its own entries, not for the CV's."""
+    findings = _talks(_entry(_TALK, "S8", "INVITED LECTURES", idx=41),
+                      _entry(_TALK, "S8", "PUBLICATIONS", "Abstracts", idx=90))
+    assert len(findings) == 1
+    assert "1 entry under 'INVITED LECTURES'" in findings[0]["message"]
+
+
 def test_an_r_sub_heading_under_a_parent_mapped_elsewhere_is_reported():
     """The leaf-side run says R though the parent maps S1: the mixed path the R pin leaves."""
     assert len(_talks(_entry(_TALK, "S8", "PUBLICATIONS", "Lectures by Invitation"))) == 1
