@@ -22,11 +22,13 @@ certification coded B2 or I, by `core.credential_lines`, the module stage
 read too. `banner_line_as_record` (BAN-1 in doctor/PRECISION.md) is a line
 of the CV's opening banner ("Title: Professor of ...") coded D1, D2 or O,
 which renders as a dateless copy of the dated record further down.
-read too.
 `non_record_line_as_record` reports a line that is no record at all and
 carries a record code: a group lead-in ending in a colon, a continuation
 heading, a column-header row, a footnote or legend, a bare date stamp
-(S3B-NRL in doctor/PRECISION.md).
+(S3B-NRL in doctor/PRECISION.md). `training_title_misfiled` reads a
+training title where the two training rules do not look: as its own field later in the line, after a
+single date, or from a longer title list, coded as a position, a research
+activity, a degree or an honor.
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -88,11 +90,13 @@ from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_c
 from unified_pipeline.stage3b.header_pin import (
     _GRANT_CODES,
     HEADER_PIN_MIN_CONFIDENCE,
+    _is_trainee_title,
     _names_authors,
     is_lead_in,
 )
 from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE
+from unified_pipeline.stage6.parsing.entry_card import _MONTH
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     heading_names_teaching_role,
@@ -139,10 +143,18 @@ BANNER_LINE_SHAPE = "banner_line_as_record"
 #: doctor/PRECISION.md has the stored-run measurement).
 NON_RECORD_LINE_SHAPE = "non_record_line_as_record"
 NON_RECORD_LINE_EXPECTED = "T (not a record)"
+#: A training title the two older training rules do not read, coded as a
+#: position, a research activity, a degree or an honor. INFO until its hits
+#: over the stored runs (TTM-1 in doctor/PRECISION.md) are promoted.
+TRAINING_TITLE_MISFILED_SHAPE = "training_title_misfiled"
+#: The older WARN shapes that read a training title at the opening of the
+#: line: an entry one of them reports is not reported twice.
+TRAINING_WARN_SHAPES = frozenset({"training_as_appointment", "training_as_degree"})
 SHAPE_SEVERITY = {FELLOWSHIP_AS_MEMBERSHIP_SHAPE: "INFO",
                   CREDENTIAL_MISFILED_SHAPE: "INFO",
                   BANNER_LINE_SHAPE: "INFO",
-                  NON_RECORD_LINE_SHAPE: "INFO"}
+                  NON_RECORD_LINE_SHAPE: "INFO",
+                  TRAINING_TITLE_MISFILED_SHAPE: "INFO"}
 #: The home a credential_misfiled finding points to, by code.
 CREDENTIAL_HOME_EXPECTED = {
     OTHER_EDUCATION_CODE: "B2 (other education: an exam, permit, course or certificate, not a licence or board)",
@@ -254,6 +266,73 @@ _TRAINING_PROGRAM_ROLE_RE = re.compile(r"director|coordinator|chair", re.IGNOREC
 
 #: Academic degrees: an entry the Education table renders as conferred.
 DEGREE_CODES = frozenset({"B1"})
+
+
+#: Investigator-initiated research activities, and honors and awards.
+RESEARCH_ACTIVITY_CODE = "M1"
+HONOR_CODE = "H"
+#: What a training row is filed as when training_title_misfiled reports it:
+#: a position, a research activity, a degree or an honor. The Postdoctoral
+#: Training table prints none of them.
+TRAINING_TITLE_WRONG_CODES = APPOINTMENT_CODES | DEGREE_CODES | {RESEARCH_ACTIVITY_CODE, HONOR_CODE}
+#: Where a field of a row ends: a tab, a comma or a table-cell bar.
+_FIELD_BREAK_RE = re.compile(r"[\t,|]")
+#: What a row or a field opens with before its title: a list marker ("b)",
+#: "5."), then a date, a date range or a run of date-only fields ("Feb. 2031-Nov.
+#: 2032", "06/2008", "2031<tab>"). A month is a whole month name or its
+#: abbreviation, so "Marketing Intern" and "Mayo Fellow" keep their first word.
+_FIELD_LEAD_RE = re.compile(rf"(?:[a-z]\))?(?:{_MONTH}|\d|[\s/.\u2011\u2013-])*", re.IGNORECASE)
+#: The training titles `header_pin._TRAINEE_TITLE` does not hold: a
+#: postdoctoral scholar, associate, research associate or trainee, a
+#: postdoctoral fellow named with "clinical research", a predoctoral fellow,
+#: trainee or student, a bare research fellow, a graduate student and a bare
+#: trainee ("Trainee, <program>"). Each ends its field: a field break, a
+#: full stop or a bracket follows it, or it goes on "in <specialty>". So "Graduate Student Advisory Committee", "Postdoctoral
+#: Scholar Award" and "Research Fellowship" are no title. A bare clinical
+#: fellow is the pin's own title.
+_WIDER_TRAINEE_TITLE_RE = re.compile(
+    r"(?:post-?doctoral\s+(?:(?:clinical\s+)?research\s+)?(?:scholar|associate|trainee|fellow)"
+    r"|pre-?doctoral\s+(?:\w+\s+)?(?:fellow|trainee|student)"
+    r"|research\s+fellow"
+    r"|graduate\s+student"
+    r"|trainee)(?=\s*(?:[\t,|.(]|in\b))", re.IGNORECASE)
+#: How a title before the doctorate opens (a predoctoral one or a graduate
+#: student): the row is training or education, and which of the two the
+#: title alone does not say.
+_STUDENT_TITLE_RE = re.compile(r"pre-?doctoral|graduate", re.IGNORECASE)
+#: What a training_title_misfiled finding points to: the training table, or,
+#: for a student title, training or education. A student title coded as a
+#: degree is already in education and is not reported.
+TRAINING_EXPECTED = "C (training)"
+STUDENT_TRAINING_EXPECTED = "C or B (training or education)"
+#: A faculty rank on the same line: "Research Fellow" beside "Lecturer" is a
+#: rank outside the United States, and a row that names an instructor post
+#: and a fellowship is the faculty row.
+_FACULTY_RANK_RE = re.compile(r"professor|lecturer|instructor", re.IGNORECASE)
+
+
+def _trainee_title_start(text: str) -> int | None:
+    """Where the row's training title begins: at the opening of the row or
+    of a later tab-, comma- or bar-separated field, once that field's date
+    is read. The title is one stage 3b's content pin reads
+    (`_is_trainee_title`) or one of the wider list. None when the row names
+    no training title."""
+    for field_start in [0, *(field.end() for field in _FIELD_BREAK_RE.finditer(text))]:
+        start = _FIELD_LEAD_RE.match(text, field_start).end()
+        if _is_trainee_title(text[start:]) or _WIDER_TRAINEE_TITLE_RE.match(text, start):
+            return start
+    return None
+
+
+def _is_student_title(text: str) -> bool:
+    """Whether the row's training title is a predoctoral or graduate-student one."""
+    start = _trainee_title_start(text)
+    return start is not None and bool(_STUDENT_TITLE_RE.match(text, start))
+
+
+def _training_title_expected(text: str) -> str:
+    """The home a training_title_misfiled finding names for the row."""
+    return STUDENT_TRAINING_EXPECTED if _is_student_title(text) else TRAINING_EXPECTED
 
 
 def _homed_in_other_education(text: str) -> bool:
@@ -666,6 +745,28 @@ def _is_non_record_line(entry: _ClassifiedEntry) -> bool:
                 or _repeats_leaf_heading(text, leaf) or _is_undated_non_record(text))
 
 
+def _is_training_title_misfiled(entry: _ClassifiedEntry) -> bool:
+    """A position, research-activity, degree or honor code on a row whose
+    own title says it is training (`_trainee_title_start`): an intern, a
+    resident, a postdoctoral, predoctoral, clinical or research fellow, a
+    postdoctoral scholar or associate, a graduate student or a trainee. The
+    Postdoctoral Training table misses the row. A row that names a faculty
+    rank or a role over a training program is the faculty row, and an
+    elected or honorific fellowship (`is_honorific_fellowship`) or a row
+    its owner listed under honors is the honor. A predoctoral or
+    graduate-student row coded as a degree is in education already. For a
+    position code stage 3b's content pin reads the opening title by the
+    same test, so on a fresh run this reports what the pin does not reach."""
+    if entry.code not in TRAINING_TITLE_WRONG_CODES or _trainee_title_start(entry.text) is None:
+        return False
+    if _FACULTY_RANK_RE.search(entry.text) or _TRAINING_PROGRAM_ROLE_RE.search(entry.text):
+        return False
+    if entry.code in DEGREE_CODES and _is_student_title(entry.text):
+        return False
+    return not (any(heading_names_honors(level) for level in entry.heading_path)
+                or is_honorific_fellowship(entry.text, entry.heading_path))
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -719,6 +820,9 @@ def lint_section_consistency(stage3b: dict, stage4: dict | None = None) -> list[
             groups[(BANNER_LINE_SHAPE, "T (not a record)", entry.heading_path)].append(entry)
         if _is_non_record_line(entry):
             groups[(NON_RECORD_LINE_SHAPE, NON_RECORD_LINE_EXPECTED, entry.heading_path)].append(entry)
+        if _is_training_title_misfiled(entry) and not reported & TRAINING_WARN_SHAPES:
+            groups[(TRAINING_TITLE_MISFILED_SHAPE, _training_title_expected(entry.text),
+                    entry.heading_path)].append(entry)
         if credential_home is not None and not guarded and not reported & CREDENTIAL_WARN_SHAPES:
             groups[(CREDENTIAL_MISFILED_SHAPE, CREDENTIAL_HOME_EXPECTED[credential_home.code],
                     entry.heading_path)].append(entry)
