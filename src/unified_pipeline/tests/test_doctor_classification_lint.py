@@ -306,6 +306,9 @@ def test_record_lines_that_look_like_non_records_are_quiet(text, code):
 def test_a_line_ending_its_headings_last_word_without_being_it_is_quiet():
     assert _run(_entry("Doctoral", "C", "Postdoctoral")) == []
     assert _run(_entry("Admissions Committee", "P", "Institutional Committees")) == []
+    # only the heading's last words: a word from its start or its middle is a record's own
+    assert _run(_entry("Service", "P", "Committees and Service Activities")) == []
+    assert _run(_entry("Committees", "P", "Committees and Service Activities")) == []
 
 
 def test_the_heading_a_line_repeats_is_the_leaf_of_its_path():
