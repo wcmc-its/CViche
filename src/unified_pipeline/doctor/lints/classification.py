@@ -83,12 +83,12 @@ from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.stage3b.context import build_mapping_index, get_taxonomy_context
 from unified_pipeline.stage3b.header_pin import (
     _GRANT_CODES,
-    _TRAINEE_TITLE,
     HEADER_PIN_MIN_CONFIDENCE,
     _is_trainee_title,
 )
 from unified_pipeline.stage3b.io import _normalize_taxonomy_mappings
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE
+from unified_pipeline.stage6.parsing.entry_card import _MONTH
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
     heading_names_teaching_role,
@@ -252,35 +252,31 @@ HONOR_CODE = "H"
 #: a position, a research activity, a degree or an honor. The Postdoctoral
 #: Training table prints none of them.
 TRAINING_TITLE_WRONG_CODES = APPOINTMENT_CODES | DEGREE_CODES | {RESEARCH_ACTIVITY_CODE, HONOR_CODE}
-#: Where a field of a row ends: a tab or a comma.
-_FIELD_BREAK_RE = re.compile(r"[\t,]")
-#: What a row or a field opens with before its title: a list marker ("b)"),
-#: then a date, a date range or a run of date-only fields ("Feb. 2031-Nov.
-#: 2032", "06/2008", "2031<tab>").
-_MONTH_NAME = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b"
-_FIELD_LEAD_RE = re.compile(
-    rf"(?:[a-z\d]{{1,2}}[.)]\s+)?(?:{_MONTH_NAME}|\d+|[\s/.\u2010-\u2015-])*", re.IGNORECASE)
-#: A title ends its field when a field break, a full stop, a bracket or the
-#: end of the line follows it, or it goes on "in <specialty>".
-_TITLE_ENDS_FIELD = r"(?=\s*(?:$|[\t,.(]|in\b))"
+#: Where a field of a row ends: a tab, a comma or a table-cell bar.
+_FIELD_BREAK_RE = re.compile(r"[\t,|]")
+#: What a row or a field opens with before its title: a list marker ("b)",
+#: "5."), then a date, a date range or a run of date-only fields ("Feb. 2031-Nov.
+#: 2032", "06/2008", "2031<tab>"). A month is a whole month name or its
+#: abbreviation, so "Marketing Intern" and "Mayo Fellow" keep their first word.
+_FIELD_LEAD_RE = re.compile(rf"(?:[a-z]\))?(?:{_MONTH}|\d|[\s/.\u2011\u2013-])*", re.IGNORECASE)
 #: The training titles `header_pin._TRAINEE_TITLE` does not hold: a
 #: postdoctoral scholar, associate, research associate or trainee, a
 #: postdoctoral fellow named with "clinical research", a predoctoral fellow,
 #: trainee or student, a bare research fellow, a graduate student and a bare
-#: trainee ("Trainee, <program>"). Each ends its field
-#: (`_TITLE_ENDS_FIELD`), so "Graduate Student Advisory Committee",
-#: "Postdoctoral Scholar Award" and "Research Fellowship" are no title. A
-#: bare clinical fellow is the pin's own title.
+#: trainee ("Trainee, <program>"). Each ends its field: a field break, a
+#: full stop or a bracket follows it, or it goes on "in <specialty>". So "Graduate Student Advisory Committee", "Postdoctoral
+#: Scholar Award" and "Research Fellowship" are no title. A bare clinical
+#: fellow is the pin's own title.
 _WIDER_TRAINEE_TITLE_RE = re.compile(
     r"(?:post-?doctoral\s+(?:(?:clinical\s+)?research\s+)?(?:scholar|associate|trainee|fellow)"
     r"|pre-?doctoral\s+(?:\w+\s+)?(?:fellow|trainee|student)"
     r"|research\s+fellow"
     r"|graduate\s+student"
-    r"|trainee)\b" + _TITLE_ENDS_FIELD, re.IGNORECASE)
-_TITLE_ENDS_FIELD_RE = re.compile(_TITLE_ENDS_FIELD, re.IGNORECASE)
-#: A title before the doctorate: the row is training or education, and which
-#: of the two the title alone does not say.
-_STUDENT_TITLE_RE = re.compile(r"pre-?doctoral\b|graduate\s+student\b", re.IGNORECASE)
+    r"|trainee)(?=\s*(?:[\t,|.(]|in\b))", re.IGNORECASE)
+#: How a title before the doctorate opens (a predoctoral one or a graduate
+#: student): the row is training or education, and which of the two the
+#: title alone does not say.
+_STUDENT_TITLE_RE = re.compile(r"pre-?doctoral|graduate", re.IGNORECASE)
 #: What a training_title_misfiled finding points to: the training table, or,
 #: for a student title, training or education. A student title coded as a
 #: degree is already in education and is not reported.
@@ -289,38 +285,18 @@ STUDENT_TRAINING_EXPECTED = "C or B (training or education)"
 #: A faculty rank on the same line: "Research Fellow" beside "Lecturer" is a
 #: rank outside the United States, and a row that names an instructor post
 #: and a fellowship is the faculty row.
-_FACULTY_RANK_RE = re.compile(r"\b(?:professor|lecturer|instructor)\b", re.IGNORECASE)
-#: An award named for its trainees ("Resident Teaching Award") is the award,
-#: not the training.
-_AWARD_NAME_RE = re.compile(r"\bawards?\b", re.IGNORECASE)
-
-
-def _is_trainee_title_at_head(rest: str) -> bool:
-    """A training title where the row itself opens, once its date is read:
-    stage 3b's content pin's own test, or a title of the wider list."""
-    return _is_trainee_title(rest) or bool(_WIDER_TRAINEE_TITLE_RE.match(rest))
-
-
-def _is_trainee_title_field(rest: str) -> bool:
-    """A training title that is a later field of the row: a title of the
-    wider list, or one of the pin's that ends the field, so "Resident
-    Supervision in the clinic" and "Intern Selection" after a comma are not."""
-    if _WIDER_TRAINEE_TITLE_RE.match(rest):
-        return True
-    title = _TRAINEE_TITLE.match(rest)
-    return bool(title and _TITLE_ENDS_FIELD_RE.match(rest, title.end())) and _is_trainee_title(rest)
+_FACULTY_RANK_RE = re.compile(r"professor|lecturer|instructor", re.IGNORECASE)
 
 
 def _trainee_title_start(text: str) -> int | None:
-    """Where the row's training title begins: at its opening after the date,
-    or as a tab- or comma-separated field of its own. None when the row
-    names no training title."""
-    head = _FIELD_LEAD_RE.match(text).end()
-    if _is_trainee_title_at_head(text[head:]):
-        return head
-    for field in _FIELD_BREAK_RE.finditer(text):
-        start = _FIELD_LEAD_RE.match(text, field.end()).end()
-        if _is_trainee_title_field(text[start:]):
+    """Where the row's training title begins: at the opening of the row or
+    of a later tab-, comma- or bar-separated field, once that field's date
+    is read. The title is one stage 3b's content pin reads
+    (`_is_trainee_title`) or one of the wider list. None when the row names
+    no training title."""
+    for field_start in [0, *(field.end() for field in _FIELD_BREAK_RE.finditer(text))]:
+        start = _FIELD_LEAD_RE.match(text, field_start).end()
+        if _is_trainee_title(text[start:]) or _WIDER_TRAINEE_TITLE_RE.match(text, start):
             return start
     return None
 
@@ -583,27 +559,20 @@ def _is_training_title_misfiled(entry: _ClassifiedEntry) -> bool:
     resident, a postdoctoral, predoctoral, clinical or research fellow, a
     postdoctoral scholar or associate, a graduate student or a trainee. The
     Postdoctoral Training table misses the row. A row that names a faculty
-    rank or a role over a training program is the faculty row, and a row
-    that names an award, an elected or honorific fellowship
-    (`is_honorific_fellowship`) or an H row its owner listed under honors
-    (`_listed_as_honor`) is the honor. A predoctoral or graduate-student
-    row coded as a degree is in education already. For a position code stage 3b's
-    content pin reads the opening title by the same test, so on a fresh run
-    this reports what the pin does not reach."""
+    rank or a role over a training program is the faculty row, and an
+    elected or honorific fellowship (`is_honorific_fellowship`) or a row
+    its owner listed under honors is the honor. A predoctoral or
+    graduate-student row coded as a degree is in education already. For a
+    position code stage 3b's content pin reads the opening title by the
+    same test, so on a fresh run this reports what the pin does not reach."""
     if entry.code not in TRAINING_TITLE_WRONG_CODES or _trainee_title_start(entry.text) is None:
         return False
     if _FACULTY_RANK_RE.search(entry.text) or _TRAINING_PROGRAM_ROLE_RE.search(entry.text):
         return False
     if entry.code in DEGREE_CODES and _is_student_title(entry.text):
         return False
-    return not (_AWARD_NAME_RE.search(entry.text) or _listed_as_honor(entry)
+    return not (any(heading_names_honors(level) for level in entry.heading_path)
                 or is_honorific_fellowship(entry.text, entry.heading_path))
-
-
-def _listed_as_honor(entry: _ClassifiedEntry) -> bool:
-    """An H row under a heading that names honors: a chief residency or a
-    research fellowship the owner listed there as a distinction keeps its H."""
-    return entry.code == HONOR_CODE and any(heading_names_honors(level) for level in entry.heading_path)
 
 
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
