@@ -871,6 +871,8 @@ def test_an_address_or_phone_line_coded_a_is_quiet():
     ["Summary of Personal Data"],     # the phrase does not open the heading
     ["12. Personal Data"],            # one letter or digit numbers the heading
     ["A) Personal Data"],             # and a full stop closes the number
+    ["A Personal Data"],              # which the full stop must follow
+    ["1.Personal Data"],              # with a space after it
     ["Personal Data", "Education"],   # the leaf heading is not the root's
 ])
 def test_a_line_outside_the_opening_block_is_quiet(headings):
@@ -926,11 +928,21 @@ def test_a_dated_row_that_is_no_appointment_is_no_twin():
                        "Honors", idx=70)) == []
 
 
+@pytest.mark.parametrize("text", [
+    "Professor of Medicine\tsince 1998",  # its year sits in a later part: the line is dated
+    "\u2022\tProfessor of Medicine",       # a bullet's first part has no words to repeat
+    "Professor\tInvented University",     # one word repeats in most records
+])
+def test_a_dated_or_wordless_banner_line_has_no_twin(text):
+    assert _run(_entry(text, "D1", "Personal Data", idx=4), _DATED_PROFESSOR) == []
+
+
 @pytest.mark.parametrize("banner_at,twin_at,reported", [
     ("Invented University", "Unrelated University", False),
     ("Invented University", "Invented University", True),
     ("Invented University", "Invented General Hospital", True),   # the twin names no university
     ("Invented General Hospital", "Unrelated University", True),  # the banner names none
+    ("Invented University and Unrelated University", "Unrelated University", True),  # they share one
 ])
 def test_a_dated_twin_at_another_university_is_another_post(banner_at, twin_at, reported):
     findings = _run(

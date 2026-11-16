@@ -507,6 +507,10 @@ _BANNER_LABEL_RE = re.compile(
 BANNER_APPOINTMENT_DATE_LABEL = "date appointed:"
 #: A banner line's title is its first tab-separated part.
 BANNER_PART_SEPARATOR = "\t"
+#: Words a banner title needs before a dated record that repeats them is its
+#: twin: a bullet's empty first part repeats in every record, and one word
+#: ("Professor") in most.
+BANNER_TWIN_MIN_TITLE_WORDS = 2
 #: The name a line gives a university: "<Name> University". A dated record
 #: at another university is another post, however alike its title.
 _BANNER_UNIVERSITY_RE = re.compile(r"\w+ University")
@@ -532,6 +536,8 @@ def _has_dated_twin(entry: _ClassifiedEntry, entries: list[_ClassifiedEntry]) ->
         return False
     title = entry.text.split(BANNER_PART_SEPARATOR)[0]
     words = {word.lower() for word in _WORD_RE.findall(title)}
+    if len(words) < BANNER_TWIN_MIN_TITLE_WORDS:
+        return False
     return any(other.code in BANNER_RECORD_CODES and _SUBHEADING_YEAR_RE.search(other.text)
                and words <= {word.lower() for word in _WORD_RE.findall(other.text)}
                and not _at_another_university(entry.text, other.text)
