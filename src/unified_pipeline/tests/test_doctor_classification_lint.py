@@ -195,11 +195,21 @@ _NON_RECORD = "non_record_line_as_record"
     ("* denotes corresponding author", "S1", "Publications"),
     ("†Co-senior authors", "S1", "Publications"),
     ("* Oral presentation", "S8", "Abstracts"),
+    ("*Presenters underlined when not the owner", "S8", "Posters"),
+    ("*winner of the Invented Poster Award for the best student poster.", "N4", "Trainees"),
+    ("* Served as a research mentor for the trainee", "N2", "Book Chapters"),
+    # a starred remark on the record beside it
+    ("*This study was published in J Invented Med in 2001 and has been cited by 15 articles.", "S1", "Research"),
+    ("*The results of this study were published in two articles and cited 30 times.", "S1", "Research"),
+    ("* These findings came from our invented registry grant.", "M2A", "Publications"),
+    ("*Results were patented and used in later experiments.", "M2D", "Research"),
     ("Note: trainees are underlined", "S8", "Abstracts"),
     ("Section Notes: GS marks a graduate student", "S1", "Publications"),
     # a table column-header row
     ("Period Fellowship Project Student", "N3", "Trainees"),
     ("Name Years Degree Title", "N3", "Trainees"),
+    ("Term Project Student", "N3", "Trainees"),
+    ("Term Course No. Title Hrs. Enrollment", "K1", "Teaching"),
     ("Term Course Title/Number Hours Enrollment", "K1", "Teaching"),
     # a Word field leftover and a count summary
     ('HYPERLINK "http://example.org/widgets"', "S1", "Publications"),
@@ -257,6 +267,34 @@ def test_a_short_undated_committee_name_is_quiet():
     # an award made of column words, and two column words
     ("Student Leadership Fellowship", "H"),
     ("Course Title", "K1"),
+    # a record that opens, or ends, with a full date is no bare date stamp
+    ("7/16/18 Invented Trial of things, site investigator", "M2B"),
+    ("Invented Talk, Springfield, 7/16/18", "R"),
+    # a word that only starts or ends like "continued"
+    ("Member, Invented Contracts Committee", "P"),
+    ("Invented drug registry, discontinued", "M1"),
+    # a starred record whose first word is a legend word: a role closed by a comma, or a dated line
+    ("*Presenter, Invented Annual Meeting, Springfield, 2019", "R"),
+    ("*Winner, Invented Teaching Prize, 2018", "H"),
+    ("*Presenter, Invented Annual Meeting, Springfield", "R"),
+    ("*Winner: Invented Teaching Prize", "H"),
+    ("*Held at the Invented Annual Meeting, Springfield, 2019", "R"),
+    # a legend word with no footnote mark, or with the mark further in
+    ("Held weekly, Invented Tumor Board case review", "L1"),
+    ("Invented Seminar Series *held jointly with Invented College", "K5"),
+    ("*Oral presentation at the Invented Annual Meeting, Springfield", "R"),
+    # "notes" inside a title, and a title opening "Notes on"
+    ("Invented Lecture Notes: Cardiology for Students", "S3"),
+    ("Notes on an invented method. J Invented Med 2019;1:2-3.", "S5"),
+    # counts after, or before, a record's own words
+    ("Invented Grand Rounds (weekly). Local-48, Regional-15", "R"),
+    ("Local-48, Regional-15 sessions for the invented house staff", "R"),
+    # a starred citation opening with "The", and a remark coded as research narrative
+    ("*The Quill A.B., Brook C.D. trial of things. J Invented Med.", "S1"),
+    ("*This is a study I designed and ran at the invented institute.", "M1"),
+    ("This study was published in J Invented Med and cited 15 times.", "S1"),
+    ("Invented Trial of things *this arm closed early", "M2B"),
+    ("*Thesis committee, Invented College", "P"),
     # a citation that opens with a Word field leftover is still a citation
     ('HYPERLINK "http://example.org/1" Quill AB, Brook CD. A trial of things. J Invented Med.', "S1"),
 ])
@@ -270,6 +308,18 @@ def test_a_field_leftover_or_a_count_summary_coded_s0_is_quiet(text):
     # S0 takes a bare profile URL and a publication count; any other code is a finding.
     assert _run(_entry(text, "S0", "Bibliography")) == []
     assert _shapes(_run(_entry(text, "S1", "Bibliography"))) == [_NON_RECORD]
+
+
+def test_a_line_ending_its_headings_last_word_without_being_it_is_quiet():
+    assert _run(_entry("Doctoral", "C", "Postdoctoral")) == []
+    assert _run(_entry("Admissions Committee", "P", "Institutional Committees")) == []
+
+
+def test_a_starred_citation_count_coded_s0_is_quiet():
+    # S0 takes a citation count; the same remark coded as a citation is a finding.
+    text = "*This study was published in J Invented Med in 2003 and cited by 17 articles."
+    assert _run(_entry(text, "S0", "Research")) == []
+    assert _shapes(_run(_entry(text, "S1", "Research"))) == [_NON_RECORD]
 
 
 def test_a_line_matching_two_sub_shapes_is_reported_once():

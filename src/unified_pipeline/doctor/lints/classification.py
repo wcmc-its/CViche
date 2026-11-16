@@ -22,8 +22,8 @@ certification coded B2 or I, by `core.credential_lines`, the module stage
 read too.
 `non_record_line_as_record` reports a line that is no record at all and
 carries a record code: a group lead-in ending in a colon, a continuation
-heading, a column-header row, a footnote or legend, a bare date stamp
-(S3B-NRL in doctor/PRECISION.md).
+heading, a column-header row, a footnote or legend, a starred remark on
+the record beside it, a bare date stamp (S3B-NRL in doctor/PRECISION.md).
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -191,6 +191,9 @@ _JOURNAL_ROLE_WORD_RE = re.compile(
 _BOARD_HEADING_RE = re.compile(r"board", re.IGNORECASE)
 #: Researcher Profile & Bibliometric Summary (core/taxonomy_v7.json).
 PROFILE_SUMMARY_CODE = "S0"
+#: Research Activities: narratives of research programs and projects
+#: (core/taxonomy_v7.json).
+RESEARCH_NARRATIVE_CODE = "M1"
 
 #: Codes that state the owner taught an event (K4, rendered under "Continuing
 #: education ... as teacher") or wrote for it (S8, rendered as an abstract).
@@ -493,9 +496,9 @@ def _is_fellowship_as_membership(entry: _ClassifiedEntry) -> bool:
 # with a label inside it ("Course Director: <course>, 2010-2015") is none.
 
 #: A four-digit year or a slash date. A lead-in, a continuation heading, a
-#: column row or a heading's own words carrying one is as often a record cut
-#: short ("<year>: <meeting>, <role>, <city>:"), so those four
-#: sub-shapes read undated lines only.
+#: column row, a legend or a heading's own words carrying one is as often a
+#: record ("<year>: <meeting>, <role>, <city>:", "*Held at <meeting>,
+#: <year>"), so those five sub-shapes read undated lines only.
 _LINE_DATE_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)|(?<!\d)\d{1,2}/\d{1,2}(?:/\d{2,4})?(?!\d)")
 #: "<heading> (continued)", "<heading> (cont)", "<heading>, CONTINUED": the
 #: heading a page break repeats.
@@ -504,16 +507,26 @@ _CONTINUATION_HEADING_RE = re.compile(r"[\s(,]cont(?:inued|['’]d|\.)?\W*$", re
 _BARE_DATE_STAMP_RE = re.compile(
     r"^\W*(?:\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{1,2}\s?[A-Za-z]{3,9}\.?\s?\d{2,4}"
     r"|[A-Za-z]{3,9}\.?\s\d{1,2}(?:st|nd|rd|th)?,?\s\d{4})\W*$")
+#: The marks a CV hangs a footnote on.
+_FOOTNOTE_MARK = r"[*†‡§¥]+"
 #: A footnote or legend: a footnote mark, then what the mark stands for
 #: ("*Held virtually", "* denotes corresponding author", "†Co-senior
-#: authors"). The mark alone is not enough: many CVs open a real record with
-#: "*" as an authorship or in-rank mark. A remark on the row beside it
-#: ("*This work was ...") is left out: it is as often a research narrative
-#: (M1) or a citation count (S0), which are records.
+#: authors", "*Presenters underlined"). The mark alone is not enough: many
+#: CVs open a real record with "*" as an authorship or in-rank mark, and a
+#: record's own first word can be a legend word, so a role closed by a comma
+#: or colon ("*Presenter, <meeting>", "*Winner: <prize>") is none.
 _LEGEND_NOTE_RE = re.compile(
-    r"^[\s(]*[*†‡§¥]+\s*(?:=\s*)?(?:denot(?:es?|ing)|designat(?:es?|ing)|indicat(?:es?|ing)|marks|signif(?:y|ies)"
-    r"|held|served\s+as|presenters?|winners?|co-(?:first|second|senior|corresponding)"
-    r"|oral\s+presentations?\W*$)\b", re.IGNORECASE)
+    r"^[\s(]*" + _FOOTNOTE_MARK + r"\s*(?:=\s*)?(?:denot(?:es?|ing)|held|served\s+as|presenters?|winners?"
+    r"|co-(?:first|second|senior|corresponding)|oral\s+presentations?\W*$)\b(?!\s*[,:])", re.IGNORECASE)
+#: A starred remark on the record beside it: the mark, then a sentence about
+#: a study or its results ("*This study was published in <journal> in <year>
+#: and has been cited by ..."). It carries a year as often as not, so the
+#: sentence opening is the test, not the date.
+_STARRED_REMARK_RE = re.compile(r"^[\s(]*" + _FOOTNOTE_MARK + r"\s*(?:this|the|these|results)\b", re.IGNORECASE)
+#: Codes a starred remark may carry besides T: M1 is the code for research
+#: narrative, which a sentence about a study is, and S0 takes a citation
+#: count (core/taxonomy_v7.json).
+_REMARK_HOME_CODES = frozenset({UNCLASSIFIED_CODE, RESEARCH_NARRATIVE_CODE, PROFILE_SUMMARY_CODE})
 #: "Note: ...", "Notes: ...", "Section Notes: ...", "(Note: ...)".
 _NOTE_LABEL_RE = re.compile(r"^[\s(*]*(?:section\s+)?notes?\s*:", re.IGNORECASE)
 #: A Word hyperlink field with no text of its own: `HYPERLINK "<url>"`, then
@@ -566,14 +579,15 @@ def _repeats_leaf_heading(text: str, leaf: str) -> bool:
 
 
 def _is_undated_non_record(text: str, leaf: str) -> bool:
-    """The four sub-shapes read on an undated line only: a group lead-in
+    """The five sub-shapes read on an undated line only: a group lead-in
     (`is_lead_in`, stage 3b's own test) that is no author list cut at its
-    colon, a continuation heading, a column-header row, the leaf heading
-    repeated."""
+    colon, a continuation heading, a legend, a column-header row, the leaf
+    heading repeated."""
     if _LINE_DATE_RE.search(text):
         return False
     return ((is_lead_in(text) and not _names_authors(text))
             or bool(_CONTINUATION_HEADING_RE.search(text))
+            or bool(_LEGEND_NOTE_RE.search(text))
             or _is_column_header_row(text)
             or _repeats_leaf_heading(text, leaf))
 
@@ -581,16 +595,19 @@ def _is_undated_non_record(text: str, leaf: str) -> bool:
 def _is_non_record_line(entry: _ClassifiedEntry) -> bool:
     """A record code on page furniture, a note or a group label: a lead-in
     ending in a colon, a continuation heading, a column-header row, the leaf
-    heading repeated, a bare date stamp, a footnote or legend, a Word field
-    leftover or a count summary. Stage 6 renders each as a junk row."""
+    heading repeated, a bare date stamp, a footnote or legend, a starred
+    remark, a Word field leftover or a count summary. Stage 6 renders each
+    as a junk row."""
     if entry.code == UNCLASSIFIED_CODE:
         return False
-    text = entry.text.strip()
+    text = entry.text
     if _FIELD_LEFTOVER_RE.search(text) or _COUNT_SUMMARY_RE.search(text):
         return entry.code not in _URL_OR_COUNT_CODES
+    if _STARRED_REMARK_RE.search(text) and not _names_authors(text):
+        return entry.code not in _REMARK_HOME_CODES
     leaf = entry.heading_path[-1] if entry.heading_path else ""
-    return bool(_BARE_DATE_STAMP_RE.search(text) or _LEGEND_NOTE_RE.search(text)
-                or _NOTE_LABEL_RE.search(text) or _is_undated_non_record(text, leaf))
+    return bool(_BARE_DATE_STAMP_RE.search(text) or _NOTE_LABEL_RE.search(text)
+                or _is_undated_non_record(text, leaf))
 
 
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
