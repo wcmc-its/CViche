@@ -229,7 +229,11 @@ Lints, ranked by the severity of the failure class they catch:
                           rendered as one: a group header (an institution or
                           organization alone, dated only under teaching), a
                           lead-in label ending in ':', a date fragment with
-                          no words ('47.', '1997-'), or an undated D1 above
+                          no words ('47.', '1997-'), page furniture, a note
+                          or a column-header row printed as a row of exactly
+                          its own words (section_consistency's
+                          non_record_line_as_record, once it renders), or an
+                          undated D1 above
                           or below the dated appointments repeating one of
                           their titles (EBYSBC E8, E10, E29); WARN. Not a
                           sub-heading stage 6 moved into its rows (#985)

@@ -8301,6 +8301,39 @@ def test_junk_or_header_row_reads_a_banner_title_against_the_dated_institution()
         ("WARN", "entry 4 (D1)", "undated_duplicate")]
 
 
+@pytest.mark.parametrize("text, row", [
+    ("PRESENTATIONS \u2013 Example meetings (continued)", "PRESENTATIONS \u2013 Example meetings (continued)"),
+    ("*Held virtually", "Held virtually"),
+    ("Name Degree Dates Thesis Title", "Name: Degree \u2014 Dates \u2014 Thesis Title"),
+    ("(Example Heading)", "\u2022 (Example Heading)"),
+])
+def test_junk_or_header_row_warns_on_a_non_record_line_rendered_alone(text, row):
+    """A continuation heading, a legend, a column-header row and the leaf
+    heading repeated, each coded as a record and printed as a row."""
+    entries = [_junk4(text, "R", 750)]
+    assert _junk_hits(entries, [], [("p", row)]) == [("WARN", "entry 750 (R)", "non_record_line")]
+
+
+def test_junk_or_header_row_reads_a_legend_that_stage_4_filed_as_a_place():
+    """A field-less or place-only entry is no header to look for, and is
+    still read as a non-record line."""
+    entries = [_junk4("*Held virtually", "R", 178, location="Held virtually")]
+    assert _junk_hits(entries, [], [("p", "Held virtually")]) == [
+        ("WARN", "entry 178 (R)", "non_record_line")]
+
+
+def test_junk_or_header_row_needs_the_non_record_line_alone_on_its_row():
+    """One more word on the row and it is a record that carries the note."""
+    entries = [_junk4("*Held virtually", "R", 178)]
+    assert _junk_hits(entries, [], [("p", "Held virtually, Example Society")]) == []
+    assert _junk_hits(entries, [], []) == []
+
+
+def test_junk_or_header_row_reads_a_record_line_as_no_non_record_line():
+    entries = [_junk4("Widget Dynamics, Example Society", "R", 12)]
+    assert _junk_hits(entries, [], [("p", "Widget Dynamics, Example Society")]) == []
+
+
 def test_junk_or_header_row_reads_undated_duplicates_against_d1_only():
     """A dated D2 of the same title is not an appointment the banner repeats,
     and an undated D2 is not read as a banner."""

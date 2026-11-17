@@ -149,8 +149,10 @@ CREDENTIAL_WARN_SHAPES = frozenset({"board_certification_misfiled", "life_suppor
 BANNER_LINE_SHAPE = "banner_line_as_record"
 #: A line that is no record (a group label, a continuation heading, a
 #: footnote, a column-header row) coded as one, which stage 6 renders as a
-#: junk row. INFO until its hits are read on a fresh batch (S3B-NRL in
-#: doctor/PRECISION.md has the stored-run measurement).
+#: junk row. INFO: on 108 held-out stored runs about 90% of its hits are no
+#: record, but a third of its lines never reach the document (S3B-NRL and
+#: JUNK-NRL in doctor/PRECISION.md). junk_or_header_row's `non_record_line`
+#: shape is the WARN, for a line that renders as a row of its own.
 NON_RECORD_LINE_SHAPE = "non_record_line_as_record"
 NON_RECORD_LINE_EXPECTED = "T (not a record)"
 #: A training title the two older training rules do not read, coded as a
@@ -765,11 +767,16 @@ def _is_non_record_line(entry: _ClassifiedEntry) -> bool:
     summary. Stage 6 renders each as a junk row."""
     if entry.code == UNCLASSIFIED_CODE:
         return False
-    text = entry.text
-    leaf = entry.heading_path[-1] if entry.heading_path else ""
+    return is_non_record_text(entry.text, entry.heading_path[-1] if entry.heading_path else "")
+
+
+def is_non_record_text(text: str, leaf_heading: str) -> bool:
+    """`_is_non_record_line`'s reading of the line itself, under its leaf
+    heading. junk_or_header_row asks it of a stage-4 entry, to report the
+    line once it renders as a row."""
     return bool(_BARE_DATE_STAMP_RE.search(text) or _NOTE_LABEL_RE.search(text)
                 or _COUNT_SUMMARY_RE.search(text) or _is_column_header_row(text)
-                or _repeats_leaf_heading(text, leaf) or _is_undated_non_record(text))
+                or _repeats_leaf_heading(text, leaf_heading) or _is_undated_non_record(text))
 
 
 def _is_training_title_misfiled(entry: _ClassifiedEntry) -> bool:
