@@ -98,6 +98,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     deduplicate_entries,
     recovered_row_already_rendered,
 )
+from unified_pipeline.stage6.blank_lines import even_out_blank_lines
 from unified_pipeline.stage6.empty_slots import NOT_APPLICABLE, TemplateSnapshot, fill_empty_slots, snapshot_template
 from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
@@ -2922,6 +2923,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # anything the fill logic relied on.
         if self.strip_template_instructions:
             self._remove_instruction_box()
+
+        # Last of all: every writer and the removal above has had its say on
+        # the blank paragraphs around the headings (#2140).
+        evened = even_out_blank_lines(self.doc.element.body, template_snapshot)
+        logger.info("Blank paragraphs added or removed around headings: %d", evened)
 
     def _log_generation_summary(self, output_path: str) -> None:
         """The verbose end-of-render stats block, lifted out of `generate`
