@@ -1211,6 +1211,43 @@ def test_metrics_pin_reads_no_code_as_no_answer():
     assert content_pin_code(entry) is None
 
 
+# --- #1344: a guideline or protocol published in a journal is not S5 --------------
+
+@pytest.mark.parametrize("text,home", [
+    (f"Quorlenby A, Vashtrel B. Practice guidelines for example membrane care. {_VENUE}. 2031 May;84(5):1243-1257.", "S2"),
+    (f"Quorlenby A. Example Society Position Statement: signals in membranes. {_VENUE} 44(3): 306-331, 2031.", "S2"),
+    (f"Vashtrel B, Quorlenby A: Recommendations from the Example Task Force; {_VENUE}, 2031, 6: 869-885.", "S2"),
+    (f"Quorlenby A. Example consensus statement on membranes. {_VENUE}. 2031. doi: 10.1234/example.2031.17", "S2"),
+    (f"Quorlenby A. Membrane care after surgery: study protocol for a randomised trial. {_VENUE}. 2031;19(1):32. PMID: 1234567", "S1"),
+    (f"Vashtrel B. Rationale and design of the Example Membrane Trial. {_VENUE} 81:154-160, 2031.", "S1"),
+])
+def test_journal_published_guideline_or_protocol_leaves_s5(text, home):
+    # A firm 0.95 answer is recoded too: the citation, not the model's doubt, decides it.
+    (out,), n = apply_header_pin([_row("S5", text, confidence=0.95)], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == home and out["pre_pin_code"] == "S5"
+
+
+@pytest.mark.parametrize("code,text,hierarchy", [
+    # No journal citation: a society's web guideline, a report, a toolkit.
+    ("S5", "Quorlenby A. Example Society Guidelines for Membrane Care. Published online December 2031. www.example.org", None),
+    ("S5", "Example Agency. Core Elements of Membrane Stewardship: Guideline framework for clinics. 2031", None),
+    # A preprint server's DOI is not a journal.
+    ("S5", "Quorlenby A. Consensus guidelines for membranes. bioRxiv 2031. doi: 10.1101/2031.01.01.123456", None),
+    # A journal citation with no guideline or protocol word.
+    ("S5", f"Quorlenby A. Data on signals in an example membrane. {_VENUE}. 2031;19(1):32-40.", None),
+    # "Protocol" alone is a laboratory method, not a study protocol.
+    ("S5", f"Quorlenby A. Generic acquisition protocol in membranes. {_VENUE}. 2031;19(1):32-40.", None),
+    # The owner's own heading says non-peer-reviewed.
+    ("S5", f"Quorlenby A. Example Clinical Practice Guidelines. {_VENUE}, 19(4): 439-457, 2031.",
+     ["PUBLICATIONS", "RESEARCH PAPERS (NON-PEER REVIEWED)"]),
+    # Only S5 moves.
+    ("S6", f"Quorlenby A. Practice guidelines for example membrane care. {_VENUE}. 2031;84(5):1243-1257.", None),
+])
+def test_guideline_pin_leaves_other_rows(code, text, hierarchy):
+    entry = _row(code, text, 0.95, hierarchy) if hierarchy else _row(code, text, 0.95)
+    assert content_pin_code(entry) is None
+
+
 # --- #1695 part 2: a student evaluation of the owner's teaching is T ----------------
 
 STUDENT_EVALUATIONS = ("Appendix III Student Evaluations",)
