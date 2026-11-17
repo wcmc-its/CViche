@@ -83,9 +83,19 @@ def _spacers(start: BaseOxmlElement, *, preceding: bool) -> list[BaseOxmlElement
     return run
 
 
+#: Word's per-paragraph ids (`w14:paraId`, `w14:textId`) live in this namespace
+#: and must not repeat, so a copied spacer drops them.
+_W14_NAMESPACE = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+
+
 def _new_spacer(like: BaseOxmlElement | None) -> BaseOxmlElement:
     """A copy of *like*, so the new gap is as tall as its neighbours, or a bare paragraph."""
-    return deepcopy(like) if like is not None else OxmlElement("w:p")
+    if like is None:
+        return OxmlElement("w:p")
+    spacer = deepcopy(like)
+    for name in [name for name in spacer.attrib if name.startswith(_W14_NAMESPACE)]:
+        del spacer.attrib[name]
+    return spacer
 
 
 def _set_gap(heading: BaseOxmlElement, want: int, model: BaseOxmlElement | None, *,

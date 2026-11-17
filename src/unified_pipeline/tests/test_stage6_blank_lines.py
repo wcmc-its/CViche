@@ -152,6 +152,8 @@ def test_an_added_blank_copies_its_neighbour():
     doc = _template("Books:", "")
     spacer = doc.paragraphs[1]
     spacer.style = doc.styles["No Spacing"]
+    para_id = "{http://schemas.microsoft.com/office/word/2010/wordml}paraId"
+    spacer._p.set(para_id, "01E7E115")
     snapshot = snapshot_template(doc.element.body)
     _write_after(doc, "Books:", "N/A")
 
@@ -160,3 +162,4 @@ def test_an_added_blank_copies_its_neighbour():
     added = doc.paragraphs[1]
     assert added.text == "" and added._p is not spacer._p
     assert added.style.name == "No Spacing"
+    assert spacer._p.get(para_id) == "01E7E115" and added._p.get(para_id) is None
