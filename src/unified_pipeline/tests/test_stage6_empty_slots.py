@@ -346,18 +346,20 @@ def test_real_template_keeps_every_placeholder_and_marks_the_empty_slots(tmp_pat
     doc = _render(tmp_path, [_OWNER, _PATENT])
     body = _body_texts(doc)
 
-    def first_after(prefix):
+    def under(prefix):
         i = next(n for n, (kind, text) in enumerate(body)
                  if kind == 'p' and text.strip().startswith(prefix))
-        return body[i + 1]
+        return body[i + 1:i + 3]
 
-    assert first_after("Past (Completed) Funding") == ('p', NOT_APPLICABLE)
-    assert first_after("Pending Funding") == ('p', NOT_APPLICABLE)
-    assert first_after("Clinical Leadership") == ('p', NOT_APPLICABLE)
-    assert first_after("Leadership and mentoring in programs") == ('p', NOT_APPLICABLE)
-    assert first_after("Books:") == ('p', NOT_APPLICABLE)
+    # One blank line, then N/A: the same gap a slot with content has (#2140).
+    na_under_heading = [('p', ''), ('p', NOT_APPLICABLE)]
+    assert under("Past (Completed) Funding") == na_under_heading
+    assert under("Pending Funding") == na_under_heading
+    assert under("Clinical Leadership") == na_under_heading
+    assert under("Leadership and mentoring in programs") == na_under_heading
+    assert under("Books:") == na_under_heading
     # The patent rendered, so its slot says nothing of N/A.
-    assert first_after("Patents & Inventions") != ('p', NOT_APPLICABLE)
+    assert ('p', NOT_APPLICABLE) not in under("Patents & Inventions")
     assert any("Synthetic Widget" in cell for kind, rows in body if kind == 'tbl'
                for row in rows for cell in row)
     # Every record placeholder is still there, with N/A in its first answer.
