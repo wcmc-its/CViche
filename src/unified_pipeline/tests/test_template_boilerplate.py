@@ -238,6 +238,12 @@ def test_a_protected_term_is_never_near_matched(monkeypatch):
     "Award Source: (funding agency \u2013 federal, foundation, industry; type of grant)* | N/A\n"
     "Project title: |\nDuration of support: | \n(mm/yyyy-mm/yyyy)\nYour role*: |",
     "Award Source (funding agency, type of grant): | N/A\nProject title: |",
+    # #2141 (9TUVGW): the value with a "?" or written more than once.
+    "N/A?",
+    "N/A?N/A?",
+    "N/A?N/A? |  |",
+    "None. N/A",
+    "Primary Hospital Affiliation: | N/A?N/A?",
 ])
 def test_an_unanswered_prompt_is_detected(text):
     assert is_unanswered_prompt(text)
@@ -250,6 +256,9 @@ def test_an_unanswered_prompt_is_detected(text):
     "Grant pending | N/A",        # an unrecognised cell is faculty data
     "N/A for 2019; resumed 2020", # an answer that says something
     "Primary Hospital Affiliation:",  # an unfilled label with no N/A
+    "Nana",                       # #2141: a name, not "na" twice
+    "N/A?N/A? pending",
+    "N/A/2019",
     # #1942: one answered row keeps the whole multi-row block.
     "Award Source (funding agency, type of grant): | N/A\nProject title: | Training in testing",
 ])
