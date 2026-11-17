@@ -2175,6 +2175,57 @@ def test_apply_formatted_fields_cuts_a_placeholder_whose_title_ends_in_a_period(
     assert "title" not in entry["extracted_fields"]
 
 
+# --- #1344: an S7 citation carries no status the source does not state -----------
+
+def _s7(text, hierarchy=("PUBLICATIONS", "Working Papers"), code="S7"):
+    return {"text": text, "taxonomy_code": code, "hierarchy": list(hierarchy), "extracted_fields": {}}
+
+
+@pytest.mark.parametrize("entry,citation,expected", [
+    (_s7("Quill A, Rook B. Signals in an example tissue."),
+     "Quill A, Rook B. Signals in an example tissue. [Submitted].", "Quill A, Rook B. Signals in an example tissue."),
+    (_s7("Quill A. Signals in an example tissue. J Imag Stud. 2031", ("Papers in Preparation",)),
+     "Quill A. Signals in an example tissue. J Imag Stud. [Submitted]. 2031.",
+     "Quill A. Signals in an example tissue. J Imag Stud. 2031."),
+    # A title's "review" is not a status.
+    (_s7("Quill A. Example tissue signals: a review of the literature."),
+     "Quill A. Example tissue signals: a review of the literature. [Submitted/In review].",
+     "Quill A. Example tissue signals: a review of the literature."),
+    # The source says another status than the one the model wrote.
+    (_s7("Quill A. Signals in an example tissue. J Imag Stud. 2031. In press."),
+     "Quill A. Signals in an example tissue. J Imag Stud. [In review]. 2031.",
+     "Quill A. Signals in an example tissue. J Imag Stud. 2031."),
+])
+def test_s7_citation_loses_a_status_the_source_does_not_state(entry, citation, expected):
+    assert s5d.apply_formatted_fields(entry, {"formatted_citation": citation}) is True
+    assert entry["extracted_fields"]["formatted_citation"] == expected
+
+
+@pytest.mark.parametrize("entry,citation", [
+    (_s7("Quill A. Signals in an example tissue. Under review with J Imag Stud."),
+     "Quill A. Signals in an example tissue. J Imag Stud. [Submitted]."),
+    (_s7("Quill A. Signals in an example tissue. J Imag Stud.", ("PUBLICATIONS", "Submitted Manuscripts")),
+     "Quill A. Signals in an example tissue. J Imag Stud. [In review]."),
+    (_s7("Quill A. Signals in an example tissue.", ("Manuscripts in preparation",)),
+     "Quill A. Signals in an example tissue. [In preparation]."),
+    (_s7("Quill A. Signals in an example tissue. J Imag Stud; Under revision"),
+     "Quill A. Signals in an example tissue. J Imag Stud. [Under revision]."),
+    (_s7("Quill A. Signals in an example tissue. J Imag Stud. Accepted."),
+     "Quill A. Signals in an example tissue. J Imag Stud. [Accepted]."),
+    (_s7("Quill A. Signals in an example tissue. J Imag Stud, in press"),
+     "Quill A. Signals in an example tissue. J Imag Stud. [In press]."),
+    (_s7("Quill A. Signals in an example tissue.", ("WORKS IN PROGRESS",)),
+     "Quill A. Signals in an example tissue. [In progress]."),
+    # A bracket that is no status, and a code other than S7, are left alone.
+    (_s7("Quill A. Signals in an example tissue."), "Quill A. Signals in an example tissue [letter]."),
+    (_s7("Quill A. Signals in an example tissue. J Imag Stud. 2031;4:12-19.", code="S1"),
+     "Quill A. Signals in an example tissue. J Imag Stud. [Submitted]. 2031;4:12-19."),
+])
+def test_s7_citation_keeps_a_status_the_source_states(entry, citation):
+    s5d.apply_formatted_fields(entry, {"formatted_citation": citation})
+    assert entry["extracted_fields"]["formatted_citation"] == citation
+
+
 @pytest.mark.parametrize("field", ["editors", "publisher"])
 def test_apply_formatted_fields_copies_editors_and_publisher_onto_an_entry_without_them(field):
     # #481: the reply's editors/publisher used to be dropped, so stage 6's
