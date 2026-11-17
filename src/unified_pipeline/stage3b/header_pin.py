@@ -128,6 +128,10 @@ _CONTRIBUTED_WORK = re.compile(
     r"|research\s+forum|residents?\s+conference)\b",
     re.I,
 )
+# A talk the row says someone else gave ("talk given by my student, ...") is not
+# the owner's invited talk; whether it is an abstract is #312 owner question 1,
+# so the model's answer stands (NTCULM 436/500/506).
+_TALK_BY_ANOTHER = re.compile(r"\btalk given by\b", re.I)
 
 # --- #312 A2n: a session role under an R pin is the owner's part in the program ---
 #
@@ -960,6 +964,7 @@ def _r_pin_takes(entry: dict) -> bool:
         and _safe_confidence(entry) <= _S8_PIN_MAX_MODEL_CONFIDENCE
         and not _has_author_list(text)
         and not _CONTRIBUTED_WORK.search(text)
+        and not _TALK_BY_ANOTHER.search(text)
     )
 
 
@@ -975,8 +980,9 @@ def _is_session_role_q2(entry: dict) -> bool:
 
 def _r_named_set_takes(entry: dict) -> bool:
     """Whether an R heading, agreeing or leaf-side, recodes this model answer:
-    the measured set, or a session-role Q2 (#312 A2n, C1b)."""
-    return entry.get("taxonomy_code") in HEADER_PIN_OVERRIDES[_INVITED_TALK_PIN] or _is_session_role_q2(entry)
+    the measured set, an unsure author-less S8, or a session-role Q2 (#312 A2n,
+    C1b; the S8 on the leaf-side run by the owner's 2026-11-16 decision)."""
+    return _r_pin_takes(entry) or _is_session_role_q2(entry)
 
 
 def _log_r_pin(entry: dict, pin: str | None) -> None:

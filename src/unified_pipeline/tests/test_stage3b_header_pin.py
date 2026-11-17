@@ -390,9 +390,28 @@ def test_r_leaf_run_recodes_a_session_role_q2():
     assert (out["taxonomy_code"], out["pre_pin_code"]) == ("R", "Q2")
 
 
+@pytest.mark.parametrize("ctx", [R_LEAF_CTX, R_RUN_CTX])
+def test_r_leaf_run_recodes_an_unsure_author_less_s8(ctx):
+    talk = _row("S8", '"Signals in an example tissue." Example Society Annual Meeting, Springfield, 2031.',
+                confidence=0.8)
+    (out,), n = apply_header_pin([talk], ctx)
+    assert n == 1
+    assert (out["taxonomy_code"], out["pre_pin_code"]) == ("R", "S8")
+
+
+def test_a_talk_someone_else_gave_stays_s8_under_agreeing_r_levels():
+    entry = _row("S8", "2031: Example Society Meeting. Talk given by graduate student, Pat Example.")
+    (out,), n = apply_header_pin([entry], R_CTX)
+    assert n == 0 and out == entry
+
+
 @pytest.mark.parametrize("entry", [
-    # The unsure author-less S8 branch stays an agreeing-levels call (#312 owner question 1).
-    _row("S8", '"Signals in an example tissue." Example Society Annual Meeting, Springfield, 2031.'),
+    # A confident S8 stays (#312 owner question 1), and so does one with authors
+    # or one the row says someone else gave.
+    _row("S8", '"Signals in an example tissue." Example Society Annual Meeting, Springfield, 2031.',
+         confidence=0.85),
+    _row("S8", "Doe JA, Roe K. Signals in an example tissue. Example Society Meeting, 2031."),
+    _row("S8", "2031: Example Society meeting, Springfield-talk given by my student, Pat Example"),
     _row("K3", "Course Director, Example Topic Course, Example University, 2031", confidence=0.9),
     _row("K5", "Example Topic for Families, Example Public Library, 2031", confidence=0.9),
     _row("Q2", "Member, Example Society Program Committee, 2031", confidence=0.9),
