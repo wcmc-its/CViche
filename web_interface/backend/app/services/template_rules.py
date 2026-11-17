@@ -23,6 +23,10 @@ Conditions:
   column when it heads one (Percent Effort).
 - ``not_applicable``: the slot holds nothing but "N/A", or nothing at all.
 - ``section_empty``: the same, over a whole top-level section, to the next one.
+- ``column_sum``: the numbers written under a table's column label do not add
+  up to ``threshold`` (#2052: Percent Effort and 100). The Total row is left
+  out. A column with no number in it, or with an answer that is not a number,
+  does not fire: the first is ``blank``'s, the second is not ours to add up.
 
 Nothing here edits the document: it returns where each comment goes.
 """
@@ -58,7 +62,16 @@ RULES_PATH = Path(__file__).with_name("template_rules.json")
 TEMPLATE_RULE_LINT = "template_rule"
 #: The conditions a rule may name (the module docstring says what each tests).
 CONDITIONS = frozenset({"always", "blank", "not_applicable", "section_empty",
-                        "max_entries", "max_words"})
+                        "max_entries", "max_words", "column_sum"})
+#: The conditions that compare against ``threshold`` and cannot load without one.
+_THRESHOLD_CONDITIONS = frozenset({"max_entries", "max_words", "column_sum"})
+#: The label of the row that states a column's total (the Percent Effort
+#: table's last row): its own figure is not one of the amounts to add up.
+TOTAL_ROW_LABEL = "total"
+#: One amount in a summed column: "15", "15%", "12.5 %".
+_AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%?")
+#: How far a column's sum may sit from its threshold and still equal it.
+_SUM_TOLERANCE = 0.01
 #: A bibliography entry as stage 6 numbers it: "12. Quill AB ...".
 _NUMBERED_ENTRY_RE = re.compile(r"^\d+\.\s")
 
@@ -194,6 +207,43 @@ def _blank_label(blocks: list[_Block], slot: str, doc: DocumentObject) -> Paragr
     return None
 
 
+def _column_amounts(tbl: BaseOxmlElement, slot: str) -> list[float] | None:
+    """The numbers under *tbl*'s column label starting with *slot*, Total row
+    left out; None when the table has no such column label, or a written
+    answer in it is not a number."""
+    rows = _cell_rows(tbl)
+    at = next(((r, c) for r, row in enumerate(rows) for c, tc in enumerate(row)
+               if _text(tc).startswith(slot)), None)
+    if at is None:
+        return None
+    amounts = []
+    for row in rows[at[0] + 1:]:
+        if at[1] >= len(row) or _text(row[0]).lower() == TOTAL_ROW_LABEL:
+            continue
+        written = _text(row[at[1]])
+        amount = _AMOUNT_RE.fullmatch(written)
+        if written and amount is None:
+            return None
+        if amount is not None:
+            amounts.append(float(amount.group(1)))
+    return amounts
+
+
+def _column_off_sum(blocks: list[_Block], rule: TemplateRule, doc: DocumentObject) -> Paragraph | None:
+    """*rule*'s column label, when the numbers under it do not add up to its threshold."""
+    for block in blocks:
+        if block.para is not None:
+            continue
+        amounts = _column_amounts(block.element, rule.slot)
+        if amounts is None:
+            continue
+        if not amounts or abs(sum(amounts) - rule.threshold) <= _SUM_TOLERANCE:
+            return None
+        label, _ = _table_label(block.element, rule.slot)
+        return Paragraph(label.find(qn("w:p")), doc._body)
+    return None
+
+
 def _over(count: int, rule: TemplateRule) -> bool:
     return rule.threshold is not None and count > rule.threshold
 
@@ -218,6 +268,8 @@ def _anchor(rule: TemplateRule, blocks: list[_Block], doc: DocumentObject) -> Pa
     """Where *rule*'s comment goes in the document, or None when it does not fire."""
     if rule.condition == "blank":
         return _blank_label(blocks, rule.slot, doc)
+    if rule.condition == "column_sum":
+        return _column_off_sum(blocks, rule, doc)
     at = _heading(blocks, rule.slot)
     return blocks[at].para if at is not None and _fires(rule, blocks, at) else None
 
@@ -225,12 +277,12 @@ def _anchor(rule: TemplateRule, blocks: list[_Block], doc: DocumentObject) -> Pa
 @cache
 def load_rules(path: Path = RULES_PATH) -> tuple[TemplateRule, ...]:
     """The rules in *path*; raises ValueError on a condition no code reads,
-    or a max_* rule with no threshold."""
+    or a max_* or column_sum rule with no threshold."""
     rules = tuple(TemplateRule(**row) for row in json.loads(path.read_text(encoding="utf-8")))
     for rule in rules:
         if rule.condition not in CONDITIONS:
             raise ValueError(f"template rule {rule.slot!r}: unknown condition {rule.condition!r}")
-        if rule.condition.startswith("max_") and rule.threshold is None:
+        if rule.condition in _THRESHOLD_CONDITIONS and rule.threshold is None:
             raise ValueError(f"template rule {rule.slot!r}: {rule.condition} needs a threshold")
     return rules
 
