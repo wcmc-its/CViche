@@ -35,6 +35,8 @@ A content pin (#1695) recodes a per-article citation-metrics line ("<Surname> et
 al. (<year>) <journal> JIF: <x>") from a publication or editorial code to S0,
 and a teaching code under a student-evaluations heading to T (under a
 combined "X and Evaluations" heading, only an evaluation-summary row).
+A content pin (#1344) recodes an S5 guideline or consensus statement the row
+cites in a journal to S2, and a study protocol to S1.
 A chief-trainee pin (#1731) recodes a position or leadership code on a line
 that opens, after an optional date, with "Chief Resident(cy)" or "Chief Fellow" to C.
 A reviewer pin (#1413) recodes an unsure Q4C journal name to Q4D when the
@@ -285,6 +287,31 @@ _PROCEEDINGS_VENUE = re.compile(
     r"|\bConf\b|\bLecture\s+Notes\b",
     re.I,
 )
+
+# --- #1344: a guideline or protocol published in a journal is not "non-peer-reviewed" ---
+#
+# The owner's decision of 2026-10-02: S5 is only for an item with no evidence of
+# journal publication. A consensus statement or practice guideline in a journal
+# is a review (S2); a study protocol in a journal is a research article (S1).
+# The evidence is read off the row: a PMID or DOI, or a volume and page
+# ("84(5):1243", "81:154-160"). A preprint server's DOI is not a journal, and a
+# heading the owner words as non-peer-reviewed keeps the row where it is.
+_NON_PEER_REVIEWED_CODE = "S5"
+_GUIDELINE_HOME = "S2"
+_PROTOCOL_HOME = "S1"
+_GUIDELINE_WORD = re.compile(
+    r"\b(?:guidelines?|consensus|position\s+(?:statement|paper)|scientific\s+statement"
+    r"|practice\s+parameters?|recommendations)\b",
+    re.I,
+)
+_PROTOCOL_WORD = re.compile(
+    r"\b(?:study\s+protocol|protocol\s+(?:for|of)|rationale\s+and\s+design|design\s+and\s+rationale)\b", re.I)
+_VOLUME_AND_PAGE = re.compile(r"\b\d{1,4}\s*(?:\(\s*[\w-]{1,12}\s*\))?\s*:\s*[A-Za-z]?\d")
+_PREPRINT = re.compile(r"\b(?:bioRxiv|medRxiv|arXiv|SSRN|Research\s+Square|preprints?)\b", re.I)
+# The owner's own heading wins: "Research Papers (Non-Peer Reviewed)" keeps its S5.
+_NON_PEER_REVIEWED_HEADING = re.compile(r"\b(?:non|not|un)[-\s]?(?:peer|refereed)", re.I)
+_GUIDELINE_WHY = "A guideline or consensus statement published in a journal is a review"
+_PROTOCOL_WHY = "A study protocol published in a journal is a research article"
 
 # Content pins: shapes whose code does not depend on the heading they sit under.
 # Only the owner-attended forms: "attending" is a physician title and "attendees" or
@@ -1118,7 +1145,8 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
     a publication code on a note that points at a numbered publication is T;
     a publication or editorial code on a per-article metrics line is S0;
     a teaching code under a student, course or teaching evaluations heading is T
-    (under a combined heading, only a row that opens as an evaluation summary).
+    (under a combined heading, only a row that opens as an evaluation summary);
+    an S5 guideline or protocol the row cites in a journal is S2 or S1 (#1344).
     """
     code, text = entry.get("taxonomy_code"), entry.get("text") or ""
     heading = _heading_text(entry)
@@ -1134,6 +1162,19 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
         return _BIBLIOMETRIC_CODE, _METRICS_STUB_WHY
     if code and _TEACHING_CODE.match(code) and _is_under_teaching_evaluations(entry):
         return _APPENDIX_CODE, _TEACHING_EVALUATION_WHY
+    if code == _NON_PEER_REVIEWED_CODE and not _NON_PEER_REVIEWED_HEADING.search(heading):
+        return _journal_published_home(text)
+    return None
+
+
+def _journal_published_home(text: str) -> tuple[str, str] | None:
+    """(code, why) for a guideline or protocol the row cites in a journal, or None (#1344)."""
+    if _PREPRINT.search(text) or not (_PUBLICATION_ID.search(text) or _VOLUME_AND_PAGE.search(text)):
+        return None
+    if _GUIDELINE_WORD.search(text):
+        return _GUIDELINE_HOME, _GUIDELINE_WHY
+    if _PROTOCOL_WORD.search(text):
+        return _PROTOCOL_HOME, _PROTOCOL_WHY
     return None
 
 
