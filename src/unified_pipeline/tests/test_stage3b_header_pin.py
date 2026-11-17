@@ -199,8 +199,24 @@ def test_s8_with_an_author_list_or_contributed_marker_stays(text):
     assert n == 0 and out == entry
 
 
-def test_confident_s8_under_r_stays():
-    entry = _row("S8", '"Signals in an example tissue." Example Society Meeting, 2031.', confidence=0.85)
+@pytest.mark.parametrize("confidence", [0.85, 0.96])
+def test_confident_author_less_s8_is_recoded_where_every_level_says_r(confidence):
+    # Owner's 2026-11-16 answer to #312 question 1; the leaf-side run keeps the ceiling
+    # (test_r_leaf_run_leaves_every_other_answer).
+    talk = _row("S8", '"Signals in an example tissue." Example Society Meeting, 2031.', confidence=confidence)
+    (out,), n = apply_header_pin([talk], R_CTX)
+    assert n == 1 and (out["taxonomy_code"], out["pre_pin_code"]) == ("R", "S8")
+
+
+@pytest.mark.parametrize("text", [
+    "Doe JA, Roe K. Signals in an example tissue. Example Society Meeting, 2031.",
+    '"Signals in an example tissue" (poster), Example Society Meeting, 2031.',
+    "2031. Selected Paper. Example Society Meeting. Talk presented by Post-doctoral Fellow, Dr Pat Example.",
+    "2031 Example Biology Symposium. Signals in an example tissue. Example J 22: 236.4, 2031",
+    "2031 Example Biology Symposium. Signals in an example tissue. Example J 19(5):A1337/715.5, 2031",
+])
+def test_confident_s8_the_content_guards_name_stays_under_r(text):
+    entry = _row("S8", text, confidence=0.9)
     (out,), n = apply_header_pin([entry], R_CTX)
     assert n == 0 and out == entry
 
@@ -214,8 +230,9 @@ def test_surname_with_bare_initials_and_comma_is_an_author_list():
 
 @pytest.mark.parametrize("confidence", [None, "high", ""])
 def test_s8_with_an_unreadable_confidence_counts_as_certain(confidence):
+    # On the leaf-side run, where the ceiling applies.
     entry = _row("S8", '"Signals in an example tissue." Example Society Meeting, 2031.', confidence=confidence)
-    (out,), n = apply_header_pin([entry], R_CTX)
+    (out,), n = apply_header_pin([entry], R_LEAF_CTX)
     assert n == 0 and out == entry
 
 
@@ -308,7 +325,7 @@ def test_session_role_q2_the_1580_decision_keeps_stays_q2(text):
     assert n == 0 and out == entry
 
 
-@pytest.mark.parametrize("code", ["P", "D3", "S8"])
+@pytest.mark.parametrize("code", ["P", "D3"])  # an author-less S8 is the S8 rule's, at any confidence
 def test_a_session_role_the_model_coded_other_than_q2_is_left_alone(code):
     entry = _row(code, MODERATOR, confidence=0.9)
     (out,), n = apply_header_pin([entry], R_CTX)
