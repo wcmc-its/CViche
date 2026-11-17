@@ -111,6 +111,7 @@ from ..shared import (
     normalise_hyphens,
     offered_as_subpoint,
 )
+from .classification import is_non_record_text
 from .extraction import _leaf_strings
 
 # Lint 7: a source section with at least this many substantive lines whose
@@ -3571,12 +3572,19 @@ def lint_date_cell_shape(stage4: dict, table_rows: list[list[list[str]]],
 #                     description, perhaps placed: the sentence fills the
 #                     record's name cell (RCBKFG GKAQHB 94). A narrative
 #                     alone is a research statement, written as prose.
+#   non_record_line   page furniture, a note or a column-header row with no
+#                     closing ':' ('<heading> (continued)', '*Held
+#                     virtually', 'Name Degree Dates'): section_consistency's
+#                     non_record_line_as_record names the stage-3b code, at
+#                     INFO, whether or not the line renders; this is the
+#                     line rendered as a row of exactly its own words
 JUNK_SHAPE_DATE_FRAGMENT = "date_fragment"
 JUNK_SHAPE_LABEL = "label"
 JUNK_SHAPE_HEADER_ONLY = "header_only"
 JUNK_SHAPE_UNDATED_DUPLICATE = "undated_duplicate"
 JUNK_SHAPE_ROLE_ONLY = "role_only"
 JUNK_SHAPE_DESCRIPTION_ONLY = "description_only"
+JUNK_SHAPE_NON_RECORD_LINE = "non_record_line"
 
 #: Severity of every finding. Measured 2026-10-04 over the 63-run
 #: EBYSBC/s7ab/pilot farm (origin/dev fb466a0f renders): 104 hits, 65 on an
@@ -3599,6 +3607,8 @@ _JUNK_SHAPE_MESSAGES = MappingProxyType({
                           "role stage 4 read from it",
     JUNK_SHAPE_DESCRIPTION_ONLY: "a sentence with no name, title or role "
                                  "renders as a record of its own",
+    JUNK_SHAPE_NON_RECORD_LINE: "page furniture, a note or a column-header "
+                                "row renders as a record of its own",
 })
 
 #: Taxonomy letters the lint does not judge. A is Personal Data, rendered as
@@ -3810,10 +3820,12 @@ def _junk_shape(raw: dict, code: str, text: str, fields: dict[str, object],
         return candidate(JUNK_SHAPE_DATE_FRAGMENT, text_tokens, text_tokens, 0)
     if text.endswith(":") and len(text.split()) <= JUNK_LABEL_MAX_WORDS:
         return candidate(JUNK_SHAPE_LABEL, text_tokens, text_tokens, JUNK_ROW_EXTRA_WORDS)
-    if _is_header_only(code, fields):
+    holder = _field_tokens(fields, _JUNK_HOLDER_FIELDS)
+    # A header with no institution or organization has no word to look for;
+    # it may still be a non-record line, read last.
+    if holder and _is_header_only(code, fields):
         dated_header = bool(fields.keys() & _JUNK_DATE_FIELDS)
-        return candidate(JUNK_SHAPE_HEADER_ONLY,
-                         _field_tokens(fields, _JUNK_HOLDER_FIELDS),
+        return candidate(JUNK_SHAPE_HEADER_ONLY, holder,
                          _field_tokens(fields, _JUNK_PLACEMENT_FIELDS),
                          0 if dated_header else JUNK_ROW_EXTRA_WORDS)
     core = (_undated_duplicate_core(_entry_position(raw), fields, dated)
@@ -3828,6 +3840,8 @@ def _junk_shape(raw: dict, code: str, text: str, fields: dict[str, object],
         return candidate(JUNK_SHAPE_DESCRIPTION_ONLY, described,
                          _field_tokens(fields, _JUNK_DESCRIPTION_FIELDS | _JUNK_PLACEMENT_FIELDS),
                          JUNK_ROW_EXTRA_WORDS)
+    if is_non_record_text(text, str((raw.get("hierarchy") or [""])[-1])):
+        return candidate(JUNK_SHAPE_NON_RECORD_LINE, text_tokens, text_tokens, 0)
     return None
 
 
