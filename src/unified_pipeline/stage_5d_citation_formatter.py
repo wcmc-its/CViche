@@ -334,6 +334,38 @@ def _without_placeholder(citation: str, placeholder: str) -> str:
     return f"{cleaned}." if cleaned else ''
 
 
+# #1344: the prompt's S7 template ("[Submitted/In review]") makes the model
+# stamp a submission status on work the CV lists only as a working paper, in
+# preparation or in progress (KDAZOM 249, RVTAQT 161, RSRRUF 188). A bracketed
+# status is kept only when the entry's own line or one of its headings states
+# it; "submitted" and "under review" count as the same claim.
+_UNPUBLISHED_CODE = 'S7'
+_STATUS_BRACKET_RE = re.compile(
+    r"\s*\[[^\]]*\b(?:submi\w*|review|revis\w*|prepar\w*|press|accept\w*|progress)\b[^\]]*\]", re.IGNORECASE)
+_STATUS_CLAIMS = (
+    (re.compile(r"submi|review", re.I),
+     re.compile(r"\bsubmi|\b(?:under|in)[-\s]+review|\bfor\s+review|\bunder\s+consideration", re.I)),
+    (re.compile(r"revis", re.I), re.compile(r"\brevis", re.I)),
+    (re.compile(r"prepar", re.I), re.compile(r"\bprepar", re.I)),
+    (re.compile(r"press", re.I), re.compile(r"\bin\s+press", re.I)),
+    (re.compile(r"accept", re.I), re.compile(r"\baccept", re.I)),
+    (re.compile(r"progress", re.I), re.compile(r"\bprogress", re.I)),
+)
+
+
+def _status_in_source(bracket: str, source: str) -> bool:
+    return any(claim.search(bracket) and stated.search(source) for claim, stated in _STATUS_CLAIMS)
+
+
+def without_invented_status(citation: str, entry: dict) -> str:
+    """An S7 `citation` without a bracketed status its entry's line and headings do not state (#1344)."""
+    if entry.get('taxonomy_code') != _UNPUBLISHED_CODE:
+        return citation
+    source = ' '.join([entry.get('text') or '', *map(str, entry.get('hierarchy') or [])])
+    kept = _STATUS_BRACKET_RE.sub(lambda m: m[0] if _status_in_source(m[0], source) else '', citation)
+    return kept if kept == citation else _REPEATED_PERIODS_RE.sub('.', kept).strip()
+
+
 # #1570: the grounding check. Stage 6 prints a 5d citation in place of the
 # CV's own line, so a citation naming an author, an initial or a meeting
 # ordinal the line does not hold puts invented text in the document
@@ -649,7 +681,8 @@ def apply_formatted_fields(entry: dict, formatted_data: dict) -> bool:
     The citation always; each extracted field only where the entry has none.
     A bracketed placeholder title the source does not carry ("[Title not
     provided]") is never written, and is cut out of the citation (#446:
-    EBYSBC HFAJCC-05, XWNZWW-02): stage 6 then sees an entry with no title."""
+    EBYSBC HFAJCC-05, XWNZWW-02): stage 6 then sees an entry with no title.
+    An S7 citation loses a bracketed status the source does not state (#1344)."""
     fields = entry.setdefault('extracted_fields', {})
     formatted_data = dict(formatted_data)
     title = formatted_data.get('title')
@@ -662,6 +695,8 @@ def apply_formatted_fields(entry: dict, formatted_data: dict) -> bool:
                 formatted_data.pop('formatted_citation')
     stored = 'formatted_citation' in formatted_data
     if stored:
+        if isinstance(formatted_data['formatted_citation'], str):
+            formatted_data['formatted_citation'] = without_invented_status(formatted_data['formatted_citation'], entry)
         fields['formatted_citation'] = formatted_data['formatted_citation']
         fields['formatting_source'] = 'stage_5d_llm'
     for field in _COPIED_FIELDS:
