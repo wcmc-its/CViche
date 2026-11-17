@@ -113,8 +113,10 @@ _MODEL_SOURCE = "llm"
 # S8 under an R pin. A talk the author filed under Invited Lectures with no author
 # list in front of it is the owner's invited talk (MIFYLG, KYOPUV). An author list
 # or a contributed-work marker keeps the model's S8: that shape is an abstract.
-# So does a confident S8: the pin breaks the model's tie, it does not overrule a
-# firm answer (the 1990s research-conference sub-lists filed under talks score 0.85+).
+# So does a confident S8 where only the leaf-side run of headings says R: there the
+# pin breaks the model's tie, it does not overrule a firm answer. Where every mapped
+# level says R the ceiling is off (owner's 2026-11-16 answer to #312 question 1:
+# the research-conference sub-lists the author filed under talks, 0.85+, are talks).
 _S8_PIN_MAX_MODEL_CONFIDENCE = 0.80
 _AUTHOR_LIST = re.compile(
     r"\b[A-Z][A-Za-z'\u2019-]+,?\s+(?:[A-Z]\.\s?){1,3}(?=[,;.\s*]|$)"  # Doe, J.A. / Doe J.
@@ -130,8 +132,13 @@ _CONTRIBUTED_WORK = re.compile(
 )
 # A talk the row says someone else gave ("talk given by my student, ...") is not
 # the owner's invited talk; whether it is an abstract is #312 owner question 1,
-# so the model's answer stands (NTCULM 436/500/506).
-_TALK_BY_ANOTHER = re.compile(r"\btalk given by\b", re.I)
+# so the model's answer stands (NTCULM 436/500/506; "talk presented by
+# Post-doctoral Fellow, ...", LRANWT 85). The owner's 2026-11-16 answer: leave it.
+_TALK_BY_ANOTHER = re.compile(r"\btalk (?:given|presented) by\b", re.I)
+
+# A journal volume and locator ("FASEB J 22: 236.4, 2008", "19(5):A1337") marks a
+# published abstract: as a talk the row would lose that reference (QRJUGI 121/122/125).
+_VOLUME_LOCATOR = re.compile(r"\b\d{1,4}(?:\(\d{1,3}\))?\s?:\s?[A-Z]?\d{2,}")
 
 # --- #312 A2n: a session role under an R pin is the owner's part in the program ---
 #
@@ -954,17 +961,21 @@ def _safe_confidence(entry: dict) -> float:
         return 1.0
 
 
-def _r_pin_takes(entry: dict) -> bool:
-    """Whether an R pin recodes this model answer: the measured set, or an unsure, author-less S8."""
+def _r_pin_takes(entry: dict, every_level_agrees: bool = False) -> bool:
+    """Whether an R pin recodes this model answer: the measured set, or an
+    author-less S8. The S8 must be an unsure one unless `every_level_agrees`:
+    where every mapped heading level says R the confidence ceiling is off
+    (owner's 2026-11-16 decision, #312 owner question 1)."""
     code, text = entry.get("taxonomy_code"), entry.get("text") or ""
     if code in HEADER_PIN_OVERRIDES["R"]:
         return True
     return (
         code == "S8"
-        and _safe_confidence(entry) <= _S8_PIN_MAX_MODEL_CONFIDENCE
+        and (every_level_agrees or _safe_confidence(entry) <= _S8_PIN_MAX_MODEL_CONFIDENCE)
         and not _has_author_list(text)
         and not _CONTRIBUTED_WORK.search(text)
         and not _TALK_BY_ANOTHER.search(text)
+        and not _VOLUME_LOCATOR.search(text)
     )
 
 
@@ -1061,7 +1072,7 @@ def header_pin_code(entry: dict, pin: str | None, leaf: str | None, leaf_run: st
     recode on that path is logged (`_log_r_pin`).
     """
     code = entry.get("taxonomy_code")
-    if pin == "R" and _r_pin_takes(entry):
+    if pin == "R" and _r_pin_takes(entry, every_level_agrees=True):
         return "R"
     if leaf_run == _INVITED_TALK_PIN and _r_named_set_takes(entry):
         _log_r_pin(entry, pin)
