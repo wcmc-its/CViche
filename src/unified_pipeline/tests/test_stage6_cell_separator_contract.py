@@ -273,6 +273,7 @@ class _MentoringProbe(MentoringSection):
         self.stats = {'tables_populated': 0, 'entries_inserted': 0}
         self.lines: list[str] = []
         self.tabled: list[dict] = []
+        self.anchors: list[str] = []
         self.doc = Document()
         self.doc.add_paragraph("MENTORING")
 
@@ -281,6 +282,9 @@ class _MentoringProbe(MentoringSection):
 
     def _find_header_paragraph(self, text):
         return None
+
+    def _find_template_label(self, text):
+        return None  # this document ships no outcomes note (#2145)
 
     def _find_table_after_paragraph(self, idx):
         return None
@@ -291,6 +295,7 @@ class _MentoringProbe(MentoringSection):
 
     def _insert_mentoring_line(self, text, anchor, entry=None, *, inserted=''):
         self.lines.append(text)
+        self.anchors.append(''.join(anchor.xpath('.//w:t/text()')))
         return None
 
 
@@ -317,6 +322,42 @@ def test_an_n4_entry_reaches_this_function_however_mentee_shaped_it_is():
     assert probe.lines == [
         "Jane Roe — Postdoctoral Fellow — 07/2020-06/2022 — Thesis title"
     ]
+
+
+_OUTCOMES_NOTE = ("**Optional: List publications, awards, grants, development of new clinical "
+                  "programs or course, and other scholarly products arising directly from the "
+                  "mentoring activity.")
+_OUTCOME = {"taxonomy_code": "N4", "text": "Roe J. A synthetic poster. Example Meeting, 2021."}
+
+
+class _NotedMentoringProbe(_MentoringProbe):
+    """The probe over a document that ships the template's outcomes note."""
+
+    def __init__(self):
+        super().__init__()
+        self.doc.add_paragraph("Past Mentees:")
+        self.doc.add_paragraph(_OUTCOMES_NOTE)
+
+    def _find_template_label(self, text):
+        return next((i for i, p in enumerate(self.doc.paragraphs)
+                     if text.lower() in p.text.lower()), None)
+
+
+def test_n4_outcome_lines_go_under_the_templates_outcomes_note():
+    """#2145: under the MENTORING heading they sat above the template's
+    opening text, where the template has no slot."""
+    probe = _NotedMentoringProbe()
+    probe._fill_mentoring({"N4": [_OUTCOME]})
+
+    assert probe.lines == [_OUTCOME["text"]]
+    assert probe.anchors == [_OUTCOMES_NOTE]
+
+
+def test_n4_outcome_lines_fall_back_to_the_heading_when_no_note_ships():
+    probe = _MentoringProbe()
+    probe._fill_mentoring({"N4": [_OUTCOME]})
+
+    assert probe.anchors == ["MENTORING"]
 
 
 # --------------------------------------------------------------------------

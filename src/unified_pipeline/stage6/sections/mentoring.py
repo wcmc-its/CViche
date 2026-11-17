@@ -74,11 +74,17 @@ from ..resolution import _get_cv_owner_name, _is_cv_owner
 logger = logging.getLogger(__name__)
 
 # Template paragraphs the section anchors on, exact text (case-insensitive,
-# stripped). "MENTORING" doubles as the N4 outcome anchor and, with the
-# "Mentees" substring, as the fallback when neither mentee heading exists.
+# stripped). "MENTORING" doubles as the N4 outcome fallback anchor and, with
+# the "Mentees" substring, as the fallback when neither mentee heading exists.
 CURRENT_MENTEES_HEADING = "Current Mentees:"
 PAST_MENTEES_HEADING = "Past Mentees:"
 MENTORING_HEADING = "MENTORING"
+# The template's own note on what mentoring produced, the section's last line
+# ("**Optional: List publications, awards, grants ... arising directly from the
+# mentoring activity"). N4 outcome lines go under it (#2145): under the
+# section heading they sat above the template's opening text, where the
+# template has no slot (EHMQSQ 7 lines, OQIDBN 16).
+OUTCOMES_NOTE_TEXT = "**Optional: List publications"
 MENTEES_FALLBACK_TEXT = "Mentees"
 
 # N1/N2 template slots, immediately above the mentee headings (#529). Both
@@ -1312,7 +1318,7 @@ class MentoringSection:
     ) -> None:
         """Render section N: a table per mentee under "Current Mentees:" and
         "Past Mentees:", aggregate lines under the same headings, N4 outcome
-        lines under the MENTORING header, N1 lines under "Leadership and
+        lines under the template's outcomes note, N1 lines under "Leadership and
         mentoring in programs..." and N2 tables under "Institutional
         Training Grants..." (#529).
 
@@ -1409,17 +1415,25 @@ class MentoringSection:
                 self._render_mentee_group(mentees, summaries, anchor, ongoing=ongoing)
 
         # Mentoring outcomes (N4) have no table in the WCM template; they go
-        # under the section header.
+        # under its note on outcomes at the end of the section.
         if partition.outcomes:
-            mentoring_anchor = self._paragraph_element(
-                self._find_paragraph_exact(MENTORING_HEADING))
-            if mentoring_anchor is None:
+            outcomes_anchor = self._outcomes_anchor()
+            if outcomes_anchor is None:
                 logger.warning(
-                    "Mentoring: %s heading not found in template; "
-                    "%d outcome lines not rendered", MENTORING_HEADING,
+                    "Mentoring: neither the outcomes note nor the %s heading found in "
+                    "template; %d outcome lines not rendered", MENTORING_HEADING,
                     len(partition.outcomes))
             else:
-                self._insert_mentoring_summaries(partition.outcomes, mentoring_anchor)
+                self._insert_mentoring_summaries(partition.outcomes, outcomes_anchor)
+
+    def _outcomes_anchor(self) -> BaseOxmlElement | None:
+        """Where N4 outcome lines go: after the template's outcomes note
+        (`OUTCOMES_NOTE_TEXT`), or after the MENTORING heading in a template
+        that ships no such note."""
+        index = self._find_template_label(OUTCOMES_NOTE_TEXT)
+        if index is None:
+            index = self._find_paragraph_exact(MENTORING_HEADING)
+        return self._paragraph_element(index)
 
     def _decline_award_title_mentees(self, refused: Sequence[Mapping[str, Any]]) -> None:
         """Hand each refused mentee entry, its name cleared, to `generate()`'s
