@@ -267,6 +267,17 @@ _NEAR_MATCH_MIN_RATIO = 0.93
 # the answer cell of a known label ("Primary Hospital Affiliation: | N/A"),
 # the line carries no CV content.
 _UNANSWERED = frozenset({"n/a", "na", "not applicable", "none", "listed above"})
+# #2141 (9TUVGW): a source that writes the value with a "?" or more than once
+# ("N/A?N/A?", "None. N/A") has still said nothing. Each value must end at a
+# word's end, so "Nana" is a name and not "na" twice.
+_UNANSWERED_PIECE_RE = re.compile(
+    r"(?:(?:%s)(?![a-z0-9])[\s?.;,]*)+" % "|".join(
+        re.escape(value) for value in sorted(_UNANSWERED, key=len, reverse=True)))
+
+
+def _is_unanswered(piece: str) -> bool:
+    """True if a `_normalize`d *piece* is nothing but `_UNANSWERED` values."""
+    return _UNANSWERED_PIECE_RE.fullmatch(piece) is not None
 
 
 def is_near_template_instruction(text: str) -> bool:
@@ -320,9 +331,9 @@ def is_unanswered_prompt(text: str) -> bool:
     if not text:
         return False
     pieces = [p for p in (_normalize(x) for x in _LABEL_PIECE_SPLIT_RE.split(text)) if p]
-    if not any(p in _UNANSWERED for p in pieces):
+    if not any(_is_unanswered(p) for p in pieces):
         return False
-    return all(p in _UNANSWERED or p in _INSTRUCTION_SET or p in _PROTECTED
+    return all(_is_unanswered(p) or p in _INSTRUCTION_SET or p in _PROTECTED
                for p in pieces)
 
 
