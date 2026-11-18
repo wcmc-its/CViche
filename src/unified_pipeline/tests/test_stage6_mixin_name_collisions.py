@@ -433,6 +433,7 @@ REMAINING_SUBSTRING_ANCHOR_CALLS = {
 
 TEMPLATE_LABEL_ANCHOR_CALLS = {
     ("bibliography.py", "_fill_bibliography"): 1,
+    ("mentoring.py", "_outcomes_anchor"): 1,
     ("researcher_profiles.py", "_fill_researcher_profiles"): 1,
     ("service.py", "_fill_journal_reviewing"): 2,
     ("service.py", "_fill_other_service"): 1,

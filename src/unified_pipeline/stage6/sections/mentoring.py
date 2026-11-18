@@ -1420,8 +1420,8 @@ class MentoringSection:
             outcomes_anchor = self._outcomes_anchor()
             if outcomes_anchor is None:
                 logger.warning(
-                    "Mentoring: neither the outcomes note nor the %s heading found in "
-                    "template; %d outcome lines not rendered", MENTORING_HEADING,
+                    "Mentoring: %s heading not found in template; "
+                    "%d outcome lines not rendered", MENTORING_HEADING,
                     len(partition.outcomes))
             else:
                 self._insert_mentoring_summaries(partition.outcomes, outcomes_anchor)
