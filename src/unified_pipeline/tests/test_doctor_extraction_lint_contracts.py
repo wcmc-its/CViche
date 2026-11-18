@@ -3661,6 +3661,10 @@ def test_year_not_in_source_silent_when_the_text_states_the_year(fields, text):
     ({"start_date": "1998", "end_date": "1999"}, "Example fellow Oct. 98 - Oct. 99"),
     # SIJYJZ: a two-digit year opening an open range.
     ({"start_date": "2016"}, "Example member 16- present"),
+    # VYJMXR 106 (#1342): a list item that leaves its century out, which
+    # stage 4's span reader completes and writes to additional_dates.
+    ({"start_date": "2001", "end_date": "2006", "additional_dates": ["2009"]},
+     "Example committee 2001-06, -09"),
 ])
 def test_year_not_in_source_reads_dashed_dates_list_tails_and_month_years(fields, text):
     assert _not_in_source(_fields_entry("C", fields, text=text)) == []
@@ -3678,6 +3682,9 @@ def test_year_not_in_source_reads_dashed_dates_list_tails_and_month_years(fields
     ({"start_date": "2013"}, "Board meeting May 13 at Example Hall"),
     ({"start_date": "2020"}, "Volume 20 - Example Title"),
     ({"start_date": "2012"}, "Chapter 12- Example Title"),
+    # A dashed two digits after a span written in full is no elided year.
+    ({"end_date": "2009"}, "Example committee 2001-2006, -09"),
+    ({"end_date": "2009"}, "Example committee 2001, -09"),
 ])
 def test_year_not_in_source_new_shapes_do_not_vouch_for_a_day_or_a_number_run(fields, text):
     assert len(_not_in_source(_fields_entry("C", fields, text=text))) == 1

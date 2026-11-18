@@ -805,19 +805,37 @@ def _start_year(record: dict) -> int | None:
     return _parse_date_components(str(fields.get('start_date') or ''))[0]
 
 
+#: A title that names a visit, not a rank the faculty member holds: "Visiting
+#: Professor", "Visiting Scholar". Such a D1 row is never the CV's current
+#: rank, so it follows the source-open-marker rule like any other D row
+#: (batch KFUTTD, EGHJRK 74, #1342: a one-year visit headed Academic
+#: Appointments as "<year>-Present").
+_VISITING_TITLE_RE = re.compile(r'\bvisiting\b', re.IGNORECASE)
+
+
+def is_visiting_title(title: object) -> bool:
+    """Whether an appointment title names a visit (`_VISITING_TITLE_RE`).
+    Read by the doctor's date_cell_shape lint too, so the row stage 6 denies
+    the latest-rank "-Present" is the row the lint stops exempting."""
+    return bool(_VISITING_TITLE_RE.search(str(title or '')))
+
+
 def _latest_rank_rows(records: list[dict]) -> set[int]:
     """Indexes of the D1 records in one table that hold the latest D1 start
     year: the CV's current rank, whose start-only date keeps "-Present"
     without an open marker (#1342, decision 2026-10-02). Rows tied on that
     year are all kept, the same reading as the doctor's date_cell_shape
-    lint (`DATE_CELL_LATEST_RANK_CODE`)."""
+    lint (`DATE_CELL_LATEST_RANK_CODE`). A visiting title among them is not
+    kept (`is_visiting_title`); it leaves the latest year as it was, so no
+    earlier row gains "-Present" in its place."""
     years = {index: _start_year(record) for index, record in enumerate(records)
              if record.get('taxonomy_code') == ACADEMIC_APPOINTMENT_CODE}
     known = [year for year in years.values() if year is not None]
     if not known:
         return set()
     latest = max(known)
-    return {index for index, year in years.items() if year == latest}
+    return {index for index, year in years.items() if year == latest
+            and not is_visiting_title((records[index].get('extracted_fields') or {}).get('title'))}
 
 
 def _position_row_cells(entry: dict, superseded: bool = False,

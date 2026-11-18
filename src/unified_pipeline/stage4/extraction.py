@@ -45,6 +45,7 @@ from unified_pipeline.stage4.coercion import (
     apply_regex_post_processing,
     coerce_field_value_types,
     derive_listed_spans,
+    derive_record_listed_spans,
     normalize_dates,
     split_joined_journals,
     split_parenthetical_title_span,
@@ -77,6 +78,10 @@ from unified_pipeline.stage4.schemas import (
     get_active_schemas,
     get_field_schema,
     get_taxonomy_label,
+)
+from unified_pipeline.stage4.source_dates import (
+    close_unsupported_open_ends,
+    date_completion_column_rows,
 )
 from unified_pipeline.stage4.year_groups import date_group_year_twins, date_year_group_members
 
@@ -533,7 +538,8 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
 
     An entry that ends as one record is offered its text's listed spans
     (`derive_listed_spans`): on several records they would be no one
-    record's.
+    record's. A record of several is offered one list of the text, when its
+    own range is that list's min-max (`derive_record_listed_spans`).
     """
     cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
     cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code,
@@ -556,6 +562,7 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
         coverage = calculate_unextracted_content(entry_text, last_fields)
         return _EntryExtraction(last_fields, last_reformatted, coverage, len(items))
     records = [fields for fields, _ in cleaned]
+    derive_record_listed_spans(entry_text, records, taxonomy_code)
     fields = {**last_fields, STAGE4_RECORDS_KEY: records}
     coverage = calculate_unextracted_content(entry_text, _union_of_records(records))
     return _EntryExtraction(fields, last_reformatted, coverage, len(items))
@@ -1685,6 +1692,8 @@ def extract_fields_from_mapped_entries(
     all_entries.sort(key=lambda e: (safe_int(e.get("element_idx_start")), safe_int(e.get("element_idx_end"))))
     all_entries = date_year_group_members(all_entries, STAGE4_RECORDS_KEY)  # document order (E26)
     all_entries = date_group_year_twins(all_entries)  # 3b's group year (#1435)
+    all_entries = date_completion_column_rows(all_entries, STAGE4_RECORDS_KEY)  # #1342
+    all_entries = close_unsupported_open_ends(all_entries, STAGE4_RECORDS_KEY)  # #1342
 
     # Fallback: Add target_name via regex matching if LLM didn't extract it
     cv_owner_last_name = cv_owner_name.get('last_name', '')

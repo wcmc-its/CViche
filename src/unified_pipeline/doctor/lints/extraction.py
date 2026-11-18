@@ -2255,10 +2255,15 @@ def _year_in_source(year: int, text: str) -> bool:
     last two digits as a two-digit year token, a stand-alone two-digit
     range or one of `_source_two_digit_years`'s shapes ("5/31/34" states
     2034, "64-66" both years, "3-30-00" 2000); or a range shorthand's end
-    ("2011-2"). Any source hyphen reads as "-" (`normalise_hyphens`)."""
+    ("2011-2"); or a list item stage 4's span reader completes
+    (`_written_spans`: the 2009 of "2001-06, -09", which stage 4 writes to
+    `additional_dates`, #1342). Any source hyphen reads as "-"
+    (`normalise_hyphens`)."""
     text = _OCR_LEADING_ONE_RE.sub("1", normalise_hyphens(text))
     return (str(year) in text or year % 100 in _source_two_digit_years(text)
-            or year in _range_shorthand_ends(text))
+            or year in _range_shorthand_ends(text)
+            or any(year in (span.first, span.last)
+                   for span in _written_spans(_span_source(text))))
 
 
 def _earliest_degree_year(entries: list[_FieldsEntry]) -> int | None:

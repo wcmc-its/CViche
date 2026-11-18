@@ -4533,6 +4533,21 @@ def test_date_cell_shape_leaves_memberships_and_the_latest_rank_open_by_decision
     assert lint_date_cell_shape(stage4, [_COMMITTEE_ROW], []) == []
 
 
+def test_date_cell_shape_warns_on_an_open_visiting_title_that_is_the_latest_d1_row():
+    """#1342 (EGHJRK 74): a visit is not the CV's current rank, so stage 6
+    denies it the latest-rank '-Present' and an old render that printed one
+    is reported. The same row under a rank title stays exempt."""
+    def lint(title):
+        entry = _dated4(f"2015 {title}, Example Widget Institute", "D1", "2015", None, idx=12)
+        entry["extracted_fields"]["title"] = title
+        rows = [[[title, "Example Widget Institute", "2015-Present"]]]
+        return lint_date_cell_shape({"entries": [entry]}, rows, [])
+
+    assert [(f["severity"], f["evidence"]) for f in lint("Visiting Professor")] == [
+        ("WARN", ["2015-Present"])]
+    assert lint("Professor") == []
+
+
 @pytest.mark.parametrize("code", ["D2", "D3"])
 def test_date_cell_shape_warns_on_an_open_d2_or_d3_row(code):
     """#1342 (decision 2026-10-02, superseding #946's): a D2 or D3 row
