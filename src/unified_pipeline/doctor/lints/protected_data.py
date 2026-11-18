@@ -253,6 +253,19 @@ _GRANDCHILD_WORDS = r"(?i:(?:great[- ]?)?grand(?:children|child|sons?|daughters?
 #: was missed. An adult child is still a child ("two grown sons: ...").
 _COUNTED_CHILD_WORDS = r"(?i:children|child|sons?|daughters?)"
 _CHILD_AGE_WORD = r"(?i:(?:adult|grown|young)[ \t]+)?"
+#: #2152 (ITMPWP-01): "Family Status: Married, <n> (<adjective>) boys" reached
+#: the Appendix with this lint silent. Its three parts, each a shape of this
+#: lint's own: a marital status word, the child words a family line uses
+#: ("boys", "girls" among them), and one short parenthetical between a head
+#: count and its noun.
+_STATUS_WORDS = r"(?i:married|single|divorced|widowed|separated)"
+_FAMILY_CHILD_WORDS = r"(?i:children|child|kids|sons?|daughters?|boys?|girls?)"
+_COUNT_PAREN_MAX_CHARS = 30
+_COUNT_PAREN = r"\([^()\n]{1,%d}\)[ \t]+" % _COUNT_PAREN_MAX_CHARS
+#: A head count and its child noun, the parenthetical optional.
+_FAMILY_CHILD_COUNT = _COUNT + r"[ \t]+(?:" + _COUNT_PAREN + r")?" + _FAMILY_CHILD_WORDS + r"\b"
+#: What ends a fragment: a hard delimiter or the end of the line.
+_FRAGMENT_END = r"(?=[ \t.]*(?:[\n\t|;]|$))"
 #: A North American number, with or without its area-code parentheses.
 _PHONE = r"(?:\+?1[ .-]?)?(?:\(\d{3}\)[ .-]?|\b\d{3}[ .-])\d{3}[ .-]\d{4}\b"
 _STREET = (r"\b\d{1,6}[ \t]+(?:[A-Z][\w.'’-]*[ \t]+){1,4}"
@@ -325,6 +338,24 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
     # opening a sentence ("five children with asthma were enrolled").
     (re.compile(r"\b(?P<value>" + _COUNT + r"[ \t]+(?:" + _GRANDCHILD_WORDS + "|"
                 + _CHILD_WORDS + r"))\b(?=[ \t]*(?:[;,(]|\.?[ \t]*(?:\n|$)))"), CAT_CHILDREN),
+    # #2152 (ITMPWP-01): a "Family Status" label with a status word or a head
+    # count as its value. "Family status and outcomes ..." carries neither.
+    (re.compile(r"\b(?i:family[ \t]+status)\b" + _SEP + r"(?P<value>" + _STATUS_WORDS
+                + r"\b(?:[ \t]*,[ \t]*" + _FAMILY_CHILD_COUNT + r")?|" + _FAMILY_CHILD_COUNT + ")"),
+     CAT_MARITAL_STATUS),
+    # ...a status word opening its fragment or following a separator, a comma,
+    # then the children's head count to the end of the fragment ("Married, 2
+    # boys"). The count is what makes the word a status: "Single, double and
+    # triple blinding" carries none, "separated, 2 children at a time" goes on.
+    (re.compile(r"(?:^|(?<=[\n\t|;:,(]))[ \t]*(?:[•·*–—-][ \t]*)?" + _STATUS_WORDS
+                + r"[ \t]*,[ \t]*(?P<value>" + _FAMILY_CHILD_COUNT + ")" + _FRAGMENT_END),
+     CAT_MARITAL_STATUS),
+    # ...and a head count that is a fragment of its own, with a parenthetical
+    # before its noun ("2 (wonderful) girls") or with "boys" / "girls" as the
+    # noun. Inside a line, "9 girls, 8 boys." is a study's.
+    (re.compile(r"(?:^|(?<=[\n\t|;]))[ \t]*(?:[•·*–—-][ \t]*)?(?P<value>" + _COUNT + r"[ \t]+(?:"
+                + _COUNT_PAREN + _FAMILY_CHILD_WORDS + r"|(?i:boys?|girls?)))\b" + _FRAGMENT_END),
+     CAT_CHILDREN),
     (re.compile(r"(?:\b(?i:born|date[ \t]+of[ \t]+birth|birth[ \t]*date|dob)\b|(?i:d\.o\.b)\.?)"
                 + r"(?:" + _SEP + r"|[ \t]*,?[ \t]+(?:(?i:in|on)[ \t]+)?)"
                 + r"(?P<value>" + _DATE + ")"), CAT_DATE_OF_BIRTH),

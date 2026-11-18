@@ -1169,3 +1169,67 @@ def test_847_a_child_statement_in_the_appendix_is_one_finding_naming_no_value():
 ])
 def test_847_a_study_count_or_a_title_after_a_head_count_is_not_a_shape(text):
     assert _shape_hits(text, []) == []
+
+
+# --------------------------------------------------------------------------
+# #2152 (ITMPWP-01): "Family Status: <status>, <n> (<adjective>) boys" in the
+# Appendix, the lint silent. The independent shapes for its three parts;
+# invented values, the source's spacing shapes.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, categories", [
+    ("Family Status: Married, 2 (wonderful) girls", ["marital status"]),
+    ("Family Status:\tMarried,\t2 (wonderful) girls", ["marital status"]),
+    ("Family Status:      Married,     2 (wonderful) girls", ["marital status"]),
+    ("Family Status: Divorced", ["marital status"]),
+    ("Family Status - 2 girls", ["marital status"]),
+    ("Married, 2 (wonderful) girls", ["marital status"]),
+    ("Married, two boys", ["marital status"]),
+    ("Personal: divorced, 1 child.", ["marital status"]),
+    ("2 (wonderful) girls", ["children / dependents"]),
+    ("• three (grown) sons.", ["children / dependents"]),
+    ("4 boys", ["children / dependents"]),
+    ("Name\t1 girl", ["children / dependents"]),
+])
+def test_2152_a_family_status_line_s_parts_are_shapes(text, categories):
+    assert _shape_categories(text) == categories
+
+
+@pytest.mark.parametrize("text", [
+    "Family status and outcomes in 40 children",
+    "Family Status: A Predictor of Outcomes",
+    "Single, double and triple blinding in trials",
+    "Married, with Children: a television history",
+    "Separated, 2 children at a time were screened",
+    "A cohort of married, 2 children households",
+    "Households of the married, 2 kids",
+    "Enrolled 9 girls, 8 boys.",
+    "40 (obese) children",
+    "5 (of 40) children were enrolled",
+    "Study arms: 4 (control) children",
+    "Boys and Girls Club of Exampleton",
+    "Two girls with asthma - Example Study",
+    "Paediatric asthma in boys and girls aged 5 to 9",
+])
+def test_2152_study_counts_and_titles_are_not_shapes(text):
+    assert _shape_hits(text, []) == []
+
+
+def test_2152_a_family_status_line_in_a_tracked_deletion_is_one_finding_naming_no_value():
+    """The matcher scan never reads a deletion: this finding is the independent
+    shapes' alone."""
+    blocks = [_p("T. APPENDIX"), _p("Family")]
+    deleted = [_p(""), _p("Family Status: Married, 2 (wonderful) girls")]
+    assert lint_protected_data_in_output(blocks) == []
+    findings = lint_protected_data_in_output(blocks, deleted)
+    assert len(findings) == 1
+    assert "(marital status)" in findings[0]["message"]
+    assert "tracked deletion" in findings[0]["message"]
+    for word in ("Married", "wonderful", "girls"):
+        assert word not in findings[0]["message"]
+
+
+def test_2152_a_family_status_line_in_the_appendix_is_one_finding_and_none_in_a_body_section():
+    line = "Family Status: Married, 2 (wonderful) girls"
+    assert len(lint_protected_data_in_output([_p("T. APPENDIX"), _p(line)])) == 1
+    assert lint_protected_data_in_output([_p("HONORS"), _p(line)]) == []

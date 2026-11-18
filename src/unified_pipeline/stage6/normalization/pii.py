@@ -380,6 +380,10 @@ _BARE_BIRTH_LABEL_RE = re.compile(_BARE_BIRTH_LABEL, re.X | re.I)
 # ("Marital Status and Children: <...>"), which the marital-status row misses
 # because it needs its colon right after "status".
 _MARRIED_STEM = r"married"
+#: #2152 (ITMPWP): "Family Status:" is a marital status label under another
+#: name. The family label row needs its colon right after "family", and the
+#: marital status row does not know the word.
+_FAMILY_STATUS_STEM = r"family \s+ status"
 _GRANDCHILDREN_STEM = r"(?: great \s* [-–—]? \s* )* grand \s* children"
 _MARITAL_STATUS_AND = r"marital \s* status \s* (?: & | and | / | , ) \s*"
 _COUNTED_CHILD = _FAMILY_HEAD_COUNT + r" \s+ " + _CHILD_NOUN
@@ -390,6 +394,7 @@ _COUNTED_CHILDREN_STEM = (r"(?: names? \s+ of \s+ )? (?: "
 #: the table, the dash form joins `_family_dash_matches`.
 _FAMILY_SHAPE_STEMS: tuple[tuple[str, str], ...] = (
     (CAT_SPOUSE, _MARRIED_STEM),
+    (CAT_MARITAL_STATUS, _FAMILY_STATUS_STEM),
     (CAT_CHILDREN, _GRANDCHILDREN_STEM),
     (CAT_CHILDREN, _COUNTED_CHILDREN_STEM),
 )
@@ -504,6 +509,40 @@ _BARE_MARITAL_STATUS_RE = re.compile(
     r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ \t]*+ (?: [•·*–—-] [ \t]* )?"
     + _STEM_GUARD + _MARITAL_STATUS_WORDS + r" (?! [\w-] ) [ \t.]*" + _FRAGMENT_END_AHEAD,
     re.X | re.I)
+
+#: #2152 (ITMPWP): a status word with a comma after it opens a marital status
+#: line of the Personal Data block ("Married, <n> children"). Read through
+#: `_label_spans`, so it opens a fragment or follows a separator and its span
+#: runs to the next hard delimiter. Personal Data only, like the bare word:
+#: elsewhere "Single, ..." or "Separated, ..." opens ordinary text.
+_MARITAL_STATUS_COMMA_RE = re.compile(
+    _STEM_GUARD + _MARITAL_STATUS_WORDS + r" [ \t]* ,", re.X | re.I)
+
+#: #2152 (ITMPWP): a child count with one short parenthetical between the count
+#: and the noun ("<n> (<adjective>) boys"), which the count rows above do not
+#: read: they need the noun right after the count. A family's head count, the
+#: parenthetical on one line, and the noun ending the fragment
+#: (`_FRAGMENT_END_AHEAD`), so "5 (of 40) children were enrolled" is not one.
+_CHILD_COUNT_PAREN_MAX = 30
+#: The child nouns of the two #2152 count shapes: `_CHILD_NOUN` plus "boys" and
+#: "girls". A constant of their own, because `_CHILD_NOUN` is also read by the
+#: rows the pre-LLM child-date scrub walks (`_children_label_spans`,
+#: `_child_statement_date_spans`), which must not change with a render rule.
+_FAMILY_STATUS_CHILD_NOUN = r"(?: " + _CHILD_NOUN + r" | boys? | girls? )"
+_CHILD_COUNT_PARENTHETICAL = r"\( [^()\n]{1,%d} \) [ \t]+" % _CHILD_COUNT_PAREN_MAX
+#: The count as a fragment of its own (a cell after the status), never after
+#: another label: "Study arms: 4 (control) children" is a study's.
+_PAREN_CHILD_COUNT_SHAPE = (
+    _FRAGMENT_INITIAL + r"(?: [•·*–—-] [ \t]* )?" + _FAMILY_HEAD_COUNT + r" [ \t]+ "
+    + _CHILD_COUNT_PARENTHETICAL + _FAMILY_STATUS_CHILD_NOUN + r" (?! [\w-] ) [ \t.]*" + _FRAGMENT_END_AHEAD)
+#: ...and the count after a status word and its comma, the parenthetical
+#: optional ("Married, <n> boys"). The count ending the fragment is what makes
+#: the word a status outside the Personal Data block: "Single, double and
+#: triple blinding" has none, "separated, 2 children at a time ..." goes on.
+_STATUS_COMMA_CHILD_COUNT_SHAPE = (
+    _STEM_GUARD + _MARITAL_STATUS_WORDS + r" [ \t]* , [ ]{0,2}" + _FAMILY_HEAD_COUNT + r" [ \t]+ "
+    + r"(?: " + _CHILD_COUNT_PARENTHETICAL + r" )?" + _FAMILY_STATUS_CHILD_NOUN + r" (?! [\w-] )"
+    + _FRAGMENT_END_AHEAD)
 
 #: #1391: what makes a dash "Family" label in the Appendix a family block
 #: rather than a title ("Family- wise error rate ..."): a relation word in
@@ -795,6 +834,17 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_STEM_GUARD + _GRANDCHILDREN_STEM + r" \s* :", anchored=True,
                  render_only=True),
+    # #2152 (ITMPWP): "Family Status: <status>, <n> (<adjective>) boys" (see
+    # `_FAMILY_STATUS_STEM`, `_STATUS_COMMA_CHILD_COUNT_SHAPE`,
+    # `_PAREN_CHILD_COUNT_SHAPE`). Shapes and render-time only, for the reasons
+    # the rows above give.
+    WithholdRule(CAT_MARITAL_STATUS, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_STEM_GUARD + _FAMILY_STATUS_STEM + r" \s* :", anchored=True,
+                 render_only=True),
+    WithholdRule(CAT_MARITAL_STATUS, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_STATUS_COMMA_CHILD_COUNT_SHAPE, anchored=True, render_only=True),
+    WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_PAREN_CHILD_COUNT_SHAPE, render_only=True),
     # #847 (BLBVPD): "Two sons: <names>", "Marital Status and Children: <...>"
     # (`_COUNTED_CHILDREN_STEM`). The pre-LLM child-item walks run after it
     # too (`_children_label_spans`).
@@ -1346,20 +1396,29 @@ def _family_dash_matches(text: str, *, personal_data: bool) -> list[PiiMatch]:
 _SAME_LINE_CELL_GAP_RE = re.compile(r"[ \t|;]*")
 
 
+def _bare_marital_status_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) of every marital status of a Personal Data block's `text`
+    that no label opens, in order: a whole-cell status word (#1391,
+    `_BARE_MARITAL_STATUS_RE`) and a status word with a comma after it, to the
+    end of its fragment (#2152, `_MARITAL_STATUS_COMMA_RE`)."""
+    return sorted([status.span() for status in _BARE_MARITAL_STATUS_RE.finditer(text)]
+                  + _label_spans(text, _MARITAL_STATUS_COMMA_RE))
+
+
 def _with_bare_marital_status(text: str, matches: list[PiiMatch]) -> list[PiiMatch]:
-    """#1391: `matches` (merged, in order) plus every whole-cell marital status
-    word of a Personal Data block's `text` (`_BARE_MARITAL_STATUS_RE`). A word
+    """#1391: `matches` (merged, in order) plus every unlabelled marital status
+    of a Personal Data block's `text` (`_bare_marital_status_spans`). A status
     in the cell right after another span on the same line is that span's value
     ("Marital Status:<tab>Divorced"), so the span is widened over it instead of
     being counted as a second withheld item."""
     result = list(matches)
-    for status in _BARE_MARITAL_STATUS_RE.finditer(text):
-        before = [i for i, m in enumerate(result) if m.end <= status.start()]
+    for start, end in _bare_marital_status_spans(text):
+        before = [i for i, m in enumerate(result) if m.end <= start]
         prev = before[-1] if before else None
-        if prev is not None and _SAME_LINE_CELL_GAP_RE.fullmatch(text, result[prev].end, status.start()):
-            result[prev] = result[prev]._replace(end=status.end())
+        if prev is not None and _SAME_LINE_CELL_GAP_RE.fullmatch(text, result[prev].end, start):
+            result[prev] = result[prev]._replace(end=end)
         else:
-            result.append(PiiMatch(status.start(), status.end(), CAT_MARITAL_STATUS))
+            result.append(PiiMatch(start, end, CAT_MARITAL_STATUS))
     return _merge_matches(result)
 
 
