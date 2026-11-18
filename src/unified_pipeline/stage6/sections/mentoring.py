@@ -35,7 +35,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 try:
     from docx.oxml import OxmlElement
@@ -48,6 +48,7 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from ...core.source_placement import source_placement
 from ..fan_out import (
     FOLDED_MENTEE_LINES_KEY,
     LAST_STAGE4_RECORD,
@@ -1153,6 +1154,385 @@ def _infer_supervision_type(mentee_level: str, site_position: str) -> str:
     return ''
 
 
+#: What the CV itself says about a mentee outside any labelled field (#2155,
+#: #985): a mentor-role phrase written as a cell or line of its own, and the
+#: sub-headings the mentee is listed under. Stage 4 extracts neither -- the
+#: N3A/N3B schema has no supervision field and its prompt sees only the
+#: entry's own text -- so Type of Supervision printed a guess from the level
+#: (a resident whose line ends "Research mentor" printed "Clinical") or
+#: nothing, and a level stated only by a sub-heading printed nowhere.
+_SUPERVISION_CATEGORY_RE = re.compile(r'(?<![a-z])(?:research|clinical)(?![a-z])', re.I)
+
+#: The cells of a source line: stage 2 joins a table row's cells with tabs,
+#: pipes or newlines, and a tab-stop layout arrives as runs of spaces.
+_SOURCE_CELL_SPLIT_RE = re.compile(r'[\t\n|]| {2,}')
+_ROLE_CELL_EDGE_CHARS = ' .;,()'
+_ROLE_NOUN = r'(?:mentor|advis[oe]r|supervisor|preceptor)'
+_ROLE_QUALIFIER = (r"(?:research|clinical|thesis|dissertation|doctoral|master[’']?s"
+                   r"|primary|major)")
+_ROLE_TERM = (
+    rf'(?:{_ROLE_QUALIFIER}\s+)*(?:co\s?[-–]?\s?)?{_ROLE_NOUN}'
+    rf'(?:\s+for\s+(?:the\s+)?(?:{_ROLE_QUALIFIER}\s+)*(?:thesis|dissertation|research))?')
+#: A cell that is ONLY a mentor-role phrase ("Research mentor", "Clinical
+#: supervisor and thesis advisor", "Co-advisor for thesis"), from a closed
+#: vocabulary so a name, a program or a sentence that mentions a mentor is
+#: never taken for one.
+_UNLABELLED_ROLE_RE = re.compile(rf'{_ROLE_TERM}(?:\s*(?:,|/|&|and)\s*{_ROLE_TERM})*', re.I)
+#: ...and that says what was supervised. A bare "Mentor" or "Advisor" cell
+#: states no type of supervision and is left alone.
+_ROLE_SUBJECT_RE = re.compile(r'research|clinical|thesis|dissertation', re.I)
+
+#: "Exam", "exams" or any "examin..." word, at a word start: "Example" is not one.
+_EXAMINATION = r'(?<![a-z])exam(?:in|s?(?![a-z]))'
+#: A heading that lists committee or examination service, not mentees
+#: ("Thesis Committees", "Comprehensive Exams of Doctoral Students"). Whether
+#: its rows are mentees at all is an open owner question (#2155), so nothing
+#: is read from it or from the headings above it.
+_COMMITTEE_HEADING_RE = re.compile(rf'committee|{_EXAMINATION}', re.I)
+
+_HEADING_ENUMERATOR = r'(?:(?:[A-Z]|\d{1,2}|[IVX]{1,4})[.)]\s+)?'
+_HEADING_WORD = r"[^\W\d_][\w.'’-]*\s+"
+_LEVEL_HEAD = r'(?:students?|fellows?|residents?|interns?|faculty|post-?\s?docs?)'
+_LEVEL_NOUN = (rf'(?:{_LEVEL_HEAD}|undergraduates?|undergrads?'
+               r'|post-?\s?doctoral|pre-?\s?doctoral|ph\.?\s?d\.?)')
+
+#: A heading states a trainee level or a supervision category only when
+#: EVERY word of it is in this closed vocabulary and the words come in one
+#: of the orders `_LEVEL_HEADING_RE` and `_CATEGORY_HEADING_RE` allow
+#: (#2155). Two rounds of naming the shapes that must not be read each left
+#: a gap ("Non-research Advisees", then "Teaching and Research Supervision",
+#: "Mentees excluding research trainees", "Faculty Advisor"), so the rule
+#: names what may be read instead: any other word makes the heading state
+#: nothing. That includes the plural role nouns: a "Research Mentors"
+#: heading usually lists the owner's own mentors. Each class has a
+#: one-letter code; a heading is matched as the string of its words' codes.
+#: Words are compared casefolded, without dots, apostrophes or hyphens
+#: ("Ph.D." is "phd", "Master's" is "masters").
+_HEADING_VOCABULARY: Mapping[str, frozenset[str]] = {
+    # status of the list
+    's': frozenset({'current', 'past', 'previous', 'former', 'present', 'completed', 'ongoing'}),
+    # the two supervision categories the template knows
+    'c': frozenset({'research', 'clinical'}),
+    # a trainee: the head of a level phrase
+    'l': frozenset({'student', 'students', 'fellow', 'fellows', 'resident', 'residents',
+                    'intern', 'interns', 'postdoc', 'postdocs'}),
+    # ...faculty apart: "Faculty Advisor" is the owner's role, not a level
+    'f': frozenset({'faculty'}),
+    # a level by itself, or a qualifier of a head ("Postdoctoral Fellows")
+    'a': frozenset({'undergraduate', 'undergraduates', 'undergrad', 'undergrads',
+                    'postdoctoral', 'predoctoral', 'phd'}),
+    # a degree that qualifies a head alone or as "Master of <discipline>"
+    'd': frozenset({'master', 'masters', 'doctor', 'doctors', 'bachelor', 'bachelors'}),
+    # a qualifier of a head: a stage of training, or a discipline
+    'q': frozenset({
+        'graduate', 'postgraduate', 'doctoral', 'postresidency', 'medical', 'dental',
+        'nursing', 'pharmacy', 'md', 'ms', 'msc', 'ma', 'mph', 'high', 'school', 'college',
+        'junior', 'senior', 'summer', 'visiting', 'international', 'exchange', 'thesis',
+        'honors', 'honours',
+        'adult', 'pediatric', 'pediatrics', 'paediatric', 'neonatal', 'geriatric',
+        'medicine', 'internal', 'family', 'emergency', 'surgery', 'surgical',
+        'neurosurgery', 'neurology', 'cardiology', 'cardiothoracic', 'urology',
+        'nephrology', 'oncology', 'hematology', 'gastroenterology', 'endocrinology',
+        'pulmonology', 'rheumatology', 'dermatology', 'ophthalmology', 'otolaryngology',
+        'orthopedic', 'orthopaedic', 'anesthesiology', 'radiology', 'pathology',
+        'psychiatry', 'psychology', 'obstetrics', 'gynecology', 'immunology',
+        'epidemiology', 'biostatistics', 'genetics', 'neuroscience', 'pharmacology',
+        'toxicology', 'physiology', 'biology', 'chemistry', 'engineering', 'science',
+        'sciences', 'public', 'health', 'occupational', 'physical', 'therapy',
+        'rehabilitation', 'nutrition', 'critical', 'care', 'infectious', 'disease',
+        'diseases', 'movement', 'disorder', 'disorders', 'sleep', 'pain', 'vascular',
+        'transplant', 'trauma', 'imaging', 'ultrasound', 'endoscopy', 'endoscopic',
+        'retina', 'retinal', 'vitreoretinal'}),
+    # mentoring as an activity or its mentees: the only supervision words
+    # that leave "faculty" before them a level ("Faculty Mentoring")
+    'm': frozenset({'mentoring', 'mentorship', 'mentee', 'mentees'}),
+    # ...and the others: "Faculty Advising" is advising BY the faculty member
+    'n': frozenset({'supervision', 'advising', 'advisee', 'advisees', 'precepting'}),
+    # ...as a participle, before or after the level ("Mentored faculty")
+    'v': frozenset({'mentored', 'supervised', 'advised', 'trained', 'precepted'}),
+    # ...as the owner's role
+    'r': frozenset({'mentor', 'advisor', 'adviser', 'supervisor', 'preceptor'}),
+    # the mentees of a category only ("Research Trainees", "Clinical Rotations")
+    't': frozenset({'trainee', 'trainees', 'rotation', 'rotations'}),
+    'j': frozenset({'and', '&'}),
+    'k': frozenset({'/'}),
+    'o': frozenset({'of'}),
+    'p': frozenset({'for', 'to'}),
+    'z': frozenset({':'}),
+}
+_HEADING_WORD_CODES = {word: code for code, words in _HEADING_VOCABULARY.items() for word in words}
+#: The code of a word, digit or mark outside the vocabulary; no pattern has it.
+_UNLISTED_WORD_CODE = 'x'
+_HEADING_ENUMERATOR_RE = re.compile(_HEADING_ENUMERATOR, re.I)
+#: One word of a heading: a dotted abbreviation with its dots ("Ph.D.",
+#: "M.S."), a word with the apostrophes and hyphens inside it, or any other
+#: single mark. A closing apostrophe is a mark: "Fellows' Publications" is
+#: about something the fellows have, and no word of the vocabulary.
+_HEADING_TOKEN_RE = re.compile(
+    r"(?:[^\W\d_]\.){2,}|[^\W\d_]+(?:\.[^\W\d_]+)+\.?"
+    r"|[^\W\d_](?:[\w'’\u2010-\u2015-]*\w)?|\S")
+_WORD_MARKS = str.maketrans('', '', ".'’-\u2010\u2011\u2012\u2013\u2014\u2015")
+_HEADING_CLOSING_MARKS = frozenset({'.', ':'})
+
+_DEGREE_ABBREVIATION = (
+    r'(?:Ph\.?D|M\.?D|M\.?S|M\.?Sc|M\.?A|M\.?P\.?H|Dr\.?P\.?H|O\.?T\.?D|MSOT|D\.?N\.?P'
+    r'|D\.?D\.?S|D\.?M\.?D|D\.?P\.?T|Ed\.?D|Sc\.?D|M\.?B\.?A|M\.?H\.?A'
+    r'|B\.?S|B\.?A|B\.?S\.?N|M\.?S\.?N)\.?')
+_NAME_WORD = r"(?:[A-Z][\w.'’-]*,?|of|the|at|and|for|in|&)"
+_INSTITUTION_NOUN = r'(?i:university|college|hospital|institute|school|center|centre|clinic|academy)'
+#: What a closing parenthetical after an allowed heading may hold, and still
+#: leave the heading stating what it states: an institution's name
+#: (capitalised words around an institution noun), degree abbreviations, a
+#: mentor-role phrase, a status, or a category word.
+_HEADING_PARENTHETICAL_RE = re.compile(
+    rf'(?:{_NAME_WORD}\s+)*{_INSTITUTION_NOUN},?(?:\s+{_NAME_WORD})*'
+    rf'|{_DEGREE_ABBREVIATION}(?:\s*(?:,|/|and|&)\s*{_DEGREE_ABBREVIATION})*'
+    rf'|(?i:(?:role\s*:\s*)?{_UNLABELLED_ROLE_RE.pattern})'
+    r'|(?i:(?:degree|training)\s+(?:awarded|completed)|completed|current|past|former|ongoing)'
+    r'|(?i:research|clinical)')
+#: ...and what it may never hold: a word that takes something out of the
+#: heading ("Fellows (Not Advised At This Institute)" would otherwise
+#: pass as an institution's name).
+_PARENTHETICAL_EXCLUSION_RE = re.compile(
+    r'(?<![a-z])(?:not|no|non|except|excluding|without|other)(?![a-z])', re.I)
+_CLOSING_PARENTHETICAL_RE = re.compile(r'\s*\(([^()]*)\)\s*[.:]?\s*$')
+
+_STATUS_CODES = r's(?:[jk]?s)*'
+_FACULTY_CODE = 'f'
+#: A qualifier before a level head: one word, or "Master of <discipline>".
+_QUALIFIER_CODES = r'(?:do[qa]+|[qacd])'
+#: One trainee level: qualifiers, joined by nothing or "and", then one head
+#: ("Postdoctoral Fellows", "Adult and Pediatric Cardiology Fellows",
+#: "Master of Science Students"), or a level word alone ("Undergraduate").
+_LEVEL_CODES = rf'(?:{_QUALIFIER_CODES}(?:j?{_QUALIFIER_CODES})*)?[lfa]'
+#: A heading that names one trainee level and nothing else: an optional
+#: "Mentor to" / "Advisor for", status words, the level, then at most a
+#: supervision word with or without its category ("C. Post-doctoral
+#: Fellows.", "Dental Student Research Mentor", "Master's Students
+#: Advised"). After "faculty" only a participle or a mentoring word, with or
+#: without its category, may follow: "Faculty Advisor", "Faculty Research
+#: Mentor", "Faculty Advising" and "Faculty Clinical Supervision" are the
+#: owner's role or activity, and state no level. Nor does a category word
+#: joined by "and" to another kind of qualifier: "Research and Graduate
+#: Student Supervision" names an activity beside a level, not one level.
+_LEVEL_HEADING_RE = re.compile(
+    rf'(?!.*(?:cj[^c]|[^c]jc))(?:r[poz])?(?:{_STATUS_CODES})?v?(?P<level>{_LEVEL_CODES})'
+    rf'(?:c?m|v|(?<!{_FACULTY_CODE})c?[nvr])?')
+#: A word of a level list before the category: "Doctoral/Postdoctoral
+#: Research Mentorship", "Residents and Fellows Clinical Supervision".
+_LEVEL_WORD_CODES = r'(?:do[qa]+|[qadlf])'
+#: A heading that names the kind of supervision and nothing else: status
+#: words, level words joined by nothing, "and" or a slash, then "research" or
+#: "clinical" directly before one supervision word ("Past Research
+#: Supervision", "RESEARCH TRAINEES", "Dental Student Research Mentor").
+#: "Clinical Fellows" names a level, "Research Associates" a job and
+#: "Teaching and Research Supervision" two activities, so none matches.
+_CATEGORY_HEADING_RE = re.compile(
+    rf'(?:{_STATUS_CODES})?(?P<levels>(?:{_LEVEL_WORD_CODES}(?:[jk]?{_LEVEL_WORD_CODES})*)?)'
+    r'c(?:[mnt]|(?P<role>r))')
+_STATUS_HEADING_RE = re.compile(_STATUS_CODES)
+#: A line that speaks for itself about the mentee's level, or is committee
+#: service: a level noun, a dotted degree, a dissertation, a committee or an
+#: examination. The heading's level is then not added -- it is not needed,
+#: or the heading is not this row's (a dissertation-committee line that
+#: stage 1b left under an undergraduate heading).
+_LINE_STATES_A_LEVEL_RE = re.compile(
+    rf'(?<![a-z])(?:{_LEVEL_NOUN}(?![a-z])|dissertation)|committee|{_EXAMINATION}'
+    rf'|{_DOTTED_DEGREE_RE.pattern}', re.I)
+#: "Students" with no modifier ("STUDENT SUPERVISION", "Other Students") is
+#: the section's name, not a level worth printing on every row.
+_GENERIC_LEVELS = frozenset({'student', 'students'})
+_ROLE_HEADING_MAX_MODIFIERS = 5
+#: A heading that is the owner's role toward the mentees under it ("Faculty
+#: Career Mentor", "Honors Thesis Advisor"): two to six words, none an award,
+#: ending in the role noun. It prints only where Type of Supervision would
+#: otherwise be blank.
+_ROLE_HEADING_RE = re.compile(
+    rf'{_HEADING_ENUMERATOR}(?P<role>(?:(?!awards?(?![a-z])){_HEADING_WORD})'
+    rf'{{1,{_ROLE_HEADING_MAX_MODIFIERS}}}(?:co-?)?{_ROLE_NOUN})\s*[.:]?', re.I)
+#: The entry key stage 4 stamps a T-coded sub-heading under (#1047,
+#: `stage4/context_headings.py`); it sits below the hierarchy's leaf.
+_CONTEXT_HEADING_KEY = 'context_heading'
+#: Set on a mentee entry whose headings may not be its own
+#: (`mark_interrupted_mentee_headings`); nothing is then read from them.
+HEADINGS_INTERRUPTED_KEY = 'mentee_headings_interrupted'
+#: The codes a mentee list is made of: its mentees and their outcome lines.
+#: Any other code under the same headings is a line of another kind.
+_MENTEE_LIST_CODES = frozenset({*_MENTEE_CODES, _OUTCOME_CODE})
+
+
+def mark_interrupted_mentee_headings(coded: Sequence[tuple[dict[str, Any], str]]) -> None:
+    """Mark each N3A/N3B entry that comes, in the source, after an entry of
+    another kind filed under the same heading path, unless stage 4 stamped
+    it with a context heading of its own.
+
+    A sub-heading stage 1b did not make a hierarchy level is an entry of its
+    own, coded as whatever it reads like, and the mentees after it keep the
+    heading above: in the corpus an "Undergraduate ... Program" line coded
+    as teaching sat inside a master's-students list, and an attendings row
+    inside a fellows table. Those mentees are listed under the line that
+    interrupts, not under the heading, so the heading says nothing reliable
+    about them. `coded` is every entry with the code it is grouped under;
+    order is read from the element indices, since recovered rows are
+    appended out of place. An entry with no comparable index is treated as
+    interrupting, or as interrupted."""
+    first_other: dict[tuple[str, ...], tuple[float, ...]] = {}
+    for entry, code in coded:
+        if code not in _MENTEE_LIST_CODES:
+            path, span = _heading_path(entry), source_placement(entry).span
+            start = span[0] if span else ()
+            if path not in first_other or start < first_other[path]:
+                first_other[path] = start
+    for entry, code in coded:
+        earliest = first_other.get(_heading_path(entry))
+        if code not in _MENTEE_CODES or earliest is None or entry.get(_CONTEXT_HEADING_KEY):
+            continue
+        span = source_placement(entry).span
+        if span is None or span[0] > earliest:
+            entry[HEADINGS_INTERRUPTED_KEY] = True
+
+
+class _HeadingWords(NamedTuple):
+    """A heading as its words' class codes (`_HEADING_VOCABULARY`), with each
+    word's place in `text`."""
+    text: str
+    codes: str
+    spans: tuple[tuple[int, int], ...]
+
+
+def _heading_words(heading: str) -> _HeadingWords | None:
+    """`heading` without its enumerator, closing parentheticals and closing
+    full stop or colon, word by word. None when a closing parenthetical
+    holds anything `_HEADING_PARENTHETICAL_RE` does not allow, or a word of
+    `_PARENTHETICAL_EXCLUSION_RE`."""
+    text = heading[_HEADING_ENUMERATOR_RE.match(heading).end():]
+    while (closing := _CLOSING_PARENTHETICAL_RE.search(text)) is not None:
+        held = closing.group(1).strip()
+        if _PARENTHETICAL_EXCLUSION_RE.search(held) or not _HEADING_PARENTHETICAL_RE.fullmatch(held):
+            return None
+        text = text[:closing.start()]
+    tokens = list(_HEADING_TOKEN_RE.finditer(text))
+    if tokens and tokens[-1].group() in _HEADING_CLOSING_MARKS:
+        tokens.pop()
+    codes = ''.join(
+        _HEADING_WORD_CODES.get(token.group().casefold().translate(_WORD_MARKS) or token.group(),
+                                _UNLISTED_WORD_CODE)
+        for token in tokens)
+    return _HeadingWords(text, codes, tuple(token.span() for token in tokens))
+
+
+def _single_category(phrase: str) -> str:
+    """The one supervision category word `phrase` uses, capitalised as the
+    template writes it; '' when it uses neither or both."""
+    named = {word.casefold() for word in _SUPERVISION_CATEGORY_RE.findall(phrase)}
+    return named.pop().capitalize() if len(named) == 1 else ''
+
+
+def _role_category(role: str) -> str:
+    """The category a mentor-role phrase names ("Research mentor" ->
+    "Research"); '' unless the whole phrase is a role from the closed
+    vocabulary of `_UNLABELLED_ROLE_RE` that uses one category word."""
+    if not _UNLABELLED_ROLE_RE.fullmatch(role.strip(_ROLE_CELL_EDGE_CHARS)):
+        return ''
+    return _single_category(role)
+
+
+def _heading_category(heading: str) -> str:
+    """The category `heading` states as the kind of supervision
+    (`_CATEGORY_HEADING_RE`); '' when any word of it is outside that
+    pattern, when it uses both category words anywhere, or when a role noun
+    follows "faculty" ("Faculty Research Mentor")."""
+    words = _heading_words(heading)
+    match = _CATEGORY_HEADING_RE.fullmatch(words.codes) if words else None
+    if match is None or (match.group('role') and _FACULTY_CODE in match.group('levels')):
+        return ''
+    return _single_category(heading)
+
+
+def _unlabelled_role(text: str) -> str:
+    """The mentor-role phrase the entry's source text holds as a cell of its
+    own with no "Role:" label (`_UNLABELLED_ROLE_RE`), as written; else ''."""
+    for cell in _SOURCE_CELL_SPLIT_RE.split(text):
+        phrase = cell.strip(_ROLE_CELL_EDGE_CHARS)
+        if _UNLABELLED_ROLE_RE.fullmatch(phrase) and _ROLE_SUBJECT_RE.search(phrase):
+            return phrase
+    return ''
+
+
+def _mentee_headings(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The headings the CV lists this mentee under, innermost first: the
+    stamped context heading, then the hierarchy from its leaf up. It stops
+    at a committee or examination heading (`_COMMITTEE_HEADING_RE`), and is
+    empty for an entry `mark_interrupted_mentee_headings` marked."""
+    if entry.get(HEADINGS_INTERRUPTED_KEY):
+        return ()
+    headings: list[str] = []
+    for heading in (_text(entry.get(_CONTEXT_HEADING_KEY)), *reversed(_heading_path(entry))):
+        if _COMMITTEE_HEADING_RE.search(heading):
+            break
+        if heading.strip():
+            headings.append(heading.strip())
+    return tuple(headings)
+
+
+def _heading_supervision_type(headings: Sequence[str]) -> str:
+    """The supervision category the nearest heading that states one states
+    ("Past Research Supervision" -> "Research"). A heading below it is
+    passed over only when it is itself a level heading or status words
+    ("Ph.D. Students", "Completed"); under any other heading the answer is
+    ''."""
+    for heading in headings:
+        category = _heading_category(heading)
+        words = _heading_words(heading)
+        if category or words is None or not (_LEVEL_HEADING_RE.fullmatch(words.codes)
+                                             or _STATUS_HEADING_RE.fullmatch(words.codes)):
+            return category
+    return ''
+
+
+def _heading_role(headings: Sequence[str]) -> str:
+    """The innermost heading when it is a role phrase (`_ROLE_HEADING_RE`),
+    without its enumerator or closing punctuation; else ''."""
+    match = _ROLE_HEADING_RE.fullmatch(headings[0]) if headings else None
+    return match.group('role') if match else ''
+
+
+def _heading_mentee_level(headings: Sequence[str], line: str) -> str:
+    """The trainee level the innermost heading states (`_LEVEL_HEADING_RE`),
+    as the CV writes it apart from a leading capital; '' when that heading
+    names none, when it is only "Students", or when `line` -- the entry's
+    source text and what the row already prints -- speaks for itself
+    (`_LINE_STATES_A_LEVEL_RE`). Only the innermost heading is read: a level
+    two headings up may be a parent group's ("Fellows" over "Laboratory
+    Staff"), not this mentee's."""
+    words = _heading_words(headings[0]) if headings else None
+    match = _LEVEL_HEADING_RE.fullmatch(words.codes) if words else None
+    if match is None or _LINE_STATES_A_LEVEL_RE.search(line):
+        return ''
+    level = words.text[words.spans[match.start('level')][0]:words.spans[match.end('level') - 1][1]]
+    return '' if level.casefold() in _GENERIC_LEVELS else level[0].upper() + level[1:]
+
+
+def _level_and_site(name: str, mentee_level: str, site_pos_raw: str,
+                    headings: Sequence[str], text: str) -> str:
+    """Site/Position before its extras: "<level> - <site>", or whichever of
+    the two there is. The level is stage 4's. When stage 4 gave none, or
+    only a degree the Name already shows, it is the one the innermost
+    heading states (`_heading_mentee_level`), else what it was. A level the
+    site already holds as whole words, or a stage-4 level the Name shows
+    (#2088), is not prefixed."""
+    # Case-sensitive: "Ms." or a surname "Do" in the Name is no degree.
+    level_in_name = bool(mentee_level and re.search(
+        rf'(?<!\w){re.escape(mentee_level)}(?!\w)', name))
+    heading_level = ('' if mentee_level and not level_in_name
+                     else _heading_mentee_level(headings, f"{text}\n{name}\n{site_pos_raw}"))
+    level = heading_level or mentee_level
+    if (level and site_pos_raw and not _contains_words(site_pos_raw, level)
+            and (heading_level or not level_in_name)):
+        return f"{level} - {site_pos_raw}"
+    return site_pos_raw or level
+
+
 def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecord:
     """Resolve one raw stage-4 mentee dict into a `MenteeRecord`.
 
@@ -1184,19 +1564,26 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     mentee's off-schema `outcome` (`_MENTEE_OUTCOME_KEY`) follows the project.
     The lines of the mentee's other records fan-out folded into this table
     come last (`_with_folded_lines`, #2067).
+
+    What the CV states outside a labelled field is read before anything is
+    guessed (#2155, #985). Type of Supervision is, in order: stage 4's
+    value; the source's labelled row; the category an unlabelled role cell
+    names (`_unlabelled_role`); the category a heading names
+    (`_heading_supervision_type`); the guess from the level; and, only when
+    all of those are blank, a heading that is itself a role
+    (`_heading_role`). The level in Site/Position may come from the
+    innermost heading (`_level_and_site`); that level never feeds the
+    guess: "Residents" as a heading is not "Clinical".
     """
     fields = entry.get('extracted_fields') or {}
 
     name = _text(fields.get('name') or fields.get('mentee_name'))
     mentee_level = _text(fields.get('mentee_level'))       # e.g. "PhD, MBSB"
     site_pos_raw = _text(fields.get('site_position'))      # e.g. "Thesis"
-    if (mentee_level and site_pos_raw and not _contains_words(site_pos_raw, mentee_level)
-            # Case-sensitive: "Ms." or a surname "Do" in the Name is no degree.
-            and not re.search(rf'(?<!\w){re.escape(mentee_level)}(?!\w)', name)):
-        site_position = f"{mentee_level} - {site_pos_raw}"
-    else:
-        site_position = site_pos_raw or mentee_level
-    site_position = _with_site_extras(site_position, fields)
+    headings = _mentee_headings(entry)
+    site_position = _with_site_extras(
+        _level_and_site(name, mentee_level, site_pos_raw, headings, _text(entry.get('text'))),
+        fields)
 
     project = _text(fields.get('research_focus') or fields.get('dissertation_title')
                     or fields.get('thesis_title'))
@@ -1219,11 +1606,13 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     if not supervision_type:
         supervision_type = _source_supervision_type(_text(entry.get('text')))
     role_match = _ROLE_LINE_RE.search(_text(entry.get('text')))
-    role = role_match.group(1).strip() if role_match else ''
+    role = role_match.group(1).strip() if role_match else _unlabelled_role(_text(entry.get('text')))
     if not supervision_type:
-        supervision_type = _infer_supervision_type(mentee_level, site_pos_raw)
+        supervision_type = (_role_category(role) or _heading_supervision_type(headings)
+                            or _infer_supervision_type(mentee_level, site_pos_raw))
     if role and role.casefold() not in supervision_type.casefold():
         supervision_type = f"{supervision_type} ({role})" if supervision_type else role
+    supervision_type = supervision_type or _heading_role(headings)
 
     mentoring_period = _format_mentee_duration(
         fields, ongoing=ongoing, source_text=_text(entry.get('text')))
