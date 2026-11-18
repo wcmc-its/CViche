@@ -734,8 +734,10 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: mentee_field_incomplete (#1941) is a mentee field the submitter left blank or
 #: "N/A": a request to complete it, not a CViche problem, so it is a comment on
 #: the blank cell, never a run-page row.
+#: dedup_merged (#666) lists the duplicates stage 6 merged: mostly correct
+#: merges, shown in the copy's notes so the owner can add back one that was not.
 REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts",
-                                    "mentee_field_incomplete"})
+                                    "mentee_field_incomplete", "dedup_merged"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 

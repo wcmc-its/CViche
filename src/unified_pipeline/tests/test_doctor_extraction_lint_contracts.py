@@ -91,6 +91,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_classified_unrendered,
     lint_cross_entry_value,
     lint_dedup_drops,
+    lint_dedup_merged,
     lint_footer_in_record,
     lint_grant_boundary,
     lint_grant_bucket,
@@ -1074,6 +1075,64 @@ def test_dedup_drops_evidence_names_no_entry_when_two_carry_the_text():
                             dict(twin, element_idx_start=20)]}
     result = lint_dedup_drops({"dedup_decisions": [decision]}, None, stage_5d)
     assert result[0]["evidence"][0].startswith("K4 (")
+
+
+# dedup_merged (#666): the drops lint_dedup_drops gives no finding, listed.
+
+_MERGED_CARD = {"code": "B2", "metric": "jaccard=0.88",
+                "dropped_text": "Example Life Support (ELS) 2031-present",
+                "kept_text": "Example Life Support (ELS) Instructor 2031-present"}
+
+
+def test_dedup_merged_lists_a_drop_worded_differently():
+    """A certification dropped beside its instructor card (REIUOE-01) reads
+    as a duplicate to lint_dedup_drops, and is listed here at INFO."""
+    assert lint_dedup_drops({"dedup_decisions": [_MERGED_CARD]}) == []
+    [finding] = lint_dedup_merged({"dedup_decisions": [_MERGED_CARD]})
+    assert (finding["lint"], finding["severity"]) == ("dedup_merged", "INFO")
+    assert finding["message"].startswith("1 dedup drop(s) merged")
+    assert finding["evidence"] == [
+        "B2 (jaccard=0.88): dropped 'Example Life Support (ELS) 2031-present' vs kept "
+        "'Example Life Support (ELS) Instructor 2031-present'"]
+
+
+@pytest.mark.parametrize("decision", [
+    # The kept entry's own words over again.
+    dict(_MERGED_CARD, kept_text=_MERGED_CARD["dropped_text"]),
+    # Appendix page furniture, worded differently.
+    {"code": "T", "metric": "containment=1.00", "dropped_text": "PAGE 2 of 9",
+     "kept_text": "Example Name PAGE 2 of 9"},
+    # Under DEDUP_LISTED_MIN_WORDS words.
+    {"code": "I", "metric": "containment=1.00", "dropped_text": "Example Society",
+     "kept_text": "2031 Example Society"},
+])
+def test_dedup_merged_leaves_out_a_drop_no_reader_needs(decision):
+    assert lint_dedup_merged({"dedup_decisions": [decision]}) == []
+
+
+def test_dedup_merged_counts_words_not_distinct_words():
+    """Three words is a record's worth, a repeated word included."""
+    drop = {"code": "I", "metric": "containment=1.00", "dropped_text": "Example Example Society",
+            "kept_text": "2031 Example Example Society"}
+    assert len(lint_dedup_merged({"dedup_decisions": [drop]})) == 1
+
+
+def test_dedup_merged_never_lists_a_drop_dedup_drops_reports():
+    """A poorly covered drop is lint_dedup_drops' WARN, and only that."""
+    loss = {"code": "Q4D", "metric": "containment=0.75",
+            "dropped_text": "Example Diagnosis Journal (2031-Present)",
+            "kept_text": "Example Medicine Journal (2031-Present)"}
+    assert [f["severity"] for f in lint_dedup_drops({"dedup_decisions": [loss]})] == ["WARN"]
+    assert lint_dedup_merged({"dedup_decisions": [loss]}) == []
+
+
+def test_dedup_merged_lists_every_drop():
+    """Not cut at DEDUP_EVIDENCE_LIMIT: the review copy notes each."""
+    drops = [{"code": "R", "metric": "containment=1.00",
+              "dropped_text": f"Example Lecture {i}, Example City",
+              "kept_text": f"2031 Example Lecture {i}, Example City"} for i in range(8)]
+    [finding] = lint_dedup_merged({"dedup_decisions": drops})
+    assert len(finding["evidence"]) == 8
 
 
 def test_dedup_drops_record_rule_drop_skips_the_coverage_warn_not_the_name_info():

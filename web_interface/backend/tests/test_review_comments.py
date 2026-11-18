@@ -449,6 +449,28 @@ def test_a_dedup_drop_led_by_its_entry_number_and_cut_at_the_doctors_length(tmp_
     assert _notes(out)[2:] == ["\u2022 Didactic Teaching", 'Removed: "Squid Optics Seminar"', f'Kept: "{kept}\u2026"']
 
 
+def test_a_merged_dedup_drop_is_a_note_though_it_is_info(tmp_path):
+    """dedup_merged lists drops at INFO; each is still an entry off the page,
+    so each is a note. A two-line dropped text is a note on one line."""
+    listed = _finding("dedup_merged", "2 dedup drop(s) merged into a kept entry worded differently", [
+        "K1 (jaccard=0.88): dropped 'Squid Optics Seminar' vs kept 'Squid Optics Seminar Leader'",
+        "K1 (containment=1.00): dropped '2031-present\nSquid Anatomy Tutor' vs kept "
+        "'2031-present Squid Anatomy Tutor, Example School'"], severity="INFO")
+    out, count = rc.write_review_docx(_clean_docx(tmp_path), _report(listed))
+    assert _notes(out)[2:] == [
+        "\u2022 Didactic Teaching", 'Removed: "Squid Optics Seminar"', 'Kept: "Squid Optics Seminar Leader"',
+        "\u2022 Didactic Teaching", 'Removed: "2031-present Squid Anatomy Tutor"',
+        'Kept: "2031-present Squid Anatomy Tutor, Example School"']
+
+
+def test_an_info_dedup_drops_finding_stays_out_of_the_copy(tmp_path):
+    """Only the review-copy-only listing is noted at INFO."""
+    named_apart = _finding("dedup_drops", "1 dedup drop(s) fully covered by the kept entry", [
+        "K1 (jaccard=0.91): dropped 'Squid Optics Seminar' vs kept 'Squid Optics Seminar Leader'"],
+        severity="INFO")
+    assert rc.write_review_docx(_clean_docx(tmp_path), _report(named_apart))[1] == 0
+
+
 def test_a_dedup_quote_the_doctor_cut_still_reads(tmp_path):
     """The run page marks a quote cut at a doctor cap with an ellipsis."""
     evidence = ("K1 (jaccard=0.92, 86% covered by kept): dropped 'Core Squid Curriculum b Lecturer' "
