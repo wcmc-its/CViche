@@ -75,7 +75,9 @@ def test_every_rule_names_a_slot_the_template_ships():
 
 def test_the_bare_template_fires_every_rule_but_the_caps_each_on_its_slot():
     fired = _fired(_template())
-    expected = {r.shape for r in tr.load_rules() if not r.condition.startswith("max_")}
+    # A cap needs entries to count and a sum needs amounts: neither fires on a blank form.
+    expected = {r.shape for r in tr.load_rules()
+                if not r.condition.startswith("max_") and r.condition != "column_sum"}
     assert set(fired) == expected
     for shape, anchor in fired.items():
         assert anchor.strip().startswith(shape.split(":", 1)[1]), shape
@@ -125,6 +127,71 @@ def test_percent_effort_fires_until_one_activity_has_an_effort():
     doc = _template()
     _cell(doc, "Percent Effort (%)", row=1, column=1).text = "40%"
     assert "blank:Percent Effort (%)" not in _fired(doc)
+
+
+SUM_RULE = "column_sum:Percent Effort (%)"
+
+
+def _efforts(*efforts: str):
+    """The template with ``efforts`` written down the Percent Effort column."""
+    doc = _template()
+    for row, effort in enumerate(efforts, start=1):
+        _cell(doc, "Percent Effort (%)", row=row, column=1).text = effort
+    return doc
+
+
+@pytest.mark.parametrize("efforts", [
+    ("15%", "80%", "5%", "5%"),   # #2052, WSFSAZ: 105
+    ("40%",),                     # one activity filled in, 60 short
+    ("50", "25"),                 # no percent sign
+    ("50 %", "25 %"),             # a space before the sign
+    ("33.3%", "33.3%", "33.3%"),  # 99.9
+    ("100%", "5%"),               # an amount that reads like the template's own Total
+])
+def test_percent_effort_that_does_not_add_up_to_100_fires_on_the_column_label(efforts):
+    assert _fired(_efforts(*efforts))[SUM_RULE] == "Percent Effort (%)"
+
+
+@pytest.mark.parametrize("efforts", [
+    (),                              # nothing written: the blank rule's
+    ("15%", "75%", "5%", "5%"),
+    ("100%",),
+    ("50", "25 %", "12.5%", "12.5"),
+    ("60%", "", "40%"),
+    ("0%", "100%", "0%", "0%"),
+    ("50%", "varies", "10%"),        # an answer that is not a number is not ours to add up
+    ("50%", "10-20%"),
+])
+def test_percent_effort_that_adds_up_or_cannot_be_added_does_not_fire(efforts):
+    assert SUM_RULE not in _fired(_efforts(*efforts))
+
+
+def test_the_total_row_is_not_one_of_the_amounts():
+    doc = _efforts("60%", "40%")
+    _cell(doc, "Total", exact=True).text = "100"   # rewritten, so no longer the template's text
+    assert SUM_RULE not in _fired(doc)
+    off = _efforts("60%", "45%")
+    _cell(off, "Total", exact=True).text = "100"
+    assert SUM_RULE in _fired(off)
+
+
+def test_a_row_too_short_to_reach_the_column_is_skipped():
+    doc = _efforts("60%", "45%")
+    research = _cell(doc, "Research", column=0, exact=True)._tc.getparent()
+    for tc in list(research.iterchildren(qn("w:tc")))[1:]:
+        research.remove(tc)
+    assert SUM_RULE in _fired(doc)
+
+
+def test_a_sum_rule_reads_only_the_table_that_has_its_column():
+    rule = tr.TemplateRule("Year Awarded", "column_sum", "Should be 1.", 1)
+    doc = _efforts("15%", "80%")
+    assert tr.template_rule_comments(doc, (rule,)) == []          # blank column
+    _cell(doc, "Year Awarded", row=1, column=3).text = "2"
+    assert [(p.text, r.comment) for p, r in tr.template_rule_comments(doc, (rule,))] == [
+        ("Year Awarded", "Should be 1.")]
+    missing = tr.TemplateRule("No Such Column", "column_sum", "x", 1)
+    assert tr.template_rule_comments(doc, (missing,)) == []
 
 
 @pytest.mark.parametrize("slot", ["Academic Degree(s)", "Academic Appointments"])
@@ -191,7 +258,8 @@ def test_rules_load_from_data_and_reject_what_no_code_reads(tmp_path):
     assert [(p.text, r.comment) for p, r in tr.template_rule_comments(doc, (rule,))] == [
         ("Books:", "Please list two.")]
     for bad in ([{"slot": "Books:", "condition": "max_lines", "comment": "x"}],
-                [{"slot": "Books:", "condition": "max_entries", "comment": "x"}]):
+                [{"slot": "Books:", "condition": "max_entries", "comment": "x"}],
+                [{"slot": "Percent Effort (%)", "condition": "column_sum", "comment": "x"}]):
         path = tmp_path / "bad.json"
         path.write_text(json.dumps(bad))
         tr.load_rules.cache_clear()
