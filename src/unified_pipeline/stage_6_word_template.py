@@ -307,6 +307,7 @@ from unified_pipeline.stage6.sections.appendix import (
 from unified_pipeline.stage6.sections.memberships import MEMBERSHIPS_HEADING
 from unified_pipeline.stage6.sections.mentoring import (
     annotate_outcome_mentees,
+    mark_interrupted_mentee_headings,
     outcome_mentee_warnings,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
@@ -2527,6 +2528,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._section_failures.extend(honor_listed_as_funding_warnings(honors_moved))
         self._section_failures.extend(credential_reroute_warnings(credentials_moved))
         self._section_failures.extend(outcome_mentee_warnings(annotate_outcome_mentees(coded)))
+        mark_interrupted_mentee_headings(coded)
         consume_institution_headings(coded, entries_by_code, _is_heading_shaped, warnings=self._section_failures)
 
         if self.verbose:
