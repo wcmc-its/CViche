@@ -111,6 +111,9 @@ _EMPLOYMENT_ROW_KEYWORDS: dict[str, tuple[str, ...]] = {
     'dates of employment': ('date', 'employ'),
 }
 
+# The row that states the status, whose options go once it does (#2052).
+_STATUS_ROW_KEY = 'employment status'
+
 # How many paragraphs past the section anchor may hold its label rows. The
 # October-2022 template's block is the employer row, the status row, then a
 # dozen colon-free status options; the bound keeps a "Title:" or "Date:"
@@ -740,8 +743,27 @@ class PassthroughSection:
             run = para.add_run(f"{template_label}:\t{value}")
             _set_font(run)
             self.stats['entries_inserted'] += 1
+            if row_key == _STATUS_ROW_KEY:
+                self._remove_status_options(para._p)
             return True
         return False
+
+    def _remove_status_options(self, status_row: _Element) -> None:
+        """Delete the template's status options under a status row that now
+        states one (#2052). The row's own label asks for it: "Please choose
+        one, list here, delete the others". The options are the unbroken run
+        of template paragraphs under the row that hold text and no colon; a
+        blank line, a "Label:" row or a paragraph stage 6 wrote ends it."""
+        options = []
+        for element in status_row.itersiblings():
+            if element not in self._template_paras:
+                break
+            text = ''.join(t.text or '' for t in element.iter(qn('w:t'))).strip()
+            if not text or ':' in text:
+                break
+            options.append(element)
+        for element in options[:_EMPLOYMENT_ROW_SCAN_WINDOW]:
+            element.getparent().remove(element)
 
     def _fill_hospital_affiliation(self, all_entries: list[dict]) -> list[dict]:
         """Fill G. INSTITUTIONAL/HOSPITAL AFFILIATION section.

@@ -39,6 +39,9 @@ class _StubGenerator(PassthroughSection):
         self.doc = doc
         self.verbose = False
         self.stats = {"entries_inserted": 0, "tables_populated": 0}
+        # What the real generator's `doc` setter records: the paragraphs the
+        # template shipped, by element (#548).
+        self._template_paras = frozenset(p._p for p in doc.paragraphs)
 
     def _find_paragraph_with_text(self, search_text):
         for i, para in enumerate(self.doc.paragraphs):
@@ -261,6 +264,75 @@ def test_real_wcm_template_routes_employer_and_status_rows():
     assert ("Current Employment Status (Please choose one, list here, delete the "
             "others):\tFull-time salaried by Weill Cornell") in texts
     assert generator.stats["entries_inserted"] == 2
+
+
+_STATUS_LABEL = "Current Employment Status (Please choose one, list here, delete the others):"
+_FIRST_OPTION = "Full-time salaried by Weill Cornell"
+
+
+def _after_status_row(doc) -> list[str]:
+    texts = _texts(doc)
+    at = next(i for i, text in enumerate(texts) if text.startswith(_STATUS_LABEL))
+    return texts[at + 1:at + 4]
+
+
+def test_real_wcm_template_drops_the_status_options_once_a_status_is_written():
+    """#2052: the label asks to "choose one, list here, delete the others";
+    two of 180 rendered CVs stated a status and still listed all eight."""
+    doc = docx.Document(str(TEMPLATE_PATH))
+    before = _texts(doc)
+    assert _after_status_row(doc)[0] == _FIRST_OPTION
+
+    _StubGenerator(doc)._fill_passthrough_sections(
+        [_entry("Employment Status: Full-time salaried by Weill Cornell")])
+
+    assert _after_status_row(doc) == ["", "", "LICENSURE, BOARD CERTIFICATION"]
+    assert len(_texts(doc)) == len(before) - 8
+
+
+def test_real_wcm_template_keeps_the_status_options_when_no_status_is_written():
+    doc = docx.Document(str(TEMPLATE_PATH))
+    before = len(_texts(doc))
+
+    _StubGenerator(doc)._fill_passthrough_sections(
+        [_entry("Name of Employer(s): Weill Cornell Medical College")])
+
+    assert _after_status_row(doc)[0] == _FIRST_OPTION
+    assert len(_texts(doc)) == before
+
+
+def test_only_a_stated_status_removes_the_lines_under_its_row():
+    doc = docx.Document()
+    for line in ("Name of Current Employer(s):", "A line under the employer row",
+                 "Current Employment Status:", "Full-time", "Part-time"):
+        doc.add_paragraph(line)
+
+    # Another row written, and a status entry with no value (never written): nothing removed.
+    _StubGenerator(doc)._fill_passthrough_sections([
+        _entry("Name of Employer(s): Example Hospital"), _entry("Employment Status:")])
+
+    assert _texts(doc) == ["Name of Current Employer(s):\tExample Hospital",
+                           "A line under the employer row",
+                           "Current Employment Status:", "Full-time", "Part-time"]
+
+
+def test_status_options_end_at_a_label_row_a_blank_or_a_written_line():
+    doc = docx.Document()
+    for line in ("Name of Current Employer(s):", "Current Employment Status:",
+                 "Full-time", "Part-time", "Position/Title:", "Voluntary"):
+        doc.add_paragraph(line)
+    generator = _StubGenerator(doc)
+    written = doc.add_paragraph("A line a writer added")
+    doc.paragraphs[1]._p.addnext(written._p)   # not the template's: ends the run at once
+
+    generator._fill_passthrough_sections([_entry("Employment Status: Full-time")])
+    assert _texts(doc)[1:4] == ["Current Employment Status:\tFull-time",
+                                "A line a writer added", "Full-time"]
+
+    written._p.getparent().remove(written._p)
+    generator._fill_passthrough_sections([_entry("Employment Status: Part-time")])
+    assert _texts(doc) == ["Name of Current Employer(s):", "Current Employment Status:\tPart-time",
+                           "Position/Title:", "Voluntary"]
 
 
 # --- #807: E-coded entries under a foreign heading ---------------------------
