@@ -3617,3 +3617,170 @@ def test_847_a_source_docx_s_child_names_and_dates_never_reach_the_rendered_docu
     for _paragraphs, values in _847_SOURCE:
         for value in values:
             assert value not in rendered, f"{value!r} reached the rendered document"
+
+
+# --------------------------------------------------------------------------
+# #2152 (ITMPWP): "Family Status: <status>, <n> (<adjective>) boys" reached the
+# Appendix. Three parts, each missed for its own reason: the label, the status
+# word before a comma, and a child count with a parenthetical before "boys" /
+# "girls". Every value below is invented; the spacing is the shapes a reader
+# produces: one fragment, tab cells, a 5+ space gap, the value on the next line.
+# --------------------------------------------------------------------------
+
+_2152_LINES = [
+    "Family Status: Married, 2 (zqxwonderful) girls",
+    "Family Status:\tMarried,\t2 (zqxwonderful) girls",
+    "Family Status:      Married,     2 (zqxwonderful) girls",
+    "Family Status:\nMarried, 2 (zqxwonderful) girls",
+    "Family Status: Divorced, four (zqxgrown) boys.",
+]
+_2152_VALUE_WORDS = ("Married", "Divorced", "zqx", "girls", "boys")
+
+
+@pytest.mark.parametrize("text", _2152_LINES)
+@pytest.mark.parametrize("code", [A, APPENDIX])
+def test_2152_a_family_status_line_is_withheld_whole(text, code):
+    residual, withheld = _withheld_residual(f"Citizenship: Example\n{text}\nLanguages: Example", code=code)
+    for word in _2152_VALUE_WORDS:
+        assert word not in residual, (word, residual)
+    assert not any(ch.isdigit() for ch in residual), residual
+    assert "Citizenship: Example" in residual and "Languages: Example" in residual
+    assert withheld[0].category == CAT_MARITAL_STATUS
+    assert {item.category for item in withheld} <= {CAT_MARITAL_STATUS, CAT_CHILDREN}
+
+
+@pytest.mark.parametrize("text", _2152_LINES)
+def test_2152_a_family_status_line_in_a_routed_content_entry_is_left_alone(text):
+    """The rows sit in the Personal Data / Appendix scope, like the family rows."""
+    assert not _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text, category, destinations", [
+    # the label alone, whatever its value
+    ("Family Status: Engaged", CAT_MARITAL_STATUS, _PERSONAL_ONLY),
+    ("Personal: Family Status: Engaged", CAT_MARITAL_STATUS, _PERSONAL_ONLY),
+    ("Family Status - Engaged", CAT_MARITAL_STATUS, _DASH_PERSONAL_DATA_ONLY),
+    # a status word, its comma and a child count ending the fragment
+    ("Married, 2 girls", CAT_MARITAL_STATUS, _PERSONAL_ONLY),
+    ("Divorced, one (grown) son.", CAT_MARITAL_STATUS, _PERSONAL_ONLY),
+    ("Personal: widowed, two children", CAT_MARITAL_STATUS, _PERSONAL_ONLY),
+    # ...and with anything else after the comma, in the Personal Data block only
+    ("Married, since 1999", CAT_MARITAL_STATUS, _PERSONAL_DATA_BLOCK_ONLY),
+    ("Name: Pat Example\tSingle, no children", CAT_MARITAL_STATUS, _PERSONAL_DATA_BLOCK_ONLY),
+    # the count with a parenthetical, a fragment of its own
+    ("2 (wonderful) girls", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Name: Pat Example\t • three (grown) children.\tCitizenship: Example", CAT_CHILDREN, _PERSONAL_ONLY),
+    # "boys" and "girls" are child nouns of these two count shapes
+    ("3 (grown) boys", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Widowed, one boy", CAT_MARITAL_STATUS, _PERSONAL_ONLY),
+])
+def test_2152_each_part_is_withheld_on_its_own(text, category, destinations):
+    for code, expected in destinations.items():
+        matches = _probe_matches(text, code)
+        assert bool(matches) is expected, (text, code)
+        if expected:
+            assert matches[0].category == category, (text, code)
+
+
+def test_2152_a_count_cell_is_cut_alone_and_its_neighbours_stay():
+    residual, withheld = _withheld_residual(
+        "Name: Pat Example\t2 (wonderful) girls\tCitizenship: Example", code=A)
+    assert residual.split() == ["Name:", "Pat", "Example", "Citizenship:", "Example"]
+    assert [item.category for item in withheld] == [CAT_CHILDREN]
+
+
+def test_2152_a_status_in_the_cell_after_the_label_is_one_withheld_item():
+    """As #1391's bare word: the status is the label's value, not a second item."""
+    _residual, withheld = _withheld_residual("Family Status:\tMarried,\t2 (wonderful) girls", code=A)
+    assert [item.category for item in withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    # a study's counts
+    "40 children were enrolled",
+    "40 (obese) children",
+    "5 (of 40) children were enrolled",
+    "Study arms: 4 (control) children",
+    "Enrolled 9 girls, 8 boys.",
+    "Outcomes in 40 children: a paediatric cohort study",
+    # programme, study and publication titles
+    "Boys and Girls Club of Exampleton",
+    "Boys and Girls: A Study of Play",
+    "Paediatric asthma in boys and girls aged 5 to 9",
+    "Example A. Married, with children: a study of households. J Example. 2001",
+    "Married life and health outcomes",
+    "Family status and outcomes in 40 children",
+    "A cohort of married, 2 children households",
+    "Households of the married, 2 children",
+    # a parenthetical that never closes, or is too long to be an adjective
+    "2 (wonderful girls",
+    "2 (" + "x" * 31 + ") girls",
+    # a count glued to a longer number
+    "R01-2 (renewal) children",
+    "12 (wonderful) girls",
+])
+def test_2152_study_counts_and_titles_are_not_withheld_anywhere(text):
+    for code in (A, APPENDIX, MEMBERSHIP, CONTENT):
+        assert not _denied(text, code), (text, code)
+
+
+@pytest.mark.parametrize("text", [
+    "Single, double and triple blinding in trials",
+    "Separated, 2 children at a time were screened",
+    "Married, with Children: a television history",
+])
+def test_2152_a_title_opening_with_a_status_word_renders_outside_the_personal_data_block(text):
+    """The comma form needs a child count ending the fragment everywhere but in
+    an A-coded entry, where the bare word is withheld already (#1391)."""
+    for code in (APPENDIX, MEMBERSHIP, CONTENT):
+        assert not _denied(text, code), (text, code)
+
+
+def test_2152_the_new_rows_stay_out_of_the_pre_llm_scrub():
+    for text in [*_2152_LINES, "Married, 2 girls", "2 (wonderful) girls", "4 boys"]:
+        assert redact_pre_llm_values(text) == text
+
+
+_2152_PRE_LLM_CHILD_DATE_LINES = [
+    "Children: two girls, Kim (b. 2001) and Lee (b. 2003)",
+    "Married to Pat Example; three boys born 2001, 2003, 2005",
+]
+_2152_PRE_LLM_CHILD_LIST = ["Two boys:", "Kim Example, born 3/4/2001", "Lee Example, born 5/6/2003"]
+
+
+def _2152_as_sons_and_daughters(text: str) -> str:
+    return text.replace("girls", "daughters").replace("boys", "sons")
+
+
+@pytest.mark.parametrize("text", _2152_PRE_LLM_CHILD_DATE_LINES)
+def test_2152_boys_and_girls_do_not_join_the_pre_llm_child_date_scrub(text):
+    """"boys" / "girls" are nouns of the two render-only #2152 shapes alone
+    (`_FAMILY_STATUS_CHILD_NOUN`). The rows the pre-LLM child-date scrub walks
+    read `_CHILD_NOUN`, which does not widen with a render rule: the scrub runs
+    before the paid stages at every code. The same line worded "sons" /
+    "daughters" is the control that the scrub does read it."""
+    assert redact_pre_llm_values(text) == text
+    control = _2152_as_sons_and_daughters(text)
+    assert PRE_LLM_PLACEHOLDER in redact_pre_llm_values(control)
+
+
+def test_2152_boys_and_girls_do_not_open_a_pre_llm_child_list():
+    assert redact_pre_llm_child_list_paragraphs(_2152_PRE_LLM_CHILD_LIST) == _2152_PRE_LLM_CHILD_LIST
+    control = [_2152_as_sons_and_daughters(paragraph) for paragraph in _2152_PRE_LLM_CHILD_LIST]
+    assert redact_pre_llm_child_list_paragraphs(control) != control
+
+
+def test_2152_the_parenthetical_count_is_linear_in_an_unclosed_parenthesis():
+    text = "2 (" + "wonderful " * 20_000
+    started = time.perf_counter()
+    assert _pii_matches(text) == []
+    assert time.perf_counter() - started < 2.0
+
+
+def test_2152_a_family_status_line_never_reaches_the_rendered_document(tmp_path):
+    """Render proof, not matcher proof: the real `generate()` over a fieldless A
+    and a fieldless T entry of each spacing shape, every XML part of the docx
+    searched, tracked changes included."""
+    rendered = _847_render(tmp_path, _2152_LINES)
+    for word in ("zqx", "Married", "Divorced", "Family Status"):
+        assert word not in rendered, f"{word!r} reached the rendered document"
