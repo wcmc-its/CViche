@@ -800,7 +800,8 @@ def test_untitled_entry_still_skips_the_gate():
 
 
 @pytest.mark.parametrize('volume, number', [
-    ('19 Suppl 1', 19), (' 7', 7), (42, 42), ('Suppl 2', None), ('', None), (None, None)])
+    ('19 Suppl 1', 19), (' 7', 7), (42, 42), ('Suppl 2', None), ('', None), (None, None),
+    ('00', None), (0, None)])  # #2153: a placeholder, not a volume to compare
 def test_volume_number_is_the_leading_number(volume, number):
     assert stage5.volume_number(volume) == number
 
@@ -1394,14 +1395,17 @@ def test_title_search_ignores_a_preprint_record(tmp_path, monkeypatch):
 PAPER_PMID, NOTICE_PMID = '23456789', '34567890'
 
 
-def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',), year=2025):
+def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',), year=2025,
+             volume=None, vernacular=None):
     """One PubmedArticle; `title` is raw XML, so it may hold inline markup."""
+    volume_xml = f'<Volume>{volume}</Volume>' if volume else ''
+    vernacular_xml = f'<VernacularTitle>{vernacular}</VernacularTitle>' if vernacular else ''
     names = ''.join(f'<Author><LastName>{a.rsplit(" ", 1)[0]}</LastName>'
                     f'<Initials>{a.rsplit(" ", 1)[1]}</Initials></Author>' for a in authors)
     types = ''.join(f'<PublicationType>{t}</PublicationType>' for t in pubtypes)
     return (f'<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article>'
-            f'<Journal><JournalIssue><PubDate><Year>{year}</Year></PubDate></JournalIssue>'
-            f'<Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>'
+            f'<Journal><JournalIssue>{volume_xml}<PubDate><Year>{year}</Year></PubDate></JournalIssue>'
+            f'<Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>{vernacular_xml}'
             f'<AuthorList>{names}</AuthorList><PublicationTypeList>{types}</PublicationTypeList>'
             f'</Article></MedlineCitation></PubmedArticle>')
 
@@ -2860,3 +2864,195 @@ def test_crossref_query_adds_the_first_authors_and_year(fields, query):
     # #1870: on its title alone, MNZ7IA's West J Emerg Med case report never
     # reached Crossref's top three.
     assert stage5.crossref_query('Cholinergic crisis', fields) == query
+
+
+# ---- #2153: a title-search hit whose title only contains the CV's, a
+# placeholder ArticleTitle, and an erratum's record reached by the CV's PMID
+
+# NESTED_TITLE is all inside SHARED_TITLE: 1.0 against the shorter title, 5 of
+# 7 words against the longer. The EGHJRK e206 shape, synthetic: a later paper
+# about the CV's paper, in another journal's volume.
+def _nested_entry(year='2019', volume='40'):
+    return _article_entry(10, title=NESTED_TITLE, year=year, volume=volume)
+
+
+def _containing_record(year=2021, volume='7', title=SHARED_TITLE):
+    return _article(PAPER_PMID, title, year=year, volume=volume)
+
+
+def test_title_hit_containing_the_cv_title_from_another_year_and_volume_is_refused(
+        tmp_path, monkeypatch):
+    assert title_word_overlap(NESTED_TITLE, [SHARED_TITLE]) == 1.0
+    [result], _, enricher = _run_entries(tmp_path, monkeypatch, [_nested_entry()], [
+        _hits(PAPER_PMID), _article_set(_containing_record())])
+    assert result['enrichment_status'] == 'no_identifier'  # a miss, as the search leaves it
+    assert 'enrichment_data' not in result and 'enrichment_rejected' not in result
+    assert 'pmid' not in result['extracted_fields']
+    assert enricher.stats['enriched'] == 0
+
+
+@pytest.mark.parametrize('entry, record', [
+    (_nested_entry(volume='7'), _containing_record()),            # the volume agrees
+    (_nested_entry(year='2021'), _containing_record()),            # the year agrees
+    (_nested_entry(volume=None), _containing_record()),            # in press: no volume yet
+    (_nested_entry(volume='00'), _containing_record()),            # a placeholder volume
+    (_nested_entry(), _containing_record(volume=None)),            # the record has none
+    (_nested_entry(), _containing_record(title=NESTED_TITLE)),     # the same title
+], ids=['volume-agrees', 'year-agrees', 'no-cv-volume', 'zero-cv-volume', 'no-record-volume',
+        'same-title'])
+def test_title_hit_is_kept_unless_year_and_volume_both_contradict_a_longer_title(
+        tmp_path, monkeypatch, entry, record):
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [entry], [
+        _hits(PAPER_PMID), _article_set(record)])
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+
+
+def test_second_title_hit_is_taken_when_the_first_names_another_paper(tmp_path, monkeypatch):
+    own = _article(SIBLING_PMID, NESTED_TITLE, year=2019, volume='40')
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_nested_entry()], [
+        _hits(PAPER_PMID, SIBLING_PMID), _article_set(_containing_record(), own)])
+    assert result['enrichment_data']['pubmed_pmid'] == SIBLING_PMID
+
+
+def test_pubmed_record_of_crossrefs_doi_containing_the_cv_title_is_refused(tmp_path, monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [_hits(), _hits(PAPER_PMID), _article_set(_containing_record())],
+                           crossref=[_crossref_items(_crossref_hit())])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_nested_entry()]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    assert result['enrichment_status'] == 'no_identifier'
+    assert 'enrichment_data' not in result
+
+
+def test_crossref_record_pubmed_does_not_index_containing_the_cv_title_is_not_kept(
+        tmp_path, monkeypatch):
+    work = _crossref_work(issued=2021, volume='7')
+    enricher, _, _ = _make(monkeypatch, [_hits(), _hits()], crossref=[_crossref_items(work)])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_nested_entry()]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    assert stage5.CROSSREF_MATCH_KEY not in result
+    # Positive control: the same work is kept once the CV's volume is its own.
+    enricher, _, _ = _make(monkeypatch, [_hits(), _hits()], crossref=[_crossref_items(work)])
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_nested_entry(volume='7')]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    assert result[stage5.CROSSREF_MATCH_KEY]['source'] == stage5.CROSSREF_MATCH_BY_TITLE
+
+
+VERNACULAR_TITLE = 'Migracion de garzas por la costa norte en primavera'
+
+
+@pytest.mark.parametrize('placeholder', ['[Not Available].', '[Not Available]', ' [not available]. '])
+def test_placeholder_article_title_is_no_pubmed_title(monkeypatch, placeholder):
+    # EGHJRK e283: the record of a paper with no English title; the CV's
+    # title matches its VernacularTitle, and stage 6 printed the placeholder.
+    xml = _article_set(_article(PMID, placeholder, vernacular=VERNACULAR_TITLE))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    [result] = enricher._enrich_by_pmid([(_titled(VERNACULAR_TITLE, pmid=PMID), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['enrichment_data']['pubmed_title'] == ''  # stage 6 falls back to the CV's
+    assert result['extracted_fields']['title'] == VERNACULAR_TITLE
+
+
+@pytest.mark.parametrize('vernacular', [VERNACULAR_TITLE, None, '\u6d77\u5cb8\u306e\u9dfa\u306e\u6e21\u308a'],
+                         ids=['latin-vernacular', 'no-vernacular', 'non-latin-vernacular'])
+def test_placeholder_title_does_not_pass_a_record_for_another_paper(monkeypatch, vernacular):
+    # The record keeps its placeholder for the #1043 gate: with no title
+    # words at all, a record is not checked against the CV's title.
+    xml = _article_set(_article(PMID, '[Not Available].', vernacular=vernacular))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    [result] = enricher._enrich_by_pmid([(_titled(UNRELATED_TITLE, pmid=PMID), PMID)])
+    assert result['enrichment_status'] == 'title_check_failed'
+    assert 'enrichment_data' not in result
+    assert result['enrichment_rejected']['pubmed_title'] == '[Not Available].'
+
+
+@pytest.mark.parametrize('title', ['[Heron migration along the coast].', 'Not available in print',
+                                   '[Not Available]: a survey of missing titles', None])
+def test_bracketed_or_similar_real_title_is_kept(title):
+    assert stage5.record_title(title) == title
+
+
+ERRATUM_TITLE = f'Correction to: {SHARED_TITLE}'
+
+
+def _erratum_response(pubtypes=('Published Erratum',), title=ERRATUM_TITLE):
+    return _article_set(_article(PMID, title, pubtypes=pubtypes))
+
+
+def _cited_entry(text=None, title=SHARED_TITLE):
+    return {'taxonomy_code': 'S1',
+            'text': text or f'Garcia M. {title}. Heart Journal. 2025;7:210-214. PMID: {PMID}.',
+            'extracted_fields': {'title': title, 'authors': 'Garcia M', 'pages': '210-214', 'pmid': PMID}}
+
+
+@pytest.mark.parametrize('pubtypes', [('Published Erratum',), ('Journal Article', 'Published Erratum')])
+def test_pmid_that_is_the_papers_erratum_keeps_the_cv_citation(monkeypatch, pubtypes):
+    # VYJMXR e995: the PMID typed in the CV is the correction's record.
+    enricher, _, _ = _make(monkeypatch, [_erratum_response(pubtypes)])
+    [result] = enricher._enrich_by_pmid([(_cited_entry(), PMID)])
+    assert result['enrichment_status'] == stage5.ERRATUM_RECORD_STATUS
+    assert 'enrichment_data' not in result  # stage 6 renders the CV's own citation
+    assert result['extracted_fields']['pages'] == '210-214'
+    assert result['enrichment_rejected'] == {
+        'source': 'pmid', 'pubmed_pmid': PMID, 'pubmed_title': ERRATUM_TITLE,
+        'publication_types': list(pubtypes)}
+    assert (enricher.stats['erratum_records_rejected'], enricher.stats['enriched'],
+            enricher.stats['failed_lookups']) == (1, 0, 0)
+
+
+def test_erratum_reached_by_doi_does_not_store_its_pmid(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, json_data=ESEARCH_JSON), _erratum_response()])
+    entry = _cited_entry()
+    del entry['extracted_fields']['pmid']
+    [result] = enricher._enrich_by_doi([(entry, DOI)])
+    assert result['enrichment_status'] == stage5.ERRATUM_RECORD_STATUS
+    assert result['enrichment_rejected']['source'] == 'doi_search'
+    assert 'pmid' not in result['extracted_fields']
+
+
+@pytest.mark.parametrize('entry', [
+    _cited_entry(title=ERRATUM_TITLE),
+    _cited_entry(title=f'Erratum: {SHARED_TITLE}'),
+    _cited_entry(title=f'{SHARED_TITLE} - CORRIGENDUM'),
+    _cited_entry(text=f'Garcia M. {SHARED_TITLE}. Heart Journal. 2025;7:e99 (published correction).'),
+    _cited_entry(text=f'Garcia M. {SHARED_TITLE}. Heart Journal. 2025;7:e99. Errata.'),
+    _cited_entry(text=f'Author corrections. Garcia M. {SHARED_TITLE}. Heart Journal. 2025;7:e99.'),
+    _cited_entry(text=f'Garcia M. {SHARED_TITLE}. Heart Journal. 2025;7:e99. Corrigenda.'),
+    _cited_entry(text='Garcia M. Heart Journal. 2025;7:e99.', title=ERRATUM_TITLE),
+], ids=['correction-title', 'erratum-title', 'corrigendum-title', 'correction-note', 'errata-note',
+        'corrections-heading', 'corrigenda-note',
+        'title-outside-the-text'])
+def test_erratum_the_cv_itself_lists_is_accepted(monkeypatch, entry):
+    enricher, _, _ = _make(monkeypatch, [_erratum_response()])
+    [result] = enricher._enrich_by_pmid([(entry, PMID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['enrichment_data']['pubmed_title'] == ERRATUM_TITLE
+
+
+def test_record_that_is_not_an_erratum_is_accepted_whatever_its_title(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [_erratum_response(pubtypes=('Journal Article',))])
+    [result] = enricher._enrich_by_pmid([(_cited_entry(), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+@pytest.mark.parametrize('text', [
+    f'Garcia M. {SHARED_TITLE}. Heart Journal. 2025;7:210-214. Corrected proof.',
+    f'Garcia M. {SHARED_TITLE}. Heart Journal. 2025;7:210-214. Autocorrection study.',
+], ids=['corrected', 'inside-a-word'])
+def test_cv_line_with_a_word_near_correction_does_not_list_the_erratum(monkeypatch, text):
+    enricher, _, _ = _make(monkeypatch, [_erratum_response()])
+    [result] = enricher._enrich_by_pmid([(_cited_entry(text=text), PMID)])
+    assert result['enrichment_status'] == stage5.ERRATUM_RECORD_STATUS
+
+
+def test_bare_pmcid_retry_landing_on_an_unlisted_erratum_is_not_counted(monkeypatch):
+    # The retry puts the entry back on its PMCID-path status, so the erratum
+    # counter must not keep an entry whose status says something else.
+    enricher, _, _ = _make(monkeypatch, [_idconv_error_response(), _erratum_response()])
+    entry = _titled(SHARED_TITLE, pmcid=BARE_PMID)
+    [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
+    assert result['enrichment_status'] == 'pmcid_not_found'
+    assert 'enrichment_rejected' not in result
+    assert (enricher.stats['erratum_records_rejected'], enricher.stats['failed_lookups'],
+            enricher.stats['title_mismatches']) == (0, 1, 0)

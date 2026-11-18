@@ -147,6 +147,24 @@ PREPRINT_PUBTYPE = 'Preprint'
 # lists as in press.
 NOTICE_PUBTYPES = frozenset({'Published Erratum', 'Retraction Notice', 'Expression of Concern'})
 TITLE_SEARCH_EXCLUDED_PUBTYPES = NOTICE_PUBTYPES | {PREPRINT_PUBTYPE}
+# The identifier a CV types for a paper can be its erratum's (VYJMXR e995,
+# dev-308, #2153: the PMID was the correction's record, so the paper printed
+# as "Correction to: ..." with the erratum's issue and page). A record of this
+# type replaces the citation only when the CV's own line names a correction.
+# Over 159 stored stage-5 outputs (2026-11-18), 10 ID-path acceptances carry
+# the type: the CV names the correction in 4, and in the other 6 its own
+# citation is the one to print.
+ERRATUM_PUBTYPE = 'Published Erratum'
+CV_NAMES_A_CORRECTION_PATTERN = re.compile(r'\b(?:corrections?|errat(?:um|a)|corrigend(?:um|a))\b', re.I)
+# The status of an entry whose identifier resolved to an erratum the CV does
+# not name. Not a *_failed status: the CV's own citation is the right one to
+# render.
+ERRATUM_RECORD_STATUS = 'resolved_to_unlisted_erratum'
+# PubMed's ArticleTitle for a record with no title in English and no
+# translation (EGHJRK e283, dev-308, #2153: stage 6 printed it in place of the
+# CV's title). A bracketed translated title is a real one and does not match.
+# The one placeholder among 9,828 accepted records in 159 stored outputs.
+PLACEHOLDER_TITLE_PATTERN = re.compile(r'\s*\[\s*not\s+available\s*\]\s*\.?\s*', re.I)
 # A Comment can be either. Of the three Comment-typed title-search matches in
 # the 63-run EBYSBC farm (2026-10-02), two were the CV's own commentary, each
 # its search's only hit; the third was a "Discussion of:" piece about the
@@ -635,9 +653,10 @@ def _same_title(a: str, b: str) -> bool:
 
 def volume_number(volume: str | int | None) -> int | None:
     """The volume's leading number ("19 Suppl 1" -> 19), or None when it
-    has none to compare."""
+    has none to compare. A zero is none: no journal has a volume 0, and a CV
+    writes one for a paper not yet assigned a volume (MQLKPQ e126, #2153)."""
     match = re.match(r'\s*(\d+)', str(volume or ''))
-    return int(match.group(1)) if match else None
+    return int(match.group(1)) or None if match else None
 
 
 # An ID-path record whose year and volume both differ from the CV's names
@@ -649,8 +668,8 @@ def volume_number(volume: str | int | None) -> int | None:
 # the only one refused: of the 29 whose year and volume both differ, 17 were
 # already under MIN_TITLE_WORD_OVERLAP and 11 are the same title (the CV gave
 # the issue as the volume). 415 differ in the year alone, mostly online versus
-# print, so a year alone does not refuse. The title search has its own floor
-# and year window and is not checked this way.
+# print, so a year alone does not refuse. A title-search hit is held to the
+# same test (`record_names_another_paper`, #2153).
 def citation_contradicts_record(fields: dict, pubmed_record: dict) -> bool:
     """Whether the CV's year and volume are both known and both differ from
     the record's: two facts of the citation that say it is another paper. An
@@ -814,6 +833,50 @@ def cv_title(fields: dict) -> str:
     return fields.get('title') or fields.get('chapter_title') or ''
 
 
+# A title-search hit whose title only CONTAINS the CV's scores 1.0 against the
+# shorter title, so MIN_TITLE_SEARCH_OVERLAP cannot refuse it (EGHJRK e206,
+# dev-308, #2153: the CV's paper was replaced by a paper about it from two
+# years later, by other authors, in another journal). Over 4,288 title-search acceptances in 159
+# stored stage-5 outputs (2026-11-18), 243 match only against the shorter
+# title. 220 of those give the record's own year and volume: the CV's paper
+# under a longer published title, so the longer title alone is not the test.
+# Another 17 agree on the year or have none to compare. The last 6 differ in
+# both; 5 are another item and are refused here (the sixth gave a zero for its
+# volume, see `volume_number`).
+def record_names_another_paper(fields: dict, record: dict) -> bool:
+    """Whether a record is another paper by the CV's own citation: its year
+    and volume both differ from the CV's (`citation_contradicts_record`), and
+    its title does not match the CV's against the longer of the two
+    (`_same_title`), so one title's words being a subset of the other's is
+    not enough."""
+    if not citation_contradicts_record(fields, record):
+        return False
+    source_title = cv_title(fields)
+    return not any(_same_title(source_title, title or '')
+                   for title in (record.get('title'), record.get('vernacular_title')))
+
+
+def cv_names_a_correction(entry: dict) -> bool:
+    """Whether the CV's line or title calls the entry a correction."""
+    fields = entry.get('extracted_fields') or {}
+    return bool(CV_NAMES_A_CORRECTION_PATTERN.search(f"{entry.get('text') or ''} {cv_title(fields)}"))
+
+
+def record_is_an_unlisted_erratum(entry: dict, pubmed_record: dict) -> bool:
+    """Whether `pubmed_record` is a Published Erratum and the CV lists the
+    paper, not its correction (#2153)."""
+    return (ERRATUM_PUBTYPE in (pubmed_record.get('publication_types') or [])
+            and not cv_names_a_correction(entry))
+
+
+def record_title(article_title: str | None) -> str | None:
+    """The ArticleTitle to store for rendering: '' for PubMed's
+    "[Not Available]." placeholder, which is no title, so the CV's own then
+    renders (#2153). The record itself keeps the placeholder, so the title
+    gates (#1043, #1696) still see a record whose title is not the CV's."""
+    return '' if PLACEHOLDER_TITLE_PATTERN.fullmatch(article_title or '') else article_title
+
+
 def _cv_fields(accepted: _Acceptance) -> dict:
     """An accepted record's entry as the CV gave it, before the merge."""
     return accepted.before.get('extracted_fields') or {}
@@ -874,6 +937,7 @@ class PubMedEnricher:
             'failed_lookups': 0,
             'title_mismatches': 0,
             'reply_targets_rejected': 0,
+            'erratum_records_rejected': 0,
             'api_errors': 0,
             'title_searches': 0,
             'crossref_searches': 0,
@@ -1252,6 +1316,8 @@ class PubMedEnricher:
             if entry['enrichment_status'] == 'enriched':
                 continue
             self._shift_failure_counts(entry['enrichment_status'], -1)
+            if entry['enrichment_status'] == ERRATUM_RECORD_STATUS:
+                self.stats['erratum_records_rejected'] -= 1
             self._shift_failure_counts(status, 1)
             entry['enrichment_status'] = status
             entry.pop('enrichment_rejected', None)
@@ -1506,14 +1572,16 @@ class PubMedEnricher:
     @staticmethod
     def _title_hit_passes(entry: dict, overlap: float, record: dict) -> bool:
         """Whether a title-search hit may be accepted: its title overlap
-        clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the CV, and its
-        year is plausible for the CV's. `_accept_record`'s reply check
+        clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the CV, its
+        year is plausible for the CV's, and the CV's year and volume do not
+        make it another paper (#2153). `_accept_record`'s reply check
         (#1438) cannot refuse such a hit: a record sharing a CV author is
         never taken for the item a reply answers."""
         fields = entry.get('extracted_fields') or {}
         return (overlap >= MIN_TITLE_SEARCH_OVERLAP
                 and shares_an_author(fields.get('authors'), record['authors'])
-                and plausible_publication_year(fields.get('year'), record['year']))
+                and plausible_publication_year(fields.get('year'), record['year'])
+                and not record_names_another_paper(fields, record))
 
     def _search_pmids_by_title(self, title: str) -> list[str]:
         params = {
@@ -1964,6 +2032,9 @@ class PubMedEnricher:
         if record_is_the_replied_item(entry, pubmed_record):
             self._reject_replied_item(entry, source, pubmed_record)
             return False
+        if record_is_an_unlisted_erratum(entry, pubmed_record):
+            self._reject_unlisted_erratum(entry, source, pubmed_record)
+            return False
         self._acceptances.append(_Acceptance(
             entry, copy.deepcopy(entry), pubmed_record.get('pmid'),
             pubmed_record.get('title'), pubmed_record.get('year'), source, overlap))
@@ -1976,16 +2047,9 @@ class PubMedEnricher:
     @staticmethod
     def _contradicted_on_an_id_path(fields: dict, pubmed_record: dict, source: str) -> bool:
         """Whether an ID path's record is another paper by the CV's own
-        citation (#1696): its year and volume both differ from the CV's, and
-        its title does not match the CV's against the longer of the two
-        (`_same_title`), so a short record title that is a subset of the
-        CV's topic words is not enough."""
-        if source in TITLE_SEARCH_SOURCES or not citation_contradicts_record(fields, pubmed_record):
-            return False
-        source_title = cv_title(fields)
-        return not any(_same_title(source_title, title or '')
-                       for title in (pubmed_record.get('title'),
-                                     pubmed_record.get('vernacular_title')))
+        citation (#1696, `record_names_another_paper`). A title-search hit
+        was held to that test before it got here (`_title_hit_passes`)."""
+        return source not in TITLE_SEARCH_SOURCES and record_names_another_paper(fields, pubmed_record)
 
     def _reject_record(self, entry: dict, source: str, pmid: str | None,
                        pubmed_title: str | None, overlap: float,
@@ -2018,6 +2082,19 @@ class PubMedEnricher:
             'pubmed_authors': pubmed_record.get('authors_vancouver'),
         }
         self.stats['reply_targets_rejected'] += 1
+
+    def _reject_unlisted_erratum(self, entry: dict, source: str, pubmed_record: dict) -> None:
+        """Leave an entry on its own fields when its identifier is the record
+        of an erratum the CV does not name (#2153), with that record kept
+        under `enrichment_rejected` for audit."""
+        entry['enrichment_status'] = ERRATUM_RECORD_STATUS
+        entry['enrichment_rejected'] = {
+            'source': source,
+            'pubmed_pmid': pubmed_record.get('pmid'),
+            'pubmed_title': pubmed_record.get('title'),
+            'publication_types': pubmed_record.get('publication_types'),
+        }
+        self.stats['erratum_records_rejected'] += 1
 
     def _release_weaker_shared_pmids(self) -> None:
         """One PMID ends on at most one citation of a document (#1598). When it
@@ -2100,7 +2177,7 @@ class PubMedEnricher:
         # Create enrichment_data section
         entry['enrichment_data'] = {
             'pubmed_pmid': pubmed_record.get('pmid'),
-            'pubmed_title': pubmed_record.get('title'),
+            'pubmed_title': record_title(pubmed_record.get('title')),
             'pubmed_journal': pubmed_record.get('journal'),
             'pubmed_journal_iso': pubmed_record.get('journal_iso'),
             'pubmed_authors': pubmed_record.get('authors_vancouver'),
