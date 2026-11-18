@@ -62,10 +62,7 @@ Lints, ranked by the severity of the failure class they catch:
                           kept entry lacks (#666, EBYSBC E4); plus an INFO
                           finding for a fully-covered drop whose extracted
                           name differs from the kept entry's by a rank word
-                          or is on the page as no cell of its own (#666),
-                          and an INFO listing of every other drop worded
-                          differently from its kept entry, for the review
-                          copy's notes
+                          or is on the page as no cell of its own (#666)
 12. pipe_leaks            raw ' | '-delimited source lines rendered as output
                           paragraphs — verbatim-fallback formatting reaching
                           the faculty-facing document (#208 costs) — and
@@ -628,6 +625,13 @@ Lints, ranked by the severity of the failure class they catch:
                           Educational Experiences, an Honors row that names
                           a certification the owner earned (KGXMLK-05).
                           WARN, one per row. Reads the docx's table rows
+14bg. dedup_merged        a stage-6 dedup drop lint 11 gives no finding,
+                          worded differently from its kept entry (#666:
+                          an "ATLS" card dropped beside "ATLS Instructor",
+                          REIUOE-01). Most are one record the CV wrote
+                          twice, so INFO and review-copy only: the notes
+                          list what went and what stayed. Every drop
+                          listed. Reads the stage-6 report
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -745,6 +749,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_classified_unrendered,
     lint_cross_entry_value,
     lint_dedup_drops,
+    lint_dedup_merged,
     lint_footer_in_record,
     lint_grant_boundary,
     lint_grant_bucket,
@@ -1043,6 +1048,7 @@ KNOWN_LINTS = (
     "cross_section_duplicate",
     "degree_row_not_degree",
     "licensure_row_not_licence",
+    "dedup_merged",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1389,6 +1395,9 @@ LINT_PREVALENCE = {
     # fresh renders on origin/dev 03955964 (the #1243 census farm's 460 and
     # the 11 MIX11 runs), 2026-11-04.
     "licensure_row_not_licence": 0.028,
+    # dedup_merged (#666; DD-LIST in doctor/PRECISION.md): 93 of 192
+    # label-store runs rendered fresh on origin/dev 500a02d6, 2026-11-17.
+    "dedup_merged": 0.484,
 }
 
 
@@ -2033,6 +2042,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("degree_row_not_degree", lint_degree_row_not_degree, ("table_rows",)),
     LintSpec("licensure_row_not_licence", lint_licensure_row_not_licence, ("table_rows",),
              optional=("stage_4",)),
+    # The same views as dedup_drops, so the two never name the same drop.
+    LintSpec("dedup_merged", lint_dedup_merged, ("stage_6_report",),
+             optional=("blocks", "stage_5d")),
 )
 
 #: The views read from the stage-6 docx.

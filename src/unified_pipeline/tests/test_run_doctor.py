@@ -2938,13 +2938,13 @@ def test_dedup_drops_flags_distinct_record_quiet_on_true_dup():
          "kept_text": "Oct 2025-Present\nAssociate Professor, Health "
                       "Professions Education\nDepartment of Medicine"},
     ]}
-    f, listed = lint_dedup_drops(report)
+    findings = lint_dedup_drops(report)
+    assert len(findings) == 1
+    f = findings[0]
     assert f["lint"] == "dedup_drops" and f["severity"] == "WARN"
     assert "1 dedup drop(s)" in f["message"]
     assert "Diagnosis" in f["evidence"][0]
     assert not any("Associate Professor" in e for e in f["evidence"])
-    # The true dup is listed, not flagged: INFO, for the review copy's notes.
-    assert listed["severity"] == "INFO" and "Associate Professor" in listed["evidence"][0]
 
 
 def test_dedup_drops_quiet_with_no_decisions():
@@ -6565,14 +6565,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (87), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (88), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 85
+    assert len(payload["findings"]) == 86
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

@@ -123,10 +123,6 @@ COMMENT_AUTHOR = "CViche check"
 COMMENT_MAP_SUFFIX = "_comments.json"
 COMMENT_INITIALS = "CV"
 COMMENTED_SEVERITIES = ("ERROR", "WARN")
-#: Lints noted in the review copy at INFO too. A dedup drop is a fact, not a
-#: guess: an entry of the CV is not on the page, and the note is the only
-#: place the owner sees which (7 verified HIGH losses had none, #666).
-NOTED_AT_ANY_SEVERITY = frozenset({"dedup_drops"})
 #: Flags one lint may put in one document. A lint can fire hundreds of times.
 MAX_FLAGS_PER_LINT = 25
 
@@ -147,6 +143,7 @@ REVIEW_FLAGS = {
     "enrichment_failures": "Not found in PubMed: check this citation.",
     "stage6_render_warnings": "Check this section.",
     "dedup_drops": "An entry was removed as a near-duplicate.",
+    "dedup_merged": "An entry was removed as a near-duplicate.",
     "pipe_leaks": "Citations run together: split them.",
     "table_shape": "One award split across rows: merge them.",
     "duplicate_passages": "Repeated: delete this copy.",
@@ -294,8 +291,12 @@ YEAR_LINTS = frozenset({"implausible_year", "year_not_in_source"})
 _YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
 #: dedup_drops evidence, "[entry N: ]K1 (jaccard=1.00, 89% covered by kept): dropped '<x>' vs
 #: kept '<y>'" (doctor _drop_evidence); the run page may mark it cut with a trailing ellipsis.
+#: DOTALL: stage 6 quotes an entry's text with its line breaks, and a drop
+#: whose text spans two lines is a note like any other.
 _DEDUP_RE = re.compile(r"^(?:entry [^:]+: )?(?P<code>[A-Z][A-Z0-9]*) \(.*?\): "
-                       r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'\u2026?$")
+                       r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'\u2026?$", re.DOTALL)
+#: Lints whose finding is a list of dedup drops, each a review note.
+DEDUP_LINTS = frozenset({"dedup_drops", "dedup_merged"})
 #: stage 6's appendix_diversion messages, after the code prefix the run page
 #: strips: "2 entries diverted to the Appendix ...", "1 entry ... recovered into the Appendix".
 _DIVERTED_RE = re.compile(r"(?P<count>\d+) (?P<noun>entr(?:y|ies))\b[^.]*?(?:diverted to|recovered into) the Appendix")
@@ -478,7 +479,7 @@ def _item_flags(lint: str, inst: DoctorFindingInstance, label: str,
 def _quoted(text: str) -> str:
     """A dedup text in quotes, marked cut when it is as long as the doctor quotes."""
     cut = TRUNCATION_MARK if len(text) >= DEDUP_TEXT_CHARS else ""
-    return f'"{text.strip()}{cut}"'
+    return f'"{" ".join(text.split())}{cut}"'
 
 
 def _dedup_notes(inst: DoctorFindingInstance) -> list[Note]:
@@ -552,7 +553,7 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
     (#2002). An Appendix diversion with no heading is still a note (#1639). A blank mentee field is a comment on its cell of ``tables`` (the
     document's), or nothing."""
     lint, inst = finding["lint"], _instance(finding)
-    if lint == "dedup_drops":
+    if lint in DEDUP_LINTS:
         return [], _dedup_notes(inst)
     if lint == MISSING_SOURCE_LINT:  # never on the page, so never gated: a note per line
         return [], [Note(NOTE_TITLES[lint], REVIEW_FLAGS[lint], f'"{quote}"') for quote in inst.quotes]
@@ -731,8 +732,7 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
         return None
     rows = load_gate_ledger() if rows is None else rows
     findings = [f for f in _usable_findings(doctor_payload)[0]
-                if f["severity"] in COMMENTED_SEVERITIES
-                or f["lint"] in REVIEW_COPY_ONLY_LINTS | NOTED_AT_ANY_SEVERITY]
+                if f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS]
     doc = Document(str(clean_docx))
     paragraphs = [(p, _norm(_paragraph_text(p)))
                   for p in (Paragraph(el, doc._body) for el in doc.element.body.iter(qn("w:p")))]

@@ -871,12 +871,12 @@ DEDUP_EVIDENCE_LIMIT = 6
 #: two side by side and the difference is often at the end ("4 hrs" vs "5 hrs").
 #: The review copy marks a quote this long as cut (#1388).
 DEDUP_TEXT_CHARS = 300
-#: A drop `_drop_suspicion` reads as a duplicate is still listed (INFO) when a
+#: dedup_merged lists a drop `_drop_suspicion` reads as a duplicate when a
 #: reader could not tell it from a separate record without seeing both: the
-#: two are worded differently. On dev `500a02d6`, 7 verified
-#: HIGH losses still dropped this way with no finding (an "ATLS" card beside
-#: "ATLS Instructor", REIUOE-01). Not listed: Appendix page furniture, and a
-#: dropped text too short to be a record.
+#: two are worded differently. On dev `500a02d6`, 7 verified HIGH losses still
+#: dropped this way with no finding (an "ATLS" card beside "ATLS Instructor",
+#: REIUOE-01). Not listed: Appendix page furniture, and a dropped text too
+#: short to be a record.
 _UNLISTED_DROP_CODE = "T"
 DEDUP_LISTED_MIN_WORDS = 3
 
@@ -1181,16 +1181,6 @@ def _drop_suspicion(decision: Mapping, rendered_items: set[str] | None,
     return None
 
 
-def _merged_unlike(decision: Mapping) -> bool:
-    """A drop worth listing though it reads as a duplicate: a record's worth
-    of words (`DEDUP_LISTED_MIN_WORDS`), not Appendix furniture, and not the
-    kept entry's own words over again."""
-    dropped = _alphanumeric_tokens(decision.get("dropped_text", ""))
-    kept = _alphanumeric_tokens(decision.get("kept_text", ""))
-    return (decision.get("code") != _UNLISTED_DROP_CODE
-            and len(dropped) >= DEDUP_LISTED_MIN_WORDS and dropped != kept)
-
-
 def lint_dedup_drops(report: dict,
                      blocks: list[tuple[str, str]] | None = None,
                      stage_5d: Mapping | None = None) -> list[dict]:
@@ -1213,11 +1203,6 @@ def lint_dedup_drops(report: dict,
     qualifier word (`_named_apart`). A duplicate reworded by the kept entry
     also lands here, so it stays INFO.
 
-    INFO, every drop listed: a drop none of the tests above marks, worded
-    differently from its kept entry (`_merged_unlike`). Most are one record the
-    CV wrote twice; the review copy lists them so the owner can add back one
-    that was not.
-
     A record-rule drop (`stage6/record_dedup.py`, metric
     `RECORD_RULE_METRIC_PREFIX`) matched the two records on their fields, not
     their text: a header line beside a table row shares few words with it by
@@ -1226,15 +1211,12 @@ def lint_dedup_drops(report: dict,
     `stage_5d`, when given, names each drop's entry (`_entry_index_by_text`)."""
     suspect = []
     named_apart = []
-    merged = []
     rendered_items = _rendered_item_set(blocks) if blocks is not None else None
     index_by_text = _entry_index_by_text(stage_5d)
     copies = _citation_copies(stage_5d)
     for d in report.get("dedup_decisions", []):
         verdict = _drop_suspicion(d, rendered_items, copies)
         if verdict is None:
-            if _merged_unlike(d):
-                merged.append(_drop_evidence(d, index_by_text, str(d.get("metric", "?"))))
             continue
         severity, detail, entries = verdict
         evidence = _drop_evidence(d, index_by_text, detail, entries)
@@ -1255,13 +1237,44 @@ def lint_dedup_drops(report: dict,
             f"is no cell of its own on the page — possible distinct records "
             f"lost (#666)",
             named_apart[:DEDUP_EVIDENCE_LIMIT]))
-    if merged:
-        findings.append(_finding(
-            "dedup_drops", "INFO",
-            f"{len(merged)} dedup drop(s) merged into a kept entry worded "
-            f"differently — most are one record listed twice; listed for the owner to check",
-            merged))
     return findings
+
+
+def _merged_unlike(decision: Mapping) -> bool:
+    """A drop worth listing though it reads as a duplicate: a record's worth
+    of words (`DEDUP_LISTED_MIN_WORDS`), not Appendix furniture, and not the
+    kept entry's own words over again."""
+    dropped = _alphanumeric_tokens(decision.get("dropped_text", ""))
+    kept = _alphanumeric_tokens(decision.get("kept_text", ""))
+    return (decision.get("code") != _UNLISTED_DROP_CODE
+            and sum(dropped.values()) >= DEDUP_LISTED_MIN_WORDS and dropped != kept)
+
+
+def lint_dedup_merged(report: dict,
+                      blocks: list[tuple[str, str]] | None = None,
+                      stage_5d: Mapping | None = None) -> list[dict]:
+    """Stage-6 dedup drops `lint_dedup_drops` gives no finding, listed (#666).
+
+    INFO, every drop listed: a drop `_drop_suspicion` reads as a duplicate,
+    worded differently from its kept entry (`_merged_unlike`). Most are one
+    record the CV wrote twice, so this marks no defect and costs no score; it
+    is review-copy only, where the notes show the owner what went and what
+    stayed, so a separate record merged by mistake can be added back.
+    `blocks` and `stage_5d` are `lint_dedup_drops`' own, so the two lints
+    never name the same drop."""
+    rendered_items = _rendered_item_set(blocks) if blocks is not None else None
+    index_by_text = _entry_index_by_text(stage_5d)
+    copies = _citation_copies(stage_5d)
+    merged = [_drop_evidence(d, index_by_text, str(d.get("metric", "?")))
+              for d in report.get("dedup_decisions", [])
+              if _drop_suspicion(d, rendered_items, copies) is None and _merged_unlike(d)]
+    if not merged:
+        return []
+    return [_finding(
+        "dedup_merged", "INFO",
+        f"{len(merged)} dedup drop(s) merged into a kept entry worded differently "
+        f"— most are one record listed twice; listed for the owner to check",
+        merged)]
 
 
 # --------------------------------------------------------------------------
