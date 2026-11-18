@@ -62,7 +62,10 @@ Lints, ranked by the severity of the failure class they catch:
                           kept entry lacks (#666, EBYSBC E4); plus an INFO
                           finding for a fully-covered drop whose extracted
                           name differs from the kept entry's by a rank word
-                          or is on the page as no cell of its own (#666)
+                          or is on the page as no cell of its own (#666),
+                          and an INFO listing of every other drop worded
+                          differently from its kept entry, for the review
+                          copy's notes
 12. pipe_leaks            raw ' | '-delimited source lines rendered as output
                           paragraphs — verbatim-fallback formatting reaching
                           the faculty-facing document (#208 costs) — and

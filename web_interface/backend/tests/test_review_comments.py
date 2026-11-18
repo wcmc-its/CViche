@@ -449,6 +449,19 @@ def test_a_dedup_drop_led_by_its_entry_number_and_cut_at_the_doctors_length(tmp_
     assert _notes(out)[2:] == ["\u2022 Didactic Teaching", 'Removed: "Squid Optics Seminar"', f'Kept: "{kept}\u2026"']
 
 
+def test_a_dedup_drop_is_noted_at_info_too(tmp_path):
+    """A drop the doctor only lists (INFO) is still an entry off the page, so
+    it is a note; any other lint's INFO finding stays out of the copy."""
+    listed = _finding("dedup_drops", "1 dedup drop(s) merged into a kept entry worded differently", [
+        "K1 (jaccard=0.88): dropped 'Squid Optics Seminar' vs kept 'Squid Optics Seminar Leader'"],
+        severity="INFO")
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(listed))
+    assert _notes(out)[2:] == ["\u2022 Didactic Teaching", 'Removed: "Squid Optics Seminar"',
+                               'Kept: "Squid Optics Seminar Leader"']
+    other = _finding("duplicate_records", "1 record the source lists twice", ["Squid Optics Seminar"], severity="INFO")
+    assert rc.write_review_docx(_clean_docx(tmp_path), _report(other))[1] == 0
+
+
 def test_a_dedup_quote_the_doctor_cut_still_reads(tmp_path):
     """The run page marks a quote cut at a doctor cap with an ellipsis."""
     evidence = ("K1 (jaccard=0.92, 86% covered by kept): dropped 'Core Squid Curriculum b Lecturer' "

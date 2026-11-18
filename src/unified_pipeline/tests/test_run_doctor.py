@@ -2938,13 +2938,13 @@ def test_dedup_drops_flags_distinct_record_quiet_on_true_dup():
          "kept_text": "Oct 2025-Present\nAssociate Professor, Health "
                       "Professions Education\nDepartment of Medicine"},
     ]}
-    findings = lint_dedup_drops(report)
-    assert len(findings) == 1
-    f = findings[0]
+    f, listed = lint_dedup_drops(report)
     assert f["lint"] == "dedup_drops" and f["severity"] == "WARN"
     assert "1 dedup drop(s)" in f["message"]
     assert "Diagnosis" in f["evidence"][0]
     assert not any("Associate Professor" in e for e in f["evidence"])
+    # The true dup is listed, not flagged: INFO, for the review copy's notes.
+    assert listed["severity"] == "INFO" and "Associate Professor" in listed["evidence"][0]
 
 
 def test_dedup_drops_quiet_with_no_decisions():

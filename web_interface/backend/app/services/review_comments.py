@@ -123,6 +123,10 @@ COMMENT_AUTHOR = "CViche check"
 COMMENT_MAP_SUFFIX = "_comments.json"
 COMMENT_INITIALS = "CV"
 COMMENTED_SEVERITIES = ("ERROR", "WARN")
+#: Lints noted in the review copy at INFO too. A dedup drop is a fact, not a
+#: guess: an entry of the CV is not on the page, and the note is the only
+#: place the owner sees which (7 verified HIGH losses had none, #666).
+NOTED_AT_ANY_SEVERITY = frozenset({"dedup_drops"})
 #: Flags one lint may put in one document. A lint can fire hundreds of times.
 MAX_FLAGS_PER_LINT = 25
 
@@ -727,7 +731,8 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
         return None
     rows = load_gate_ledger() if rows is None else rows
     findings = [f for f in _usable_findings(doctor_payload)[0]
-                if f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS]
+                if f["severity"] in COMMENTED_SEVERITIES
+                or f["lint"] in REVIEW_COPY_ONLY_LINTS | NOTED_AT_ANY_SEVERITY]
     doc = Document(str(clean_docx))
     paragraphs = [(p, _norm(_paragraph_text(p)))
                   for p in (Paragraph(el, doc._body) for el in doc.element.body.iter(qn("w:p")))]

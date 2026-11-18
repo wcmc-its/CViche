@@ -139,6 +139,12 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
 # ==========================================================================
 # D1 (T1.1) -- lint_dedup_drops returns structured findings, not strings.
 
+def _suspect(findings: list[dict]) -> list[dict]:
+    """The findings that mark a drop as a possible loss: all but the plain
+    listing of merged drops, which marks none."""
+    return [f for f in findings if "worded differently" not in f["message"]]
+
+
 def test_lint_dedup_drops_returns_structured_findings():
     poorly_covered = {"dedup_decisions": [
         {"code": "N1", "metric": "jaccard",
@@ -544,7 +550,7 @@ def test_dedup_safe_containment_exact_boundary():
     report_80 = {"dedup_decisions": [
         {"code": "A", "metric": "j", "dropped_text": dropped,
          "kept_text": kept_80pct}]}
-    assert lint_dedup_drops(report_90) == []          # exactly at the safe line
+    assert _suspect(lint_dedup_drops(report_90)) == []          # exactly at the safe line
     assert len(lint_dedup_drops(report_80)) == 1       # just below -> suspect
 
 
@@ -894,7 +900,7 @@ def test_dedup_drops_warns_on_a_date_the_kept_entry_lacks(dropped, kept):
 def test_dedup_drops_quiet_when_the_kept_entry_carries_the_date():
     decision = _drop("3/2031 Example grand rounds talk",
                      "3/2031 Example grand rounds talk, Example Hospital")
-    assert lint_dedup_drops({"dedup_decisions": [decision]}) == []
+    assert _suspect(lint_dedup_drops({"dedup_decisions": [decision]})) == []
 
 
 @pytest.mark.parametrize("dropped, kept, reason", [
@@ -993,7 +999,7 @@ def test_dedup_drops_warns_when_names_name_two_records(key, dropped_name, kept_n
     assert [f["severity"] for f in result] == ["WARN"]
     assert f"{key} names another record" in result[0]["evidence"][0]
     # the same name on the page as an item of its own was not lost
-    assert lint_dedup_drops({"dedup_decisions": [decision]}, [("p", dropped_name)]) == []
+    assert _suspect(lint_dedup_drops({"dedup_decisions": [decision]}, [("p", dropped_name)])) == []
 
 
 @pytest.mark.parametrize("dropped_name, kept_name, metric", [
@@ -1076,13 +1082,41 @@ def test_dedup_drops_evidence_names_no_entry_when_two_carry_the_text():
     assert result[0]["evidence"][0].startswith("K4 (")
 
 
+def test_dedup_drops_lists_a_merged_drop_worded_differently():
+    """A drop no test marks is still listed, at INFO, when its kept entry is
+    worded differently: a certification beside its instructor card (REIUOE-01)."""
+    card = {"code": "B2", "metric": "jaccard=0.88",
+            "dropped_text": "Example Life Support (ELS) 2031-present",
+            "kept_text": "Example Life Support (ELS) Instructor 2031-present"}
+    twin = dict(card, kept_text=card["dropped_text"])
+    furniture = {"code": "T", "metric": "containment=1.00",
+                 "dropped_text": "PAGE 2 of 9", "kept_text": "- PAGE 2 of 9 -"}
+    stub = {"code": "I", "metric": "containment=1.00",
+            "dropped_text": "Example Society", "kept_text": "2031 Example Society"}
+    [finding] = lint_dedup_drops({"dedup_decisions": [card, twin, furniture, stub]})
+    assert finding["severity"] == "INFO" and _suspect([finding]) == []
+    assert finding["message"].startswith("1 dedup drop(s) merged")
+    assert finding["evidence"] == [
+        "B2 (jaccard=0.88): dropped 'Example Life Support (ELS) 2031-present' vs kept "
+        "'Example Life Support (ELS) Instructor 2031-present'"]
+
+
+def test_dedup_drops_lists_every_merged_drop():
+    """The listing is not cut at DEDUP_EVIDENCE_LIMIT: the review copy notes each."""
+    drops = [{"code": "R", "metric": "containment=1.00",
+              "dropped_text": f"Example Lecture {i}, Example City",
+              "kept_text": f"2031 Example Lecture {i}, Example City"} for i in range(8)]
+    [finding] = lint_dedup_drops({"dedup_decisions": drops})
+    assert len(finding["evidence"]) == 8
+
+
 def test_dedup_drops_record_rule_drop_skips_the_coverage_warn_not_the_name_info():
     """A stage-6 record-rule drop matched on fields: its low text coverage
     is not evidence, but a dropped name absent from the page still is."""
     header = {"code": "D1", "metric": "record=undated_appointment",
               "dropped_text": "Title: Associate Professor",
               "kept_text": "2031-present Associate Prof., Dept. of Widgets"}
-    assert lint_dedup_drops({"dedup_decisions": [header]}, [("p", "x")]) == []
+    assert _suspect(lint_dedup_drops({"dedup_decisions": [header]}, [("p", "x")])) == []
     named = dict(header, dropped_fields={"title": "Associate Professor"},
                  kept_fields={"title": "Associate Prof."})
     result = lint_dedup_drops({"dedup_decisions": [named]}, [("p", "Associate Prof.")])
