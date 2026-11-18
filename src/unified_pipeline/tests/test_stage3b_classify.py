@@ -1002,6 +1002,90 @@ def test_record_lines_naming_a_place_word_are_kept_under_two_codes(text):
     assert _flags(entries) == [False, False]
 
 
+# #2154: the same mentee row under two sub-headings of one section is two
+# roster rows (a thesis committee and an exam committee), not one row twice.
+
+_MENTEE_ROW = "Member | Mentee Placeholder | Imaginary Studies (Example U) | 2031"
+_MENTORING = "MENTORING"
+_THESIS_ROSTER = (_MENTORING, "Thesis Committees")
+_EXAM_ROSTER = (_MENTORING, "Qualifying Exam Committees")
+
+
+def _mentee(start, hierarchy, code="N3B", end=None):
+    entry = _placed(code, start, end, hierarchy)
+    entry["text"] = _MENTEE_ROW
+    return entry
+
+
+@pytest.mark.parametrize("first, second", [
+    ("405.3", "412.9"),     # rows of two tables, as stage 2 writes them
+    ("412.9", "405.3"),
+    (405.3, 412.9),         # the same rows as JSON floats
+    (350, 470),              # two paragraphs
+    (350, "412.9"),          # a paragraph and a table row
+    ("412.1", "412.10"),     # row 10 is not row 1
+    ("92.5.1", "92.5.10"),   # nor is pseudo-row 10 pseudo-row 1
+])
+def test_mentee_twins_in_two_rosters_are_both_kept(first, second):
+    entries = [_mentee(first, _THESIS_ROSTER), _mentee(second, _EXAM_ROSTER)]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert [bool(e.get("is_duplicate")) for e in updated] == [False, False]
+    assert pairs == []
+
+
+@pytest.mark.parametrize("first, second", [
+    # one roster
+    (_mentee("405.3", _THESIS_ROSTER), _mentee("405.4", _THESIS_ROSTER)),
+    # one roster whose heading was re-typed
+    (_mentee("405.3", _THESIS_ROSTER), _mentee("412.9", (_MENTORING, "THESIS  COMMITTEES:"))),
+    # two sections, not two sub-headings of one
+    (_mentee("405.3", ("RESEARCH",)), _mentee("412.9", ("PAST MENTEES",))),
+    (_mentee("405.3", ("RESEARCH", "Thesis Committees")), _mentee("412.9", _EXAM_ROSTER)),
+    (_mentee("405.3", (_MENTORING,)), _mentee("412.9", _EXAM_ROSTER)),
+    (_mentee("405.3", ()), _mentee("412.9", ())),
+    # one row emitted twice upstream
+    (_mentee("412.9", _THESIS_ROSTER), _mentee("412.9", _EXAM_ROSTER)),
+    # a whole table and one of its own rows
+    (_mentee(412, _THESIS_ROSTER), _mentee("412.9", _EXAM_ROSTER)),
+    (_mentee("412.9", _THESIS_ROSTER), _mentee(410, _EXAM_ROSTER, end=412)),
+    # a whole table written as a JSON float, and one of its own rows
+    (_mentee(412.0, _THESIS_ROSTER), _mentee("412.5", _EXAM_ROSTER)),
+    # a row and one of its own pseudo-rows
+    (_mentee("412.9", _THESIS_ROSTER), _mentee("412.9.1", _EXAM_ROSTER)),
+    # no source position to compare
+    (_mentee(None, _THESIS_ROSTER), _mentee("412.9", _EXAM_ROSTER)),
+    (_mentee("405.3", _THESIS_ROSTER), _mentee("row nine", _EXAM_ROSTER)),
+    (_mentee("405.3", _THESIS_ROSTER), _mentee(True, _EXAM_ROSTER)),
+    # both copies in the Appendix
+    (_mentee("405.3", _THESIS_ROSTER, code="T"), _mentee("412.9", _EXAM_ROSTER, code="T")),
+])
+def test_mentee_twins_outside_two_rosters_are_still_duplicates(first, second):
+    assert _flags([first, second]) == [False, True]
+
+
+@pytest.mark.parametrize("code", ["S1", "K1", "R", "I", "P", "O", "B1"])
+def test_twins_under_two_sub_headings_outside_the_mentee_codes_are_still_duplicates(code):
+    # A paper under two publication lists is one paper: both
+    # copies would land in the same output table.
+    entries = [_mentee(350, ("PUBLICATIONS", "Review Articles"), code),
+               _mentee(470, ("PUBLICATIONS", "Book Chapters"), code)]
+    assert _flags(entries) == [False, True]
+
+
+def test_label_row_twins_in_two_rosters_are_still_duplicates():
+    entries = [_mentee("405.0", _THESIS_ROSTER), _mentee("412.0", _EXAM_ROSTER)]
+    for entry in entries:
+        entry["text"] = "Name:\tDegree:\tCompletion Date:"
+    assert _flags(entries) == [False, True]
+
+
+@pytest.mark.parametrize("first, second", [("405.3", "412.9"), (350, "412.9"), ("405.3", 470)])
+def test_two_code_twins_with_a_table_row_copy_are_still_duplicates(first, second):
+    # The #1435 two-code exemption still needs whole elements on both sides.
+    entries = [_mentee(first, _THESIS_ROSTER, "N3A"), _mentee(second, _EXAM_ROSTER, "N3B")]
+    assert _flags(entries) == [False, True]
+
+
 def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():
     # #651: stage 4's membership check and stage 3b's must be ONE list.
     from unified_pipeline.stage3b.io import canonical_taxonomy_codes, load_taxonomy

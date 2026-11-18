@@ -16,6 +16,7 @@ stage3b module.
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import NamedTuple, TypedDict
@@ -1268,42 +1269,97 @@ def _is_place_part(part: str) -> bool:
     return len(part.split()) <= _PLACE_LINE_MAX_WORDS and bool(_PLACE_WORD_RE.search(part))
 
 
+#: A place in the source document: one number per dotted part of an element
+#: index, so a table row ("602.8", row 8 of element 602) sorts inside its
+#: table and row 10 does not read as row 1 the way float("602.10") would.
+_ElementPosition = tuple[float, ...]
+
+#: Closes a span after every row of its last element: (602, inf) is past
+#: (602, 8), so a whole table overlaps each of its own rows (#2154).
+_SPAN_END = (math.inf,)
+
+#: A hierarchy this deep has a sub-heading under a section heading (#2154).
+_SUB_HEADING_DEPTH = 2
+
+
 class _SourcePlacement(NamedTuple):
     """Where a duplicate candidate came from: its taxonomy code, the span of
-    source elements it was cut from (None when the entry has none), and
-    whether its text reads as a record rather than a place or label line."""
+    source positions it was cut from (None when the entry has none), whether
+    its text reads as a record rather than a place or label line, whether
+    it was cut from whole elements (integer indices, not table rows), and
+    the headings it sits under."""
 
     code: str
-    span: tuple[int, int] | None
+    span: tuple[_ElementPosition, _ElementPosition] | None
     record_shaped: bool
+    whole_elements: bool
+    hierarchy: tuple[str, ...]
+
+
+def _element_position(idx: object) -> _ElementPosition | None:
+    """An element index as a sortable position, or None when it is not one.
+    An int is a whole element; a table row arrives as "602.8" (a float in
+    some older artifacts), a pseudo-row as "92.5.10"."""
+    if isinstance(idx, float) and idx.is_integer():
+        idx = int(idx)
+    parts = str(idx).split(".")
+    return tuple(int(part) for part in parts) if all(part.isdecimal() for part in parts) else None
 
 
 def _source_placement(entry: dict) -> _SourcePlacement:
     start, end = entry.get("element_idx_start"), entry.get("element_idx_end")
-    has_span = isinstance(start, int) and isinstance(end, int)
-    return _SourcePlacement(entry.get("taxonomy_code") or "", (start, end) if has_span else None,
-                            not _is_place_or_label_line(entry.get("text") or ""))
+    first, last = _element_position(start), _element_position(end)
+    has_span = first is not None and last is not None
+    return _SourcePlacement(entry.get("taxonomy_code") or "", (first, last + _SPAN_END) if has_span else None,
+                            not _is_place_or_label_line(entry.get("text") or ""),
+                            isinstance(start, int) and isinstance(end, int),
+                            tuple(str(level) for level in entry.get("hierarchy") or []))
+
+
+def _in_two_mentee_rosters(first: _SourcePlacement, second: _SourcePlacement) -> bool:
+    """True when two same-code entries are mentee rows under two different
+    sub-headings of one section (#2154). A roster row records a relationship
+    and its sub-heading names which one: in one corpus CV a student sat on
+    the thesis-committee table and again on the qualifying-exam table, and
+    the second table rendered a row short. Outside the mentee codes a
+    second sub-heading files the same record again (a paper under two
+    publication lists, a society under two membership lists), and the two
+    copies would land in one output table: those stay duplicates, as do
+    twins under headings that are not two sub-headings of one section."""
+    if not first.code.startswith(MENTEE_CODE_PREFIX):
+        return False
+    one, other = first.hierarchy, second.hierarchy
+    return (len(one) >= _SUB_HEADING_DEPTH and one[:-1] == other[:-1]
+            and _duplicate_key(one[-1]) != _duplicate_key(other[-1]))
 
 
 def _filed_twice_by_the_cv(first: _SourcePlacement, second: _SourcePlacement) -> bool:
     """True when two same-text entries are two records the CV itself lists
-    twice: two different codes, neither the Appendix fallback, so each
-    renders in its own table, cut from two separate source elements (#1435:
-    FVQANK listed three journals under REVIEWER FOR (Q4D) and again under
-    EDITORIAL BOARDS (Q4C), and the editorial-board rows were dropped).
+    twice, cut from two separate source positions, neither coded as the
+    Appendix fallback. Either they carry two different codes, so each
+    renders in its own table (#1435: FVQANK listed three journals under
+    REVIEWER FOR (Q4D) and again under EDITORIAL BOARDS (Q4C), and the
+    editorial-board rows were dropped), or they share a mentee code under
+    two sub-headings (`_in_two_mentee_rosters`, #2154).
     Twins cut from overlapping source elements are one line emitted twice
     upstream (in one corpus CV a single service line, element 168, came
     out under both O and P, with no second copy in the source), and a
     pair with a T copy still resolves by the M-over-T preference: both
-    stay duplicates, as does a pair with no element span to compare, and
-    a place or label line (`_is_place_or_label_line`), which a CV repeats
-    as a sub-heading rather than lists as a record."""
+    stay duplicates, as does a pair with no element span to compare, a
+    two-code pair with a table-row copy (20 such corpus pairs include
+    column-header and empty label rows coded as records), and a place or
+    label line (`_is_place_or_label_line`), which a CV repeats as a
+    sub-heading rather than lists as a record."""
     if first.span is None or second.span is None or not first.record_shaped:
         return False
     apart = first.span[1] < second.span[0] or second.span[1] < first.span[0]
-    return (apart and bool(first.code) and bool(second.code) and first.code != second.code
-            and not first.code.startswith(APPENDIX_TAXONOMY_PREFIX)
-            and not second.code.startswith(APPENDIX_TAXONOMY_PREFIX))
+    if (not apart or not first.code or not second.code
+            or first.code.startswith(APPENDIX_TAXONOMY_PREFIX)
+            or second.code.startswith(APPENDIX_TAXONOMY_PREFIX)):
+        return False
+    if first.code != second.code:
+        return first.whole_elements and second.whole_elements
+    return _in_two_mentee_rosters(first, second)
 
 
 def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -1327,8 +1383,8 @@ def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
     instead of a silent drop they never see. For the same reason, two
     identical undated lines filed under two different years of one section
     are not duplicates (`_undated_year_groups`, #1435), and neither are two
-    identical lines the CV lists under two different codes that both render
-    (`_filed_twice_by_the_cv`, #1435).
+    identical lines the CV lists under two different codes that both render,
+    or in two mentee rosters (`_filed_twice_by_the_cv`, #1435, #2154).
 
     Args:
         entries: List of classified entries
