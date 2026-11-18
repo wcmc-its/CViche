@@ -76,6 +76,7 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     OUTCOME_MENTEE_AUTHOR,
     OUTCOME_MENTEE_CHECK,
     OUTCOME_MENTEE_KEY,
+    OUTCOMES_NOTE_TEXT,
     MenteeRecord,
     _looks_like_training_grant_table,
     _outcome_line_from_fields,
@@ -122,6 +123,11 @@ def _template_generator() -> WCMTemplateGenerator:
 def _warnings(caplog, logger_name: str) -> list[logging.LogRecord]:
     return [r for r in caplog.records
             if r.levelno == logging.WARNING and r.name == logger_name]
+
+
+def _outcomes_note(doc) -> str:
+    """The template's outcomes note, whole: where N4 lines go (#2145)."""
+    return next(p.text.strip() for p in doc.paragraphs if p.text.startswith(OUTCOMES_NOTE_TEXT))
 
 
 def _body_after(doc, heading_text: str, count: int) -> list[tuple[str, str]]:
@@ -376,7 +382,8 @@ def test_mentoring_real_template_body_order():
     """Real template: summary line, then the mentee tables with spacing,
     directly under each heading and above the template's own "Duplicate
     table below as needed" instruction; the two placeholder tables are gone;
-    N4 sits under MENTORING."""
+    N4 sits under the template's outcomes note at the section's end, and
+    nothing is written under the MENTORING heading (#2145)."""
     gen = _template_generator()
     template_tables = len(gen.doc.tables)
     entries_by_code = {
@@ -401,7 +408,8 @@ def test_mentoring_real_template_body_order():
     past = _body_after(gen.doc, "Past Mentees:", 3)
     assert past[:2] == [('tbl', 'Carol C'), ('p', '')]
     assert past[2][1].startswith('Duplicate table below')
-    assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'One mentee now leads a lab.')]
+    assert _body_after(gen.doc, _outcomes_note(gen.doc), 1) == [('p', 'One mentee now leads a lab.')]
+    assert _body_after(gen.doc, "MENTORING", 1) == [('p', '')]
     # Two mentee placeholders out, three mentee tables in. With no N2
     # entries the N2 placeholder stays (#1942).
     assert len(gen.doc.tables) == template_tables - 2 + 3
@@ -556,12 +564,12 @@ def test_outcome_line_is_only_for_outcomes():
 
 
 def test_mentoring_real_template_renders_a_scrambled_outcome_from_its_fields():
-    """End to end: the scrambled row lands under MENTORING as the field line;
+    """End to end: the scrambled row lands under the outcomes note as the field line;
     a narrative outcome beside it is still written verbatim."""
     gen = _template_generator()
     gen._fill_mentoring({'N4': [_n4(_SCRAMBLED_OUTCOME_TEXT, **_OUTCOME_FIELDS),
                                 _n4('One mentee now leads a lab.')]})
-    assert _body_after(gen.doc, "MENTORING", 2) == [
+    assert _body_after(gen.doc, _outcomes_note(gen.doc), 2) == [
         ('p', _OUTCOME_LINE), ('p', 'One mentee now leads a lab.')]
 
 
@@ -686,10 +694,10 @@ def test_mentoring_real_template_renders_an_award_line_with_its_mentee():
     gen = _template_generator()
     award = {**_n4('Ospry Fellowship (2021)'), OUTCOME_MENTEE_KEY: 'Ilsabet Corvane'}
     gen._fill_mentoring({'N4': [award, _n4('One mentee now leads a lab.')]})
-    assert _body_after(gen.doc, "MENTORING", 2) == [
+    assert _body_after(gen.doc, _outcomes_note(gen.doc), 2) == [
         ('p', 'Ospry Fellowship (2021)'), ('p', 'One mentee now leads a lab.')]
     body = list(gen.doc.element.body)
-    heading = next(p for p in gen.doc.paragraphs if p.text.strip() == "MENTORING")
+    heading = next(p for p in gen.doc.paragraphs if p.text.startswith(OUTCOMES_NOTE_TEXT))
     award_p, plain_p = body[body.index(heading._element) + 1:body.index(heading._element) + 3]
     assert _inserted_runs(award_p) == [(OUTCOME_MENTEE_AUTHOR, ' — Ilsabet Corvane')]
     assert OUTCOME_MENTEE_AUTHOR == 'CViche: mentee named on the line above'
@@ -713,7 +721,7 @@ def test_without_track_changes_the_inherited_mentee_is_plain_text():
     gen.emit_track_changes = False
     award = {**_n4('Ospry Fellowship (2021)'), OUTCOME_MENTEE_KEY: 'Ilsabet Corvane'}
     gen._fill_mentoring({'N4': [award]})
-    assert _body_after(gen.doc, "MENTORING", 1) == [
+    assert _body_after(gen.doc, _outcomes_note(gen.doc), 1) == [
         ('p', 'Ospry Fellowship (2021) — Ilsabet Corvane')]
 
 
