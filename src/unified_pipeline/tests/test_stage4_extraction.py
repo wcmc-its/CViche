@@ -1799,6 +1799,46 @@ def test_a_last_record_named_after_the_range_is_not_given_it(monkeypatch):
     assert "reformatted_fields" not in out
 
 
+def test_a_record_of_several_is_offered_the_list_its_range_spans(monkeypatch):
+    # RINASX 455 (#1342): the wire from `_extract_entry_items` to
+    # `derive_record_listed_spans`, on a code whose date cell lists spans.
+    out = _two_record_entry(monkeypatch, "Fern Council 2001, 2003, 2005; Glade Board 2009",
+                            {"committee_name": "Glade Board", "start_date": "2009"})
+    first, last = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert first["additional_dates"] == ["2001", "2003", "2005"]
+    assert "additional_dates" not in last
+    assert "additional_dates" not in out["extracted_fields"]
+
+
+def test_the_driver_holds_stored_dates_to_the_source_line(monkeypatch):
+    # #1342: `extract_fields_from_mapped_entries` runs both `source_dates`
+    # passes over the extracted entries, the completion column first.
+    _stub_owner(monkeypatch)
+    replies = {0: {"content_type": "table_header"},
+               1: {"mentee_name": "A. Example", "start_date": "2031"},
+               2: {"course": "Glade Seminar", "start_date": "2011", "end_date": "present"}}
+
+    def extracted(entries, batch_idx, total, cv_owner_name, cancel_check=None):
+        return _batch_result([dict(e, extracted_fields=dict(replies[e["element_idx_start"]]))
+                              for e in entries])
+
+    monkeypatch.setattr(extraction, "extract_fields_batch", extracted)
+    mapped = [
+        {"text": "Duty | Trainee | Complete Date", "taxonomy_code": "T", "element_idx_start": 0,
+         "table_index": 0, "row_index": 0},
+        {"text": "Member | A. Example | 2031", "taxonomy_code": "N3A", "element_idx_start": 1,
+         "table_index": 0, "row_index": 1},
+        {"text": "Seminar Leader\tGlade Seminar\t2011", "taxonomy_code": "K3",
+         "element_idx_start": 2},
+    ]
+
+    out = extraction.extract_fields_from_mapped_entries(mapped, batch_size=3, workers=1)
+
+    _, mentee, course = (e["extracted_fields"] for e in out["entries"])
+    assert (mentee["start_date"], mentee["end_date"]) == (None, "2031")
+    assert (course["start_date"], course["end_date"]) == ("2011", None)
+
+
 def _last_dates(out: dict) -> tuple:
     last = out["extracted_fields"][STAGE4_RECORDS_KEY][-1]
     return last.get("start_date"), last.get("end_date")
@@ -2166,9 +2206,12 @@ def test_the_spans_reach_a_recovered_entry_too(monkeypatch):
 
 
 def test_the_spans_of_a_several_record_entry_are_no_one_records(monkeypatch):
-    entry, reply = _items_reply("Chair, Fern Society, 2003, 2007, 2013; Glade Board 2009", "O", [
+    # Both records store the list's min-max, so the list is neither's. One
+    # record alone storing it is offered the list (#1342,
+    # test_a_record_of_several_is_offered_the_list_its_range_spans).
+    entry, reply = _items_reply("Chair, Fern Society and Glade Board, 2003, 2007, 2013", "O", [
         {"organization": "Fern Society", "role": "Chair", "start_date": "2003", "end_date": "2013"},
-        {"organization": "Glade Board", "start_date": "2009"}])
+        {"organization": "Glade Board", "start_date": "2003", "end_date": "2013"}])
     monkeypatch.setattr(extraction, "call_llm", reply)
     (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
 

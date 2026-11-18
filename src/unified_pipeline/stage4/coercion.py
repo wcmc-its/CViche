@@ -1939,10 +1939,41 @@ def _span_source(text: str) -> str:
     return _SPAN_BETWEEN_RE.sub(r"\1-", _SPAN_CONNECTOR_RE.sub("-", _SPAN_MONTH_RE.sub("", text)))
 
 
+#: A further year of a list whose century the CV leaves out: a list separator,
+#: then a dash and two digits ("2001-06, -09": 2001 to 2006, and 2009). Read
+#: only straight after a span written the same short way (`_elided_years`);
+#: the span it gives starts at the dash, so the gap before it is the
+#: separator alone.
+_ELIDED_YEAR_RE = re.compile(
+    rf"(?:\s*[,;])+\s*(?P<item>{_SPAN_DASH}\s?(?P<yy>\d{{2}}))(?![\d/.%])")
+#: The longest end a span writes without its century: "2001-06", "2001-6".
+_SHORT_END_DIGITS = 2
+
+
+def _elided_years(text: str, before: WrittenSpan) -> list[WrittenSpan]:
+    """The "-YY" items that follow `before` in a list (`_ELIDED_YEAR_RE`),
+    each the first year after the one before it that ends in those digits
+    (`_short_range_end_year`, so within `_MAX_SHORT_RANGE_SPAN_YEARS`).
+    Stops at the first item with no such year (VYJMXR 106, #1342)."""
+    found: list[WrittenSpan] = []
+    while True:
+        item = _ELIDED_YEAR_RE.match(text, before.end)
+        year = _short_range_end_year(before.last, int(item['yy'])) if item else None
+        if item is None or year is None:
+            return found
+        before = WrittenSpan(year, year, item.start('item'), item.end('item'))
+        found.append(before)
+
+
 def _written_spans(text: str) -> list[WrittenSpan]:
     """The year spans of `text` (already `_span_source`), in order. A one- or
     two-digit end is completed from the start year; one that would end before
-    it (a month: "2019-05") leaves the start year alone."""
+    it (a month: "2019-05") leaves the start year alone. After a span whose
+    short end was completed to a later year, a list item that leaves its
+    century out is a span too (`_elided_years`); after any other it is not,
+    since a day range the month was read off ("2000, June 18-20") leaves the
+    same ", -20", and after a month ("1996-04, -02") nothing says the next
+    two digits are a year."""
     spans: list[WrittenSpan] = []
     for match in _WRITTEN_SPAN_RE.finditer(text):
         first, end = int(match[1]), match[2]
@@ -1950,11 +1981,14 @@ def _written_spans(text: str) -> list[WrittenSpan]:
             last = first
         elif end.isalpha():
             last = _SPAN_OPEN_END
-        elif len(end) <= 2:
+        elif len(end) <= _SHORT_END_DIGITS:
             last = first - first % 10 ** len(end) + int(end)
         else:
             last = int(end[:4])
         spans.append(WrittenSpan(first, max(first, last), match.start(), match.end()))
+        if (end is not None and end.isdigit() and len(end) <= _SHORT_END_DIGITS
+                and last > first):
+            spans.extend(_elided_years(text, spans[-1]))
     return spans
 
 
@@ -2175,6 +2209,52 @@ def derive_listed_spans(original_text: str, updated: dict[str, Any], taxonomy_co
         'reason': reason,
     }
     updated[LISTED_SPANS_KEY] = listed
+
+
+def _listed_runs(text: str) -> list[list[WrittenSpan]]:
+    """Each run of spans `text` writes as one list: consecutive spans with
+    only list separators between them (`_LIST_ONLY_GAP_RE`), two or more,
+    that leave a year of their min-max uncovered, no lone year of them
+    opening a dash of its own."""
+    source = _span_source(text)
+    runs: list[list[WrittenSpan]] = []
+    for span in _written_spans(source):
+        if runs and _LIST_ONLY_GAP_RE.fullmatch(source[runs[-1][-1].end:span.start]):
+            runs[-1].append(span)
+        else:
+            runs.append([span])
+    return [run for run in runs
+            if _leaves_a_gap([(span.first, span.last) for span in run],
+                             (min(span.first for span in run), max(span.last for span in run)))
+            and not any(span.first == span.last and _SPAN_OPEN_DASH_RE.match(source, span.end)
+                        for span in run)]
+
+
+def derive_record_listed_spans(original_text: str, records: list[dict[str, Any]],
+                               taxonomy_code: str) -> None:
+    """Write, on a record of a several-record entry, the spans one list of
+    the text gives when the record's start_date-end_date is that list's
+    min-max (RINASX 455, #1342: "..., 2001, 2004-2006, 2009" stored as
+    2001-2009 on one of nine records).
+
+    `derive_listed_spans` reads the whole text as one record's list, so it is
+    not offered a several-record entry. Here the list is one run of the text
+    (`_listed_runs`), and it is a record's only when exactly one run has the
+    record's own range as its min-max and no other record stores that range.
+    The code and the record are held to `derive_listed_spans`' conditions.
+    """
+    runs = _listed_runs(original_text) if taxonomy_code in LISTED_SPAN_CODES else []
+    if not runs:
+        return
+    stored = [_stored_span(record) for record in records]
+    for record, own in zip(records, stored, strict=True):
+        if own is None or stored.count(own) != 1 or _holds_further_span(record):
+            continue
+        listing = [run for run in runs
+                   if own == (min(span.first for span in run), max(span.last for span in run))]
+        if len(listing) == 1:
+            record[LISTED_SPANS_KEY] = list(dict.fromkeys(
+                _span_item(span.first, span.last) for span in listing[0]))
 
 
 def apply_regex_post_processing(

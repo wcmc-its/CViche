@@ -1680,7 +1680,10 @@ def test_a_further_span_follows_the_appointments_own_dates():
 # the start year open; the CV's latest D1 row (no later D1 start year) keeps
 # "-Present" without one. Superseded rungs (#946) still render the bare start.
 
-from unified_pipeline.stage6.sections.positions import _latest_rank_rows  # noqa: E402
+from unified_pipeline.stage6.sections.positions import (  # noqa: E402
+    _latest_rank_rows,
+    is_visiting_title,
+)
 
 
 def _texted_entry(idx, title, start, text, code="D2", end=""):
@@ -1774,6 +1777,38 @@ def test_the_generic_table_takes_the_latest_rank_from_d1_rows_only():
         "Lecturer in Biology": "2016-Present",
         "Consultant": "2023",
     }
+
+
+@pytest.mark.parametrize("title", ["Visiting Professor", "visiting scholar, Fern Program"])
+def test_a_visiting_title_is_not_the_latest_rank(title):
+    # EGHJRK 74 (#1342): a one-year visit, the CV's latest D1 row, rendered
+    # "<year>-Present" at the head of Academic Appointments.
+    rows = _render_positions([
+        _texted_entry(1, title, "2021", f"2021 {title}, Quexley Institute", code="D1"),
+        _texted_entry(2, "Professor of Medicine", "2012", "Professor of Medicine, 2012", code="D1"),
+    ], code="D1")
+    # The visit follows its source, and the earlier row gains nothing by it.
+    assert _dates_by_title(rows) == {title: "2021", "Professor of Medicine": "2012"}
+
+
+def test_a_visiting_title_still_reads_present_from_an_open_source():
+    rows = _render_positions([
+        _texted_entry(1, "Visiting Professor", "2021", "Visiting Professor, 2021 - present",
+                      code="D1"),
+        _texted_entry(2, "Visiting Lecturer", "2021", "Visiting Lecturer, 2021", code="D1"),
+        _texted_entry(3, "Professor of Medicine", "2021", "Professor of Medicine, 2021", code="D1"),
+    ], code="D1")
+    assert _dates_by_title(rows) == {"Visiting Professor": "2021-Present",
+                                     "Visiting Lecturer": "2021",
+                                     "Professor of Medicine": "2021-Present"}
+
+
+def test_latest_rank_rows_leaves_a_visiting_title_out_without_moving_the_latest_year():
+    records = [_rank_entry(1, "Visiting Professor", "2021"),
+               _rank_entry(2, "Professor", "2019"),
+               _rank_entry(3, "Revisiting Fellow", "2021")]
+    assert _latest_rank_rows(records) == {2}
+    assert not is_visiting_title(None) and not is_visiting_title("Advisiting")
 
 
 def test_latest_rank_rows_reads_d1_start_years_only():

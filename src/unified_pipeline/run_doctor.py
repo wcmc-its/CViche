@@ -218,7 +218,8 @@ Lints, ranked by the severity of the failure class they catch:
                           to the stage-4 entry it renders: "<start>-Present"
                           when the entry's text has no open marker (WARN; I
                           memberships and the CV's latest D1 rank keep it by
-                          decision, #1342 2026-10-02), a raw
+                          decision, #1342 2026-10-02; a visiting title is
+                          no rank and does not), a raw
                           stored value "2003-04-2005-09" or "2009-Summer", or
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of

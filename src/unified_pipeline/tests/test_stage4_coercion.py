@@ -70,6 +70,7 @@ from unified_pipeline.stage4.coercion import (  # noqa: E402
     apply_regex_post_processing,
     coerce_field_value_types,
     derive_listed_spans,
+    derive_record_listed_spans,
     normalize_authors_vancouver,
     normalize_dates,
     split_joined_journals,
@@ -1555,3 +1556,104 @@ def test_stage_6_shows_the_listed_spans_in_the_date_cell(text, start, end, code,
     fields = {"start_date": start, "end_date": end}
     derive_listed_spans(text, fields, code, {})
     assert with_extra_date_spans(own_range, fields, code) == cell
+
+
+# --- #1342: a list item that leaves its century out; a list on one of several records
+
+@pytest.mark.parametrize("text, spans", [
+    ("2001-06, -09 Glade Society, poster judge", [(2001, 2006), (2009, 2009)]),
+    ("Glade Society 2001-06, -09; -12", [(2001, 2006), (2009, 2009), (2012, 2012)]),
+    ("1998-99, \u201302 Glade Society", [(1998, 1999), (2002, 2002)]),
+    # Only after a span with a short end: a day range the month was read off
+    # ("2000, June 18-20") leaves the same ", -20".
+    ("Fern Meeting 2000, June 18-20, 2000", [(2000, 2000), (2000, 2000)]),
+    ("2001-2006, -09 Glade Society", [(2001, 2006)]),
+    ("2001, -05 Glade Society", [(2001, 2001)]),
+    # A short end read as a month is no short year: nothing follows it.
+    ("1996-04, -02 Glade Society", [(1996, 1996)]),
+    # The item is counted from the span's END: after 2001-2006, "-03" would
+    # be 2103, not the 2003 inside the span.
+    ("2001-06, -03 Glade Society", [(2001, 2006)]),
+    # No separator before the dash, a third digit, a longer date, an open span.
+    ("2001-06 -09 Glade Society", [(2001, 2006)]),
+    ("2001-06, -091 Glade Society", [(2001, 2006)]),
+    ("2001-06, -09/15 Glade Society", [(2001, 2006)]),
+    ("2001-present, -09", [(2001, 10_000)]),
+])
+def test_a_list_item_without_its_century_is_read_after_a_short_span(text, spans):
+    from unified_pipeline.stage4.coercion import _span_source, _written_spans
+
+    assert [(span.first, span.last) for span in _written_spans(_span_source(text))] == spans
+
+
+def test_an_elided_item_is_the_first_such_year_after_the_span_before_it():
+    from unified_pipeline.stage4.coercion import _span_source, _written_spans
+
+    # "-03" after 1998-99 is 2003; after 2003, "-01" would be 2101: no item.
+    spans = _written_spans(_span_source("1998-99, -03, -01"))
+    assert [(span.first, span.last) for span in spans] == [(1998, 1999), (2003, 2003)]
+
+
+def test_a_short_range_stored_as_a_month_and_a_later_year_lists_both_spans():
+    # VYJMXR 106: "YYYY-YY, -YY" stored as start "YYYY-MM", end the last year.
+    from unified_pipeline.stage6.formatting.dates import with_extra_date_spans
+
+    text = "2001-06, -09 Glade Society, poster judge"
+    fields = {"start_date": "2001-06", "end_date": "2009"}
+    spans, reformatted = _listed(text, "Q4D", **fields)
+    assert spans == ["2001-2006", "2009"]
+    assert reformatted[LISTED_SPANS_KEY]["reason"].startswith("Listed the separate spans")
+    assert with_extra_date_spans("2001-2009", {**fields, LISTED_SPANS_KEY: spans}, "Q4D") \
+        == "2001-2006, 2009"
+
+
+def _record_spans(text, records, code="Q3"):
+    records = [dict(record) for record in records]
+    derive_record_listed_spans(text, records, code)
+    return [record.get(LISTED_SPANS_KEY) for record in records]
+
+
+_PANELS = ("Judge for: a) Fern Foundation b) Glade Institute (guest, 1998); "
+           "Glade Special Panel, 1999; Glade Poster Panel, 2001, 2004\u20132006, 2009. "
+           "c) Moss Council")
+
+
+def test_a_record_whose_range_is_one_lists_min_max_gets_that_list():
+    # RINASX 455: the fourth record's range is the min-max of one list.
+    records = [{"agency": "Fern Foundation"},
+               {"agency": "Glade Institute", "start_date": "1998", "end_date": "1998"},
+               {"agency": "Glade Special Panel", "start_date": "1999", "end_date": "1999"},
+               {"agency": "Glade Poster Panel", "start_date": "2001", "end_date": "2009"},
+               {"agency": "Moss Council"}]
+    assert _record_spans(_PANELS, records) == [
+        None, None, None, ["2001", "2004-2006", "2009"], None]
+
+
+@pytest.mark.parametrize("text, records, code", [
+    # Two records store the list's min-max: it is neither's.
+    ("Fern Panel, Glade Panel 2003, 2007, 2013",
+     [{"start_date": "2003", "end_date": "2013"}, {"start_date": "2003", "end_date": "2013"}], "Q3"),
+    # Two lists share the min-max.
+    ("Fern Panel 2003, 2007, 2013; Glade Panel 2003, 2009, 2013",
+     [{"start_date": "2003", "end_date": "2013"}, {"start_date": "2001"}], "Q3"),
+    # Words between the years: two records' dates, not one list.
+    ("Fern Panel 2003, Glade Panel 2013",
+     [{"start_date": "2003", "end_date": "2013"}, {"start_date": "2001"}], "Q3"),
+    # The list leaves no gap, or one of its years opens a dash.
+    ("Fern Panel 2003, 2004, 2005; Glade Panel",
+     [{"start_date": "2003", "end_date": "2005"}, {"start_date": "2001"}], "Q3"),
+    ("Fern Panel 2003, 2007, 2013 - ; Glade Panel",
+     [{"start_date": "2003", "end_date": "2013"}, {"start_date": "2001"}], "Q3"),
+    # The record's range is one item of the list, not its min-max.
+    ("Fern Panel 2003, 2007, 2013; Glade Panel",
+     [{"start_date": "2007", "end_date": "2007"}, {"start_date": "2001"}], "Q3"),
+    # The record already keeps a further span; a code with no further-span cell.
+    ("Fern Panel 2003, 2007, 2013; Glade Panel",
+     [{"start_date": "2003", "end_date": "2013", "additional_info": "also 2007"},
+      {"start_date": "2001"}], "Q3"),
+    ("Fern Panel 2003, 2007, 2013; Glade Panel",
+     [{"start_date": "2003", "end_date": "2013"}, {"start_date": "2001"}], "N3B"),
+])
+def test_a_list_that_is_not_plainly_one_records_is_left_alone(text, records, code):
+    assert _record_spans(text, records, code) == [None, None]
+

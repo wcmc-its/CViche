@@ -87,6 +87,7 @@ from unified_pipeline.stage6.sections.licensure import (
     _resolve_licensure,
     credential_listed_as_licence,
 )
+from unified_pipeline.stage6.sections.positions import is_visiting_title
 from unified_pipeline.stage6.supplementary import PRESENTATION_TITLE_FIELDS
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -3293,6 +3294,7 @@ class _DatedEntry(NamedTuple):
     tokens: frozenset[str]
     start_year: str | None
     open_by_decision: bool = False
+    visiting: bool = False
 
 
 class _RenderedDate(NamedTuple):
@@ -3347,14 +3349,17 @@ def _dated_entry(raw: dict, filled_name: str = "") -> tuple[_DatedEntry, set[str
                         str(raw.get("taxonomy_code") or ""), text,
                         "\n".join(headings),
                         _attribution_tokens(f"{text} {values} {filled_name}"),
-                        start_years[0] if start_years else None)
+                        start_years[0] if start_years else None,
+                        visiting=is_visiting_title(fields.get("title")))
     return entry, set(_FOUR_DIGIT_YEAR_RE.findall(f"{text} {values}"))
 
 
 def _mark_latest_rank(entries: list[tuple[_DatedEntry, set[str]]]
                       ) -> list[tuple[_DatedEntry, set[str]]]:
     """Mark the CV's latest DATE_CELL_LATEST_RANK_CODE rows (no later row of
-    that code by start year) as keeping an open range by decision."""
+    that code by start year) as keeping an open range by decision. A
+    visiting title is not marked: stage 6 denies it the same "-Present"
+    (`positions.is_visiting_title`, #1342)."""
     rank_years = [entry.start_year for entry, _ in entries
                   if entry.code == DATE_CELL_LATEST_RANK_CODE and entry.start_year]
     if not rank_years:
@@ -3362,7 +3367,7 @@ def _mark_latest_rank(entries: list[tuple[_DatedEntry, set[str]]]
     latest = max(rank_years)
     return [(entry._replace(open_by_decision=True)
              if entry.code == DATE_CELL_LATEST_RANK_CODE and entry.start_year == latest
-             else entry, years)
+             and not entry.visiting else entry, years)
             for entry, years in entries]
 
 
