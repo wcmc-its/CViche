@@ -360,6 +360,46 @@ def test_real_template_one_entry_leaves_n2_and_mentee_placeholders_in_place():
     assert after.count('Name') == 2
 
 
+def _shape_under(gen: WCMTemplateGenerator, heading: str, count: int) -> list[str]:
+    """The `count` body elements under the paragraph starting `heading`:
+    'TBL', '' for a blank paragraph, else the paragraph's first 16 characters."""
+    body = list(gen.doc.element.body)
+    at = next(p._element for p in gen.doc.paragraphs if p.text.startswith(heading))
+    shape = []
+    for element in body[body.index(at) + 1:body.index(at) + 1 + count]:
+        text = ''.join(t.text or '' for t in element.iter(qn('w:t')))
+        shape.append('TBL' if element.tag == qn('w:tbl') else text[:16])
+    return shape
+
+
+def test_real_template_current_grants_take_the_placeholders_place():
+    """#2146: under the heading, the tables sat above the line that introduces
+    them, and the placeholder's removal left two blanks after that line."""
+    gen = _real_template_generator()
+    template_shape = _shape_under(gen, 'Current Research Funding', 4)
+    assert template_shape == ['Duplicate table ', '', 'TBL', '']
+
+    gen._fill_research_support(
+        {'M2A': [_m2a_entry('Synthetic Study of Widgets', 'NIH'),
+                 _m2a_entry('Synthetic Study of Gears', 'NSF')]},
+        None, 'synthetic-uid', as_of=date(2026, 1, 1))
+
+    assert _shape_under(gen, 'Current Research Funding', 7) == [
+        'Duplicate table ', '', 'TBL', '', 'TBL', '', '*Please annotate']
+
+
+def test_real_template_past_grants_have_no_placeholder_and_go_under_the_heading():
+    gen = _real_template_generator()
+    past = {**_m2a_entry('Synthetic Study of Levers', 'NIH'), 'taxonomy_code': 'M2B'}
+    past['extracted_fields'] = {**past['extracted_fields'], 'end_date': '12/2021'}
+
+    gen._fill_research_support({'M2B': [past]}, None, 'synthetic-uid', as_of=date(2026, 1, 1))
+
+    assert _shape_under(gen, 'Past (Completed) Funding', 2) == ['TBL', 'Please summarize']
+    # Current's own placeholder is untouched.
+    assert _shape_under(gen, 'Current Research Funding', 4) == ['Duplicate table ', '', 'TBL', '']
+
+
 def test_real_template_l3_content_with_no_grants_or_mentees_keeps_both_mentee_placeholders():
     """Ticket D-836-R2, TASK 2 item 3 (updated for #845, then #1942): the combined
     real-template proof -- #836's guards (research_support, mentoring) plus
