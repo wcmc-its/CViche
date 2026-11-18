@@ -3910,3 +3910,78 @@ def test_an_unlabelled_award_beside_a_class_award_in_one_list_is_kept():
 def test_an_unlabelled_award_under_another_heading_or_dated_by_its_class_still_drops(dropped, kept):
     assert not _unlabelled_beside_class_award(dropped, kept, "H")
     assert not _kept_both("H", dropped, kept)
+
+
+# #2154: stage 3b keeps the same mentee row under two sub-headings of one
+# section (a thesis-committee roster and an exam-committee roster). The
+# stage-4 mentee fields do not carry the sub-heading, so the pair scores 1.0
+# here; stage 6 must keep both rows in that case and in no other.
+
+_ROSTER_ROW = "Member | Mentee Placeholder | Imaginary Studies (Example U) | 2031"
+_ROSTER_FIELDS = {"mentee_name": "Mentee Placeholder", "start_date": "2031",
+                  "site_position": "Imaginary Studies (Example U)"}
+_THESIS_ROSTER = ("MENTORING", "Thesis Committees")
+_EXAM_ROSTER = ("MENTORING", "Qualifying Exam Committees")
+
+
+def _roster_row(start, hierarchy, code="N3B", text=_ROSTER_ROW, end=None) -> dict:
+    return {"taxonomy_code": code, "text": text, "extracted_fields": dict(_ROSTER_FIELDS),
+            "hierarchy": list(hierarchy), "element_idx_start": start,
+            "element_idx_end": start if end is None else end}
+
+
+def _roster_drops(first: dict, second: dict, code: str | None = "N3B") -> list[dict]:
+    """The dedup decisions for a group holding the two rows, kept row first."""
+    decisions: list[dict] = []
+    kept = deduplicate_entries([first, second], decisions=decisions, code=code,
+                               document=[first, second])
+    assert len(kept) + len(decisions) == 2  # a kept row is never also reported dropped
+    return decisions
+
+
+@pytest.mark.parametrize("first, second", [
+    ("405.3", "412.9"),     # rows of two tables, as stage 2 writes them
+    ("412.9", "405.3"),
+    (350, 470),              # two paragraphs
+    (350, "412.9"),          # a paragraph and a table row
+    ("412.1", "412.10"),     # row 10 is not row 1
+])
+def test_a_mentee_row_in_two_rosters_of_one_section_is_kept_twice(first, second):
+    rows = [_roster_row(first, _THESIS_ROSTER), _roster_row(second, _EXAM_ROSTER)]
+    assert _roster_drops(*rows) == []
+    assert not _drop_is_safe(rows[1], rows[0], "N3B", rows)
+
+
+def test_two_roster_rows_are_read_under_the_code_of_the_group_they_render_in():
+    # A bare N3 row is routed into its siblings' N3B group before dedup.
+    rows = [_roster_row("405.3", _THESIS_ROSTER), _roster_row("412.9", _EXAM_ROSTER, code="N3")]
+    assert _roster_drops(*rows) == []
+
+
+@pytest.mark.parametrize("first, second", [
+    # one roster
+    (_roster_row("405.3", _THESIS_ROSTER), _roster_row("405.4", _THESIS_ROSTER)),
+    # one roster whose heading was re-typed
+    (_roster_row("405.3", _THESIS_ROSTER), _roster_row("412.9", ("MENTORING", "THESIS  COMMITTEES:"))),
+    # two sections, not two sub-headings of one
+    (_roster_row("405.3", ("RESEARCH", "Thesis Committees")), _roster_row("412.9", _EXAM_ROSTER)),
+    (_roster_row("405.3", ("MENTORING",)), _roster_row("412.9", _EXAM_ROSTER)),
+    (_roster_row("405.3", ()), _roster_row("412.9", ())),
+    # one row emitted twice upstream, and a whole table beside one of its rows
+    (_roster_row("412.9", _THESIS_ROSTER), _roster_row("412.9", _EXAM_ROSTER)),
+    (_roster_row(412, _THESIS_ROSTER), _roster_row("412.9", _EXAM_ROSTER)),
+    # no source position to compare
+    (_roster_row(None, _THESIS_ROSTER), _roster_row("412.9", _EXAM_ROSTER)),
+    # the texts differ: stage 3b never paired these, so the #227 guard decides
+    (_roster_row("405.3", _THESIS_ROSTER, text=_ROSTER_ROW + " | Gizmo Hall"),
+     _roster_row("412.9", _EXAM_ROSTER)),
+])
+def test_mentee_twins_outside_two_rosters_still_render_once(first, second):
+    assert len(_roster_drops(first, second)) == 1
+
+
+@pytest.mark.parametrize("code", ["K1", "I", "H", "O", "Q4D", "T", None])
+def test_twins_under_two_sub_headings_outside_the_mentee_codes_still_render_once(code):
+    # #1435: a course under two teaching lists is one course.
+    rows = [_roster_row(350, _THESIS_ROSTER, code or "N3B"), _roster_row(470, _EXAM_ROSTER, code or "N3B")]
+    assert len(_roster_drops(*rows, code=code)) == 1

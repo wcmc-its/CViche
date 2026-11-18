@@ -13,12 +13,19 @@ question both answer, and on `fan_out` for the fields each section renderer
 writes (`_RENDERED_FIELDS`, `_FORMATTED_KEYS`), because "would this record
 reach the page" is the question #983's fan-out answers too, and on
 `formatting` for the citation a bibliography row prints (`_printed_dates`,
-#446). Nothing here may import `stage_6_word_template`.
+#446), and on `core.source_placement` for the one definition of "the CV lists
+this row in two rosters" that stage 3b's duplicate marker reads too (#2154).
+Nothing here may import `stage_6_word_template`.
 """
 import re
 from types import MappingProxyType
 from typing import NamedTuple
 
+from unified_pipeline.core.source_placement import (
+    duplicate_key,
+    filed_twice_by_the_cv,
+    source_placement,
+)
 from unified_pipeline.core.text_norm import is_placeholder_title, norm
 
 from .fan_out import (
@@ -1223,6 +1230,23 @@ def _different_mentees(dropped_entry: dict, kept_entry: dict) -> bool:
     return len(names) == 2 and not names & _PLACEHOLDER_NAMES
 
 
+def _listed_in_two_rosters(dropped_entry: dict, kept_entry: dict, code: str | None) -> bool:
+    """#2154: True when two same-text rows of a mentee code sit under two
+    sub-headings of one section, cut from separate source positions: one
+    student on a thesis-committee roster and again on an exam-committee
+    roster. Stage 3b keeps both (`filed_twice_by_the_cv`, the same test), but
+    the stage-4 mentee fields do not carry the sub-heading, so the pair
+    scored 1.0 here and the second roster rendered a row short. Both rows
+    are read under `code`, the group they will render in. Any other pair is
+    still one record under two headings and renders once (#1435)."""
+    texts = [entry.get('text') or '' for entry in (dropped_entry, kept_entry)]
+    if duplicate_key(texts[0]) != duplicate_key(texts[1]):
+        return False
+    first, second = (source_placement(entry)._replace(code=code or '')
+                     for entry in (dropped_entry, kept_entry))
+    return filed_twice_by_the_cv(first, second)
+
+
 def _verbatim_contained(text: str, container: str) -> bool:
     """True when `text`, whitespace ignored (`_squash`), stands in `container`
     starting and ending on a word boundary there. Squashed, "Part II" sits
@@ -1525,7 +1549,12 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
 
     #666 (JFBPNC): a course listed under a teaching sub-heading that names
     another part than the kept row's (TA beside guest lecturer) is another
-    record (`_teaching_parts_apart`)."""
+    record (`_teaching_parts_apart`).
+
+    #2154: a mentee row the CV lists in two rosters of one section is two
+    rows (`_listed_in_two_rosters`)."""
+    if _listed_in_two_rosters(dropped_entry, kept_entry, code):
+        return False  # #2154: one student on two committee rosters is two rows
     dropped_text = dropped_entry.get('text') or ''
     kept_text = kept_entry.get('text') or ''
     verbatim = _verbatim_contained(dropped_text, kept_text)
