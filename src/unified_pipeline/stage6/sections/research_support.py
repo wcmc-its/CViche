@@ -2184,8 +2184,14 @@ class ResearchSupportSection:
                 logger.info("  %s: %s grants -> '%s'", code, len(entries), section_header)
 
             # Create a table for each grant with spacing between them
-            # Track the last inserted element (as actual XML element reference)
-            last_element = self.doc.paragraphs[section_idx]._element
+            # Track the last inserted element (as actual XML element reference).
+            # The first table goes where the template's placeholder is, below
+            # the "Duplicate table below as needed" line that introduces it
+            # (#2146): written under the heading, the tables sat above that
+            # line and the placeholder's removal left two blanks after it.
+            # Past and Pending have no placeholder, so theirs go under the heading.
+            last_element = (placeholder._element if placeholder is not None
+                            else self.doc.paragraphs[section_idx]._element)
 
             for i, entry in enumerate(sorted_entries):
                 fields = cast(GrantFields, entry.get('extracted_fields') or {})
