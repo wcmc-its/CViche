@@ -114,6 +114,14 @@ DEDUP_FULL_CONTAINMENT_MIN_TOKENS = 5
 # de-fusing the table in stage 2 (#208/#248).
 DEDUP_FUSED_BLOB_RECORD_LINES = 5
 
+# `deduplicate_entries`' different-titles check: two entries whose title words
+# share at most this share (jaccard) are distinct items at one venue, when the
+# smaller title has at least `DEDUP_DIFFERENT_TITLE_MIN_WORDS` words (a shorter
+# cut of the text may be a generic label). `_other_talk_title` reads the
+# same share off stage 4's title fields.
+DEDUP_DIFFERENT_TITLE_MAX_JACCARD = 0.25
+DEDUP_DIFFERENT_TITLE_MIN_WORDS = 3
+
 # #666 (WZSMUO Q4D): `deduplicate_entries`' containment test divides by the
 # smaller entry's significant words, so a one-word entry is "contained" in
 # every longer entry that shares its word: the journal "Cell" was dropped
@@ -236,6 +244,45 @@ def _part_numbers(text: str, pattern: re.Pattern[str] = _PART_NUMBER_RE) -> set[
     return {_ROMAN_NUMERALS.get(n.lower(), n.lstrip('0') or n)
             for group in pattern.findall(text)
             for n in re.findall(_PART_NUMERAL, group, re.IGNORECASE)}
+
+
+# #666 (BRAQDE): a one-digit number that names WHICH one tells two records
+# apart the way a part number does -- "Example Team Award Year 1" beside the
+# same award's "Year 2", "coach, 5 year olds" beside "coach, 6 year olds" --
+# and is as invisible to token containment (a digit is too short to be a
+# word). Read only where a word or a comma and one space stand before it and
+# a space, a comma or semicolon not before a digit, or the end follow it, so
+# a list number ("1." "(2)"), a decimal, a thousands separator ("USD 7,500"),
+# a range ("1-9") and a digit inside an identifier ("R01", "K23") are never
+# read. A day stated with its month, a page, volume or issue number, a digit
+# before an identifier ("5 R01 ..."), and a count with its unit (`_COUNT_RE`,
+# which `_counts` reads) are cut out first: "1 week" beside "7 days" is one
+# count written two ways. Two texts tell records apart only when BOTH name
+# such a number and the dropped one names one the kept one lacks
+# (`_numbers_apart`): a copy that leaves the number out may be the same
+# record, and doubt drops, as for a date.
+_LONE_NUMBER_RE = re.compile(r'(?<=[A-Za-z,] )(\d)(?=\s|[,;](?!\d)|$)')
+_MONTH_NAMES = '|'.join(sorted(_MONTH_NAME_TO_NUM, key=len, reverse=True))
+_NOT_A_LONE_NUMBER_RE = re.compile(
+    rf'\b(?:{_MONTH_NAMES})\.?\s+\d\b|\b\d\s+(?:{_MONTH_NAMES})\b'
+    r'|\b(?:pp?|pages?|vols?|volume|nos?|number|issue)\.?\s*\d\b'
+    r'|\b\d\s+[a-z]+\d',
+    re.IGNORECASE)
+
+
+def _lone_numbers(text: str) -> set[str]:
+    """Every one-digit number `text` names on its own (`_LONE_NUMBER_RE`),
+    once each date, page, volume, issue and count is cut out."""
+    bare = _NOT_A_LONE_NUMBER_RE.sub(' ', _COUNT_RE.sub(' ', text))
+    return _part_numbers(bare, _LONE_NUMBER_RE)
+
+
+def _numbers_apart(dropped_text: str, kept_text: str) -> bool:
+    """True when the kept text names a lone number (`_lone_numbers`) and the
+    dropped text names one it lacks: "Year 1" beside "Year 2". A dropped text
+    naming none is a subset of any."""
+    dropped, kept = _lone_numbers(dropped_text), _lone_numbers(kept_text)
+    return bool(kept) and not dropped <= kept
 
 
 # A Roman numeral standing on its own tells two records of one series apart
@@ -605,7 +652,8 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
       a fused kept text vouches for no other date it holds (#666, EBYSBC
       VNUAHA-02: a 2013 award against a fused row whose fields are 2012's).
     - either branch, and the two award names are apart (`_other_award_name`,
-      #666 CYOFWJ 40).
+      #666 CYOFWJ 40), or the two talk titles (`_other_talk_title`, #666
+      BRAQDE).
 
     Each shape also needs that no other entry of `document` carries the
     record (`_record_carried`: the name, on the dropped record's dates or on
@@ -638,7 +686,8 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
     if ((verbatim and not _significant_words(name) <= _rendered_words(kept_fields, rendered))
             or _names_a_sibling(kept_entry, kept_fields, rendered, name)
             or not _dates_overlap_or_match(dropped_entry, kept_entry)
-            or _other_award_name(code, dropped_fields, kept_fields)):
+            or _other_award_name(code, dropped_fields, kept_fields)
+            or _other_talk_title(code, dropped_entry, kept_entry)):
         return not any(_record_carried(entry, name, name_key, code, dropped_text)
                        for entry in others)
     if (_distinct_bare_names(dropped_entry, kept_entry,
@@ -969,6 +1018,57 @@ def _narrower_committee(code: str | None, dropped_entry: dict,
     return name if set(kept_words) - stated else None
 
 
+# #666 (BRAQDE): two talks given in one month at one venue share every venue
+# word, so the whole texts match, and `deduplicate_entries`' different-titles
+# check cannot see that their titles differ when one title is under
+# `DEDUP_DIFFERENT_TITLE_MIN_WORDS` words. Stage 4's title field is the title
+# itself, not a cut of the text, so a short one is a title too: two talk
+# titles that share no more than that check allows
+# (`DEDUP_DIFFERENT_TITLE_MAX_JACCARD`) are two talks. A title reworded keeps
+# most of its words and still drops, and so does a title the kept row's text
+# states word for word: a short title or a talk's kind ("Keynote address")
+# that the kept row prints beside a longer title is the same talk. The venue
+# both rows share is cut out of the kept text first (`_TALK_VENUE_FIELDS`, of
+# either row): a title whose words recur in the venue's name is not stated by
+# the kept row.
+_TALK_CODES = frozenset({'R'})
+_TALK_TITLE_FIELD = 'title'
+_TALK_VENUE_FIELDS = ('event_name', 'location', 'host_organization')
+
+
+def _without_talk_venue(text: str, *entries: dict) -> str:
+    """`text` with each venue field value (`_TALK_VENUE_FIELDS`) of `entries`
+    cut out wherever it stands on word boundaries (`_verbatim_pattern`), case
+    and spacing ignored: a short value ("MA") is never cut out of a longer
+    word ("Chairman"). A venue the text words otherwise stays, and the title
+    check then drops as before."""
+    for entry in entries:
+        fields = entry.get('extracted_fields') or {}
+        for key in _TALK_VENUE_FIELDS:
+            squashed = _squash(fields.get(key)) if isinstance(fields.get(key), str) else ''
+            if squashed:
+                text = re.sub(_verbatim_pattern(squashed), ' ', text, flags=re.IGNORECASE)
+    return text
+
+
+def _other_talk_title(code: str | None, dropped_entry: dict, kept_entry: dict) -> bool:
+    """True when both talks have a title (stage 4's field), the two share at
+    most `DEDUP_DIFFERENT_TITLE_MAX_JACCARD` of their significant words, and
+    the kept row's text, its shared venue cut out (`_without_talk_venue`),
+    does not state the dropped title (`_verbatim_contained`)."""
+    title = (dropped_entry.get('extracted_fields') or {}).get(_TALK_TITLE_FIELD)
+    kept_title = (kept_entry.get('extracted_fields') or {}).get(_TALK_TITLE_FIELD)
+    if code not in _TALK_CODES or not (isinstance(title, str) and isinstance(kept_title, str)):
+        return False
+    words, kept_words = _significant_words(title), _significant_words(kept_title)
+    if not (words and kept_words):
+        return False
+    shared = len(words & kept_words) / len(words | kept_words)
+    kept_text = _without_talk_venue(kept_entry.get('text') or '', dropped_entry, kept_entry)
+    return (shared <= DEDUP_DIFFERENT_TITLE_MAX_JACCARD
+            and not _verbatim_contained(title, kept_text))
+
+
 def _distinct_record_label(code: str | None, dropped_fields: dict,
                            kept_fields: dict) -> str | None:
     """What the dropped record is called when its fields say it is not the kept
@@ -1256,10 +1356,16 @@ def _verbatim_contained(text: str, container: str) -> bool:
     squashed = _squash(text)
     if not squashed or squashed not in _squash(container):
         return False
+    return re.search(_verbatim_pattern(squashed), container.lower()) is not None
+
+
+def _verbatim_pattern(squashed: str) -> str:
+    """A regex matching `squashed` (lower case, no whitespace) with any
+    spacing between its characters, starting and ending on a word boundary
+    where it starts or ends with a letter or digit."""
     lead = r'(?<![a-z0-9])' if squashed[0].isalnum() else ''
     trail = r'(?![a-z0-9])' if squashed[-1].isalnum() else ''
-    body = r'\s*'.join(re.escape(char) for char in squashed)
-    return re.search(lead + body + trail, container.lower()) is not None
+    return lead + r'\s*'.join(re.escape(char) for char in squashed) + trail
 
 
 # #666 (EBYSBC BZZNRL-04): a teaching or talk list grouped under employer lines
@@ -1552,7 +1658,10 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     record (`_teaching_parts_apart`).
 
     #2154: a mentee row the CV lists in two rosters of one section is two
-    rows (`_listed_in_two_rosters`)."""
+    rows (`_listed_in_two_rosters`).
+
+    #666 (BRAQDE): a one-digit number both texts name and that differs is
+    another record (`_numbers_apart`)."""
     if _listed_in_two_rosters(dropped_entry, kept_entry, code):
         return False  # #2154: one student on two committee rosters is two rows
     dropped_text = dropped_entry.get('text') or ''
@@ -1603,6 +1712,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #666: another numeral or letter of a series is another record
     if not _counts(dropped_text) <= _counts(kept_text):
         return False  # #666: a different hours or student count is another occasion
+    if _numbers_apart(dropped_text, kept_text):
+        return False  # #666: "Year 1" beside "Year 2" is another record
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)
@@ -2398,7 +2509,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                 title_union = titles[i] | titles[j]
                 title_jaccard = (len(titles[i] & titles[j]) / len(title_union)
                                  if title_union else 0)
-                if title_jaccard <= 0.25 and min(len(titles[i]), len(titles[j])) >= 3:
+                if (title_jaccard <= DEDUP_DIFFERENT_TITLE_MAX_JACCARD
+                        and min(len(titles[i]), len(titles[j])) >= DEDUP_DIFFERENT_TITLE_MIN_WORDS):
                     if verbose:
                         print(f"    Dedup: skipping (different titles, "
                               f"title_jaccard={title_jaccard:.2f}) "
