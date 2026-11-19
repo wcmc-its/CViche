@@ -161,6 +161,44 @@ def test_date_text_rewrites_the_date_where_it_stands():
     assert _bold(card) == "University Course on Violence"
 
 
+@pytest.mark.parametrize("text, date", [
+    ("Skills Curriculum - Example Program    2015-", "2015-"),
+    ("Skills Curriculum- Example Program 2015-", "2015-"),
+    ("Skills Curriculum, Department of Example 2015 –", "2015 –"),
+    ("Skills Curriculum, Department of Example 2015-\tWeekly sessions", "2015-"),
+    ("Skills Curriculum, Department of Example (2015-)", "2015-"),
+])
+def test_an_open_range_straight_after_the_org_is_the_cards_date(text, date):
+    """#2019: a year written after the organization with no separator is
+    no whole segment, but an open range is still the date `date_text`
+    rewrites, so the card does not print the range closed. Whether the
+    entry is a card, and its details, do not change."""
+    fields = {"program_name": "Skills Curriculum"}
+    plain = _card(text, **fields)
+    card = entry_card(text, fields, date_text=lambda slot: f"[{slot}]")
+    assert f"[{date}]" in card.text
+    assert card.has_details == plain.has_details
+
+
+@pytest.mark.parametrize("text", [
+    "Skills Curriculum, Department of Example 2015-2018",
+    "Skills Curriculum, Department of Example 2015",
+    "Skills Curriculum, Department of Example 2015 - 2018",
+    "Skills Curriculum, Department of Example 2015- Weekly sessions",
+])
+def test_a_closed_or_bare_year_after_the_org_is_not_a_date_slot(text):
+    card = entry_card(text, {"program_name": "Skills Curriculum"},
+                      date_text=lambda slot: f"[{slot}]")
+    assert "[" not in card.text
+
+
+def test_an_open_year_inside_the_head_is_not_the_cards_date():
+    """Only a date after the head and organization is the card's date."""
+    card = entry_card("Skills Curriculum 2015-, Department of Example",
+                      {"program_name": "Skills Curriculum"}, date_text=lambda slot: f"[{slot}]")
+    assert card.text == "Skills Curriculum 2015-, Department of Example"
+
+
 def test_a_field_differing_in_case_or_spacing_anchors_but_is_not_bold():
     """The anchor may match loosely; the bold is verbatim or nothing."""
     card = _card("COURSE  DIRECTOR, Example University, 2010", role="Course Director",

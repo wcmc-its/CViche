@@ -1519,6 +1519,27 @@ def test_a_cards_open_range_date_reads_present_as_the_field_path_prints_it():
     assert para.text == "Course Director, Estuarine Biology, 2013-Present, Weekly seminar"
 
 
+@pytest.mark.parametrize("text, end_date, expected", [
+    ("Skills Curriculum - Example Residency Program    2015-", "present",
+     "Skills Curriculum - Example Residency Program    2015-Present"),
+    ("Skills Curriculum, Department of Example 2015-", None,
+     "Skills Curriculum, Department of Example 2015-Present"),
+    ("Skills Curriculum, Department of Example 2015-2018", "2018",
+     "Skills Curriculum, Department of Example 2015-2018"),
+    ("Skills Curriculum, Department of Example 2015", None,
+     "Skills Curriculum, Department of Example 2015"),
+])
+def test_a_cards_open_range_after_the_org_with_no_separator_reads_present(text, end_date,
+                                                                          expected):
+    """#2019: an ongoing K3 curriculum whose year follows the organization
+    with no separator printed a bare start year, as if it had ended. A
+    closed range or a single year prints as the source writes it."""
+    entry = _entry("K3", text, program_name="Skills Curriculum", start_date="2015",
+                   end_date=end_date)
+    _gen, (para,) = _rendered_card(entry)
+    assert para.text == expected
+
+
 def test_a_cards_date_closed_by_stage4_keeps_the_sources_dash():
     """Stage 4 records an end: the field path prints a closed range, so the
     date is not rewritten to "Present"."""
