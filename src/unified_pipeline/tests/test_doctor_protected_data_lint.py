@@ -11,6 +11,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_doctor_protected_data_lint.py -p no:cacheprovider
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -834,7 +835,7 @@ def test_1223_stage_4_locates_the_entry_and_never_changes_the_count():
     """The evidence names the source entry index (what the autopsy labels and
     the harness match on); without stage 4 the same findings are unlocated.
     A spouse line under a spaced dash: since #1223 the withhold's matcher
-    claims "Married: <name>" itself, and a matcher hit is not located."""
+    claims "Married: <name>" itself."""
     appendix = [_p("T. APPENDIX"), _p("Spouse \u2013 Pat Example Lee, Esq."),
                 _p("Grandchildren \u2013 Ann Beth, Cy, Dee")]
     stage_4 = {"entries": [
@@ -864,6 +865,80 @@ def test_1223_locating_needs_a_distinctive_value_and_tolerates_a_tail_edit():
     many = {"entries": [{"element_idx_start": i, "text": long_source} for i in range(5)]}
     assert [f["evidence"] for f in lint_protected_data_in_output(edited, None, many)] == [
         ["entry 0", "entry 1", "entry 2"]]
+
+
+_ENTRY_EVIDENCE_RE = re.compile(r"entry \d+(?:\.\d+)?")
+
+
+def test_847_a_matcher_hit_names_its_source_entry_and_nothing_else_changes():
+    """A hit of the withhold's own matcher is located like an independent one:
+    the evidence is the stage-4 entry index (what `doctor_vs_autopsy.py` reads),
+    in the Appendix and in a body section. Message, severity and count are the
+    same with and without stage 4, and the evidence is an index, never the value."""
+    blocks = [_p("Husband: Pat Example, MD"), _p("T. APPENDIX"), _p("\u2022 Born January 2, 1970")]
+    stage_4 = {"entries": [
+        {"element_idx_start": 2, "text": "Committee on Example Affairs, 2001-2004"},
+        {"element_idx_start": 11, "text": "Husband:\tPat Example, MD"},
+        {"element_idx_start": 40.0, "text": "Born January 2, 1970"}]}
+    located = lint_protected_data_in_output(blocks, None, stage_4)
+    assert [f["evidence"] for f in located] == [["entry 11"], ["entry 40.0"]]
+    unlocated = lint_protected_data_in_output(blocks)
+    assert [f["evidence"] for f in unlocated] == [[], []]
+    strip = [{k: v for k, v in f.items() if k != "evidence"} for f in located]
+    assert strip == [{k: v for k, v in f.items() if k != "evidence"} for f in unlocated]
+    assert all(_ENTRY_EVIDENCE_RE.fullmatch(item) for f in located for item in f["evidence"])
+
+
+def test_847_a_numbered_appendix_line_is_located_without_the_renderers_number():
+    """Stage 6 numbers the Appendix lines it writes, and a whole-line hit
+    takes the number with it; the source entry carries no such number. A
+    number the source does carry names that entry alone, as rendered."""
+    stage_4 = {"entries": [
+        {"element_idx_start": 7, "text": "1990-present\tExample Community Church, Member"},
+        {"element_idx_start": 9, "text": "4) Sample Valley Church, Elder"},
+        {"element_idx_start": 10, "text": "Sample Valley Church, Elder"}]}
+    for rendered, located in (("12. 1990-present: Example Community Church, Member", ["entry 7"]),
+                              ("3)\t1990-present: Example Community Church, Member", ["entry 7"]),
+                              ("4) Sample Valley Church, Elder", ["entry 9"]),
+                              ("5. Sample Valley Church, Elder", ["entry 9", "entry 10"])):
+        findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p(rendered)], None, stage_4)
+        assert [f["evidence"] for f in findings] == [located], rendered
+
+
+def test_847_each_hit_of_one_paragraph_names_its_own_entry():
+    """The probe is the matched fragment, not its paragraph: two leaks the
+    renderer joined into one line trace to the two entries they came from."""
+    stage_4 = {"entries": [{"element_idx_start": 5, "text": "Date of Birth: January 2, 1970"},
+                           {"element_idx_start": 6, "text": "Husband: Pat Example, MD"}]}
+    joined = [_p("T. APPENDIX"), _p("Date of Birth: January 2, 1970; Husband: Pat Example, MD")]
+    assert [f["evidence"] for f in lint_protected_data_in_output(joined, None, stage_4)] == [
+        ["entry 5"], ["entry 6"]]
+
+
+def test_847_a_hit_no_single_entry_holds_stays_unlocated():
+    """No stage-4 text holds the rendered fragment, or the fragment is too
+    short to name one entry: the finding is reported as before, unlocated.
+    The Personal Data block's own probes (a bare date, the home-address row)
+    and the Licensure DEA probe are not traced to an entry."""
+    stage_4 = {"entries": [{"element_idx_start": 1, "text": "Born in 1970 and raised in Sampletown"},
+                           {"element_idx_start": 2, "text": "DOB: 1970"},
+                           {"element_idx_start": 3, "text": "01/02/1970"},
+                           {"element_idx_start": 4, "text": "DEA number AB1234563"}]}
+    reworded = [_p("T. APPENDIX"), _p("Date of Birth: January 2, 1970")]
+    assert [f["evidence"] for f in lint_protected_data_in_output(reworded, None, stage_4)] == [[]]
+    short = [_p("T. APPENDIX"), _p("DOB: 1970")]
+    assert [f["evidence"] for f in lint_protected_data_in_output(short, None, stage_4)] == [[]]
+    personal = [_p("PERSONAL DATA"), _t("Citizenship:\n01/02/1970")]
+    assert [f["evidence"] for f in lint_protected_data_in_output(personal, None, stage_4)] == [[]]
+    licensure = [_p("LICENSURE"), _t("DEA number: AB1234563")]
+    assert [f["evidence"] for f in lint_protected_data_in_output(licensure, None, stage_4)] == [[]]
+
+
+def test_847_a_matcher_hit_names_at_most_three_entries():
+    line = "Date of Birth: January 2, 1970"
+    many = {"entries": [{"element_idx_start": i, "text": line} for i in range(5)]}
+    findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p(line)], None, many)
+    assert [f["evidence"] for f in findings] == [["entry 0", "entry 1", "entry 2"]]
 
 
 def test_1223_a_misaligned_deleted_view_fails_loudly():
