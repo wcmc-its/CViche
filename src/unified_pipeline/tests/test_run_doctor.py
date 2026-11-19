@@ -6580,14 +6580,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (88), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (89), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 86
+    assert len(payload["findings"]) == 87
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6889,6 +6889,28 @@ def test_run_doctor_wires_stage_5d_into_dedup_drops_entry_index(tmp_path):
     payload = run_doctor(root, _UID)
     drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
     assert drops[0]["evidence"][0].startswith("entry 77: K4 (")
+
+
+def test_run_doctor_wires_stage3b_duplicate_drops_to_stage_3b(tmp_path):
+    """#2154: stage 4 skips an `is_duplicate` entry, so only the stage-3b
+    artifact holds it. Its kept copy sits before a programme line here."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage3b_duplicate_drops"]
+    path = next((root / "stage_3b_classified_entries").glob("*_classified.json"))
+    data = json.loads(path.read_text())
+    course = {"taxonomy_code": "K1", "hierarchy": ["TEACHING"],
+              "text": "Example Squid Optics Seminar (2031 - 2033, 12 sessions a year)"}
+    data["entries"] += [
+        {**course, "element_idx_start": 50, "element_idx_end": 50},
+        {"taxonomy_code": "D1", "hierarchy": ["TEACHING"], "element_idx_start": 52,
+         "element_idx_end": 52, "text": "Example Doctoral Track, Example University"},
+        {**course, "element_idx_start": 53, "element_idx_end": 53, "is_duplicate": True}]
+    path.write_text(json.dumps(data))
+    [finding] = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage3b_duplicate_drops"]
+    assert finding["severity"] == "INFO"
+    assert finding["evidence"][0].startswith("entry 53: K1 (same text as entry 50, entry 52, D1, between)")
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["stage3b_duplicate_drops"] == round(40 / 498, 2)
 
 
 def test_run_doctor_hard_fail_gate_makes_an_undeliverable_run_an_error(tmp_path):

@@ -144,6 +144,7 @@ REVIEW_FLAGS = {
     "stage6_render_warnings": "Check this section.",
     "dedup_drops": "An entry was removed as a near-duplicate.",
     "dedup_merged": "An entry was removed as a near-duplicate.",
+    "stage3b_duplicate_drops": "An entry was removed as a near-duplicate.",
     "pipe_leaks": "Citations run together: split them.",
     "table_shape": "One award split across rows: merge them.",
     "duplicate_passages": "Repeated: delete this copy.",
@@ -296,7 +297,7 @@ _YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
 _DEDUP_RE = re.compile(r"^(?:entry [^:]+: )?(?P<code>[A-Z][A-Z0-9]*) \(.*?\): "
                        r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'\u2026?$", re.DOTALL)
 #: Lints whose finding is a list of dedup drops, each a review note.
-DEDUP_LINTS = frozenset({"dedup_drops", "dedup_merged"})
+DEDUP_LINTS = frozenset({"dedup_drops", "dedup_merged", "stage3b_duplicate_drops"})
 #: stage 6's appendix_diversion messages, after the code prefix the run page
 #: strips: "2 entries diverted to the Appendix ...", "1 entry ... recovered into the Appendix".
 _DIVERTED_RE = re.compile(r"(?P<count>\d+) (?P<noun>entr(?:y|ies))\b[^.]*?(?:diverted to|recovered into) the Appendix")

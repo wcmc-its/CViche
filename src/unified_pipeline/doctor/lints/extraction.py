@@ -41,6 +41,12 @@ from unified_pipeline.core.batch_pool import make_batches
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
+from unified_pipeline.core.source_placement import (
+    APPENDIX_TAXONOMY_PREFIX,
+    SourcePlacement,
+    duplicate_key,
+    source_placement,
+)
 from unified_pipeline.core.template_boilerplate import (
     _MIN_EXACT_LEN,
     is_foreign_template_instruction,
@@ -1275,6 +1281,131 @@ def lint_dedup_merged(report: dict,
         f"{len(merged)} dedup drop(s) merged into a kept entry worded differently "
         f"— most are one record listed twice; listed for the owner to check",
         merged)]
+
+
+# --- stage3b_duplicate_drops -------------------------------------------------
+#
+# Stage 3b marks the second of two same-text entries `is_duplicate`
+# (`stage3b.classify.detect_duplicates`) and stage 4 skips it, so the entry
+# reaches no stage-6 receipt and neither dedup lint above. Most marks are one
+# record the CV wrote twice, or filed under two headings, which renders once
+# (#1435). The marks listed here are the ones a reader cannot tell from a
+# second record without the lines around them: the copy sits under the kept
+# entry's own headings, but in another group of the list or in another table
+# (#2154, FHQBHY-06: two courses a CV lists under one programme line and again
+# under a second, which stage 1b made no heading level; the second programme's
+# list rendered two courses short). Over 498 stored runs re-marked on origin/dev
+# `ddcd64b3` the rule lists 106 marks on 40 runs, every one read: 71 a
+# separate record or a field row of one, 12 one record written twice, 23
+# unclear; 48 of the 71 are one CV stored twice (S3B-DUP in
+# doctor/PRECISION.md). So it marks no defect: INFO, review-copy only.
+
+#: A citation is one work wherever the CV lists it: of the 38 S-coded marks
+#: the placement test alone would list, none read as a second record.
+_ONE_WORK_CODES = frozenset(PUBLICATION_CODES)
+#: What a page-continuation header adds to the heading it repeats
+#: ("Teaching (continued)"), as `duplicate_key` leaves it.
+_CONTINUATION_KEY_SUFFIX = "continued"
+
+
+class _MarkedDuplicate(NamedTuple):
+    """A duplicate-marked stage-3b entry, the kept entry with its text, and
+    what sets the two apart."""
+
+    dropped: Mapping
+    kept: Mapping
+    apart: str
+
+
+def _kept_twin(entries: list[dict], keys: list[str | None], position: int) -> int | None:
+    """The kept entry a marked one repeats: the nearest before it with its
+    text. Stage 3b marks the earlier copy only when it is Appendix-coded,
+    and that one is never listed."""
+    return next((i for i in range(position - 1, -1, -1)
+                 if keys[i] == keys[position] and not entries[i].get("is_duplicate")), None)
+
+
+def _repeats_its_heading(entry: Mapping) -> bool:
+    """True for a heading printed again as a line under itself, with or
+    without a continuation mark: page furniture stage 3b coded as a record."""
+    key = duplicate_key(str(entry.get("text") or ""))
+    headings = {duplicate_key(str(level)) for level in entry.get("hierarchy") or []}
+    return key in headings or key.removesuffix(_CONTINUATION_KEY_SUFFIX) in headings
+
+
+def _listable_pair(dropped: SourcePlacement, kept: SourcePlacement) -> bool:
+    """A marked record and its kept copy under the same headings, cut from
+    two separate places in the source. Not listed: an Appendix-coded or
+    uncoded line, a citation, a place or label line, a copy under other
+    headings (the same fact filed twice, #1435), and twins cut from one
+    source element, which is one line emitted twice upstream."""
+    if (not dropped.code or dropped.code.startswith(APPENDIX_TAXONOMY_PREFIX)
+            or dropped.code in _ONE_WORK_CODES or not dropped.record_shaped
+            or dropped.span is None or kept.span is None or dropped.hierarchy != kept.hierarchy):
+        return False
+    return dropped.span[1] < kept.span[0] or kept.span[1] < dropped.span[0]
+
+
+def _set_apart(entries: list[dict], position: int, twin: int) -> str | None:
+    """What stands between a marked entry and its kept copy, or None when
+    nothing does: the two are rows of two tables, or an entry of another
+    code that stage 3b kept sits between them in the list."""
+    dropped, kept = source_placement(entries[position]), source_placement(entries[twin])
+    if not _listable_pair(dropped, kept) or _repeats_its_heading(entries[position]):
+        return None
+    in_table_rows = len(dropped.span[0]) > 1 and len(kept.span[0]) > 1
+    if in_table_rows and dropped.span[0][0] != kept.span[0][0]:
+        return "in another table"
+    for entry in entries[twin + 1:position]:
+        code = entry.get("taxonomy_code")
+        if not entry.get("is_duplicate") and code != dropped.code:
+            return f"entry {entry.get('element_idx_start')}, {code}, between"
+    return None
+
+
+def _marked_duplicates_apart(entries: list[dict]) -> list[_MarkedDuplicate]:
+    """Every duplicate-marked entry `_set_apart` sets apart from its kept
+    copy, in list order. An entry with no text has no copy to find."""
+    keys = [duplicate_key(entry["text"]) if isinstance(entry.get("text"), str) else None
+            for entry in entries]
+    marked = []
+    for position, entry in enumerate(entries):
+        if not entry.get("is_duplicate") or keys[position] is None:
+            continue
+        twin = _kept_twin(entries, keys, position)
+        apart = _set_apart(entries, position, twin) if twin is not None else None
+        if apart is not None:
+            marked.append(_MarkedDuplicate(entry, entries[twin], apart))
+    return marked
+
+
+def lint_stage3b_duplicate_drops(stage3b: dict) -> list[dict]:
+    """Stage-3b duplicate marks a reader should check, listed (#2154).
+
+    INFO, every one listed: an entry stage 3b marked `is_duplicate`, so
+    stage 4 never extracted it, whose kept copy sits under the same headings
+    but in another group of the list or another table (`_set_apart`). Each
+    evidence line opens with the dropped entry's element index and is worded
+    as a dedup drop, so the review copy notes it as one. Silent on a repeat
+    with nothing of another kind between the copies, and on a list holding
+    a non-entry."""
+    entries = stage3b.get("entries") or []
+    if not all(isinstance(entry, dict) for entry in entries):
+        return []
+    evidence = [
+        f"entry {mark.dropped.get('element_idx_start')}: {mark.dropped.get('taxonomy_code')} "
+        f"(same text as entry {mark.kept.get('element_idx_start')}, {mark.apart}): "
+        f"dropped '{str(mark.dropped.get('text'))[:DEDUP_TEXT_CHARS]}' vs kept "
+        f"'{str(mark.kept.get('text'))[:DEDUP_TEXT_CHARS]}'"
+        for mark in _marked_duplicates_apart(entries)]
+    if not evidence:
+        return []
+    return [_finding(
+        "stage3b_duplicate_drops", "INFO",
+        f"{len(evidence)} duplicate(s) dropped before extraction, set apart from the kept "
+        f"copy under one heading — most are one record listed twice; listed for the owner "
+        f"to check",
+        evidence)]
 
 
 # --------------------------------------------------------------------------

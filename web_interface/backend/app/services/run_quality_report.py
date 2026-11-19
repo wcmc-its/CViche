@@ -736,8 +736,11 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: the blank cell, never a run-page row.
 #: dedup_merged (#666) lists the duplicates stage 6 merged: mostly correct
 #: merges, shown in the copy's notes so the owner can add back one that was not.
+#: stage3b_duplicate_drops (#2154) lists the same for the duplicates stage 3b
+#: drops before extraction, where the copy sits in another group of its list.
 REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts",
-                                    "mentee_field_incomplete", "dedup_merged"})
+                                    "mentee_field_incomplete", "dedup_merged",
+                                    "stage3b_duplicate_drops"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 
