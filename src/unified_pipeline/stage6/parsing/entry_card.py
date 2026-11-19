@@ -28,7 +28,9 @@ The slot rule decides whether an entry is a card:
 2. Organization. An organization field whose span follows the head across
    nothing but separator punctuation.
 3. Date. The first whole-segment date after the head (and organization), not
-   inside brackets.
+   inside brackets. A card that has none takes the first date after them
+   that ends an open range ("Example Program 2015-"), so the card can print
+   it still running (`_open_range_date`).
 4. Details. Everything else, one item per cell (a tab or stage 2's " | ").
 
 A head or an organization never crosses a cell break or a column gap.
@@ -123,7 +125,8 @@ _DATE_TOKEN = re.compile(
 _DATE_JOIN = re.compile(r'[\s\-–—,/]*(?:to|and|&)?[\s\-–—]*', re.IGNORECASE)
 # An open range's dash after its last date ("2015-", "2015 –"): part of the
 # date, or the card would print a range still running as one closed year.
-_OPEN_RANGE_DASH = re.compile(r'\s*[-–—]+(?=\s*(?:$|[,;|\t)]))')
+_OPEN_RANGE_DASHES = '-–—'
+_OPEN_RANGE_DASH = re.compile(rf'\s*[{_OPEN_RANGE_DASHES}]+(?=\s*(?:$|[,;|\t)]))')
 # The characters a whole segment may sit after, and before.
 _SEGMENT_BEFORE = frozenset(',;|\t(:.–—-')
 _SEGMENT_AFTER = frozenset(',;|\t).:–—-')
@@ -417,7 +420,21 @@ def _slots(text: str, fields: Mapping) -> _Slots | None:
         return None
     if not (org or date) and len(items) > MAX_UNDATED_DETAIL_ITEMS:
         return None
-    return _Slots(head=head, org=org, date=date, details=tuple(items))
+    return _Slots(head=head, org=org, date=date or _open_range_date(text, line_end),
+                  details=tuple(items))
+
+
+def _open_range_date(text: str, line_end: int) -> tuple[int, int] | None:
+    """The first date run at or after `line_end` that ends on an open
+    range's dash ("Example Program 2015-"), whole segment or not, or None.
+
+    A year written straight after an organization, with no separator, is
+    not a whole segment, so the slot rule finds no date; without a date slot
+    the card trims the trailing dash and prints a range still running as one
+    closed year (#2019). Taken only after the card is decided, so whether
+    the entry is a card, and its details, are what the slot rule found."""
+    return next((span for span in date_runs(text)
+                 if span[0] >= line_end and text[span[1] - 1] in _OPEN_RANGE_DASHES), None)
 
 
 def _cells(text: str) -> list[tuple[int, int]]:
