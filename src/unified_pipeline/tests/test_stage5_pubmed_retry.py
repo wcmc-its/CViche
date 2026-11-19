@@ -1396,16 +1396,17 @@ PAPER_PMID, NOTICE_PMID = '23456789', '34567890'
 
 
 def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',), year=2025,
-             volume=None, vernacular=None):
+             volume=None, vernacular=None, pages=None):
     """One PubmedArticle; `title` is raw XML, so it may hold inline markup."""
     volume_xml = f'<Volume>{volume}</Volume>' if volume else ''
+    pages_xml = f'<Pagination><MedlinePgn>{pages}</MedlinePgn></Pagination>' if pages else ''
     vernacular_xml = f'<VernacularTitle>{vernacular}</VernacularTitle>' if vernacular else ''
     names = ''.join(f'<Author><LastName>{a.rsplit(" ", 1)[0]}</LastName>'
                     f'<Initials>{a.rsplit(" ", 1)[1]}</Initials></Author>' for a in authors)
     types = ''.join(f'<PublicationType>{t}</PublicationType>' for t in pubtypes)
     return (f'<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article>'
             f'<Journal><JournalIssue>{volume_xml}<PubDate><Year>{year}</Year></PubDate></JournalIssue>'
-            f'<Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>{vernacular_xml}'
+            f'<Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>{pages_xml}{vernacular_xml}'
             f'<AuthorList>{names}</AuthorList><PublicationTypeList>{types}</PublicationTypeList>'
             f'</Article></MedlineCitation></PubmedArticle>')
 
@@ -3056,3 +3057,159 @@ def test_bare_pmcid_retry_landing_on_an_unlisted_erratum_is_not_counted(monkeypa
     assert 'enrichment_rejected' not in result
     assert (enricher.stats['erratum_records_rejected'], enricher.stats['failed_lookups'],
             enricher.stats['title_mismatches']) == (0, 1, 0)
+
+
+# ---- #2168: a title-search hit that is the article whose pages hold the
+# CV's item. The ATQYPF e194 shape, synthetic: the CV cites a discussion
+# printed inside another article's pages, under a title that swaps one word,
+# so it clears MIN_TITLE_SEARCH_OVERLAP (7 of 8 words).
+DISCUSSION_TITLE = 'Does heron banding reduce mortality along northern coasts?'
+HOLDING_TITLE = 'Does heron tracking reduce mortality along northern coasts?'
+HOLDING_PAGES = 'S41-48; discussion S57-9'
+
+
+def _paged_entry(title=DISCUSSION_TITLE, pages='S57-S59'):
+    entry = _article_entry(10, title=title)
+    entry['extracted_fields']['pages'] = pages
+    return entry
+
+
+def _paged_record(title=HOLDING_TITLE, pages=HOLDING_PAGES):
+    return _article(PAPER_PMID, title, pages=pages)
+
+
+@pytest.mark.parametrize('cv_pages, record_pages', [
+    ('S57-S59', HOLDING_PAGES),
+    ('S59', HOLDING_PAGES),
+    ('S57-S59', 'S41-48, S57-9'),
+    ('S41-S43', '41-48; discussion S41-3'),
+    ('110', '101\u2013115'),
+], ids=['discussion-range', 'record-last-page', 'comma-separated-ranges', 'first-page-number-other-prefix',
+        'en-dash-range'])
+def test_title_hit_whose_pages_hold_the_cv_item_under_another_title_is_refused(
+        tmp_path, monkeypatch, cv_pages, record_pages):
+    assert title_word_overlap(DISCUSSION_TITLE, [HOLDING_TITLE]) >= stage5.MIN_TITLE_SEARCH_OVERLAP
+    [result], _, enricher = _run_entries(tmp_path, monkeypatch, [_paged_entry(pages=cv_pages)], [
+        _hits(PAPER_PMID), _article_set(_paged_record(pages=record_pages))])
+    assert result['enrichment_status'] == 'no_identifier'  # the CV's citation, as written
+    assert 'enrichment_data' not in result
+    assert result['extracted_fields']['pages'] == cv_pages
+    assert 'pmid' not in result['extracted_fields']
+    assert enricher.stats['enriched'] == 0
+
+
+@pytest.mark.parametrize('entry, record', [
+    (_paged_entry(title='Does heron banding reduce mortality'), _paged_record(title=DISCUSSION_TITLE)),
+    (_paged_entry(title='Does heron banding reduce mortality along northern coast?'),
+     _paged_record(title=DISCUSSION_TITLE)),
+    (_paged_entry(pages='S41-S48'), _paged_record()),
+    (_paged_entry(pages='57-59'), _paged_record()),
+    (_paged_entry(pages='S70-S72'), _paged_record()),
+    (_paged_entry(pages=None), _paged_record()),
+    (_paged_entry(), _paged_record(pages=None)),
+    (_paged_entry(), _article(PAPER_PMID, HOLDING_TITLE, pages=HOLDING_PAGES, vernacular=DISCUSSION_TITLE)),
+    # The CV's own paper under a page typo inside the record's range, its
+    # title spelled another way: one letter, a hyphen, an acronym.
+    (_paged_entry(title='Tumour banding slows heron mortality along northern coasts', pages='102-9'),
+     _paged_record(title='Tumor banding slows heron mortality along northern coasts', pages='101-9')),
+    (_paged_entry(title='Coexpression of heron banding genes along northern coasts', pages='102-9'),
+     _paged_record(title='Co-expression of heron banding genes along northern coasts', pages='101-9')),
+    (_paged_entry(title='BWS flares in heron banding crews along northern coasts', pages='102-9'),
+     _paged_record(title='Black wader syndrome flares in heron banding crews along northern coasts',
+                   pages='101-9')),
+    (_paged_entry(title='Ornithologic banding slows heron mortality along northern coasts', pages='102-9'),
+     _paged_record(title='Ornithological banding slows heron mortality along northern coasts', pages='101-9')),
+    (_paged_entry(title='Heron mortality and a migratory system along northern coasts', pages='102-9'),
+     _paged_record(title='Heron mortality and a nonmigratory system along northern coasts', pages='101-9')),
+    (_paged_entry(title='Heron banding outcomes at a coastal centre', pages='102-9'),
+     _paged_record(title='Heron banding outcomes at a coastal center', pages='101-9')),
+    (_paged_entry(title='Saftey of heron banding along northern coasts', pages='102-9'),
+     _paged_record(title='Safety of heron banding along northern coasts', pages='101-9')),
+    (_paged_entry(title='CRW decline in heron banding crews along northern coasts', pages='102-9'),
+     _paged_record(title='Counts of roosting waders decline in heron banding crews along northern coasts',
+                   pages='101-9')),
+    (_paged_entry(title='Molt timing vs. alpha-plumage in heron banding crews', pages='102-9'),
+     _paged_record(title='Molt timing versus \u03b1-plumage in heron banding crews', pages='101-9')),
+    (_paged_entry(title='HK-2beta levels in heron banding crews along northern coasts', pages='102-9'),
+     _paged_record(title='Heronkinase-2\u03b2 levels in heron banding crews along northern coasts', pages='101-9')),
+    # Only the CV's first range is its item's first page: a later range
+    # inside the record's pages does not make the record another item.
+    (_paged_entry(pages='S1-S3; S57-S59'), _paged_record()),
+], ids=['cv-title-drops-words', 'plural-only', 'record-first-page', 'other-prefix', 'outside-the-record',
+        'no-cv-pages', 'no-record-pages', 'vernacular-title-is-the-cv-title', 'one-letter-spelling',
+        'hyphenated-compound', 'acronym', 'suffix-variant', 'prefix-variant', 'two-edit-spelling',
+        'transposed-letters', 'acronym-skipping-a-stopword', 'vs-versus-and-greek-letter',
+        'abbreviation-and-greek-letter', 'cv-second-range-inside-the-record'])
+def test_title_hit_is_kept_unless_inner_pages_and_a_swapped_word_both_say_another_item(
+        tmp_path, monkeypatch, entry, record):
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [entry], [_hits(PAPER_PMID), _article_set(record)])
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+
+
+@pytest.mark.parametrize('pages, ranges', [
+    ('S41-48; discussion S57-9', [('s', 41, 48), ('s', 57, 59)]),
+    ('3410-7', [('', 3410, 3417)]),
+    ('612', [('', 612, 612)]),
+    ('e301-e309, discussion', [('e', 301, 309)]),
+    (None, []),
+])
+def test_page_ranges_expand_an_abbreviated_last_page(pages, ranges):
+    assert stage5.page_ranges(pages) == ranges
+
+
+@pytest.mark.parametrize('a, b, each_adds', [
+    ('Heron banding counts', 'Heron tracking counts', True),
+    ('Heron bands along coasts', 'Heron band along coasts', False),
+    ('Heron loss along coasts', 'Heron los along coasts', True),
+    ('Heron bean along coasts', 'Heron bear along coasts', True),
+    ('Tumour banding along coasts', 'Tumor banding along coasts', False),
+    ('Coexpression of heron genes', 'Co-expression of heron genes', False),
+    ('BWS in heron crews', 'Black wader syndrome in heron crews', False),
+    ('Heron crews with BWS', 'Heron crews with black wader syndrome', False),
+    ('BWS heron banding', 'Black wader syndrome heron tracking', True),
+    ('BWS heron banding', 'Black wader syndrome heron', False),
+    ('BWS heron crews', 'Black wader syndrome heron tracking crews', False),
+    ('Ornithologic heron banding', 'Ornithological heron banding', False),
+    ('Heron banding and a migratory system', 'Heron banding and a nonmigratory system', False),
+    ('Heron coating counts', 'Heron coat counts', True),
+    ('Heron dynamic counts', 'Heron hemodynamic counts', False),
+    ('Heron cation counts', 'Heron polycation counts', True),
+    ('Heron cation counts', 'Heron dication counts', False),
+    ('Heron banding at a coastal centre', 'Heron banding at a coastal center', False),
+    ('Saftey of heron banding', 'Safety of heron banding', False),
+    ('CRW in heron crews', 'Counts of roosting waders in heron crews', False),
+    ('CRW in heron crews', 'Counts roosting waders in heron crews', False),
+    ('CRW heron banding', 'Counts of roosting waders heron tracking', True),
+    ('Heron vs gull banding counts', 'Heron versus gull banding', False),
+    ('Heron \u03b2-cells counts in gulls', 'Heron beta-cells counts', False),
+    ('Heron healthcare counts', 'Heron health care counts', False),
+    ('Heron tiger counts', 'Heron tight counts', True),
+    ('Gull HCR counts', 'Gull heron and crane rescue counts', False),
+    ('Heron TOB counts', 'Heron tally of birds counts', False),
+], ids=['swapped-word', 'plural-s', 'four-letter-s-word', 'four-letter-one-edit', 'one-letter-spelling',
+        'hyphenated-compound', 'acronym', 'acronym-at-title-end', 'acronym-and-swapped-word',
+        'acronym-and-an-added-word', 'acronym-and-a-dropped-word', 'suffix-variant', 'prefix-variant',
+        'short-word-held-by-another', 'seven-letter-word-held-by-another', 'six-letter-word-held-by-another',
+        'six-letter-word-two-edits-off', 'two-edit-spelling', 'transposed-letters', 'acronym-skipping-a-stopword',
+        'acronym-without-a-stopword', 'acronym-skipping-a-stopword-and-swapped-word', 'vs-versus',
+        'greek-letter-name', 'compound-of-short-words', 'five-letter-word-two-edits-off',
+        'acronym-skipping-and', 'acronym-keeping-a-stopword'])
+def test_titles_each_add_a_word_ignores_spelling_variants(a, b, each_adds):
+    assert stage5.titles_each_add_a_word(a, b) is each_adds
+    assert stage5.titles_each_add_a_word(b, a) is each_adds
+
+
+@pytest.mark.parametrize('a, b, within', [
+    ('centre', 'center', True),
+    ('saftey', 'safety', True),
+    ('cation', 'dication', True),
+    ('abcdef', 'abcdefgh', True),
+    ('abcdef', 'abcxyz', False),
+    ('abcdefgh', 'cdefghxy', False),
+    ('cation', 'polycation', False),
+    ('colony', 'colonies', False),
+], ids=['two-changes', 'adjacent-swap', 'two-insertions', 'two-insertions-at-the-end', 'three-changes', 'two-deletions-two-insertions',
+        'four-insertions', 'one-change-two-insertions-at-the-end'])
+def test_within_two_edits(a, b, within):
+    assert stage5._within_two_edits(a, b) is within
+    assert stage5._within_two_edits(b, a) is within

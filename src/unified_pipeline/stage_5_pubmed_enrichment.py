@@ -856,6 +856,166 @@ def record_names_another_paper(fields: dict, record: dict) -> bool:
                    for title in (record.get('title'), record.get('vernacular_title')))
 
 
+# One range of a page field: an optional letter prefix ("S", "e", "III"), the
+# first page, and an optional last page, which may be abbreviated ("S41-48").
+PAGE_RANGE_PATTERN = re.compile(r'([A-Za-z]*)(\d+)(?:\s*[-\u2013]\s*[A-Za-z]*(\d+))?')
+# A plural s is dropped from a title word longer than this before two titles
+# are compared word by word, so "response" and "responses" are one word.
+_PLURAL_MIN_CHARS = 4
+# Two title words longer than this one edit apart are one word spelled two
+# ways ("tumour", "tumor"); shorter ones are often two words ("bean", "bear").
+_ONE_EDIT_TITLE_WORD_FLOOR = 4
+# A title word that holds another of at least this many letters is that word
+# with a prefix or suffix ("ornithological", "ornithologic"; "nonmigratory",
+# "migratory"); shorter ones are often other words ("cation", "cat").
+_CONTAINED_TITLE_WORD_MIN_CHARS = 7
+# Two title words of at least this many letters two edits apart are one word
+# spelled two ways ("centre", "center"; a swapped-letter typo "saftey").
+_TWO_EDIT_TITLE_WORD_MIN_CHARS = 6
+# Words an acronym's initials skip ("CRW", "counts of roosting waders").
+_ACRONYM_SKIPPED_WORDS = frozenset({'of', 'and', 'the', 'in', 'for', 'on', 'to', 'a', 'an'})
+_VERSUS_PATTERN = re.compile(r'\bvs\b\.?', re.IGNORECASE)
+_GREEK_LETTER_NAME_PREFIXES = ('GREEK SMALL LETTER ', 'GREEK CAPITAL LETTER ')
+
+
+def page_ranges(pages: str | None) -> list[tuple[str, int, int]]:
+    """Each ';'- or ','-separated part of a page field as (lowercased prefix,
+    first page, last page). An abbreviated last page takes the first page's
+    leading digits ("S41-48" -> ('s', 41, 48)); a part with no number is
+    skipped."""
+    ranges = []
+    for part in re.split(r'[;,]', pages or ''):
+        match = PAGE_RANGE_PATTERN.search(part)
+        if not match:
+            continue
+        prefix, first, last = match.group(1).lower(), match.group(2), match.group(3) or match.group(2)
+        if len(last) < len(first):
+            last = first[:len(first) - len(last)] + last
+        ranges.append((prefix, int(first), int(last)))
+    return ranges
+
+
+def cites_pages_inside_record(cv_pages: str | None, record_pages: str | None) -> bool:
+    """Whether the CV's first page falls inside one of the record's page
+    ranges but is not the record's own first page: the CV cites pages within
+    the record, which a discussion, a reply or another short item printed
+    inside a longer article's pages also does."""
+    cv_ranges, record_ranges = page_ranges(cv_pages), page_ranges(record_pages)
+    if not cv_ranges or not record_ranges:
+        return False
+    prefix, first, _ = cv_ranges[0]
+    if (prefix, first) == record_ranges[0][:2]:
+        return False
+    return any(prefix == record_prefix and low <= first <= high
+               for record_prefix, low, high in record_ranges)
+
+
+def _singular(word: str) -> str:
+    return word[:-1] if len(word) > _PLURAL_MIN_CHARS and word.endswith('s') else word
+
+
+def _singular_title_words(title: str) -> set[str]:
+    return {_singular(word) for word in _title_words(title)}
+
+
+def _within_two_edits(a: str, b: str) -> bool:
+    """Whether `a` becomes `b` by at most two inserted, deleted or changed
+    letters; two adjacent letters swapped are two changes."""
+    if abs(len(a) - len(b)) > 2:
+        return False
+    row = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        diagonal, row[0] = row[0], i
+        for j, y in enumerate(b, 1):
+            diagonal, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, diagonal + (x != y))
+    return row[-1] <= 2
+
+
+def _greek_letter_named(char: str) -> str:
+    """A Greek letter's name ("β" -> "beta"); any other character as it is."""
+    name = unicodedata.name(char, '')
+    return name.rsplit(' ', 1)[-1].lower() if name.startswith(_GREEK_LETTER_NAME_PREFIXES) else char
+
+
+def _spelled_out(title: str) -> str:
+    """`title` with "vs" written "versus" and each Greek letter by its name
+    ("β-cells" -> "beta-cells"), so either spelling gives the same words."""
+    title = _VERSUS_PATTERN.sub('versus', title)
+    return ''.join(map(_greek_letter_named, unicodedata.normalize('NFKD', title)))
+
+
+def _same_word_spelled_another_way(word: str, other: str) -> bool:
+    """Whether two title words are one word: one edit apart past four letters
+    ("tumour", "tumor"), two apart from six ("centre", "center"), or one
+    holding the other from seven ("ornithologic", "ornithological")."""
+    shorter = min(len(word), len(other))
+    return (shorter > _ONE_EDIT_TITLE_WORD_FLOOR and _within_one_edit(word, other)
+            or shorter >= _TWO_EDIT_TITLE_WORD_MIN_CHARS and _within_two_edits(word, other)
+            or shorter >= _CONTAINED_TITLE_WORD_MIN_CHARS and (word in other or other in word))
+
+
+def _run_spellings(run: list[str]) -> tuple[str, str, str]:
+    """A run of title words written as one word, as its initials, and as its
+    initials without the words an acronym skips ("crw")."""
+    return (''.join(run), ''.join(token[0] for token in run),
+            ''.join(token[0] for token in run if token not in _ACRONYM_SKIPPED_WORDS))
+
+
+def _title_word_variants(words: set[str], other_words: set[str],
+                         other_title: str) -> tuple[set[str], set[str]]:
+    """The words of `words` that spell some of the other title's words
+    another way, and the other title's words they stand for: a word that is
+    one of `other_words` spelled another way (`_same_word_spelled_another_way`),
+    or a run of the other title's words written as one ("coexpression",
+    "co-expression") or as its initials (`_run_spellings`)."""
+    tokens = [_singular(token.lower()) for token in _folded_tokens(other_title)]
+    runs = [tokens[i:j] for i in range(len(tokens)) for j in range(i + 2, len(tokens) + 1)]
+    variants, covered = set(), set()
+    for word in words:
+        partners = {other for other in other_words if _same_word_spelled_another_way(word, other)}
+        partners.update(token for run in runs if word in _run_spellings(run) for token in run)
+        if partners:
+            variants.add(word)
+            covered |= partners
+    return variants, covered
+
+
+def titles_each_add_a_word(a: str, b: str) -> bool:
+    """Whether each title has a word the other lacks: one says something the
+    other does not, both ways, so neither is the other shortened or with a
+    subtitle added. A plural s, a spelling variant, a word with a prefix or
+    suffix added, a compound written whole or hyphenated, an acronym for
+    words the other spells out, "vs" for "versus" and a Greek letter for its
+    name are not a word the other lacks (`_title_word_variants`)."""
+    a, b = _spelled_out(a), _spelled_out(b)
+    words_a, words_b = _singular_title_words(a), _singular_title_words(b)
+    extra_a, extra_b = words_a - words_b, words_b - words_a
+    variants_a, covered_b = _title_word_variants(extra_a, extra_b, b)
+    variants_b, covered_a = _title_word_variants(extra_b, extra_a, a)
+    return bool(extra_a - variants_a - covered_a) and bool(extra_b - variants_b - covered_b)
+
+
+# A title-search hit can be the article whose pages hold the CV's item rather
+# than the item (ATQYPF e194, dev-312, #2168: a CV's supplement discussion,
+# printed on pages inside another article's record, matched that article at a
+# title overlap of 0.86, and the output printed its title, pages and PMID).
+# The overlap floor cannot refuse it, so the pages decide it together with
+# the titles. Over 4,343 title-search acceptances in 170 stored stage-5
+# outputs (2026-11-19), the CV's first page fell inside the record's pages but
+# not on its first page 11 times; 10 are the CV's own paper with a page typo
+# and a title that only adds or drops words, and the 11th is this case.
+def record_holds_another_item(fields: dict, record: dict) -> bool:
+    """Whether the CV cites pages inside the record's but not its first page
+    (`cites_pages_inside_record`) under a title that, against each of the
+    record's titles, has a word the record lacks while lacking one of the
+    record's (`titles_each_add_a_word`)."""
+    if not cites_pages_inside_record(fields.get('pages'), record.get('pages')):
+        return False
+    source_title = cv_title(fields)
+    return all(titles_each_add_a_word(source_title, title)
+               for title in (record.get('title'), record.get('vernacular_title')) if title)
+
+
 def cv_names_a_correction(entry: dict) -> bool:
     """Whether the CV's line or title calls the entry a correction."""
     fields = entry.get('extracted_fields') or {}
@@ -1573,15 +1733,17 @@ class PubMedEnricher:
     def _title_hit_passes(entry: dict, overlap: float, record: dict) -> bool:
         """Whether a title-search hit may be accepted: its title overlap
         clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the CV, its
-        year is plausible for the CV's, and the CV's year and volume do not
-        make it another paper (#2153). `_accept_record`'s reply check
+        year is plausible for the CV's, the CV's year and volume do not
+        make it another paper (#2153), and it is not the article whose
+        pages hold the CV's item (#2168). `_accept_record`'s reply check
         (#1438) cannot refuse such a hit: a record sharing a CV author is
         never taken for the item a reply answers."""
         fields = entry.get('extracted_fields') or {}
         return (overlap >= MIN_TITLE_SEARCH_OVERLAP
                 and shares_an_author(fields.get('authors'), record['authors'])
                 and plausible_publication_year(fields.get('year'), record['year'])
-                and not record_names_another_paper(fields, record))
+                and not record_names_another_paper(fields, record)
+                and not record_holds_another_item(fields, record))
 
     def _search_pmids_by_title(self, title: str) -> list[str]:
         params = {
