@@ -633,6 +633,18 @@ Lints, ranked by the severity of the failure class they catch:
                           twice, so INFO and review-copy only: the notes
                           list what went and what stayed. Every drop
                           listed. Reads the stage-6 report
+14bh. stage3b_duplicate_drops an entry stage 3b marked `is_duplicate`, which
+                          stage 4 skips, so lints 11 and 14bg never see
+                          it, whose kept copy sits under the same heading
+                          but in another group of the list or another
+                          table (#2154: two courses listed under one
+                          programme line and again under a second). Most
+                          are one record the CV wrote twice, so INFO and
+                          review-copy only, each named by its element
+                          index. Silent on a repeat with nothing of
+                          another kind between the copies, on a citation
+                          and on a copy under other headings. Reads
+                          stage 3b
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -765,6 +777,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_role_consistency,
     lint_span_count,
     lint_record_cut_in_two,
+    lint_stage3b_duplicate_drops,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -1050,6 +1063,7 @@ KNOWN_LINTS = (
     "degree_row_not_degree",
     "licensure_row_not_licence",
     "dedup_merged",
+    "stage3b_duplicate_drops",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1399,6 +1413,10 @@ LINT_PREVALENCE = {
     # dedup_merged (#666; DD-LIST in doctor/PRECISION.md): 93 of 192
     # label-store runs rendered fresh on origin/dev 500a02d6, 2026-11-17.
     "dedup_merged": 0.484,
+    # stage3b_duplicate_drops (#2154; S3B-DUP in doctor/PRECISION.md): 40 of
+    # 498 stored runs, stage 3b's marks replayed on origin/dev ddcd64b3,
+    # 2026-11-19.
+    "stage3b_duplicate_drops": 0.08,
 }
 
 
@@ -2046,6 +2064,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # The same views as dedup_drops, so the two never name the same drop.
     LintSpec("dedup_merged", lint_dedup_merged, ("stage_6_report",),
              optional=("blocks", "stage_5d")),
+    LintSpec("stage3b_duplicate_drops", lint_stage3b_duplicate_drops, ("stage_3b",)),
 )
 
 #: The views read from the stage-6 docx.

@@ -463,6 +463,18 @@ def test_a_merged_dedup_drop_is_a_note_though_it_is_info(tmp_path):
         'Kept: "2031-present Squid Anatomy Tutor, Example School"']
 
 
+def test_a_stage_3b_duplicate_drop_is_a_note_though_it_is_info(tmp_path):
+    """stage3b_duplicate_drops (#2154) words its evidence as a dedup drop,
+    so each is the same note: the section, what went and what stayed."""
+    course = "Squid Optics Seminar (2031 - 2033, 12 sessions a year)"
+    listed = _finding("stage3b_duplicate_drops", "1 duplicate(s) dropped before extraction", [
+        f"entry 53: K1 (same text as entry 50, entry 52, D1, between): dropped '{course}' vs kept '{course}'"],
+        severity="INFO")
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(listed))
+    assert _notes(out)[2:] == ["\u2022 Didactic Teaching", f'Removed: "{course}"', f'Kept: "{course}"']
+    assert _flag("stage3b_duplicate_drops") == _flag("dedup_merged")
+
+
 def test_an_info_dedup_drops_finding_stays_out_of_the_copy(tmp_path):
     """Only the review-copy-only listing is noted at INFO."""
     named_apart = _finding("dedup_drops", "1 dedup drop(s) fully covered by the kept entry", [

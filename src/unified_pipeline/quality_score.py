@@ -938,7 +938,7 @@ LINT_FIX_MINUTES = {
     ), FIX_MINUTES_CONTACT_BLOCK),
     **dict.fromkeys((
         "classified_unrendered", "dead_sections", "dedup_drops", "dedup_merged",
-        "multi_record_coverage",
+        "multi_record_coverage", "stage3b_duplicate_drops",
         "header_consumed_record", "orphaned_fragments", "section_lost", "segmentation",
         "renderer_row_missing", "segmentation_collapse", "source_line_coverage", "stage2_text_break",
         "stage2_unaccounted", "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",

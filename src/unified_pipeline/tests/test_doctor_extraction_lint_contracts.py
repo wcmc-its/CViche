@@ -107,6 +107,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     owner_pi_role_empty_tables,
     lint_span_count,
     lint_record_cut_in_two,
+    lint_stage3b_duplicate_drops,
     lint_under_extraction,
     lint_wrong_start_date,
     lint_year_not_in_source,
@@ -1133,6 +1134,185 @@ def test_dedup_merged_lists_every_drop():
               "kept_text": f"2031 Example Lecture {i}, Example City"} for i in range(8)]
     [finding] = lint_dedup_merged({"dedup_decisions": drops})
     assert len(finding["evidence"]) == 8
+
+
+# stage3b_duplicate_drops (#2154): stage-3b duplicate marks set apart from
+# their kept copy under one heading, listed.
+
+_COURSES = ["TEACHING"]
+
+
+def _classified(idx, code, text, hierarchy=_COURSES, duplicate=False):
+    """One stage-3b entry, marked `is_duplicate` as detect_duplicates writes it."""
+    entry = {"element_idx_start": idx, "element_idx_end": idx, "taxonomy_code": code,
+             "text": text, "hierarchy": list(hierarchy)}
+    return {**entry, "is_duplicate": True} if duplicate else entry
+
+
+_COURSE = "Example Squid Optics Seminar (2031 - 2033, 12 sessions a year)"
+_SECOND_PROGRAMME = _classified(13, "D1", "Example Doctoral Track, Example University")
+
+
+def _duplicate_drops(*entries):
+    return lint_stage3b_duplicate_drops({"entries": list(entries)})
+
+
+def test_stage3b_duplicate_drops_lists_a_course_under_a_second_programme_line():
+    """Two programmes list one course; the second programme's line is no
+    heading level, so both copies share a hierarchy and stage 3b drops the
+    second (#2154). Listed at INFO, led by the dropped entry's index."""
+    [finding] = _duplicate_drops(
+        _classified(10, "K1", _COURSE), _classified(11, "K1", "Example Kelp Ecology Course (2031, 8 sessions)"),
+        _SECOND_PROGRAMME, _classified(14, "K1", _COURSE, duplicate=True))
+    assert (finding["lint"], finding["severity"]) == ("stage3b_duplicate_drops", "INFO")
+    assert finding["message"].startswith("1 duplicate(s) dropped before extraction, set apart")
+    assert finding["evidence"] == [
+        f"entry 14: K1 (same text as entry 10, entry 13, D1, between): "
+        f"dropped '{_COURSE}' vs kept '{_COURSE}'"]
+
+
+def test_stage3b_duplicate_drops_lists_every_mark_against_its_nearest_kept_copy():
+    """Each year line opens a group; the third group's copy is compared with
+    the kept one, not with the second group's dropped copy."""
+    member = "Member, Example Kelp Panel"
+    [finding] = _duplicate_drops(
+        _classified(20, "O", "2031-32 Convenor, Example Tide Panel"), _classified(21, "P", member),
+        _classified(22, "O", "2032-33 Convenor, Example Tide Panel"),
+        _classified(23, "P", member, duplicate=True),
+        _classified(24, "O", "2033-34 Convenor, Example Tide Panel"),
+        _classified(25, "P", member, duplicate=True))
+    assert [line.split(": dropped")[0] for line in finding["evidence"]] == [
+        "entry 23: P (same text as entry 21, entry 22, O, between)",
+        "entry 25: P (same text as entry 21, entry 22, O, between)"]
+
+
+def test_stage3b_duplicate_drops_lists_a_row_of_another_table():
+    """A field row of a second record's table, with nothing between."""
+    part = "Example Part: | Example Investigator"
+    [finding] = _duplicate_drops(
+        _classified("30.2", "M2A", part, ["GRANTS"]),
+        _classified("32.2", "M2A", part, ["GRANTS"], duplicate=True))
+    assert finding["evidence"][0].startswith(
+        "entry 32.2: M2A (same text as entry 30.2, in another table): dropped ")
+
+
+def test_stage3b_duplicate_drops_compares_a_mark_with_the_nearest_kept_copy_not_the_first():
+    """Two kept copies: the one beside the mark is its twin, so the programme
+    line before that one sets nothing apart."""
+    assert _duplicate_drops(
+        _classified(10, "K1", _COURSE), _SECOND_PROGRAMME, _classified(14, "K1", _COURSE),
+        _classified(15, "K1", _COURSE, duplicate=True)) == []
+
+
+def test_stage3b_duplicate_drops_lists_a_mark_cut_from_before_its_kept_copy():
+    """Separate positions either way round: the marked copy's element index
+    may be the lower one."""
+    [finding] = _duplicate_drops(
+        _classified(20, "K1", _COURSE), _SECOND_PROGRAMME, _classified(14, "K1", _COURSE, duplicate=True))
+    assert finding["evidence"][0].startswith(
+        "entry 14: K1 (same text as entry 20, entry 13, D1, between): dropped ")
+
+
+def test_stage3b_duplicate_drops_cuts_both_quotes_at_the_dedup_length():
+    course = _COURSE + ", example session" * 20
+    cut = course[:extraction_lints.DEDUP_TEXT_CHARS]
+    assert len(course) > len(cut) == 300
+    [finding] = _duplicate_drops(
+        _classified(10, "K1", course), _SECOND_PROGRAMME, _classified(14, "K1", course, duplicate=True))
+    assert finding["evidence"] == [
+        f"entry 14: K1 (same text as entry 10, entry 13, D1, between): dropped '{cut}' vs kept '{cut}'"]
+
+
+def _spanning(idx, end, code, text, duplicate=False):
+    """A stage-3b entry cut from several source elements."""
+    return {**_classified(idx, code, text, duplicate=duplicate), "element_idx_end": end}
+
+
+def test_stage3b_duplicate_drops_names_each_entry_by_its_first_element():
+    """Entries cut from several elements are named by their start index, the
+    one doctor_vs_autopsy credits."""
+    [finding] = _duplicate_drops(
+        _spanning(10, 12, "K1", _COURSE), _spanning(13, 14, "D1", "Example Doctoral Track, Example University"),
+        _spanning(20, 22, "K1", _COURSE, duplicate=True))
+    assert finding["evidence"][0].startswith(
+        "entry 20: K1 (same text as entry 10, entry 13, D1, between): dropped ")
+
+
+def test_stage3b_duplicate_drops_quotes_each_copy_as_written():
+    """Copies equal under duplicate_key but written differently: each is
+    quoted verbatim, the dropped one first."""
+    written_again = _COURSE.upper().replace(" ", "  ", 1)
+    [finding] = _duplicate_drops(
+        _classified(10, "K1", _COURSE), _SECOND_PROGRAMME,
+        _classified(14, "K1", written_again, duplicate=True))
+    assert finding["evidence"] == [
+        f"entry 14: K1 (same text as entry 10, entry 13, D1, between): "
+        f"dropped '{written_again}' vs kept '{_COURSE}'"]
+
+
+@pytest.mark.parametrize("entries", [
+    # A continuation heading printed again as a line under itself.
+    [_classified(10, "K1", "Teaching (continued)", ["TEACHING (CONTINUED)"]),
+     _classified(13, "D1", "Example Doctoral Track, Example University", ["TEACHING (CONTINUED)"]),
+     _classified(14, "K1", "TEACHING (CONTINUED)", ["TEACHING (CONTINUED)"], duplicate=True)],
+    # An exact repeat, nothing between.
+    [_classified(10, "K1", _COURSE), _classified(11, "K1", _COURSE, duplicate=True)],
+    # A kept copy of another code, nothing between: the copy is not what stands between.
+    [_classified(10, "K2", _COURSE), _classified(11, "K1", _COURSE, duplicate=True)],
+    # A kept copy with no source position to compare.
+    [_classified(None, "K1", _COURSE), _SECOND_PROGRAMME, _classified(14, "K1", _COURSE, duplicate=True)],
+    # A whole element and a table row, nothing between: not two tables.
+    [_classified(30, "M2A", "Example Part: | Example Investigator", ["GRANTS"]),
+     _classified("32.2", "M2A", "Example Part: | Example Investigator", ["GRANTS"], duplicate=True)],
+    [_classified("30.2", "M2A", "Example Part: | Example Investigator", ["GRANTS"]),
+     _classified(32, "M2A", "Example Part: | Example Investigator", ["GRANTS"], duplicate=True)],
+    # Only entries of its own code between.
+    [_classified(10, "K1", _COURSE), _classified(11, "K1", "Example Kelp Ecology Course (2031, 8 sessions)"),
+     _classified(12, "K1", _COURSE, duplicate=True)],
+    # What stands between is itself a dropped copy: the tail of a block written twice.
+    [_classified(9, "S8", "Example A. Example poster. Example Meeting, Example City, 2031."),
+     _classified(10, "K1", _COURSE),
+     _classified(11, "S8", "Example A. Example poster. Example Meeting, Example City, 2031.", duplicate=True),
+     _classified(12, "K1", _COURSE, duplicate=True)],
+    # A citation is one work wherever it is listed.
+    [_classified(10, "S1", "Example A, Sample B. Example findings. Example Journal. 2031;1:2-3."),
+     _SECOND_PROGRAMME,
+     _classified(14, "S1", "Example A, Sample B. Example findings. Example Journal. 2031;1:2-3.",
+                 duplicate=True)],
+    # An Appendix-coded line.
+    [_classified(10, "T", _COURSE), _SECOND_PROGRAMME, _classified(14, "T", _COURSE, duplicate=True)],
+    # The same fact under another heading renders once (#1435).
+    [_classified(10, "K1", _COURSE), _SECOND_PROGRAMME,
+     _classified(14, "K1", _COURSE, ["OTHER TEACHING"], duplicate=True)],
+    # A place line a CV repeats as a sub-heading.
+    [_classified(10, "D3", "Example University, Example College"), _SECOND_PROGRAMME,
+     _classified(14, "D3", "Example University, Example College", duplicate=True)],
+    # One source element emitted twice upstream.
+    [_classified(10, "K1", _COURSE), _SECOND_PROGRAMME, _classified(10, "K1", _COURSE, duplicate=True)],
+    # A heading printed again as a page-continuation line.
+    [_classified(10, "K1", "Teaching (continued)"), _SECOND_PROGRAMME,
+     _classified(14, "K1", "TEACHING (CONTINUED)", duplicate=True)],
+    # Two rows of one table.
+    [_classified("30.2", "M2A", "Example Part: | Example Investigator"),
+     _classified("30.9", "M2A", "Example Part: | Example Investigator", duplicate=True)],
+    # A heading printed again as it stands.
+    [_classified(10, "K1", "Teaching"), _SECOND_PROGRAMME,
+     _classified(14, "K1", "TEACHING", duplicate=True)],
+    # A mark with no kept copy before it.
+    [_SECOND_PROGRAMME, _classified(14, "K1", _COURSE, duplicate=True)],
+    # A second copy stage 3b kept.
+    [_classified(10, "K1", _COURSE), _SECOND_PROGRAMME, _classified(14, "K1", _COURSE)],
+    # A mark with no source position to compare.
+    [_classified(10, "K1", _COURSE), _SECOND_PROGRAMME, _classified(None, "K1", _COURSE, duplicate=True)],
+    # A mark with no code, and one with no text after a kept entry with none.
+    [_classified(9, "K1", None), _classified(10, "K1", _COURSE), _SECOND_PROGRAMME,
+     _classified(14, None, _COURSE, duplicate=True), _classified(15, "K1", None, duplicate=True)],
+    # A list holding a non-entry.
+    [_classified(10, "K1", _COURSE), _SECOND_PROGRAMME, _classified(14, "K1", _COURSE, duplicate=True),
+     "not an entry"],
+])
+def test_stage3b_duplicate_drops_stays_silent(entries):
+    assert _duplicate_drops(*entries) == []
 
 
 def test_dedup_drops_record_rule_drop_skips_the_coverage_warn_not_the_name_info():
