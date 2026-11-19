@@ -402,6 +402,9 @@ _LOCATOR_MIN_CHARS = 8
 _LOCATOR_PROBE_CHARS = 40
 #: The harness (`doctor_vs_autopsy.py`) reads at most this many entry indices.
 _LOCATED_MAX = 3
+#: The number stage 6 writes before an Appendix line ("12. "). It is the
+#: renderer's, so the source entry's text does not carry it.
+_RENDERED_LIST_NUMBER_RE = re.compile(r"^\s*\d{1,4}[.)][ \t]+")
 
 
 def _alnum(text: str) -> str:
@@ -449,6 +452,18 @@ def _locate_entries(value: str, entry_texts: list[tuple[int | float, str]]) -> l
         return []
     probe = value[:_LOCATOR_PROBE_CHARS]
     return [f"entry {idx}" for idx, text in entry_texts if probe in text][:_LOCATED_MAX]
+
+
+def _locate_rendered(fragment: str, entry_texts: list[tuple[int | float, str]]) -> list[str]:
+    """`entry N` for the stage-4 entries a rendered fragment came from: the
+    fragment as rendered, else without the list number stage 6 put before it.
+    [] when no single source text holds it (a table row the renderer composed,
+    a value the Personal Data block took from the contact fields)."""
+    for probe in (fragment, _RENDERED_LIST_NUMBER_RE.sub("", fragment, count=1)):
+        located = _locate_entries(_alnum(probe), entry_texts)
+        if located:
+            return located
+    return []
 
 
 def _independent_findings(text: str, deleted_text: str, claimed: list[tuple[int, int]],
@@ -528,10 +543,10 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]],
 
     `deleted_blocks` is the same document's tracked-deletion view
     (`docx_body_blocks(..., deleted=True)`, block for block); the independent
-    shapes scan it as well as the accepted text. `stage_4` only locates an
-    independent hit (its finding's evidence names the source entry index); it
-    never adds or removes a finding, so the scorer, which passes none, counts
-    the same hits.
+    shapes scan it as well as the accepted text. `stage_4` only locates a
+    hit (its finding's evidence names the source entry index, never the
+    value); it never adds or removes a finding, so the scorer, which passes
+    none, counts the same hits.
 
     The withheld notice paragraph (`PII_REDACTED_NOTICE`) is skipped: it
     names categories, and a category name that ever coincides with a label
@@ -571,7 +586,8 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]],
             findings.append(_finding(
                 "protected_data_in_output", "ERROR",
                 f"protected personal data ({match.category}) found in {where} "
-                f"-- value withheld from this finding"))
+                f"-- value withheld from this finding",
+                _locate_rendered(stripped[match.start:match.end], entry_texts)))
 
         if section in (_PERSONAL_DATA_SECTION, _APPENDIX_SECTION):
             findings.extend(_independent_findings(
