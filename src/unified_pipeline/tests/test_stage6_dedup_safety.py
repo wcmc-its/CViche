@@ -45,14 +45,17 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _first_author_names,
     _is_ad_hoc,
     _lists_name,
+    _lone_numbers,
     _names_a_sibling,
     _names_record,
     _narrower_committee,
+    _numbers_apart,
     _occasions_apart,
     _one_slip_apart,
     _other_award_name,
     _other_journal_same_row,
     _other_series_member,
+    _other_talk_title,
     _paired_only_by_shape_a,
     _part_numbers,
     _place_only_event,
@@ -3985,3 +3988,254 @@ def test_twins_under_two_sub_headings_outside_the_mentee_codes_still_render_once
     # #1435: a course under two teaching lists is one course.
     rows = [_roster_row(350, _THESIS_ROSTER, code or "N3B"), _roster_row(470, _EXAM_ROSTER, code or "N3B")]
     assert len(_roster_drops(*rows, code=code)) == 1
+
+
+# ---------- #666 (BRAQDE): a number that names which one; two talk titles.
+
+def test_two_rows_apart_only_by_a_one_digit_number_are_kept():
+    # One coaching row per age group: "5" is not a significant word, so every
+    # word of one row is in the other.
+    five = _entry("T", "Gizmo Valley Soccer Club, volunteer coach, 5 year olds")
+    six = _entry("T", "Gizmo Valley Soccer Club, volunteer coach, 6 year olds")
+    assert _kept_both("T", six, five)
+
+
+def test_an_undated_copy_of_a_dated_row_with_the_same_number_still_drops():
+    # The chained shape: the undated "6" row is the dated "6" row's copy and
+    # goes; the "5" row is another age group and stays.
+    five = _entry("T", "Gizmo Valley Soccer Club, volunteer coach, 5 year olds")
+    six = _entry("T", "Gizmo Valley Soccer Club, volunteer coach, 6 year olds")
+    dated_six = _entry("T", "2031  Gizmo Valley Soccer Club, volunteer coach, 6 year olds")
+    rows = [five, six, dated_six]
+    result = deduplicate_entries(list(rows), code="T", document=list(rows))
+    assert result == [five, dated_six]
+
+
+def test_one_award_for_two_years_of_a_programme_is_two_awards():
+    kept = _entry("H", "Example Gizmo Team Award Year 2, School of Gizmos\t2029",
+                  award_name="Example Gizmo Team Award Year 2",
+                  granting_body="School of Gizmos", date="2029")
+    dropped = _entry("H", "Example Gizmo Team Award Year 1, School of Gizmos",
+                     award_name="Example Gizmo Team Award Year 1",
+                     granting_body="School of Gizmos", date=None)
+    assert _kept_both("H", dropped, kept)
+
+
+@pytest.mark.parametrize("dropped_text, kept_text", [
+    # a copy that leaves the number out may be the same record: doubt drops
+    ("Example Award Year 1, School of Gizmos", "Example Award, School of Gizmos 2029"),
+    ("Example Award, School of Gizmos", "Example Award Year 1, School of Gizmos 2029"),
+    # the same number on both
+    ("Example Award Year 1, School of Gizmos", "Example Award Year 1, School of Gizmos 2029"),
+    # a kept listing names both
+    ("Example Award Year 1, Gizmos", "Example Award Year 1 and Year 2, Gizmos"),
+    # one count written two ways (`_counts` reads counts)
+    ("Widget Clinic Elective, 1 week, Gizmo Hall", "Widget Clinic Elective, 7 days, Gizmo Hall"),
+])
+def test_numbers_that_do_not_tell_two_records_apart(dropped_text, kept_text):
+    assert not _numbers_apart(dropped_text, kept_text)
+
+
+@pytest.mark.parametrize("text", [
+    "Example talk, Gizmo Hall, May 6, 2029",           # a day of a month
+    "Example talk, Gizmo Hall, 6 June 2029",
+    "Quill AB. The squid lens. Example J, vol 3, pp 1-9",  # volume, pages
+    "Quill AB. The squid lens. Example J, no 4, p 7",
+    "Widget Clinic Elective, 2 hours, Gizmo Hall",     # a count with its unit
+    "Example Grant 5 R01 AB123456, Gizmo Hall",         # part of an identifier
+    "1. Example talk, Gizmo Hall",                      # a list number
+    "Example talk (3), Gizmo Hall",
+    "Example rating 4.5 of 5.0, Gizmo Hall",           # decimals
+    "Example course, sessions 1-3, Gizmo Hall",        # a range
+    "Annual direct costs: | USD 7,500",                # a thousands separator
+    "Example Prize - 5, Gizmo Hall",                   # after a dash or a colon
+    "Example Award: 5, Gizmo Hall",
+])
+def test_a_date_page_volume_count_identifier_or_list_number_is_not_a_lone_number(text):
+    assert _lone_numbers(text) == set()
+
+
+@pytest.mark.parametrize("text, numbers", [
+    ("Gizmo Valley Soccer Club, volunteer coach, 5 year olds", {"5"}),
+    ("Example Gizmo Team Award Year 2, School of Gizmos\t2029", {"2"}),
+    ("Example Award Year 1 and Year 2, Gizmos", {"1", "2"}),
+    ("Example Award, Year 3", {"3"}),
+])
+def test_lone_numbers(text, numbers):
+    assert _lone_numbers(text) == numbers
+
+
+def _committee_talk(title: str) -> dict:
+    venue = ("Example Society of Widgetry (ESW) Committee on Safety Standards, "
+             "Springfield, Exampleland")
+    return _entry("R", f"December 2031 {title}, {venue}",
+                  title=title, location="Springfield, Exampleland", date="2031-12",
+                  event_name="Example Society of Widgetry (ESW) Committee on Safety "
+                             "Standards", role=None)
+
+
+def test_two_talks_at_one_venue_in_one_month_with_other_titles_are_kept():
+    # Every word of the shorter row is in the longer one (the title's words
+    # recur in the committee's name), and the shorter title has two words, too
+    # few for `deduplicate_entries`' own different-titles check.
+    kept = _committee_talk("Gizmos in Widgetry (Northern Edition)")
+    dropped = _committee_talk("Safety in Widgetry")
+    assert _kept_both("R", dropped, kept)
+
+
+def test_one_talk_with_its_title_reworded_still_drops():
+    kept = _committee_talk("Gizmos in Widgetry (Northern Edition)")
+    dropped = _committee_talk("Gizmos in Widgetry")
+    assert not _kept_both("R", dropped, kept)
+
+
+@pytest.mark.parametrize("dropped_title", [
+    # a short title the kept row states beside its longer one
+    "Gizmos",
+    # a talk's kind, which the kept row states beside its title
+    "Keynote address",
+])
+def test_a_talk_title_the_kept_row_states_still_drops(dropped_title):
+    kept = _committee_talk("Gizmos: Northern and Central Widgetry")
+    kept["text"] = kept["text"].replace("December 2031 ", "December 2031 Keynote address, ")
+    kept["extracted_fields"]["role"] = "Keynote address"
+    dropped = _committee_talk(dropped_title)
+    assert not _kept_both("R", dropped, kept)
+
+
+def test_a_talk_title_is_read_from_both_fields():
+    kept = _committee_talk("Gizmos in Widgetry (Northern Edition)")
+    dropped = _committee_talk("Safety in Widgetry")
+    assert _other_talk_title("R", dropped, kept)
+    assert not _other_talk_title("R", {**dropped, "extracted_fields": {"title": None}}, kept)
+    assert not _other_talk_title("R", {**dropped, "extracted_fields": {"title": "the"}}, kept)
+    assert not _other_talk_title("R", dropped, {**kept, "extracted_fields": {"title": None}})
+    assert not _other_talk_title("R", dropped, {**kept, "extracted_fields": {}})
+    assert not _other_talk_title("R", _committee_talk("Safety in Widgetry Today"),
+                                 _committee_talk("Safety in Widgetry"))
+    assert not _other_talk_title("S3", dropped, kept)
+
+
+def test_two_talk_titles_sharing_a_quarter_of_their_words_are_kept():
+    # One of four title words shared: at the different-titles bound itself.
+    kept = _committee_talk("Gizmos Northern Edition")
+    dropped = _committee_talk("Safety Gizmos")
+    assert _other_talk_title("R", dropped, kept)
+    assert _kept_both("R", dropped, kept)
+
+
+def test_two_talk_titles_sharing_two_of_five_words_still_drop():
+    # Neither title stands word for word in the other row, so only the share
+    # (0.4, over the bound) tells this one talk listed twice.
+    kept = _committee_talk("Northern Gizmos Safety Sprockets")
+    dropped = _committee_talk("Gizmos Safety Widgetry")
+    assert not _other_talk_title("R", dropped, kept)
+    assert not _kept_both("R", dropped, kept)
+
+
+@pytest.mark.parametrize("dropped_title", ["Safety Standards", "Committee"])
+def test_a_talk_title_that_recurs_in_the_shared_venue_is_another_talk(dropped_title):
+    # The dropped title stands word for word in the venue both rows name, not
+    # beside the kept row's own title.
+    kept = _committee_talk("Gizmos for Northern Sprockets")
+    dropped = _committee_talk(dropped_title)
+    assert _other_talk_title("R", dropped, kept)
+    assert _kept_both("R", dropped, kept)
+
+
+@pytest.mark.parametrize("event_name", [
+    "EXAMPLE SOCIETY OF WIDGETRY (ESW) COMMITTEE ON SAFETY STANDARDS",
+    "Example Society of Widgetry (ESW)  Committee on Safety  Standards",
+], ids=["other-case", "other-spacing"])
+def test_the_shared_venue_is_cut_whatever_its_case_or_spacing(event_name):
+    # Stage 4's venue field may differ from the row text in case or spacing.
+    rows = [_committee_talk("Gizmos for Northern Sprockets"), _committee_talk("Safety Standards")]
+    for row in rows:
+        row["extracted_fields"]["event_name"] = event_name
+    assert _other_talk_title("R", rows[1], rows[0])
+
+
+@pytest.mark.parametrize("unnamed", ["dropped", "kept"])
+def test_the_shared_venue_is_cut_when_only_one_row_names_it(unnamed):
+    # Stage 4 may name the venue on one row only; it is still the venue both
+    # rows print.
+    rows = {"kept": _committee_talk("Gizmos for Northern Sprockets"),
+            "dropped": _committee_talk("Safety Standards")}
+    rows[unnamed]["extracted_fields"]["event_name"] = None
+    assert _other_talk_title("R", rows["dropped"], rows["kept"])
+
+
+@pytest.mark.parametrize("kind, location", [
+    ("Panel Chairman", "MA"),
+    ("Keynote address", "ES"),
+])
+def test_a_short_venue_value_is_not_cut_out_of_a_longer_word(kind, location):
+    # The kept row states the dropped title (the talk's kind) beside its own;
+    # a two-letter location is cut out only where it stands as a word, never
+    # out of "Chairman" or "address".
+    def talk(title: str, text_title: str) -> dict:
+        row = _committee_talk(title)
+        row["text"] = (f"December 2031 {text_title}, Example Society of Widgetry (ESW) "
+                       f"Committee on Safety Standards, Springfield, {location}")
+        row["extracted_fields"]["location"] = location
+        return row
+    title = "Gizmos: Northern and Central Widgetry"
+    kept = talk(title, f"{kind}, {title}")
+    kept["extracted_fields"]["role"] = kind
+    dropped = talk(kind, kind)
+    assert not _other_talk_title("R", dropped, kept)
+    assert not _kept_both("R", dropped, kept)
+
+
+@pytest.mark.parametrize("field, value, dropped_title", [
+    ("location", "Springfield, Exampleland", "Exampleland"),
+    ("host_organization", "Example Widget Academy", "Widget Academy"),
+])
+def test_a_talk_title_that_recurs_only_in_another_venue_field_is_another_talk(
+        field, value, dropped_title):
+    # The dropped title stands in the kept row's text only inside the
+    # location or the host's name, not inside the event name.
+    def talk(title: str) -> dict:
+        row = _committee_talk(title)
+        if field == "host_organization":
+            row["text"] += f", {value}"
+            row["extracted_fields"]["host_organization"] = value
+        return row
+    kept = talk("Gizmos for Northern Sprockets")
+    dropped = talk(dropped_title)
+    assert dropped_title.lower() not in kept["extracted_fields"]["event_name"].lower()
+    assert _other_talk_title("R", dropped, kept)
+    assert _kept_both("R", dropped, kept)
+
+
+@pytest.mark.parametrize("value", [["Keynote"], {"name": "Keynote"}, 7, None])
+def test_a_venue_value_that_is_not_text_is_not_cut(value):
+    # Stage 4 has written a list for a location; only a string is a venue
+    # name to cut. A number cut out of the kept text would hide the "7" of
+    # the dropped title there.
+    kept = _committee_talk("Gizmos: Northern and Central Widgetry")
+    kept["text"] = kept["text"].replace("December 2031 ", "December 2031 Keynote 7, ")
+    kept["extracted_fields"]["role"] = "Keynote 7"
+    dropped = _committee_talk("Keynote 7")
+    for row in (kept, dropped):
+        row["extracted_fields"]["location"] = value
+    assert not _other_talk_title("R", dropped, kept)
+    assert not _kept_both("R", dropped, kept)
+
+
+def test_two_talk_titles_sharing_two_of_seven_words_still_drop():
+    # 2/7 is over the different-titles bound (a quarter) and under 0.3.
+    kept = _committee_talk("Northern Gizmos Sprockets Kinetics Ratchets")
+    dropped = _committee_talk("Gizmos Sprockets Safety Widgetry")
+    assert not _other_talk_title("R", dropped, kept)
+    assert not _kept_both("R", dropped, kept)
+
+
+def test_a_number_the_kept_row_lacks_beside_one_it_names_is_apart():
+    # The dropped row names "1" and "2", the kept row "1" only: not a subset.
+    assert _numbers_apart("Example Award Year 1 and Year 2, Gizmos",
+                          "Example Award Year 1, Gizmos")
+
+
+def test_a_lone_number_before_a_semicolon_is_read():
+    assert _lone_numbers("Example Cohort 2; Widget Program") == {"2"}
