@@ -2321,3 +2321,33 @@ def test_content_filter_fallback_warning_names_the_stage(
 def test_resolve_call_config_carries_the_stage_for_provider_log_lines() -> None:
     from unified_pipeline import llm_client
     assert llm_client._resolve_call_config("stage_4", {})["stage"] == "stage_4"
+
+
+HAIKU_5_5 = "us.anthropic.claude-haiku-5-5"
+
+
+def test_haiku_5_5_is_sent_no_sampling_params_and_keeps_its_own_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2172: Haiku 5.5 400s on a temperature, and the doctor's model review was
+    measured with its thinking at the model default, so neither field is sent."""
+    fake = _FakeBedrockClient([_converse_response("hi")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    bedrock._call_bedrock(HAIKU_5_5, [{"role": "user", "content": "hi"}], 0.0,
+                          response_format=None, max_tokens=None, enable_prompt_caching=False)
+
+    sent = fake.calls[0]
+    assert "temperature" not in sent["inferenceConfig"]
+    assert "additionalModelRequestFields" not in sent
+
+
+def test_haiku_5_5_is_priced_and_a_long_prompt_bills_at_the_long_rates() -> None:
+    """Haiku 5.5's list price is $0.10 / $0.50, and five times that for a call
+    whose prompt passes 100K tokens, cached ones included; billed at 1.1x."""
+    short = pipeline_config.calculate_cost(50_000, 10_000, model=HAIKU_5_5, provider="bedrock",
+                                           cache_read_tokens=50_000)
+    assert short == pytest.approx((50_000 * 0.11 + 10_000 * 0.55 + 50_000 * 0.11 * 0.1) / 1_000_000)
+    long = pipeline_config.calculate_cost(
+        10_000, 1_000, model=HAIKU_5_5, provider="bedrock", cache_read_tokens=95_000)
+    assert long == pytest.approx((10_000 * 0.55 + 1_000 * 2.75 + 95_000 * 0.55 * 0.1) / 1_000_000)

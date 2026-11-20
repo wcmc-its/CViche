@@ -929,3 +929,29 @@ def test_a_template_rule_is_an_uncapped_comment_on_its_slot_listed_in_the_map(tm
     assert json.loads(rc.comment_map_path(out).read_text(encoding="utf-8")) == [{
         "comment_id": 0, "lint": tr.TEMPLATE_RULE_LINT, "shape": "max_entries:Abstracts",
         "severity": None, "entry_index": None}]
+
+
+def test_a_model_review_finding_is_a_comment_on_the_output_text_it_quotes(tmp_path):
+    """#2172: lint 14bi is INFO and review-copy only; what the model says is the comment."""
+    message = "May not match your CV: The output gives 1912-1914; the CV says 1911-1914."
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("model_review", message, [GRANT[:40], "Zebrafish Fin Regrowth Study, 1911-1914", "entry 31"],
+                 severity="INFO")))
+    assert n == 1 and _comments(out) == [(message, GRANT)]
+
+
+def test_a_model_review_finding_with_nothing_on_the_page_is_a_note_quoting_the_cv(tmp_path):
+    message = "May be missing from the document: no entry for this award."
+    lost = "Example Teaching Award, 2016"
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("model_review", message, [lost, "entry 44"], severity="INFO")))
+    assert n == 1 and _comments(out) == []
+    assert _notes(out) == [f"{rc.NOTE_TITLES['model_review']} (1)", rc.MODEL_REVIEW_INSTRUCTION,
+                           f'• {message} Your CV: "{lost}"']
+
+
+def test_how_much_the_model_review_left_unchecked_stays_off_the_copy(tmp_path):
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("model_review", "model review: 2 of 20 source chunks not checked (the call failed)",
+                 ["RuntimeError"], severity="INFO")))
+    assert n == 0 and _comments(out) == [] and _notes(out) == []

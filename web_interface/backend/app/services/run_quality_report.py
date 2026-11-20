@@ -738,9 +738,12 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: merges, shown in the copy's notes so the owner can add back one that was not.
 #: stage3b_duplicate_drops (#2154) lists the same for the duplicates stage 3b
 #: drops before extraction, where the copy sits in another group of its list.
+#: model_review (lint 14bi) is a model's reading of the document: about four
+#: in five of its findings are real (PRECISION.md MR-V2), so each is a comment
+#: on the output text it quotes or a review note, never a run-page row.
 REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts",
                                     "mentee_field_incomplete", "dedup_merged",
-                                    "stage3b_duplicate_drops"})
+                                    "stage3b_duplicate_drops", "model_review"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 

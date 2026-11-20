@@ -6580,14 +6580,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (89), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (90), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 87
+    assert len(payload["findings"]) == 88
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6601,11 +6601,15 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
     root = _build_clean_run(tmp_path)
     payload = run_doctor(root, _UID)
     assert set(payload) == {"document_uid", "root", "artifacts", "findings",
-                            "counts", "worst_severity", "metrics", "lint_precision"}
+                            "counts", "worst_severity", "metrics", "lint_precision",
+                            "model_review"}
+    assert payload["model_review"] is None  # off by default: no model call, no cost
     # #819: one lint_precision entry per lint key that fired, no more.
     assert set(payload["lint_precision"]) == {f["lint"] for f in payload["findings"]}
     assert all(v is not None for v in payload["artifacts"].values())
-    assert not any("skipped" in f["message"] for f in payload["findings"])
+    # 14bi is off unless the caller pays for it, and says so in its one skip.
+    assert [f["message"] for f in payload["findings"] if "skipped" in f["message"]] == [
+        "skipped: model review off"]
     assert payload["counts"]["ERROR"] == 0
     assert payload["counts"]["WARN"] == 0
     assert payload["worst_severity"] == "INFO"
@@ -11017,3 +11021,69 @@ def test_open_end_unsupported_prevalence_is_the_measured_rate():
     """Measured 2026-11-04 (OEU-1 in doctor/PRECISION.md): 1 of 471 fresh renders."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["open_end_unsupported"] == round(1 / 471, 3)
+
+
+def test_run_doctor_records_the_model_review_off_by_default(tmp_path):
+    """#2172: lint 14bi calls a model, so only a caller that passes
+    model_review=True pays for it; every other caller sees its skip."""
+    payload = run_doctor(_build_clean_run(tmp_path), _UID)
+    [review] = [f for f in payload["findings"] if f["lint"] == "model_review"]
+    assert review["status"] == "skipped" and review["reason"] == "off"
+    assert payload["model_review"] is None
+
+
+def test_run_doctor_wires_the_model_review_to_stage_2_and_the_docx(tmp_path, monkeypatch):
+    """On, the review reads stage 2 and the rendered docx, and the report says
+    what its calls cost (the orchestrator adds that to the run's total)."""
+    import unified_pipeline.llm_client as llm_client
+    from unified_pipeline.doctor.lints.model_review import MODEL_REVIEW_STAGE, REVIEW_PROMPT_SHA256
+
+    seen = []
+
+    def fake_call(stage, messages, response_format=None, **kwargs):
+        seen.append((stage, messages))
+        claims = [{"idx": ["E2"], "kind": "misplaced", "output_quote": _GRANT_TEMPLETON[:40],
+                   "source_quote": _GRANT_TEMPLETON[:40], "why": "A current grant listed as pending."}]
+        return {"content": json.dumps({"findings": claims}), "cost": 0.002, "prompt_tokens": 900,
+                "completion_tokens": 40, "cache_read_tokens": 0, "cache_write_tokens": 850}
+
+    monkeypatch.setattr(llm_client, "call_llm", fake_call)
+    payload = run_doctor(_build_clean_run(tmp_path), _UID, model_review=True)
+    [finding] = [f for f in payload["findings"] if f["lint"] == "model_review"]
+    assert finding["severity"] == "INFO" and finding["evidence"][-1] == "entry 2"
+    [(stage, messages)] = seen
+    assert stage == MODEL_REVIEW_STAGE
+    assert "[O" in messages[0]["content"] and "Pending Funding" in messages[0]["content"]
+    assert "[E2]" in messages[1]["content"]
+    assert payload["model_review"] == {
+        "stage": MODEL_REVIEW_STAGE, "prompt_sha256": REVIEW_PROMPT_SHA256, "cost": 0.002,
+        "prompt_tokens": 900, "completion_tokens": 40, "cache_read_tokens": 0, "cache_write_tokens": 850}
+
+
+def test_read_docx_review_text_keeps_empty_cells_so_columns_line_up(tmp_path):
+    """#2172: dropping an empty cell moved a year under the Number header and the
+    model read it as a licence number; a merged cell repeats in python-docx and is
+    shown once."""
+    from unified_pipeline.run_doctor import read_docx_review_text
+
+    doc = Document()
+    doc.add_paragraph("Licensure")
+    doc.add_paragraph("")
+    table = doc.add_table(rows=2, cols=3)
+    for cell, text in zip(table.rows[0].cells, ("State", "Number", "Date of issue"), strict=True):
+        cell.text = text
+    table.rows[1].cells[0].text = "Example State"
+    table.rows[1].cells[2].text = "2008"
+    note = doc.add_table(rows=1, cols=3)
+    merged = note.rows[0].cells[0].merge(note.rows[0].cells[1])
+    merged.text = "Spans two columns"
+    note.rows[0].cells[2].text = "Third"
+    path = tmp_path / "out.docx"
+    doc.save(path)
+
+    assert read_docx_review_text(str(path)).splitlines() == [
+        "[O0] Licensure",
+        "[O2.0] | State | Number | Date of issue |",
+        "[O2.1] | Example State |  | 2008 |",
+        "[O3.0] | Spans two columns | Third |",
+    ]

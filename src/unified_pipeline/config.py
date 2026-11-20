@@ -66,6 +66,10 @@ WEB_OUTPUT_BASE = PROJECT_ROOT / "web_interface" / "outputs"
 # `model` (calculate_cost, _model_io_rates).
 DEFAULT_MODEL = "us.anthropic.claude-sonnet-5"
 
+#: Input tokens in one call above which a model with a "long_prompt" row in
+#: PRICING bills that call at those rates (Haiku 5.5: 100K).
+LONG_PROMPT_TOKENS = 100_000
+
 # LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {
     "bedrock": {
@@ -88,6 +92,14 @@ PRICING = {
         "anthropic.claude-haiku-4-5": {
             "input": 1.100,
             "output": 5.500,
+        },
+        # Haiku 5.5 (the doctor's model review): $0.10 / $0.50 list, x1.1. A
+        # prompt over LONG_PROMPT_TOKENS input tokens (uncached + cache read +
+        # cache write) bills every token of that call at the long rates.
+        "anthropic.claude-haiku-5-5": {
+            "input": 0.110,
+            "output": 0.550,
+            "long_prompt": {"input": 0.550, "output": 2.750},
         },
         # Bedrock requires the FULL versioned inference-profile id for Haiku 4.5
         # (the bare alias above is rejected by the API), and _normalize_model_id
@@ -270,6 +282,8 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
         return 0.0
 
     pricing = provider_pricing[lookup]
+    if "long_prompt" in pricing and prompt_tokens + cache_read_tokens + cache_write_tokens > LONG_PROMPT_TOKENS:
+        pricing = pricing["long_prompt"]
     input_rate = pricing["input"]
     return (
         prompt_tokens * input_rate / 1_000_000
@@ -444,6 +458,7 @@ _FRIENDLY_MODEL_NAMES = {
     "anthropic.claude-sonnet-5": "Claude Sonnet 5",
     "anthropic.claude-haiku-4-5": "Claude Haiku 4.5",
     "anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
+    "anthropic.claude-haiku-5-5": "Claude Haiku 5.5",
     "anthropic.claude-opus-4-7": "Claude Opus 4.7",
     "anthropic.claude-opus-4-6": "Claude Opus 4.6",
     "gpt-4o": "GPT-4o",

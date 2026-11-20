@@ -1309,8 +1309,11 @@ class PipelineOrchestrator:
         """Run cross-stage lints over this run's artifacts and publish the report.
 
         Gated by CVICHE_RUN_DOCTOR (unset or "1" = on, "0" = off). The lints
-        are pure local file reads (no LLM, no network), run off the event
-        loop. The report lands in the pipeline outputs dir at
+        are local file reads, run off the event loop, except the model review
+        (lint 14bi), which calls Bedrock: on unless CVICHE_DOCTOR_MODEL_REVIEW
+        is "0", and its cost is added to the run's. The run's context goes
+        with it onto the executor thread, so those calls' prompt logs stay in
+        the run's own directory. The report lands in the pipeline outputs dir at
         stage_7_doctor/<uid>_doctor.json -- a location the stage-JSON viewer
         already serves -- then is attached to the final step's output_files so
         the UI lists it, and mirrored to durable storage for the S3 fallback.
@@ -1321,7 +1324,8 @@ class PipelineOrchestrator:
             return None
 
         loop = asyncio.get_running_loop()
-        payload, out_path = await loop.run_in_executor(None, self._doctor_report)
+        payload, out_path = await loop.run_in_executor(
+            None, contextvars.copy_context().run, self._doctor_report)
         new_files = [str(out_path)]
         review_path = await loop.run_in_executor(None, self._review_docx, payload)
         if review_path is not None:
@@ -1342,6 +1346,8 @@ class PipelineOrchestrator:
             if added:
                 step.output_files = json.dumps(files + added)
                 self.db.commit()
+            review = payload.get("model_review") or {}
+            await self._track_llm_cost(step.step_number, review.get("cost", 0.0), review)
 
         await loop.run_in_executor(
             None, self._persist_outputs_to_storage, new_files
@@ -1378,11 +1384,13 @@ class PipelineOrchestrator:
         from unified_pipeline.run_doctor import run_doctor
 
         source = self._pipeline_input_path()
+        review_on, _ = get_config("doctor", "CVICHE_DOCTOR_MODEL_REVIEW", default="1")
         payload = run_doctor(
             self.pipeline_output_dir,
             self.document_uid,
             source=source if source.exists() else None,
             prompt_log_dir=PROMPT_LOGS_DIR / self.run_id,
+            model_review=str(review_on).strip() != "0",
         )
         out_path = (
             self.pipeline_output_dir / 'stage_7_doctor'
