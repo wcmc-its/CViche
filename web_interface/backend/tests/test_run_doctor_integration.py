@@ -358,7 +358,7 @@ def test_doctor_source_is_the_runs_private_input_copy(monkeypatch, tmp_path, db)
     seen = {}
     monkeypatch.setattr(
         run_doctor_mod, "run_doctor",
-        lambda out_dir, uid, source=None, prompt_log_dir=None: seen.update(source=source) or _doctor_payload(),
+        lambda out_dir, uid, source=None, prompt_log_dir=None, model_review=False: seen.update(source=source) or _doctor_payload(),
     )
     o._doctor_report()
 
@@ -374,7 +374,7 @@ def test_doctor_report_records_the_executing_image_tag(monkeypatch, tmp_path, db
     o = _orchestrator(monkeypatch, tmp_path, db, "DOC_TAG")
     monkeypatch.setattr(
         run_doctor_mod, "run_doctor",
-        lambda out_dir, uid, source=None, prompt_log_dir=None: _doctor_payload(),
+        lambda out_dir, uid, source=None, prompt_log_dir=None, model_review=False: _doctor_payload(),
     )
 
     payload, out_path = o._doctor_report()
@@ -485,3 +485,42 @@ def test_the_score_sees_the_report_the_doctor_just_stored(monkeypatch, tmp_path,
     cached = json.loads(storage.files[svc.CACHE_KEY])
     assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_RAN
     assert cached["data_complete"] is True
+
+
+def test_the_model_review_is_on_by_default_and_its_cost_joins_the_run(monkeypatch, tmp_path, db):
+    """#2172: the orchestrator switches lint 14bi on, the doctor's thread carries
+    the run's context (so the review's prompt logs land in the run's own
+    directory), and what the review cost is added to the run's total."""
+    from app.models import Run
+    from unified_pipeline.core import prompt_logger
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    monkeypatch.delenv("CVICHE_DOCTOR_MODEL_REVIEW", raising=False)
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+    seen = []
+
+    def fake_run_doctor(*args, **kwargs):
+        seen.append((kwargs.get("model_review"), prompt_logger._current_run_id.get()))
+        return {**_doctor_payload(), "model_review": {
+            "stage": "doctor_model_review", "prompt_sha256": "x", "cost": 0.04, "prompt_tokens": 9000,
+            "completion_tokens": 600, "cache_read_tokens": 8000, "cache_write_tokens": 0}}
+
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", fake_run_doctor)
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_MR")
+    asyncio.run(o.execute())
+
+    assert seen == [(True, "DOC_MR")]
+    db.expire_all()
+    run = db.query(Run).filter(Run.id == "DOC_MR").first()
+    assert run.total_cost == 0.04
+    assert (run.input_tokens, run.output_tokens, run.cache_read_tokens) == (9000, 600, 8000)
+
+
+def test_the_model_review_switch_turns_it_off(monkeypatch, tmp_path, db):
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    monkeypatch.setenv("CVICHE_DOCTOR_MODEL_REVIEW", "0")
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+    kwargs = []
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: kwargs.append(k) or _doctor_payload())
+    asyncio.run(_orchestrator(monkeypatch, tmp_path, db, "DOC_MR_OFF").execute())
+    assert kwargs[-1]["model_review"] is False

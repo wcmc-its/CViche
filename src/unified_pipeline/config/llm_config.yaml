@@ -44,6 +44,12 @@ default:
   # same cache prices as Anthropic's direct API. See docs/LLM_MODELS.md.
   enable_prompt_caching: true
 
+# The doctor's model review (run_doctor lint 14bi, doctor/lints/model_review.py)
+# runs on Haiku 5.5, the model it was measured on (PRECISION.md MR-V2). It needs
+# Bedrock model access and the pods' role allowed on its inference profile.
+stages:
+  doctor_model_review: {model: us.anthropic.claude-haiku-5-5}
+
 # Stage 3b (entry classification) inherits the default model, Sonnet 5, since
 # 2026-10-01 (docs/adr/0002-stage-3b-on-sonnet-5.md). It ran on Haiku 4.5 from
 # 2026-05 until then. Roll back by restoring this block, with the FULL versioned

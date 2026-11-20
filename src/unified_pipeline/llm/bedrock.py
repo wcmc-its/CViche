@@ -121,6 +121,10 @@ DEFAULT_MAX_TOKENS = 16000
 # explicitly. Keyed by the bare id, as in PRICING. Every model outside this set
 # gets the request shape it always had.
 NO_SAMPLING_PARAMS_MODELS = frozenset({"anthropic.claude-sonnet-5"})
+# Models that also 400 on a sampling parameter but keep their own thinking
+# default: the doctor's model review was measured on Haiku 5.5 thinking at its
+# default (adaptive, effort medium), so it is sent no thinking field at all.
+DEFAULT_THINKING_MODELS = frozenset({"anthropic.claude-haiku-5-5"})
 
 
 @dataclass(frozen=True)
@@ -587,7 +591,7 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     }
     if _normalize_model_id(model) in NO_SAMPLING_PARAMS_MODELS:
         call_kwargs["additionalModelRequestFields"] = {"thinking": {"type": "disabled"}}
-    else:
+    elif _normalize_model_id(model) not in DEFAULT_THINKING_MODELS:
         call_kwargs["inferenceConfig"]["temperature"] = float(temperature)
     if system_prompts:
         call_kwargs["system"] = system_prompts

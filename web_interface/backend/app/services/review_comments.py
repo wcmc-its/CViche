@@ -95,6 +95,10 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
     owner_pi_role_empty_tables,
 )
+from unified_pipeline.doctor.lints.model_review import (  # noqa: E402
+    MODEL_REVIEW_LINT,
+    NOT_CHECKED_PREFIX as MODEL_REVIEW_NOT_CHECKED,
+)
 from unified_pipeline.doctor.precision import (  # noqa: E402
     LintPrecision,
     ShapeKey,
@@ -252,7 +256,11 @@ _OWNER_PI_ROLE_TOKEN = f"({ROLE_SHAPE_OWNER_PI_ROLE_EMPTY},"
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete",
                "source_line_coverage": ("Lines from your CV that CViche couldn't place, "
-                                        "often present in another form")}
+                                        "often present in another form"),
+               MODEL_REVIEW_LINT: "Possible problems a second read found"}
+#: The model review (lint 14bi): a comment on the output text a finding
+#: quotes, else a review note under this instruction, quoting the CV.
+MODEL_REVIEW_INSTRUCTION = "Check each against your CV."
 #: A review-copy-only lint whose quotes are source text the page does not hold.
 MISSING_SOURCE_LINT = "source_line_coverage"
 #: An Appendix diversion, on the heading of the section it was meant for.
@@ -565,6 +573,14 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
         return [], []  # less certain: the run page's Diagnostics only (#2002)
     if lint == MENTEE_FIELD_LINT:
         return _mentee_field_flags(finding, tables), []
+    if lint == MODEL_REVIEW_LINT:  # on the output text it quotes, else a note quoting the CV
+        if inst.detail.startswith(MODEL_REVIEW_NOT_CHECKED):
+            return [], []  # how much went unchecked: the report keeps it
+        flags = _item_flags(lint, inst, inst.detail, surfaces)
+        if flags:
+            return flags, []
+        item = f'{inst.detail} Your CV: "{inst.quotes[-1]}"' if inst.quotes else inst.detail
+        return [], [Note(NOTE_TITLES[lint], MODEL_REVIEW_INSTRUCTION, item)]
     if diverted_from is not None:  # no heading to sit on: a note, never nothing
         flags = _diversion(diverted_from, inst, surfaces[0])
         return (flags, []) if flags else ([], [_diversion_note(lint, inst)])

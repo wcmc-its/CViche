@@ -645,6 +645,18 @@ Lints, ranked by the severity of the failure class they catch:
                           another kind between the copies, on a citation
                           and on a copy under other headings. Reads
                           stage 3b
+14bi. model_review        a model (Haiku 5.5, `llm_config.yaml`'s
+                          doctor_model_review stage) reads the source CV a
+                          section at a time beside the whole output and names
+                          each record it finds lost, changed, misplaced,
+                          duplicated, run together, cut in two, or showing
+                          protected data (doctor recall 36% on two fresh
+                          batches; MR-V2: 43% -> 66% with this lint, 81% of
+                          its findings real). INFO and review-copy only, one
+                          per claim. Paid, so only when the caller passes
+                          `model_review=True` (the orchestrator does, unless
+                          CVICHE_DOCTOR_MODEL_REVIEW=0); dispatched by hand
+                          after the gates. Reads stage 2 and the docx
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -854,6 +866,11 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_table_shape,
     lint_unrendered_records,
 )
+from unified_pipeline.doctor.lints.model_review import (  # noqa: F401,E402
+    MODEL_REVIEW_STAGE,
+    REVIEW_PROMPT_SHA256,
+    lint_model_review,
+)
 from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_llm_fallback_served,
     lint_no_output,
@@ -914,6 +931,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _table_lines,
     as_written_deletions,
     docx_body_blocks,
+    docx_review_text,
     docx_subpoint_lines,
     docx_table_rows,
     subpoint_placements,
@@ -1067,6 +1085,7 @@ KNOWN_LINTS = (
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
+    "model_review",
 )
 
 
@@ -1417,6 +1436,9 @@ LINT_PREVALENCE = {
     # 498 stored runs, stage 3b's marks replayed on origin/dev ddcd64b3,
     # 2026-11-19.
     "stage3b_duplicate_drops": 0.08,
+    # model_review (MR-V2 in doctor/PRECISION.md): findings on 31 of 32
+    # labelled runs, the 16 KFUTTD/BRAQDE and 16 older ones, 2026-11-20.
+    "model_review": 0.97,
 }
 
 
@@ -1601,6 +1623,12 @@ def read_docx_subpoints(docx_path: str, report: dict | None = None) -> SubpointT
     `report` (the render-warnings sidecar) records whose each one is."""
     Document = _get_docx_document()
     return subpoint_text(docx_subpoint_lines(Document(docx_path)), subpoint_placements(report))
+
+
+def read_docx_review_text(docx_path: str) -> str:
+    """The docx as the model review reads it (`docx_review_text`)."""
+    Document = _get_docx_document()
+    return docx_review_text(Document(docx_path))
 
 
 def read_docx_table_rows(docx_path: str) -> list[list[list[str]]]:
@@ -1908,6 +1936,7 @@ _VIEW_LABELS = {
     "deleted_as_written": "stage_6_docx",
     "subpoints": "stage_6_docx",
     "table_rows": "stage_6_docx",
+    "review_text": "stage_6_docx",
 }
 
 
@@ -2229,11 +2258,34 @@ def _run_hand_dispatched_gates(views: dict, paths: dict, uid: str,
                bool(paths["stage_6_report"])), findings)
 
 
+def _run_model_review(on: bool, views: dict[str, object], findings: list[dict],
+                      ready: Callable[..., bool]) -> dict | None:
+    """Lint 14bi, dispatched by hand after the gates: only the caller knows
+    whether this run may pay for model calls. Off, it records its skip and
+    returns None; on, what its calls cost, for the run's total and the
+    report (prompt fingerprint and stage: CODING_STANDARDS §5.12)."""
+    if not on:
+        _run_lint("model_review", lint_model_review, [{}, "", None, None], findings)
+        return None
+    from unified_pipeline.llm_client import LlmUsage, call_llm  # the client only when it is used
+
+    usage = LlmUsage()
+    if ready("model_review", stage_2=views["stage_2"], stage_6_docx=views["review_text"]):
+        _run_lint("model_review", lint_model_review,
+                  [views["stage_2"], views["review_text"], call_llm, usage], findings)
+    return {"stage": MODEL_REVIEW_STAGE, "prompt_sha256": REVIEW_PROMPT_SHA256,
+            "cost": round(usage.cost, 6), **usage.token_totals()}
+
+
 def run_doctor(root: Path, uid: str, source: Path | None = None,
-               prompt_log_dir: Path | None = None) -> dict:
+               prompt_log_dir: Path | None = None, *, model_review: bool = False) -> dict:
     """Run every lint whose artifacts exist under root for this document uid.
     ``prompt_log_dir`` is the run's prompt-log directory, when the caller has
     it; `llm_fallback_served` reads it for the stages no artifact covers.
+    ``model_review`` runs lint 14bi, the one lint that calls a model and so
+    costs money; the report's "model_review" key says what it cost (None when
+    off). The caller copies its context into the thread this runs on, so the
+    calls' prompt logs land in the run's own directory.
     Never raises on missing/unreadable artifacts, never raises out of a lint
     (`_run_lint` turns that into an ERROR finding) and never calls sys.exit
     — the backend calls this in-process; the CLI wraps it."""
@@ -2277,6 +2329,8 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
                                                        subpoint_placements(views["stage_6_report"]))
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                            if paths["stage_6_docx"] else None)
+    views["review_text"] = (_try(lambda: read_docx_review_text(str(paths["stage_6_docx"])), "stage_6_docx", _note)
+                            if model_review and paths["stage_6_docx"] else None)
 
     findings: list[dict] = []
     ready = partial(_ready, unreadable=unreadable, findings=findings)
@@ -2288,6 +2342,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
                       [views[view] for view in spec.inputs + spec.optional], findings)
 
     _run_hand_dispatched_gates(views, paths, uid, unreadable, findings, ready)
+    review_cost = _run_model_review(model_review, views, findings, ready)
 
     counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:
@@ -2314,6 +2369,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
         # Each fired lint's hand-checked precision from doctor/PRECISION.md
         # (#819): doctor.tsv and the Teams card print it next to the lint name.
         "lint_precision": precision_payload(f["lint"] for f in findings),
+        "model_review": review_cost,
     }
 
 
@@ -2324,6 +2380,8 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--source", help="source .docx (default: <root>[/uploads]/<uid>*.docx)")
     parser.add_argument("--out", help="report file (default: <root>/<uid>_doctor.json)")
     parser.add_argument("--prompt-logs", help="the run's prompt-log directory, for llm_fallback_served")
+    parser.add_argument("--model-review", action="store_true",
+                        help="also run lint 14bi, which calls a model (paid; AWS credentials needed)")
     args = parser.parse_args(argv)
 
     # Advisory pre-check only: fail fast with a clear message BEFORE the slow
@@ -2337,7 +2395,8 @@ def main(argv: list[str] | None = None):
 
     payload = run_doctor(Path(args.root), args.uid,
                          Path(args.source) if args.source else None,
-                         Path(args.prompt_logs) if args.prompt_logs else None)
+                         Path(args.prompt_logs) if args.prompt_logs else None,
+                         model_review=args.model_review)
 
     report_json = json.dumps(payload, indent=2)
     if len(report_json.encode("utf-8")) > MAX_REPORT_BYTES:

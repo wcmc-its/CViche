@@ -1044,6 +1044,13 @@ _CALL_LLM_MODULE_STAGE = {
     'stage_6_word_template.py': '6',
 }
 
+# call_llm modules no CLI stage covers, each with the driver that reports its cost.
+_CALL_LLM_MODULE_COST_ELSEWHERE = {
+    # Lint 14bi (#2172): the CLI never runs the doctor; the orchestrator adds the
+    # report's "model_review" cost to the last step itself.
+    'run_doctor.py': 'orchestrator._run_doctor',
+}
+
 
 def _modules_importing_call_llm():
     package = Path(__file__).resolve().parents[1]
@@ -1061,7 +1068,7 @@ def _modules_importing_call_llm():
 
 def test_every_stage_module_that_calls_the_llm_is_in_the_cli_cost_list():
     modules = _modules_importing_call_llm()
-    unmapped = modules - set(_CALL_LLM_MODULE_STAGE)
+    unmapped = modules - set(_CALL_LLM_MODULE_STAGE) - set(_CALL_LLM_MODULE_COST_ELSEWHERE)
     assert not unmapped, (
         f"{sorted(unmapped)} import call_llm: map each to its stage in "
         "_CALL_LLM_MODULE_STAGE so its cost is reported (#1177)")

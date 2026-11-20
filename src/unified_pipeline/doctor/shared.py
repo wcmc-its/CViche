@@ -42,6 +42,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentType
+    from docx.table import Table as TableType
 
     from unified_pipeline.stage6.supplementary import SubpointPlacement
 
@@ -454,6 +455,59 @@ def offered_as_subpoint(text: str, subpoints: SubpointText | None,
     return len(tokens) >= RENDER_TOKEN_MIN_COUNT and any(
         len(tokens & line) >= RENDER_TOKEN_OVERLAP * len(tokens)
         for line in subpoints.line_tokens)
+
+
+#: How a block's tracked-deleted text is shown beside its kept text in `docx_review_text`.
+STRUCK_THROUGH = " ⟦struck-through: {}⟧"
+
+
+def _struck(text: str) -> str:
+    text = " ".join(text.split())
+    return STRUCK_THROUGH.format(text) if text else ""
+
+
+def _review_table_lines(tbl: TableType, prefix: str) -> list[str]:
+    """`docx_review_text`'s lines for one table: each row as "[<prefix>.<row>] |
+    cell | cell |", every cell in column order, EMPTY CELLS INCLUDED so a
+    value stays under its column header (a reader shown "Israel | 2008" took
+    the year for the licence number), a horizontally merged cell once, a
+    nested table's rows before its row's own line."""
+    lines: list[str] = []
+    for r, row in enumerate(tbl.rows):
+        cells, deleted, last_tc = [], [], None
+        for cell in row.cells:
+            if cell._tc is last_tc:  # a merged cell repeats its <w:tc>; `last_tc` keeps the proxy alive
+                continue
+            last_tc = cell._tc
+            cells.append(" ".join(_cell_text(cell).split()))
+            gone = " ".join(_cell_text(cell, deleted=True).split())
+            if gone and gone not in deleted:
+                deleted.append(gone)
+            for nested in cell.tables:
+                lines.extend(_review_table_lines(nested, f"{prefix}.{r}n"))
+        if any(cells) or deleted:
+            lines.append(f"[{prefix}.{r}] | " + " | ".join(cells) + " |" + _struck(" ".join(deleted)))
+    return lines
+
+
+def docx_review_text(doc: DocumentType) -> str:
+    """An OPEN python-docx Document as the model review reads it: one line per
+    non-empty paragraph, "[O<n>] text", n its body position; tables per
+    `_review_table_lines`. Kept text reads `<w:ins>` (`_docx_text`); a block's
+    tracked-deleted text follows it as STRUCK_THROUGH."""
+    from docx.oxml.ns import qn
+    from docx.table import Table
+
+    lines: list[str] = []
+    for i, child in enumerate(doc.element.body.iterchildren()):
+        if child.tag == qn("w:p"):
+            kept = " ".join(_docx_text(child).split())
+            gone = _docx_text(child, deleted=True)
+            if kept or gone.strip():
+                lines.append(f"[O{i}] {kept}{_struck(gone)}")
+        elif child.tag == qn("w:tbl"):
+            lines.extend(_review_table_lines(Table(child, doc), f"O{i}"))
+    return "\n".join(lines)
 
 
 def docx_table_rows(doc: DocumentType) -> list[list[list[str]]]:
