@@ -390,6 +390,12 @@ def _print_verbose(messages: list[str], verbose: bool) -> None:
             logger.debug(message)
 
 
+#: The key a render copy carries the `id()` of the pipeline entry it was
+#: copied from under (`copy_entries_for_render`). Later copies keep it, so a
+#: grant's table rows are recorded against the entry dedup kept (#2174).
+RENDER_ORIGIN_KEY = '_render_origin_id'
+
+
 def copy_entries_for_render(entries: list[dict]) -> list[dict]:
     """Shallow-copy one bucket's entries so classification never writes through
     to the caller's pipeline records (review thread 3932312407 item 1).
@@ -399,11 +405,13 @@ def copy_entries_for_render(entries: list[dict]) -> list[dict]:
     `percent_effort`. Nothing here writes any deeper, so deeper values stay
     shared. A non-dict `extracted_fields` is passed through exactly as it
     arrived rather than coerced -- a malformed record still fails where it
-    always did, instead of failing somewhere new.
+    always did, instead of failing somewhere new. Each copy names its
+    original under `RENDER_ORIGIN_KEY`.
     """
     copies: list[dict] = []
     for entry in entries:
         clone = dict(entry)
+        clone.setdefault(RENDER_ORIGIN_KEY, id(entry))
         fields = clone.get('extracted_fields')
         if isinstance(fields, dict):
             clone['extracted_fields'] = dict(fields)
@@ -2092,6 +2100,8 @@ class ResearchSupportSection:
         """
         # Get CV owner name for auto-filling PI when role is Principal Investigator
         owner_name = _get_cv_owner_name(cv_owner, document_uid)
+        originals = {id(entry): entry for code, _header in RESEARCH_SUPPORT_SECTIONS
+                     for entry in entries_by_code.get(code, [])}
         if as_of is None:
             as_of = date.today()
 
@@ -2203,6 +2213,9 @@ class ResearchSupportSection:
                         placeholder._element.getparent().remove(placeholder._element)
                         placeholder = None
                     rendered_grant_ids.add(id(entry))
+                    origin = originals.get(entry.get(RENDER_ORIGIN_KEY), entry)
+                    for row in grant_table.rows:  # its rows, for a dedup drop's tracked copy (#2174)
+                        self._row_receipts.wrote(row._tr, origin)
                     self.stats['tables_populated'] += 1
                     self.stats['entries_inserted'] += 1
 
