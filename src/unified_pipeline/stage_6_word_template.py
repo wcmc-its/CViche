@@ -72,7 +72,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
-from unified_pipeline.core.text_norm import tab_record_segments
+from unified_pipeline.core.text_norm import norm, tab_record_segments
 from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
     code_matches_expected,
     get_expected_codes_from_hierarchy,
@@ -88,6 +88,10 @@ from unified_pipeline.stage4.extraction import (
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
 from unified_pipeline.stage6 import render_check, supplementary
 from unified_pipeline.stage6.dedup import (  # noqa: F401
+    DEDUP_PAIR_KEY,
+    DEDUP_SHOWN_REMOVED,
+    DEDUP_SHOWN_TRACKED,
+    DEDUP_SHOWN_UNPLACED,
     _STOP_WORDS,
     DEDUP_FULL_CONTAINMENT_MIN_TOKENS,
     DEDUP_FUSED_BLOB_RECORD_LINES,
@@ -2017,6 +2021,19 @@ def _log_validation_warnings(all_warnings: list[dict]) -> None:
 
 
 
+
+#: Dedup metrics whose two entries share a PMID, DOI or PMCID: one paper.
+_PROVEN_COPY_METRICS = frozenset({'citation_pmid', 'citation_doi', 'citation_pmcid'})
+
+
+def _is_exact_copy(decision: Mapping[str, Any], dropped: Mapping[str, Any], kept: Mapping[str, Any]) -> bool:
+    """A dedup drop that is surely a copy (#2174): the two entries hold the
+    same words in the same order, or share a PMID, DOI or PMCID."""
+    def words(entry: Mapping[str, Any]) -> list[str]:
+        return re.findall(r'\w+', norm(entry.get('text')))
+    return decision.get('metric') in _PROVEN_COPY_METRICS or words(dropped) == words(kept)
+
+
 class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                           BibliographySection, BoardCertificationSection,
                           ClinicalPracticeSection, EducationSection,
@@ -2575,6 +2592,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 total_deduped += removed
         total_deduped += deduplicate_record_groups(entries_by_code, dedup_decisions,
                                                    dropped_ids)
+        self._dedup_pairs = [(decision, *decision.pop(DEDUP_PAIR_KEY)) for decision in dedup_decisions]
         if self.verbose and total_deduped > 0:
             logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
 
@@ -2869,6 +2887,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # inserts count as rendered) -- both bullet leftover content into the
         # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
         recovered_appendix_lines = self._recover_appendix_lines(written_appendix_entries, pre_dedup_entries_by_code, cv_owner)
+        self._show_dedup_drops()  # #2174: after the recovery, so what it re-emits is unchanged
         self._finish_document(template_snapshot)
 
         # Determine output path
@@ -4672,6 +4691,38 @@ Now analyze the text above:"""
         self._revision_id = revision.next_id
         self.stats['supplementary_subpoints'] = len(self._subpoint_placements)
         self.stats['track_changes_added'] += sum(len(sp.paragraphs) for sp in planned)
+
+    def _show_dedup_drops(self) -> None:
+        """#2174: write each entry dedup dropped as a near-duplicate as a
+        tracked deletion after the rows of the entry it was judged a copy of
+        (that entry's keeper, when it was dropped in turn), so Reject All
+        restores it when dedup was wrong, and Accept All gives the render
+        without it. Removed outright, as before: an exact copy
+        (`_is_exact_copy`), and a drop whose keeper has no row in the
+        document. Each decision records which (`shown_as`, for the doctor).
+        Skipped with track changes off, where a deletion is already accepted."""
+        if not self.emit_track_changes:
+            return
+        keeper = {id(dropped): kept for _decision, dropped, kept in self._dedup_pairs}
+        revision = supplementary.Revision(self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                          supplementary.DEDUP_AUTHOR)
+        for decision, dropped, kept in self._dedup_pairs:
+            for _ in self._dedup_pairs:  # bounded: each step follows one drop
+                if id(kept) not in keeper:
+                    break
+                kept = keeper[id(kept)]
+            elements = self._row_receipts.live_elements_for(kept)
+            texts = tuple(self._sanitize_run_text(' '.join(line.split()))
+                          for line in (dropped.get('text') or '').splitlines() if line.strip())
+            if _is_exact_copy(decision, dropped, kept):
+                decision['shown_as'] = DEDUP_SHOWN_REMOVED
+            elif not elements or not texts:
+                decision['shown_as'] = DEDUP_SHOWN_UNPLACED
+            else:
+                supplementary.write_after(elements[-1], texts, revision, self.doc)
+                decision['shown_as'] = DEDUP_SHOWN_TRACKED
+                self.stats['track_changes_added'] += len(texts)
+        self._revision_id = revision.next_id
 
     def _subpoint_section_spans(self) -> dict[str, supplementary.SectionSpan]:
         """Per `SUBPOINT_CODES` code, the body span of its WCM section: from the

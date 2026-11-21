@@ -45,6 +45,7 @@ from .dedup import (
     _part_numbers,
     _rank_qualifiers,
     _singular,
+    paired,
 )
 from .fan_out import FANNED_OUT_FROM
 from .normalization.publication import ResolvedPublication, resolve_publication
@@ -556,5 +557,5 @@ def deduplicate_record_groups(entries_by_code: dict[str, list[dict]],
     for code, dropped, kept, kept_code, rule in drops:
         entries_by_code[code] = [e for e in entries_by_code[code] if e is not dropped]
         dropped_ids.add(id(dropped))
-        decisions.append(_decision(dropped, kept, code, kept_code, rule))
+        decisions.append(paired(_decision(dropped, kept, code, kept_code, rule), dropped, kept))
     return len(drops)

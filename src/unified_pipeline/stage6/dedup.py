@@ -122,6 +122,25 @@ DEDUP_FUSED_BLOB_RECORD_LINES = 5
 DEDUP_DIFFERENT_TITLE_MAX_JACCARD = 0.25
 DEDUP_DIFFERENT_TITLE_MIN_WORDS = 3
 
+#: The key a dedup decision carries its (dropped, kept) entry dicts under,
+#: from the drop until stage 6 pops it (`paired`): stage 6 writes the dropped
+#: copy as a tracked deletion after the kept one's row (#2174). Popped before
+#: the decision reaches the sidecar, which holds JSON only.
+DEDUP_PAIR_KEY = '_pair'
+
+#: `shown_as` on a dedup decision in the render sidecar (#2174): written as a
+#: tracked deletion after its keeper's rows; removed as an exact copy; or
+#: removed because its keeper has no row to write it after.
+DEDUP_SHOWN_TRACKED = 'tracked_deletion'
+DEDUP_SHOWN_REMOVED = 'removed_exact_copy'
+DEDUP_SHOWN_UNPLACED = 'removed_no_kept_row'
+
+
+def paired(decision: dict, dropped: dict, kept: dict) -> dict:
+    """`decision`, carrying the two entries it names under `DEDUP_PAIR_KEY`."""
+    decision[DEDUP_PAIR_KEY] = (dropped, kept)
+    return decision
+
 # #666 (WZSMUO Q4D): `deduplicate_entries`' containment test divides by the
 # smaller entry's significant words, so a one-word entry is "contained" in
 # every longer entry that shares its word: the journal "Cell" was dropped
@@ -2343,8 +2362,9 @@ def _drop_citation_copies(entries: list[dict], code: str | None,
             dropped.add(drop)
             dropped_ids.add(id(entries[drop]))
             if decisions is not None:
-                decisions.append(_citation_decision(key[0], entries[drop],
-                                                    entries[keep], code))
+                decisions.append(paired(_citation_decision(key[0], entries[drop],
+                                                           entries[keep], code),
+                                        entries[drop], entries[keep]))
             if keep == other:
                 continue
         for key in keys:
@@ -2403,14 +2423,14 @@ def _drop_split_siblings(entries: list[dict], drops: list[tuple[int, int]],
             drop_indices.add(index)
             dropped_ids.add(id(entry))
             if decisions is not None:
-                decisions.append({
+                decisions.append(paired({
                     "metric": SPLIT_SIBLING_METRIC,
                     "jaccard": None, "containment": None, "title_containment": None,
                     "dropped_text": (entry.get('text') or '')[:500],
                     "kept_text": (entries[kept].get('text') or '')[:500],
                     "dropped_fields": _decision_fields(entry, code),
                     "kept_fields": _decision_fields(entries[kept], code),
-                })
+                }, entry, entries[kept]))
 
 
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
@@ -2548,7 +2568,7 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                     print(f"    Dedup: dropping entry ({metric}), "
                           f"keeping [{entries[kept].get('text', '')[:60]}...]")
                 if decisions is not None:
-                    decisions.append({
+                    decisions.append(paired({
                         "metric": metric,
                         "jaccard": round(jaccard, 2),
                         "containment": round(containment, 2),
@@ -2557,7 +2577,7 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         "kept_text": entries[kept].get('text', '')[:500],
                         "dropped_fields": _decision_fields(entries[drop], code),
                         "kept_fields": _decision_fields(entries[kept], code),
-                    })
+                    }, entries[drop], entries[kept]))
                 drop_indices.add(drop)
                 drops.append((drop, kept))
                 dropped_ids.add(id(entries[drop]))
