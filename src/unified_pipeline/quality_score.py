@@ -938,7 +938,7 @@ LINT_FIX_MINUTES = {
     ), FIX_MINUTES_CONTACT_BLOCK),
     **dict.fromkeys((
         "classified_unrendered", "dead_sections", "dedup_drops", "dedup_merged",
-        "multi_record_coverage", "stage3b_duplicate_drops", "model_review",
+        "multi_record_coverage", "stage3b_duplicate_drops",
         "header_consumed_record", "orphaned_fragments", "section_lost", "segmentation",
         "renderer_row_missing", "segmentation_collapse", "source_line_coverage", "stage2_text_break",
         "stage2_unaccounted", "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
@@ -955,7 +955,7 @@ LINT_FIX_MINUTES = {
         "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "footer_in_record",
         "glyph_field", "grant_boundary", "grant_facts", "group_credit_dropped",
         "implausible_year", "institution_cleaned_name", "journal_name_joined",
-        "licensure_fallback_truncated", "mentee_field_incomplete",
+        "licensure_fallback_truncated", "mentee_field_incomplete", "model_review",
         "open_end_unsupported", "owner_missing_from_citation",
         "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
         "session_title_missing", "shattered_prose", "span_count",
@@ -977,6 +977,11 @@ LINT_FIX_MINUTES = {
         "stage_failure_recorded",
     ), FIX_MINUTES_NONE),
 }
+
+# ponytail: model_review is costed as a wrong field because only its
+# field_lost and duplicated kinds are WARN (model_review.WARN_KINDS), so a
+# duplicate costs 0.3 min, not FIX_MINUTES_DUPLICATE's 0.2. Per-kind minutes
+# when a record_lost kind becomes WARN.
 
 #: A lint missing from LINT_FIX_MINUTES (a report written by a newer doctor)
 #: costs what a wrong field does, the most common kind of finding.

@@ -111,6 +111,21 @@ def test_a_claim_becomes_an_info_finding_the_scorer_can_locate():
     assert finding["evidence"] == ["MD | Example School | 2010", "MD, Example School, 2009", "entry 12"]
 
 
+@pytest.mark.parametrize("kind", sorted(mr.KIND_LABELS))
+def test_a_lost_detail_or_a_duplicate_is_warn_and_reads_its_own_precision_row(kind):
+    """MR-P1: only the kinds over the WARN bar count toward the score, and each
+    reads the PRECISION.md shape row of its label, so rewording a label cannot
+    silently drop it back to the lint's pooled row."""
+    from unified_pipeline.doctor.precision import finding_precision
+
+    chunk = mr.review_chunks(_stage2(_entry(12, "MD, Example School, 2009")))[0]
+    finding = mr.claim_finding(_claim(["E12"], kind=kind), chunk)
+    warn = kind in {"field_lost", "duplicated"}
+    assert finding["severity"] == ("WARN" if warn else "INFO")
+    row = finding_precision(finding["lint"], finding["message"])
+    assert (row.shape == mr.KIND_LABELS[kind]) is warn and (row.measured == "MR-P1") is warn
+
+
 def test_an_absent_output_quote_is_dropped_and_a_bare_index_is_read():
     chunk = mr.review_chunks(_stage2(_entry(7, "Example Award, 2015")))[0]
     finding = mr.claim_finding(_claim([7], kind="record_lost", output="ABSENT", source="Example Award, 2015"), chunk)
