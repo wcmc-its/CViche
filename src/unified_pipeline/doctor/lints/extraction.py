@@ -114,6 +114,7 @@ from unified_pipeline.stage4.schemas import (
     STAGE4_RECORDS_KEY,
 )
 from unified_pipeline.stage6.dedup import (
+    DEDUP_SHOWN_TRACKED,
     _citation_identity_text,
     _dates_compatible,
     _different_rank,
@@ -1187,6 +1188,13 @@ def _drop_suspicion(decision: Mapping, rendered_items: set[str] | None,
     return None
 
 
+def _lost_drops(report: Mapping) -> list[Mapping]:
+    """The dedup decisions whose dropped entry the docx does not hold: all but
+    the ones stage 6 wrote as a tracked deletion after the kept entry (#2174),
+    which a reviewer sees and Reject restores."""
+    return [d for d in report.get("dedup_decisions", []) if d.get("shown_as") != DEDUP_SHOWN_TRACKED]
+
+
 def lint_dedup_drops(report: dict,
                      blocks: list[tuple[str, str]] | None = None,
                      stage_5d: Mapping | None = None) -> list[dict]:
@@ -1214,13 +1222,14 @@ def lint_dedup_drops(report: dict,
     their text: a header line beside a table row shares few words with it by
     construction, so it skips the coverage test and takes the others.
 
-    `stage_5d`, when given, names each drop's entry (`_entry_index_by_text`)."""
+    `stage_5d`, when given, names each drop's entry (`_entry_index_by_text`).
+    A drop written as a tracked deletion is not lost (`_lost_drops`, #2174)."""
     suspect = []
     named_apart = []
     rendered_items = _rendered_item_set(blocks) if blocks is not None else None
     index_by_text = _entry_index_by_text(stage_5d)
     copies = _citation_copies(stage_5d)
-    for d in report.get("dedup_decisions", []):
+    for d in _lost_drops(report):
         verdict = _drop_suspicion(d, rendered_items, copies)
         if verdict is None:
             continue
@@ -1272,7 +1281,7 @@ def lint_dedup_merged(report: dict,
     index_by_text = _entry_index_by_text(stage_5d)
     copies = _citation_copies(stage_5d)
     merged = [_drop_evidence(d, index_by_text, str(d.get("metric", "?")))
-              for d in report.get("dedup_decisions", [])
+              for d in _lost_drops(report)
               if _drop_suspicion(d, rendered_items, copies) is None and _merged_unlike(d)]
     if not merged:
         return []

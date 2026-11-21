@@ -201,6 +201,10 @@ class RowReceiptLedger:
         publication's prose only under one of them."""
         return [element for _section, owner, element in self._written if owner is entry]
 
+    def live_elements_for(self, entry: Mapping[str, object]) -> list[_Element]:
+        """`elements_for(entry)` still in the document body."""
+        return [element for element in self.elements_for(entry) if _in_body(element)]
+
     def _live(self, appendix_section: str) -> tuple[_EntrySet, _EntrySet]:
         """(entries with a live row written by a body section, entries with
         any live element at all) -- live meaning still in the document body."""
