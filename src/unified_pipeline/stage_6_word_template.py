@@ -89,6 +89,7 @@ from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
 from unified_pipeline.stage6 import render_check, supplementary
 from unified_pipeline.stage6.dedup import (  # noqa: F401
     DEDUP_PAIR_KEY,
+    DEDUP_SHOWN_LABELS,
     DEDUP_SHOWN_PRINTED,
     DEDUP_SHOWN_REMOVED,
     DEDUP_SHOWN_TRACKED,
@@ -2035,6 +2036,28 @@ def _is_exact_copy(decision: Mapping[str, Any], dropped: Mapping[str, Any], kept
     """A dedup drop that is surely a copy (#2174): the two entries hold the
     same words in the same order, or share a PMID, DOI or PMCID."""
     return decision.get('metric') in _PROVEN_COPY_METRICS or _words(dropped.get('text')) == _words(kept.get('text'))
+
+
+_CELL_SPLIT_RE = re.compile(r'\t|\n| \| ')
+# A field label is short and dateless ("Number:", "Name of PD/PI:"). A longer
+# or dated cell ending in a colon is a heading with content of its own
+# (web051 K1 "Radiology resident teaching (2009-2010):"), not a label (#2174).
+_LABEL_MAX_WORDS = 4
+
+
+def _is_label(cell: str, kept_words: str) -> bool:
+    words = _words(cell)
+    return (cell.endswith(':') and len(words) <= _LABEL_MAX_WORDS and not re.search(r'\d', cell)
+            and f" {' '.join(words)} " in kept_words)
+
+
+def _label_fragment(dropped: Mapping[str, Any], kept: Mapping[str, Any]) -> bool:
+    """True when every cell of `dropped` is a field label (`_is_label`) that
+    the kept entry's text also holds (#2174): "Number:" or "Project
+    Title:\tRole:" split off a grant's table, with no value word."""
+    cells = [cell.strip() for cell in _CELL_SPLIT_RE.split(dropped.get('text') or '') if cell.strip()]
+    kept_words = f" {' '.join(_words(kept.get('text')))} "
+    return bool(cells) and all(_is_label(cell, kept_words) for cell in cells)
 
 
 def _printed_by(dropped: Mapping[str, Any], elements: Sequence[Any]) -> bool:
@@ -4731,6 +4754,8 @@ Now analyze the text above:"""
                           for line in (dropped.get('text') or '').splitlines() if line.strip())
             if _is_exact_copy(decision, dropped, kept):
                 decision['shown_as'] = DEDUP_SHOWN_REMOVED
+            elif _label_fragment(dropped, kept):
+                decision['shown_as'] = DEDUP_SHOWN_LABELS
             elif not elements or not texts:
                 decision['shown_as'] = DEDUP_SHOWN_UNPLACED
             elif _printed_by(dropped, elements):

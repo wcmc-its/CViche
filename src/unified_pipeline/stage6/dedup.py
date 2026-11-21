@@ -137,6 +137,10 @@ DEDUP_SHOWN_TRACKED = 'tracked_deletion'
 DEDUP_SHOWN_REMOVED = 'removed_exact_copy'
 DEDUP_SHOWN_PRINTED = 'removed_printed_by_kept_row'
 DEDUP_SHOWN_UNPLACED = 'removed_no_kept_row'
+#: A drop that is nothing but field labels its keeper's text also holds
+#: ("Number:", "Project Title:\tRole:"): a stage-2 split fragment of the kept
+#: grant's table, with no value word to lose (#2174, the #2179 grant clutter).
+DEDUP_SHOWN_LABELS = 'removed_label_fragment'
 
 
 def paired(decision: dict, dropped: dict, kept: dict) -> dict:

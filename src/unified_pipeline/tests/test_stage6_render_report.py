@@ -239,6 +239,36 @@ def test_show_dedup_drops_removes_a_drop_its_kept_row_prints_word_for_word():
     assert (printed["shown_as"], office["shown_as"]) == (DEDUP_SHOWN_PRINTED, DEDUP_SHOWN_TRACKED)
 
 
+def test_show_dedup_drops_removes_a_drop_of_bare_labels_its_kept_grant_holds():
+    """Labels alone, each in the kept text (ZASOTV, PZQJKL): removed. A label
+    with a value, a label the kept text lacks, or a dated or long heading
+    (web051) is not (#2174)."""
+    from unified_pipeline.stage6.dedup import (
+        DEDUP_SHOWN_LABELS,
+        DEDUP_SHOWN_TRACKED,
+        DEDUP_SHOWN_UNPLACED,
+    )
+    doc = Document()
+    kept_para = doc.add_paragraph("NIH\tTitle: A study\tNumber: R43 AI136118")
+    kept = {"text": "NIH\tProject Title: A study\tRole: PI\tNumber: R43 AI136118"}
+    gen = _shower(doc)
+    gen._row_receipts.wrote(kept_para._p, kept)
+    labels, many, valued, role, foreign, dated, long_ = ({"metric": "x"} for _ in range(7))
+    gen._dedup_pairs = [(labels, {"text": "Number:"}, kept),
+                        (many, {"text": "Project Title:\tRole:"}, kept),
+                        (valued, {"text": "Number: M01RR06192"}, kept),
+                        (role, {"text": "Role:\tPI"}, kept),
+                        (foreign, {"text": "Objective:"}, kept),
+                        (dated, {"text": "Resident teaching (2010):"},
+                         {"text": "Resident teaching (2010):\nCT lectures"}),
+                        (long_, {"text": "Service on graduate school committees:"},
+                         {"text": "Service on graduate school committees:\nAdmissions"})]
+    gen._show_dedup_drops()
+    assert [d["shown_as"] for d in (labels, many, valued, role, foreign, dated, long_)] == [
+        DEDUP_SHOWN_LABELS, DEDUP_SHOWN_LABELS, DEDUP_SHOWN_TRACKED, DEDUP_SHOWN_TRACKED,
+        DEDUP_SHOWN_TRACKED, DEDUP_SHOWN_UNPLACED, DEDUP_SHOWN_UNPLACED]
+
+
 def test_show_dedup_drops_writes_nothing_with_track_changes_off():
     doc = Document()
     kept_para = doc.add_paragraph(_PHD["text"])

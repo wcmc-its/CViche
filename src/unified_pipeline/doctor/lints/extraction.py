@@ -114,6 +114,7 @@ from unified_pipeline.stage4.schemas import (
     STAGE4_RECORDS_KEY,
 )
 from unified_pipeline.stage6.dedup import (
+    DEDUP_SHOWN_LABELS,
     DEDUP_SHOWN_TRACKED,
     _citation_identity_text,
     _dates_compatible,
@@ -1191,8 +1192,10 @@ def _drop_suspicion(decision: Mapping, rendered_items: set[str] | None,
 def _lost_drops(report: Mapping) -> list[Mapping]:
     """The dedup decisions whose dropped entry the docx does not hold: all but
     the ones stage 6 wrote as a tracked deletion after the kept entry (#2174),
-    which a reviewer sees and Reject restores."""
-    return [d for d in report.get("dedup_decisions", []) if d.get("shown_as") != DEDUP_SHOWN_TRACKED]
+    which a reviewer sees and Reject restores, and the bare field labels it
+    removed, which hold no value to lose."""
+    return [d for d in report.get("dedup_decisions", [])
+            if d.get("shown_as") not in (DEDUP_SHOWN_TRACKED, DEDUP_SHOWN_LABELS)]
 
 
 def lint_dedup_drops(report: dict,
