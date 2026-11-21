@@ -215,7 +215,7 @@ HOME_ONLY_IMPORTS = {
                                       "_PART_NUMBER_RE", "_TRIAL_PHASE_RE", "_trial_phases", "_standalone_numerals",
                                       "SPLIT_SIBLING_METRIC", "_drop_split_siblings",
                                       "DEDUP_PAIR_KEY", "paired", "DEDUP_SHOWN_TRACKED",  # #2174
-                                      "DEDUP_SHOWN_REMOVED", "DEDUP_SHOWN_PRINTED", "DEDUP_SHOWN_UNPLACED",
+                                      "DEDUP_SHOWN_REMOVED", "DEDUP_SHOWN_PRINTED", "DEDUP_SHOWN_UNPLACED", "DEDUP_SHOWN_LABELS",
                                       "_citation_identity_text", "_citation_fullness",
                                       "_citation_identity_keys", "_citations_conflict", "_first_author",
                                       "_first_author_names", "_one_slip_apart",
