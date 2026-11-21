@@ -1324,6 +1324,7 @@ class PipelineOrchestrator:
             return None
 
         loop = asyncio.get_running_loop()
+        started = utc_now()
         payload, out_path = await loop.run_in_executor(
             None, contextvars.copy_context().run, self._doctor_report)
         new_files = [str(out_path)]
@@ -1348,6 +1349,8 @@ class PipelineOrchestrator:
                 self.db.commit()
             review = payload.get("model_review") or {}
             await self._track_llm_cost(step.step_number, review.get("cost", 0.0), review)
+            # The review's prompt logs come after the last step's sync (#2180).
+            await asyncio.to_thread(self._sync_prompt_logs_to_storage, started, step.step_number)
 
         await loop.run_in_executor(
             None, self._persist_outputs_to_storage, new_files

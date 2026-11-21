@@ -524,3 +524,32 @@ def test_the_model_review_switch_turns_it_off(monkeypatch, tmp_path, db):
     monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: kwargs.append(k) or _doctor_payload())
     asyncio.run(_orchestrator(monkeypatch, tmp_path, db, "DOC_MR_OFF").execute())
     assert kwargs[-1]["model_review"] is False
+
+
+def test_the_review_prompt_logs_reach_run_storage(monkeypatch, tmp_path, db):
+    """#2180: the doctor runs after the last step's prompt-log sync, so its own
+    sync must copy the model review's logs, and only those written since it began."""
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    run_logs = tmp_path / "prompt_logs" / "DOC_PL"
+    run_logs.mkdir(parents=True)
+    old = run_logs / "earlier_stage_6.json"
+    old.write_text("{}")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(orch, "PROMPT_LOGS_DIR", tmp_path / "prompt_logs")
+    uploaded = []
+    monkeypatch.setattr(orch, "get_storage", lambda: SimpleNamespace(
+        put_file=lambda run_id, key, data: uploaded.append((run_id, key))))
+
+    def fake_run_doctor(*args, **kwargs):
+        (run_logs / "doctor_model_review_ab12.json").write_text("{}")
+        return _doctor_payload()
+
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", fake_run_doctor)
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_PL")
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", lambda files: None)
+
+    asyncio.run(o._run_doctor())
+
+    assert uploaded == [("DOC_PL", "prompt_logs/doctor_model_review_ab12.json")]
