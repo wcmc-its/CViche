@@ -89,6 +89,7 @@ from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
 from unified_pipeline.stage6 import render_check, supplementary
 from unified_pipeline.stage6.dedup import (  # noqa: F401
     DEDUP_PAIR_KEY,
+    DEDUP_SHOWN_PRINTED,
     DEDUP_SHOWN_REMOVED,
     DEDUP_SHOWN_TRACKED,
     DEDUP_SHOWN_UNPLACED,
@@ -2026,12 +2027,25 @@ def _log_validation_warnings(all_warnings: list[dict]) -> None:
 _PROVEN_COPY_METRICS = frozenset({'citation_pmid', 'citation_doi', 'citation_pmcid'})
 
 
+def _words(text: str | None) -> list[str]:
+    return re.findall(r'\w+', norm(text))
+
+
 def _is_exact_copy(decision: Mapping[str, Any], dropped: Mapping[str, Any], kept: Mapping[str, Any]) -> bool:
     """A dedup drop that is surely a copy (#2174): the two entries hold the
     same words in the same order, or share a PMID, DOI or PMCID."""
-    def words(entry: Mapping[str, Any]) -> list[str]:
-        return re.findall(r'\w+', norm(entry.get('text')))
-    return decision.get('metric') in _PROVEN_COPY_METRICS or words(dropped) == words(kept)
+    return decision.get('metric') in _PROVEN_COPY_METRICS or _words(dropped.get('text')) == _words(kept.get('text'))
+
+
+def _printed_by(dropped: Mapping[str, Any], elements: Sequence[Any]) -> bool:
+    """True when the kept entry's rendered rows (a cell paragraph read as its
+    whole row) print every word of `dropped`, each as often (#2174). Read on
+    the page, not on the kept entry's text: a fused kept entry's text can
+    hold a separate record no field of its row prints (WRHUNM, BRAQDE)."""
+    rows = {id(row): row for row in (next(element.iterancestors(qn('w:tr')), element) for element in elements)}
+    printed = Counter(_words(' '.join(
+        t.text or '' for row in rows.values() for t in row.iter(qn('w:t')))))
+    return not Counter(_words(dropped.get('text'))) - printed
 
 
 class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
@@ -4699,8 +4713,8 @@ Now analyze the text above:"""
         (that entry's keeper, when it was dropped in turn), so Reject All
         restores it when dedup was wrong, and Accept All gives the render
         without it. Removed outright, as before: an exact copy
-        (`_is_exact_copy`), and a drop whose keeper has no row in the
-        document. Each decision records which (`shown_as`, for the doctor).
+        (`_is_exact_copy`), a drop whose keeper has no row in the document,
+        and one whose keeper's rows print every word of it (`_printed_by`). Each decision records which (`shown_as`, for the doctor).
         Skipped with track changes off, where a deletion is already accepted."""
         if not self.emit_track_changes:
             return
@@ -4719,6 +4733,8 @@ Now analyze the text above:"""
                 decision['shown_as'] = DEDUP_SHOWN_REMOVED
             elif not elements or not texts:
                 decision['shown_as'] = DEDUP_SHOWN_UNPLACED
+            elif _printed_by(dropped, elements):
+                decision['shown_as'] = DEDUP_SHOWN_PRINTED
             else:
                 supplementary.write_after(elements[-1], texts, revision, self.doc)
                 decision['shown_as'] = DEDUP_SHOWN_TRACKED

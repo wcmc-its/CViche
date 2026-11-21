@@ -214,10 +214,29 @@ def test_show_dedup_drops_follows_a_dropped_keeper_to_its_own_keeper():
     keeper_para = doc.add_paragraph(_PHD["text"])
     gen = _shower(doc)
     gen._row_receipts.wrote(keeper_para._p, _PHD)
-    middle = {"text": "PhD Instructional Systems Technology"}
+    middle = {"text": "PhD Instructional Systems Technology, 1999"}
     gen._dedup_pairs = [({"metric": "x"}, _MS, middle), ({"metric": "x"}, middle, _PHD)]
     gen._show_dedup_drops()
     assert sorted(_deleted_texts(doc)) == sorted([_MS["text"], middle["text"]])
+
+
+def test_show_dedup_drops_removes_a_drop_its_kept_row_prints_word_for_word():
+    """Every word of the drop on the kept row (its other cells included): a
+    copy. A word the row leaves out makes it a tracked deletion, though the
+    kept entry's text holds it (WRHUNM: offices fused into a kept entry
+    whose row prints none of them)."""
+    from unified_pipeline.stage6.dedup import DEDUP_SHOWN_PRINTED, DEDUP_SHOWN_TRACKED
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text, table.rows[0].cells[1].text = "Member, Example Society", "2010"
+    kept = {"text": "Member, Example Society 2010; Secretary, Example Society, 2020-2022"}
+    gen = _shower(doc)
+    gen._row_receipts.wrote(table.rows[0].cells[0].paragraphs[0]._p, kept)
+    printed, office = {"metric": "x"}, {"metric": "x"}
+    gen._dedup_pairs = [(printed, {"text": "Example Society member 2010"}, kept),
+                        (office, {"text": "Secretary, Example Society, 2020-2022"}, kept)]
+    gen._show_dedup_drops()
+    assert (printed["shown_as"], office["shown_as"]) == (DEDUP_SHOWN_PRINTED, DEDUP_SHOWN_TRACKED)
 
 
 def test_show_dedup_drops_writes_nothing_with_track_changes_off():

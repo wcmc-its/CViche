@@ -129,10 +129,13 @@ DEDUP_DIFFERENT_TITLE_MIN_WORDS = 3
 DEDUP_PAIR_KEY = '_pair'
 
 #: `shown_as` on a dedup decision in the render sidecar (#2174): written as a
-#: tracked deletion after its keeper's rows; removed as an exact copy; or
-#: removed because its keeper has no row to write it after.
+#: tracked deletion after its keeper's rows; removed as an exact copy;
+#: removed because the keeper's rows print every word of it, so Reject would
+#: restore nothing a reader cannot already see; or removed because its keeper
+#: has no row to write it after.
 DEDUP_SHOWN_TRACKED = 'tracked_deletion'
 DEDUP_SHOWN_REMOVED = 'removed_exact_copy'
+DEDUP_SHOWN_PRINTED = 'removed_printed_by_kept_row'
 DEDUP_SHOWN_UNPLACED = 'removed_no_kept_row'
 
 
