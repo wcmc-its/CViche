@@ -652,8 +652,9 @@ Lints, ranked by the severity of the failure class they catch:
                           duplicated, run together, cut in two, or showing
                           protected data (doctor recall 36% on two fresh
                           batches; MR-V2: 43% -> 66% with this lint, 81% of
-                          its findings real). INFO and review-copy only, one
-                          per claim. Paid, so only when the caller passes
+                          its findings real). Review-copy only, one per
+                          claim: WARN for a lost detail or a duplicate
+                          (`WARN_KINDS`, MR-P1), else INFO. Paid, so only when the caller passes
                           `model_review=True` (the orchestrator does, unless
                           CVICHE_DOCTOR_MODEL_REVIEW=0); dispatched by hand
                           after the gates. Reads stage 2 and the docx

@@ -11,8 +11,11 @@ personal data.
 Measured before it shipped (PRECISION.md, MR-V2): on 16 labelled runs the
 prompt had never seen, the doctor plus this lint caught 66% of the verified
 defects against the doctor's 43%, and 81% of its findings were real (76%
-exactly as worded). So it is INFO and review-copy only: each finding is a
-comment on the output text it quotes, or a review note, and costs no score.
+exactly as worded). It is review-copy only: each finding is a comment on the
+output text it quotes, or a review note. A finding is INFO, and costs no
+score, unless its kind is in WARN_KINDS: the kinds whose findings clear the
+WARN bar (80% exactly as worded on 10 or more judged) on that measurement
+pooled with production batch UNSKBH (MR-P1).
 
 The model call is injected (`call`, `llm_client.call_llm`'s signature), so this
 module does no I/O itself, and run_doctor passes one only when its caller
@@ -65,6 +68,11 @@ KIND_LABELS = {
     "split": "May be one entry cut in two",
     "protected_data": "Personal data that may need removing",
 }
+#: The kinds a finding is WARN for, so the quality score counts it. MR-V2 and
+#: MR-P1 pooled, exactly as worded: field_lost 67 of 76 (88%), duplicated 22
+#: of 22. record_lost (12 of 16, the misses real but worded partly wrong),
+#: merged (2 of 3), split (1 of 2) and the rest stay INFO until more verdicts.
+WARN_KINDS = frozenset({"field_lost", "duplicated"})
 #: The model's word for an output quote it could not find.
 ABSENT = "ABSENT"
 #: Opens the finding that says how much of the CV went unchecked: coverage,
@@ -208,8 +216,8 @@ def _quote(value: object) -> str:
 
 
 def claim_finding(claim: Mapping, chunk: SourceChunk) -> dict | None:
-    """One model claim as an INFO finding, or None when it names no element of
-    its chunk or no known kind. The message is the reviewer's text; the
+    """One model claim as a finding, WARN for a WARN_KINDS kind and else INFO,
+    or None when it names no element of its chunk or no known kind. The message is the reviewer's text; the
     evidence is the output quote (where a comment can sit), the source quote,
     then "entry <n>" per element, which doctor_vs_autopsy.py scores by."""
     kind = claim.get("kind")
@@ -219,7 +227,8 @@ def claim_finding(claim: Mapping, chunk: SourceChunk) -> dict | None:
     reason = " ".join(str(claim.get("why") or "").split())[:MAX_REASON_CHARS]
     quotes = [q for q in (_quote(claim.get("output_quote")), _quote(claim.get("source_quote"))) if q]
     entries = [f"entry {_fmt_idx(i)}" for i in idxs]
-    return _finding(MODEL_REVIEW_LINT, "INFO", f"{KIND_LABELS[kind]}: {reason}", quotes + entries)
+    severity = "WARN" if kind in WARN_KINDS else "INFO"
+    return _finding(MODEL_REVIEW_LINT, severity, f"{KIND_LABELS[kind]}: {reason}", quotes + entries)
 
 
 def _review_chunk(call: Callable[..., dict], system: str, chunk: SourceChunk,
