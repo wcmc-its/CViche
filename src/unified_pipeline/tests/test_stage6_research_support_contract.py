@@ -4454,3 +4454,16 @@ def test_stage6_grouping_closes_the_award_end_before_fan_out():
 
     ends = sorted(child['extracted_fields']['end_date'] for child in grouped['M2A'])
     assert ends == ['2023-12', '8/2021']
+
+
+def test_a_rendered_grant_records_its_table_rows_as_its_receipt():
+    """#2174: a dedup drop whose kept entry is a grant is written as a
+    tracked row after that grant's table, so the writer records the rows."""
+    from unified_pipeline.stage6.row_receipts import RowReceiptLedger
+    gen = _sectioned_generator()
+    gen._row_receipts = RowReceiptLedger()
+    grant = _entry('M2B', title='Ended Project Study', agency='NIH',
+                   start_date='01/2018', end_date='06/2020')
+    gen._fill_research_support({'M2B': [grant]}, as_of=TEST_AS_OF)
+    [table] = _tables_under(gen, COMPLETED)
+    assert gen._row_receipts.live_elements_for(grant) == [row._tr for row in table.rows]
