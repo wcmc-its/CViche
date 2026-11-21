@@ -4214,3 +4214,47 @@ def test_one_mentees_class_of_phrase_hides_no_other_mentees_sub_point(note, tmp_
     assert note in "".join(t.text or "" for t in body.iter(qn("w:delText")))
     assert "Expected Graduation June 2024" in [
         "".join(t.text or "" for t in tc.iter(qn("w:t"))) for tc in body.iter(qn("w:tc"))]
+
+
+# --- #2174: a dedup drop written after its kept entry ------------------------------------
+
+def test_write_after_a_body_paragraph_is_struck_and_accept_all_removes_it():
+    doc = Document()
+    kept = doc.add_paragraph("Member, Example Society, 2010-present")
+    doc.add_paragraph("Next entry")
+    before = _texts(doc.element.body)
+
+    sp.write_after(kept._p, ("Member, Example Society, 2012-present",),
+                   sp.Revision(7, _DATE, sp.DEDUP_AUTHOR), doc)
+
+    assert _texts(_accept_all(doc.element.body)) == before
+    assert "Member, Example Society, 2012-present" in _reject_all_texts(doc.element.body)
+    authors = {d.get(qn("w:author")) for d in doc.element.body.iter(qn("w:del"))}
+    assert authors == {sp.DEDUP_AUTHOR}
+
+
+@pytest.mark.parametrize("anchor_is_row", [True, False])
+def test_write_after_a_table_row_adds_a_deleted_row_after_it(anchor_is_row):
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    for row, texts in zip(table.rows, (["Chair", "2015"], ["Member", "2010"]), strict=True):
+        for cell, text in zip(row.cells, texts, strict=True):
+            cell.text = text
+    first = table.rows[0]
+    anchor = first._tr if anchor_is_row else first.cells[0].paragraphs[0]._p
+
+    sp.write_after(anchor, ("Chair 2016",), sp.Revision(1, _DATE, sp.DEDUP_AUTHOR), doc)
+
+    rows = table._tbl.findall(qn("w:tr"))
+    assert len(rows) == 3 and rows[1].find(f"{qn('w:trPr')}/{qn('w:del')}") is not None
+    assert len(_accept_all(doc.element.body).findall(f".//{qn('w:tr')}")) == 2
+
+
+def test_a_second_write_after_one_anchor_goes_below_the_first():
+    doc = Document()
+    kept = doc.add_paragraph("Kept entry")
+    doc.add_paragraph("Next entry")
+    revision = sp.Revision(1, _DATE, sp.DEDUP_AUTHOR)
+    sp.write_after(kept._p, ("first copy",), revision, doc)
+    sp.write_after(kept._p, ("second copy",), revision, doc)
+    assert _reject_all_texts(doc.element.body)[:3] == ["Kept entry", "first copy", "second copy"]

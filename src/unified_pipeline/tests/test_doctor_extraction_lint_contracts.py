@@ -6519,3 +6519,14 @@ def test_journal_name_joined_reads_each_stage4_record():
 ])
 def test_journal_name_joined_silent(entry):
     assert _journal_findings(entry) == []
+
+
+def test_dedup_lints_skip_a_drop_written_as_a_tracked_deletion():
+    """#2174: a drop stage 6 wrote struck through after its kept entry is in
+    the docx, so neither lint reads it as lost; any other `shown_as` is."""
+    from unified_pipeline.stage6.dedup import DEDUP_SHOWN_TRACKED, DEDUP_SHOWN_UNPLACED
+    suspect = {"code": "N1", "metric": "jaccard", "dropped_text": "alpha beta gamma delta",
+               "kept_text": "alpha"}
+    for lint, decision in ((lint_dedup_drops, suspect), (lint_dedup_merged, _MERGED_CARD)):
+        assert lint({"dedup_decisions": [dict(decision, shown_as=DEDUP_SHOWN_TRACKED)]}) == []
+        assert len(lint({"dedup_decisions": [dict(decision, shown_as=DEDUP_SHOWN_UNPLACED)]})) == 1

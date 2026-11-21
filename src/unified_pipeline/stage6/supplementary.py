@@ -636,6 +636,10 @@ _ARTICLES = frozenset({'a', 'an', 'the'})
 #: Revision author in Word's review pane, so a reviewer can tell these from
 #: the enrichment and formatter changes and from their own edits.
 SUBPOINT_AUTHOR = 'CViche: source text with no template field'
+#: The author of an entry stage-6 dedup judged a copy of the entry above it
+#: (#2174): written struck through, so Reject restores it if dedup was wrong.
+DEDUP_AUTHOR = 'CViche: likely a copy of the entry above'
+_STAGE6_AUTHORS = frozenset({SUBPOINT_AUTHOR, DEDUP_AUTHOR})
 
 #: The render-warnings sidecar's key for the sub-points stage 6 wrote, one
 #: `SubpointPlacement` record each. The doctor reads it so that a sub-point
@@ -2565,14 +2569,15 @@ def _label_table_text(tbl: BaseOxmlElement,
 class Revision:
     """Hands out the w:id, author and date every tracked change carries."""
 
-    def __init__(self, next_id: int, date: str) -> None:
+    def __init__(self, next_id: int, date: str, author: str = SUBPOINT_AUTHOR) -> None:
         self.next_id = next_id
         self.date = date
+        self.author = author
 
     def element(self, tag: str) -> BaseOxmlElement:
         elem = OxmlElement(tag)
         elem.set(qn('w:id'), str(self.next_id))
-        elem.set(qn('w:author'), SUBPOINT_AUTHOR)
+        elem.set(qn('w:author'), self.author)
         elem.set(qn('w:date'), self.date)
         self.next_id += 1
         return elem
@@ -2617,7 +2622,7 @@ def _deleted_paragraph(text: str, revision: Revision,
 
 def _is_subpoint(elem: BaseOxmlElement | None) -> bool:
     """A paragraph or row this module wrote: its mark, row or run is deleted
-    by `SUBPOINT_AUTHOR`."""
+    by `SUBPOINT_AUTHOR` or `DEDUP_AUTHOR`."""
     if elem is None:
         return False
     if elem.tag == qn('w:p'):
@@ -2626,7 +2631,7 @@ def _is_subpoint(elem: BaseOxmlElement | None) -> bool:
         marks = [elem.find(f"{qn('w:trPr')}/{qn('w:del')}")]
     else:
         return False
-    return any(mark is not None and mark.get(qn('w:author')) == SUBPOINT_AUTHOR
+    return any(mark is not None and mark.get(qn('w:author')) in _STAGE6_AUTHORS
                for mark in marks)
 
 
@@ -2761,6 +2766,20 @@ def write_row_subpoint(row: BaseOxmlElement, texts: tuple[str, ...],
     _insert_row_after(row, texts, revision)
     cells = (''.join(t.text or '' for t in tc.iter(qn('w:t'))) for tc in row.iter(qn('w:tc')))
     return ' '.join((*(' '.join(cell.split()) for cell in cells if cell.strip()), *texts))
+
+
+def write_after(element: BaseOxmlElement, texts: tuple[str, ...], revision: Revision,
+                doc: Document) -> None:
+    """Deleted `texts` after a rendered `element` of `doc`, as a sub-point
+    goes under its anchor: a spanning deleted row after a table row
+    (`element` a `w:tr` or a paragraph in one of its cells), else deleted
+    paragraphs after a body paragraph. Accept All removes them."""
+    if element.tag == qn('w:tr'):
+        _insert_row_after(element, texts, revision)
+    elif element.getparent().tag == qn('w:tc'):
+        _insert_row_after(element.getparent().getparent(), texts, revision)
+    else:
+        _insert_after_paragraph(Paragraph(element, doc._body), texts, revision)
 
 
 def write_subpoint(subpoint: SubPoint, revision: Revision) -> None:
