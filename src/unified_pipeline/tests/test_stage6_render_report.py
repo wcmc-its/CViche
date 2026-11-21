@@ -164,3 +164,68 @@ def test_comment_failure_logs_via_project_logger_not_print(caplog, capsys):
 
     assert any("Could not add comment" in r.message for r in caplog.records)
     assert capsys.readouterr().out == ""
+
+
+# ------------------------------------------------- #2174: drops shown as tracked deletions
+
+def _shower(doc: Document, emit_track_changes: bool = True) -> WCMTemplateGenerator:
+    """Just what `_show_dedup_drops` reads; skip the heavyweight ctor."""
+    from unified_pipeline.stage6.row_receipts import RowReceiptLedger
+    gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
+    gen.doc, gen.emit_track_changes, gen._revision_id = doc, emit_track_changes, 0
+    gen._row_receipts, gen.stats = RowReceiptLedger(), {"track_changes_added": 0}
+    return gen
+
+
+def _deleted_texts(doc: Document) -> list[str]:
+    from docx.oxml.ns import qn
+    return ["".join(t.text for t in p.iter(qn("w:delText"))) for p in doc.element.body.iter(qn("w:p"))
+            if p.find(f".//{qn('w:delText')}") is not None]
+
+
+def test_show_dedup_drops_writes_a_near_duplicate_after_its_kept_row():
+    from unified_pipeline.stage6.dedup import (
+        DEDUP_SHOWN_REMOVED,
+        DEDUP_SHOWN_TRACKED,
+        DEDUP_SHOWN_UNPLACED,
+    )
+    doc = Document()
+    kept_para = doc.add_paragraph(_PHD["text"])
+    doc.add_paragraph("Next entry")
+    gen = _shower(doc)
+    gen._row_receipts.wrote(kept_para._p, _PHD)
+    exact = {"text": "PhD:  instructional systems technology,  Indiana University."}
+    unrowed_kept = {"text": "Some entry no section wrote"}
+    pairs = [({"metric": "jaccard=0.80"}, _MS, _PHD),
+             ({"metric": "jaccard=1.00"}, exact, _PHD),
+             ({"metric": "jaccard=0.70"}, {"text": "Some other entry"}, unrowed_kept)]
+    gen._dedup_pairs = pairs
+
+    gen._show_dedup_drops()
+
+    assert [d["shown_as"] for d, _dropped, _kept in pairs] == [
+        DEDUP_SHOWN_TRACKED, DEDUP_SHOWN_REMOVED, DEDUP_SHOWN_UNPLACED]
+    assert _deleted_texts(doc) == [_MS["text"]]
+    assert gen.stats["track_changes_added"] == 1
+
+
+def test_show_dedup_drops_follows_a_dropped_keeper_to_its_own_keeper():
+    doc = Document()
+    keeper_para = doc.add_paragraph(_PHD["text"])
+    gen = _shower(doc)
+    gen._row_receipts.wrote(keeper_para._p, _PHD)
+    middle = {"text": "PhD Instructional Systems Technology"}
+    gen._dedup_pairs = [({"metric": "x"}, _MS, middle), ({"metric": "x"}, middle, _PHD)]
+    gen._show_dedup_drops()
+    assert sorted(_deleted_texts(doc)) == sorted([_MS["text"], middle["text"]])
+
+
+def test_show_dedup_drops_writes_nothing_with_track_changes_off():
+    doc = Document()
+    kept_para = doc.add_paragraph(_PHD["text"])
+    gen = _shower(doc, emit_track_changes=False)
+    gen._row_receipts.wrote(kept_para._p, _PHD)
+    decision = {"metric": "jaccard=0.80"}
+    gen._dedup_pairs = [(decision, _MS, _PHD)]
+    gen._show_dedup_drops()
+    assert _deleted_texts(doc) == [] and "shown_as" not in decision

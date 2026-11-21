@@ -2887,7 +2887,6 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # inserts count as rendered) -- both bullet leftover content into the
         # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
         recovered_appendix_lines = self._recover_appendix_lines(written_appendix_entries, pre_dedup_entries_by_code, cv_owner)
-        self._show_dedup_drops()  # #2174: after the recovery, so what it re-emits is unchanged
         self._finish_document(template_snapshot)
 
         # Determine output path
@@ -2924,7 +2923,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def _finish_document(self, template_snapshot: TemplateSnapshot) -> None:
         """The passes over the whole document once every line is placed: N/A in
         each template slot nothing filled, then comments, table formatting and
-        the instruction box."""
+        the instruction box. First, dedup's drops as tracked deletions: after
+        the #221 recovery, so what it re-emits is unchanged (#2174)."""
+        self._show_dedup_drops()
         # Last content written, so a slot something above fills never says N/A (#1942).
         filled = fill_empty_slots(self.doc.element.body, template_snapshot)
         logger.info("Empty template slots marked %s: %d paragraph, %d table",
