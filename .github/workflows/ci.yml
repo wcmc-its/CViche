@@ -214,13 +214,21 @@ jobs:
       - run: mypy --config-file mypy.ini
 
   k8s-manifests:
-    # Render both kustomize overlays and validate them against the Kubernetes
-    # API schemas (#692). buildspec.yaml's render smoke runs only at deploy
-    # time, after the merge, so a broken patch or a misspelled field (a
-    # dropped securityContext, a defaultMode at the wrong level) merged to
-    # dev green. The check itself is scripts/check_k8s_manifests.sh, which
-    # local_ci.sh also runs. Tool versions are pinned and each download is
-    # checked against the sha256 its release publishes.
+    # Render both kustomize overlays (#692). buildspec.yaml's render smoke runs
+    # only at deploy time, after the merge. Per overlay this job fails on:
+    #   - a patch that doesn't render (kustomize build);
+    #   - a field the Kubernetes 1.37 schema doesn't define, or one nested at
+    #     the wrong level, e.g. a misspelled fsGroup or a defaultMode on the
+    #     volume instead of under secret: (kubeconform -strict);
+    #   - an Ingress without ssl-policy ELBSecurityPolicy-TLS13-1-2-2021-06, a
+    #     SAML secret volume that is world-readable (defaultMode missing or
+    #     with the world-read bit), or one that isn't but whose pod lacks
+    #     securityContext.fsGroup 1000 (the script's policy check).
+    # A valid field that is simply missing passes kubeconform; only the three
+    # policy rules catch a dropped one. The check itself is
+    # scripts/check_k8s_manifests.sh, which local_ci.sh also runs. Tool
+    # versions are pinned and each download is checked against the sha256 its
+    # release publishes.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -230,6 +238,10 @@ jobs:
       KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  # linux-amd64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"  # match the build image (python:3.14-slim)
+      - run: pip install pyyaml==6.0.3  # requirements.txt's pin; the policy check reads the render
       - name: Install kustomize and kubeconform (pinned)
         run: |
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP"

@@ -14,6 +14,7 @@
 #   KUSTOMIZE, KUBECONFORM  paths to the k8s-manifests job's tools (ci.yml
 #                 pins kustomize v5.8.3, kubeconform v0.8.0). Default: each
 #                 name on PATH; if missing, that job fails, the others still run.
+#                 Its policy check also needs python3 with PyYAML 6.0.3.
 set -uo pipefail
 HEAD_SHA=$1; LABEL=$2
 
