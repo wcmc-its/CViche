@@ -634,7 +634,8 @@ def _assert_no_name(text, where):
 def test_controls_mask_uid_keeps_only_the_document_uid():
     assert rgctl.mask_uid(_NAMED_UID) == "038WKA"
     assert rgctl.mask_uid("YIXQFB") == "YIXQFB"
-    assert rgctl.mask_uid("ABC_DE") == "ABC_DE"  # the run store has uids of this shape
+    assert rgctl.mask_uid("ABC_DE") == "ABC_DE" and rgctl.mask_uid("AB1-CD") == "AB1-CD"
+    assert rgctl.mask_uid("6ABC-D_Jane Doe CV") == "6ABC"
     assert rgctl.mask_uid("web08") == "web08"
     assert rgctl.mask_uid("2003_Dr_Jane_Doe") == "2003"
     # No leading document uid: a bare name must not survive as its first

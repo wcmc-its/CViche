@@ -212,6 +212,47 @@ that wiring the web driver reached it anyway -- `_copy_to_pipeline_input`
 drops the upload where stage 6's `SAMPLE_CV_DIR` guess looks -- and the
 CLI reached it only for a uid-style run from the repo root.)
 
+## Control log (2026-11-22, `render_gate_controls.py`, #783)
+
+The first log the script wrote rather than a person. Head was this branch,
+whose `src/` equals `origin/dev` b7df3a37. Base was `ada93faa`, the merge
+before #2187, which changed six stage-6 modules. Run on a laptop, four arms
+side by side.
+
+**S3-built farm.** 60 runs, picked by `build_gate_farm.py --dry-run
+--local-out` (an earlier selection than the final one, which dedups by
+upload hash too and swaps a few runs), each with its source docx. 20 minutes.
+
+| control | measured | result |
+|---|---|---|
+| determinism | head rendered twice: paragraph CHANGED 0, fingerprint CHANGED 0 of 60; doctored twice: CHANGED 0 of 60 | PASS |
+| crash guard | stale docx wiped in 4/4 arms; injected all-failed index over stale docx: refused | PASS |
+| real-CV rendering | head_a 60/60 exit 0; head_b 60/60 exit 0; base 60/60 exit 0; mutated 60/60 exit 0; source docx for 60/60 | PASS |
+| mutation (PERSONAL DATA work-email write removed) | paragraph CHANGED 41, fingerprint CHANGED 41; predicted 41 (rendered work email); exact match | PASS |
+
+Base vs head: render paragraph CHANGED 0, fingerprint CHANGED 0 of 60;
+doctor CHANGED 0 of 60.
+
+**Local 66-CV farm** (`src/unified_pipeline/outputs/`, sources from
+`data/sample_cvs/word/`, whose uids carry owners' names). 15 minutes. All four
+controls PASS: determinism 0/0/0 of 66, stale docx wiped in 4/4 arms and the
+injected index refused, 66/66 in every arm with a source docx for 65, and
+mutation CHANGED 31/31 against 31 predicted. Base vs head: 0 render and 0
+doctor changes of 66.
+
+So #2187's stage-6 fixes change no CV in either farm. The mutation control
+shows the gate could have seen a change if there had been one.
+
+**Local farm against an older base** (`f7e11a2c`, dev on 2026-11-12, ten days
+of stage-6 and doctor merges behind head). Controls as above, all PASS. Base
+vs head: render paragraph CHANGED 24, fingerprint CHANGED 66 of 66; doctor
+CHANGED 66 of 66. The per-run table listed each run by its masked uid
+(`038WKA`, `2003`, `NSUJZG`, ...), and no name from the farm's name-bearing
+uids appeared in it. 66 of the doctor deltas are `model_review`, a lint added
+in those ten days, which reports itself on every run. The next largest is
+`section_consistency` (35 gained), not traced here. None of it is noise:
+determinism was 0.
+
 ## The CI job (#2176)
 
 `corpus-gate` in `.github/workflows/ci.yml` runs `render_gate_controls.py` on

@@ -107,8 +107,8 @@ DEFAULT_JOBS = 4
 EXIT_SAME, EXIT_DIFFERS, EXIT_NO_EVIDENCE = 0, 1, 2
 
 # A whole uid that is a stored run's document uid: six upper-case letters,
-# digits or "_" (the S3 run store has uids like "AB1_CD").
-_DOCUMENT_UID_RE = re.compile(r"[A-Z0-9_]{6}")
+# digits, "_" or "-" (the S3 run store has uids like "AB1_CD", the local farm "AB1-CD").
+_DOCUMENT_UID_RE = re.compile(r"[A-Z0-9_-]{6}")
 # A leading token of up to six letters/digits that ends at a separator or at
 # the end of the uid: "038WKA" of "038WKA_Jane Doe CV", "web08", "2003".
 _LEADING_UID_RE = re.compile(r"[A-Za-z0-9]{1,6}(?![A-Za-z0-9])")
