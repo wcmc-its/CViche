@@ -29,6 +29,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -624,6 +625,10 @@ def test_render_gate_rejects_a_non_directory_source_dir():
 _NAMED_UID = "038WKA_Jane Doe CV (Updated 1-26-26)"
 _PLAIN_UID = "QWERTY"
 _NAME_PARTS = ("Jane", "Doe", "jane.doe", "Updated")
+_HASHED_RE = re.compile(r"h:[0-9a-f]{8}")
+# Name-shaped tokens a shape test would print: a bare name in uid shape, and
+# the leading tokens of "WILSON_CV" and "Smith2_cv".
+_NAME_TOKENS = ("LI_WEI", "WILSON_CV", "Smith2_cv", "Smith2")
 
 
 def _assert_no_name(text, where):
@@ -631,19 +636,41 @@ def _assert_no_name(text, where):
         assert part not in text, f"{part!r} from a name-bearing uid or CV text reached {where}"
 
 
-def test_controls_mask_uid_keeps_only_the_document_uid():
-    assert rgctl.mask_uid(_NAMED_UID) == "038WKA"
-    assert rgctl.mask_uid("YIXQFB") == "YIXQFB"
-    assert rgctl.mask_uid("ABC_DE") == "ABC_DE" and rgctl.mask_uid("AB1-CD") == "AB1-CD"
-    assert rgctl.mask_uid("6ABC-D_Jane Doe CV") == "6ABC"
-    assert rgctl.mask_uid("web08") == "web08"
-    assert rgctl.mask_uid("2003_Dr_Jane_Doe") == "2003"
-    # No leading document uid: a bare name must not survive as its first
-    # six letters, and two different names must stay distinguishable.
-    for named in ("Smith_CV", "JaneDoeCV", "Jane Doe CV"):
-        masked = rgctl.mask_uid(named)
-        assert masked.startswith("uid-") and "Jane" not in masked and "Smith" not in masked
-    assert rgctl.mask_uid("Smith_CV") != rgctl.mask_uid("Jones_CV")
+def _masked_named():
+    return rgctl.mask_uid(_NAMED_UID, frozenset())
+
+
+def test_controls_mask_uid_prints_only_allowlisted_generated_uids():
+    # A manifest that lists two real ids, a bare 038WKA, and "LI_WEI".
+    allowed = frozenset({"QZKMRT", "AB12CD", "038WKA", "LI_WEI"})
+    assert rgctl.mask_uid("QZKMRT", allowed) == "QZKMRT"
+    assert rgctl.mask_uid("AB12CD", allowed) == "AB12CD"
+    # Not in the manifest: hashed, though it has the generated shape.
+    assert _HASHED_RE.fullmatch(rgctl.mask_uid("QZKMRT", frozenset()))
+    for named in (*_NAME_TOKENS, _NAMED_UID, "WILSON", "web08", "2003_Dr_Jane_Doe"):
+        masked = rgctl.mask_uid(named, allowed)
+        assert _HASHED_RE.fullmatch(masked), (named, masked)
+    # "LI_WEI" stays hashed even when a manifest lists it: not the generated shape.
+    assert rgctl.mask_uid("WILSON_CV", allowed) != "WILSON"
+    assert rgctl.mask_uid("Smith2_cv", allowed) != "Smith2"
+    # Stable, and distinct per uid.
+    assert rgctl.mask_uid("Smith_CV", allowed) == rgctl.mask_uid("Smith_CV", frozenset())
+    assert rgctl.mask_uid("Smith_CV", allowed) != rgctl.mask_uid("Jones_CV", allowed)
+
+
+def test_controls_load_allowed_uids_keeps_only_generated_shapes():
+    with tempfile.TemporaryDirectory() as tmp:
+        man = Path(tmp) / "manifest.json"
+        man.write_text(json.dumps({rgctl.MANIFEST_UIDS_KEY: ["QZKMRT", "LI_WEI", "Smith2", 7]}))
+        assert rgctl.load_allowed_uids(man) == frozenset({"QZKMRT"})
+        man.write_text(json.dumps({"codes_by_uid": {"QZKMRT": []}}))
+        try:
+            rgctl.load_allowed_uids(man)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a manifest with no document_uids list was accepted")
+    assert rgctl.load_allowed_uids(None) == frozenset()
 
 
 def test_controls_report_never_carries_a_name_bearing_uid_or_cv_text():
@@ -660,7 +687,8 @@ def test_controls_report_never_carries_a_name_bearing_uid_or_cv_text():
     report.doctor_delta = {_NAMED_UID: ([{"lint": "section_lost", "message": "Jane Doe lost"}], [])}
     text = rgctl.format_report(report)
     _assert_no_name(text, "format_report")
-    assert "| 038WKA | 1 | 0 | yes | 1 | 0 |" in text, text
+    assert "038WKA" not in text, text
+    assert f"| {_masked_named()} | 1 | 0 | yes | 1 | 0 |" in text, text
     assert "| section_lost | 1 | 0 |" in text, text
 
 
@@ -679,31 +707,49 @@ def _make_rendered_docx(path, work_email, extra_paragraph=None):
     doc.save(str(path))
 
 
-def _fake_runner(leave_stale=False):
+def _fake_render(out, label, leave_stale, with_sources):
+    uids = (_NAMED_UID, _PLAIN_UID)
+    if not leave_stale:
+        shutil.rmtree(out)
+        out.mkdir()
+    for uid in uids:
+        email = "jane.doe@example.org" if uid == _NAMED_UID and label != "arm_mutated" else ""
+        extra = "Jane Doe, base only" if uid == _NAMED_UID and label == "base" else None
+        _make_rendered_docx(out / f"{uid}{rgctl.DOCX_SUFFIX}", email, extra)
+    index = {u: {"input": "x"} for u in uids}
+    if with_sources:  # the named uid's source is a PDF, so it has no docx
+        for u in uids:
+            index[u]["source_docx"] = "not found" if u == _NAMED_UID else f"{u}.docx"
+    (out / "_render_index.json").write_text(json.dumps(index))
+
+
+def _fake_runner(leave_stale=False, base_doctor="clean"):
     """Stands in for the render_gate.py / doctor_gate.py subprocesses. Base
     differs from head on the named uid in both render and doctor; the mutated
     copy loses the work email; the log it writes carries the full uid, as the
-    real ones do."""
-    uids = (_NAMED_UID, _PLAIN_UID)
-
+    real ones do. `base_doctor` is "clean", "partial" (a "_failed" uid, exit
+    1), "absent" (no report, exit 1) or "short" (one uid missing, exit 0)."""
     def run(script, arm_root, args, log):
         log.write_text(f"[1/2] {_NAMED_UID} OK\n")
         label = Path(arm_root).name
         out = Path(args[1])
         if script == "render_gate.py":
-            if not leave_stale:
-                shutil.rmtree(out)
-                out.mkdir()
-            for uid in uids:
-                email = "jane.doe@example.org" if uid == _NAMED_UID and label != "arm_mutated" else ""
-                extra = "Jane Doe, base only" if uid == _NAMED_UID and label == "base" else None
-                _make_rendered_docx(out / f"{uid}{rgctl.DOCX_SUFFIX}", email, extra)
-            (out / "_render_index.json").write_text(json.dumps({u: {"input": "x"} for u in uids}))
+            _fake_render(out, label, leave_stale, "--source-dir" in map(str, args))
             return 0
         findings = [{"lint": "section_lost", "message": "Jane Doe lost"}] if label == "base" else []
-        report = {uid: {"findings": findings if uid == _NAMED_UID else []} for uid in uids}
-        out.write_text(json.dumps({**report, dgc.FAILED_KEY: {}}))
-        return 0
+        report = {uid: {"findings": findings if uid == _NAMED_UID else []}
+                  for uid in (_NAMED_UID, _PLAIN_UID)}
+        mode = base_doctor if label == "base" else "clean"
+        if mode == "absent":
+            return 1
+        failed = {}
+        if mode == "partial":
+            failed = {_NAMED_UID: f"Traceback ... {_NAMED_UID}"}
+            del report[_NAMED_UID]
+        elif mode == "short":
+            del report[_NAMED_UID]
+        out.write_text(json.dumps({**report, dgc.FAILED_KEY: failed}))
+        return 1 if failed else 0
     return run
 
 
@@ -724,14 +770,20 @@ def _make_controls_tree(root, anchor=rgctl.MUTATION_ANCHOR):
     return farm
 
 
-def _run_controls_main(root, runner):
+def _run_controls_main(root, runner, extra=()):
+    """main() over a fake tree; returns (rc, stdout + stderr, summary)."""
     farm = root / "farm" if (root / "farm").exists() else _make_controls_tree(root)
     summary = root / "summary.md"
-    stdout = io.StringIO()
-    with contextlib.redirect_stdout(stdout):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         rc = rgctl.main([str(farm), "--base", str(root / "base"), "--head", str(root / "head"),
-                         "--work", str(root / "work"), "--summary", str(summary)], runner=runner)
-    return rc, stdout.getvalue(), summary.read_text()
+                         "--work", str(root / "work"), "--summary", str(summary), *extra],
+                        runner=runner)
+    return rc, out.getvalue(), summary.read_text() if summary.exists() else ""
+
+
+def _row(out, control):
+    return next(line for line in out.splitlines() if line.startswith(f"| {control}"))
 
 
 def test_controls_end_to_end_prints_and_summarises_only_masked_uids():
@@ -740,15 +792,19 @@ def test_controls_end_to_end_prints_and_summarises_only_masked_uids():
     the name -- while the subprocess log, which does, stays in --work."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        rc, out, summary = _run_controls_main(root, _fake_runner())
+        manifest = root / "manifest.json"
+        manifest.write_text(json.dumps({rgctl.MANIFEST_UIDS_KEY: [_PLAIN_UID]}))
+        rc, out, summary = _run_controls_main(root, _fake_runner(),
+                                              ["--manifest", str(manifest)])
         assert rc == rgctl.EXIT_DIFFERS, out
         assert out == summary
         _assert_no_name(out, "stdout / $GITHUB_STEP_SUMMARY")
+        assert "038WKA" not in out, out
         for control in ("determinism", "crash guard", "real-CV rendering", "mutation"):
-            row = next(line for line in out.splitlines() if line.startswith(f"| {control}"))
-            assert row.endswith("| PASS |"), row
+            assert _row(out, control).endswith("| PASS |"), _row(out, control)
+        assert "doctor base 2/2 exit 0" in _row(out, "real-CV rendering"), out
         assert "predicted 1 (rendered work email); exact match" in out, out
-        assert "| 038WKA | 0 | 1 | yes | 0 | 1 |" in out, out
+        assert f"| {_masked_named()} | 0 | 1 | yes | 0 | 1 |" in out, out
         assert _NAMED_UID in (root / "work" / "logs" / "render_head_a.log").read_text()
         # The mutation went to a copy; head's own file is untouched.
         assert rgctl.MUTATION_ANCHOR in (root / "head" / rgctl.MUTATION_FILE).read_text()
@@ -775,19 +831,92 @@ def test_controls_fail_when_the_mutation_anchor_is_gone():
         assert "anchor matched 0 times" in row and row.endswith("| FAIL |"), row
 
 
-def test_controls_crash_reports_no_evidence_without_printing_the_exception():
-    """An exception raised mid-run can carry a full uid in its text; it goes
-    to a log under --work, and stdout says only which class it was."""
+def test_controls_any_crash_prints_only_the_exception_class():
+    """An exception of any class, raised in a render or in format_report
+    itself, can carry a full uid in its text. Its message and traceback go to
+    a log under --work; stdout, stderr and the step summary name its class
+    only, and the run exits 2."""
     def raising_runner(script, arm_root, args, log):
-        raise OSError(f"cannot read {_NAMED_UID}_fields.json")
+        raise TypeError(f"cannot render {_NAMED_UID}_fields.json")
+
+    def raising_format(report):
+        raise TypeError(f"bad row for {_NAMED_UID}")
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         rc, out, summary = _run_controls_main(root, raising_runner)
         assert rc == rgctl.EXIT_NO_EVIDENCE, out
-        _assert_no_name(out + summary, "stdout / $GITHUB_STEP_SUMMARY after a crash")
-        assert "the run stopped on OSError" in out, out
+        _assert_no_name(out + summary, "stdout / stderr / $GITHUB_STEP_SUMMARY after a crash")
+        assert "Traceback" not in out and "038WKA" not in out, out
+        assert "the run stopped on TypeError" in out and out == summary, out
         assert _NAMED_UID in (root / "work" / rgctl.CRASH_LOG).read_text()
+
+    real_format = rgctl.format_report
+    rgctl.format_report = raising_format
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc, out, summary = _run_controls_main(root, _fake_runner())
+    finally:
+        rgctl.format_report = real_format
+    assert rc == rgctl.EXIT_NO_EVIDENCE, out
+    _assert_no_name(out + summary, "stdout / stderr / $GITHUB_STEP_SUMMARY after format_report")
+    assert "Traceback" not in out and "the run stopped on TypeError" in out, out
+
+
+def test_controls_a_failed_base_doctor_run_is_no_evidence():
+    """Base's doctor run crashing, writing nothing, or skipping a CV is an
+    arm failure, not head differing: exit 2, never 1."""
+    for mode in ("partial", "absent", "short"):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, _ = _run_controls_main(Path(tmp), _fake_runner(base_doctor=mode))
+            assert rc == rgctl.EXIT_NO_EVIDENCE, (mode, out)
+            row = _row(out, "real-CV rendering")
+            assert "doctor base" in row and row.endswith("| FAIL |"), (mode, row)
+            assert "**Controls passed" not in out, (mode, out)
+            _assert_no_name(out, f"stdout with base doctor {mode}")
+
+
+def test_controls_exit_no_evidence_when_a_comparison_refused_an_arm():
+    """Even with every control row passing, a refused or partial comparison
+    is no evidence."""
+    def report(render, doctor):
+        r = rgctl.GateReport(2, False, ("base", "head"))
+        r.controls.append(rgctl.ControlRow("determinism", "ok", True))
+        r.render, r.doctor = render, doctor
+        return r
+
+    both = ["a_wcm.docx", "b_wcm.docx"]
+    good_render = rgc.RenderComparison(common=both)
+    good_doctor = dgc.DoctorComparison(common=["a", "b"])
+    assert rgctl._exit_code(report(good_render, good_doctor)) == rgctl.EXIT_SAME
+    changed = rgc.RenderComparison(common=both, fingerprint_changed=["a_wcm.docx"])
+    assert rgctl._exit_code(report(changed, good_doctor)) == rgctl.EXIT_DIFFERS
+    for render, doctor in (
+            (good_render, dgc.DoctorComparison(guard_problems=["arm A: 1 uid(s)"])),
+            (rgc.RenderComparison(guard_problems=["arm A failed"]), good_doctor),
+            (good_render, dgc.DoctorComparison(common=["a"], missing=["b"])),
+            (rgc.RenderComparison(common=["a_wcm.docx"], only_b=["b_wcm.docx"]), good_doctor)):
+        r = report(render, doctor)
+        assert rgctl._exit_code(r) == rgctl.EXIT_NO_EVIDENCE, (render, doctor)
+        assert "**No evidence**" in rgctl.format_report(r)
+
+
+def test_controls_real_cv_control_fails_on_missing_sources_unless_allowed():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sources = root / "sources"
+        sources.mkdir()
+        rc, out, _ = _run_controls_main(root, _fake_runner(), ["--source-dir", str(sources)])
+        assert rc == rgctl.EXIT_NO_EVIDENCE, out
+        row = _row(out, "real-CV rendering")
+        assert "source docx for 1/2" in row and row.endswith("| FAIL |"), row
+
+        rc, out, _ = _run_controls_main(root, _fake_runner(),
+                                        ["--source-dir", str(sources), "--allow-missing-sources"])
+        assert rc == rgctl.EXIT_DIFFERS, out
+        row = _row(out, "real-CV rendering")
+        assert "source docx for 1/2 (missing allowed)" in row and row.endswith("| PASS |"), row
 
 
 def test_controls_refuse_an_arm_that_is_not_a_whole_checkout():
@@ -884,6 +1013,24 @@ def test_gate_farm_layout_holds_every_render_input_and_no_render_output():
     assert rgctl.RENDER_STAGE_DIR not in layout.values()
 
 
+def test_gate_farm_takes_only_a_generated_run_id_as_a_uid():
+    assert bgf.gateable_uid("QZKMRT", "QZKMRT") and bgf.gateable_uid("AB12CD", "AB12CD")
+    for run_id, uid in (("LI_WEI", "LI_WEI"), ("QZKMRT", "WILSON_CV"), ("QZKMRT", "Smith2_cv"),
+                        ("Smith2", "Smith2"), ("QZKMRT", "WILSON"), ("AB1-CD", "AB1-CD")):
+        assert not bgf.gateable_uid(run_id, uid), (run_id, uid)
+
+
+def test_gate_farm_manifest_lists_the_uids_the_gate_may_print():
+    chosen = [bgf.Candidate(u, frozenset({"A"}), None, None, 1, {}) for u in ("QZKMRT", "AB12CD")]
+    man = bgf.manifest(chosen, {"A", "B"})
+    assert man[rgctl.MANIFEST_UIDS_KEY] == ["AB12CD", "QZKMRT"]
+    assert man["codes_missing"] == ["B"]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "manifest.json"
+        path.write_text(json.dumps(man))
+        assert rgctl.load_allowed_uids(path) == frozenset({"AB12CD", "QZKMRT"})
+
+
 def test_gate_farm_refuses_a_write_flag_it_does_not_mean():
     for argv in (["--dry-run", "--replace"], ["--write", "--local-out", "x"], [],
                  ["--dry-run", "--size", "0"]):
@@ -924,12 +1071,16 @@ if __name__ == "__main__":
     test_doctor_compare_main_passes_when_only_metrics_differ()
     test_doctor_compare_main_silent_on_metrics_when_reports_have_none()
     test_doctor_compare_main_still_fails_on_a_findings_change_regardless_of_metrics()
-    test_controls_mask_uid_keeps_only_the_document_uid()
+    test_controls_mask_uid_prints_only_allowlisted_generated_uids()
+    test_controls_load_allowed_uids_keeps_only_generated_shapes()
     test_controls_report_never_carries_a_name_bearing_uid_or_cv_text()
     test_controls_end_to_end_prints_and_summarises_only_masked_uids()
     test_controls_fail_when_stale_output_survives_a_render()
     test_controls_fail_when_the_mutation_anchor_is_gone()
-    test_controls_crash_reports_no_evidence_without_printing_the_exception()
+    test_controls_any_crash_prints_only_the_exception_class()
+    test_controls_a_failed_base_doctor_run_is_no_evidence()
+    test_controls_exit_no_evidence_when_a_comparison_refused_an_arm()
+    test_controls_real_cv_control_fails_on_missing_sources_unless_allowed()
     test_controls_refuse_an_arm_that_is_not_a_whole_checkout()
     test_controls_render_stage_dir_is_run_doctors()
     test_render_compare_dirs_reports_each_changed_cv()
@@ -939,5 +1090,7 @@ if __name__ == "__main__":
     test_gate_farm_keeps_the_latest_run_of_each_cv()
     test_gate_farm_owner_key_hashes_the_name_and_ignores_order_and_case()
     test_gate_farm_layout_holds_every_render_input_and_no_render_output()
+    test_gate_farm_takes_only_a_generated_run_id_as_a_uid()
+    test_gate_farm_manifest_lists_the_uids_the_gate_may_print()
     test_gate_farm_refuses_a_write_flag_it_does_not_mean()
     print("ok")

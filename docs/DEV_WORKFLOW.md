@@ -255,6 +255,10 @@ Two rules:
    On a PR that touches neither `web_interface/frontend/` nor `ci.yml`,
    `frontend-typecheck` goes green without running its npm steps; it always
    runs them on `dev`/`main`. `issue-narrowing.yml` adds `gate`.
+   `corpus-gate-paths` and `corpus-gate` (#2176) show as skipped until the
+   `CORPUS_GATE_ENABLED` variable is `true`, and `corpus-gate` is skipped on
+   a PR that touches no stage-6 or doctor file. Skipped is not a failure.
+   Once enabled, `corpus-gate` is report-only: read its step summary.
    `deps-audit.yml` runs only when a requirements file changes.
 
    **When Actions can't start jobs** (billing, or a GitHub outage), a local run

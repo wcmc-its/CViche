@@ -19,7 +19,8 @@ and render_gate_controls.py read:
     cviche/gate-farm/outputs/stage_5d_citation_formatted/<uid>_citation_formatted.json
     ...                                       (one directory per stage)
     cviche/gate-farm/sources/<uid>.docx       (render_gate.py --source-dir)
-    cviche/gate-farm/manifest.json            (uids and section codes, no names)
+    cviche/gate-farm/manifest.json            (uids and section codes, no names;
+                                               render_gate_controls.py --manifest)
 
 The suffix-to-directory map is not restated here: it is run_doctor's
 artifact_layout() plus render_gate.PRECEDENCE (which adds stage 5c). The
@@ -27,8 +28,11 @@ stored _wcm.docx and _render_warnings.json are left out on purpose: the gate
 renders each arm fresh.
 
 Selection. A candidate is a run with a stage-4 _fields.json and a .docx
-upload (a PDF upload cannot back --source-dir), whose uid is a bare document
-uid (a longer uid can carry a name into the farm's filenames). Runs of the
+upload (a PDF upload cannot back --source-dir), whose uid is its run id and
+has exactly the generated shape (render_gate_controls.is_generated_uid: six of
+A-Z0-9). Any other uid -- a filename stem, or an old id with "_" in it, which
+is also what "LI_WEI" looks like -- could carry a name into the farm's
+filenames and the printed output, so it is never farmed. Runs of the
 same CV are collapsed to the latest one, first by the upload's sha256
 (input/manifest.json), then by the stage-4 cv_owner name, hashed in memory and
 never written or printed. Then a greedy set cover over the taxonomy codes
@@ -36,7 +40,9 @@ in each run's stage-4 entries picks runs until every code is covered once,
 and a second greedy pass fills to --size, preferring runs whose codes the
 farm holds fewest of.
 
-Output names runs by their 6-character uid only (render_gate_controls.mask_uid).
+Output names runs by their 6-character uid only. The manifest's
+"document_uids" list is the allowlist render_gate_controls.mask_uid reads:
+the only uids the gate ever prints unhashed.
 
 --write copies server side (copy_object), so no CV leaves S3. It refuses a
 non-empty farm prefix unless --replace, which deletes the farm keys the new
@@ -55,7 +61,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import render_gate as rg
-from render_gate_controls import RENDER_STAGE_DIR, mask_uid
+from render_gate_controls import (
+    MANIFEST_UIDS_KEY,
+    RENDER_STAGE_DIR,
+    is_generated_uid,
+    mask_uid,
+)
 
 DEFAULT_BUCKET = "wcm-cviche-storage"
 RUNS_PREFIX = "cviche/runs/"
@@ -91,6 +102,12 @@ def owner_key(fields: dict) -> str | None:
     name = owner.get("name") if isinstance(owner, dict) else None
     words = _NAME_WORD_RE.findall(str(name).lower()) if name else []
     return hashlib.sha256(" ".join(sorted(words)).encode()).hexdigest() if words else None
+
+
+def gateable_uid(run_id: str, uid: str) -> bool:
+    """A uid the farm may hold: the run's own id (the orchestrator names
+    every web run's outputs after it), in exactly the generated shape."""
+    return uid == run_id and is_generated_uid(uid)
 
 
 def section_codes(fields: dict) -> frozenset[str]:
@@ -191,8 +208,8 @@ def _candidate(s3, bucket: str, run_id: str, layout: dict) -> Candidate | None:
     if len(fields_names) != 1 or len(sources) != 1:
         return None
     uid = fields_names[0][:-len(FIELDS_SUFFIX)]
-    if mask_uid(uid) != uid:
-        return None  # a uid with more than a document uid in it would carry a name into the farm
+    if not gateable_uid(run_id, uid):
+        return None  # anything but a generated run id can carry a name into the farm
     fields = _read_json(s3, bucket, base + "outputs/" + fields_names[0])
     if not isinstance(fields, dict):
         return None
@@ -222,14 +239,16 @@ def manifest(chosen: list[Candidate], all_codes: set) -> dict:
             "codes_available": sorted(all_codes),
             "codes_covered": sorted(covered),
             "codes_missing": sorted(all_codes - covered),
-            "codes_by_uid": {mask_uid(c.uid): sorted(c.codes) for c in chosen}}
+            MANIFEST_UIDS_KEY: sorted(c.uid for c in chosen if is_generated_uid(c.uid)),
+            "codes_by_uid": {c.uid: sorted(c.codes) for c in chosen if is_generated_uid(c.uid)}}
 
 
 def print_plan(chosen: list[Candidate], man: dict) -> None:
     held = Counter(code for c in chosen for code in c.codes)
     print(f"selected {man['runs']} runs; codes covered {len(man['codes_covered'])}"
           f"/{len(man['codes_available'])}; missing: {' '.join(man['codes_missing']) or 'none'}")
-    print("runs: " + " ".join(sorted(mask_uid(c.uid) for c in chosen)))
+    allowed = frozenset(man[MANIFEST_UIDS_KEY])
+    print("runs: " + " ".join(sorted(mask_uid(c.uid, allowed) for c in chosen)))
     print("runs per code: " + " ".join(f"{code}={n}" for code, n in sorted(held.items())))
 
 

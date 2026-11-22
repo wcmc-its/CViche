@@ -2,7 +2,8 @@
 """Run the four render/doctor gate controls, then the base-vs-head gate, and print the table.
 
     python3 scripts/render_gate_controls.py <farm> --base <base_root> --head <head_root> \\
-        [--source-dir DIR] [--work DIR] [--summary FILE] [--base-label L] [--head-label L]
+        [--source-dir DIR [--allow-missing-sources]] [--manifest FILE] [--work DIR]
+        [--summary FILE] [--base-label L] [--head-label L]
 
 <farm> is a stage-output tree (render_gate.py's docstring has the shape).
 <base_root> and <head_root> are whole checkouts of the two code versions:
@@ -10,6 +11,9 @@ each needs src/ and key_files/, because stage 6 falls back to a template with
 no grant tables when key_files/ is missing and nothing raises (a vacuous arm).
 --work is wiped and recreated; it defaults to ./render_gate_controls_work.
 --summary appends the same Markdown table to FILE ($GITHUB_STEP_SUMMARY in CI).
+--manifest is the farm's manifest.json (build_gate_farm.py): the only uids
+printed as they are. --allow-missing-sources lets a --source-dir run pass
+with a source docx for fewer than all CVs (a local farm with PDF-sourced runs).
 
 Issue #783: a gate result is only evidence if the gate could have failed, and
 the four controls that show it could were run by hand and written into
@@ -22,7 +26,10 @@ docs/guides/render-doctor-gates.md. This runs them, in order:
    Then a copy of a clean arm has its _render_index.json rewritten to report
    every uid failed, with the docx left in place, and render_gate_compare
    must refuse to compare it.
-3. Real-CV rendering. Every arm renders N of N farm CVs and exits 0.
+3. Real-CV rendering. Every arm renders N of N farm CVs and exits 0, and
+   every doctor run (head twice, base once) reports N of N with no failure and
+   exits 0. With --source-dir, render_gate.py found a source docx for N of N,
+   unless --allow-missing-sources.
 4. Intentional mutation. A temporary copy of head has the PERSONAL DATA
    work-email write removed (render_gate_controls.MUTATION_*), the shape of
    the 2026-09-07 control, where removing the #550 write-back changed exactly
@@ -37,16 +44,21 @@ fresh render as stage_6_wcm_documents, so lints gated on the rendered docx
 built from JSON alone.
 
 PRIVACY (#2176). Corpus uids come from real filenames and carry owners' names
-("038WKA_Jane Doe CV ..."). Everything this script prints or writes to
---summary passes through mask_uid(), which keeps only the leading 6-character
-document uid (or a short farm number) and hashes anything else. Nothing is
-printed from a CV: counts, masked uids and lint names only. The subprocesses'
-own output, which does carry full uids and can carry CV text in a traceback,
-goes to log files under --work and is never echoed.
+("038WKA_Jane Doe CV ...", "LI_WEI", "Smith2_cv"), and no shape test tells a
+name from a uid. So mask_uid() is an allowlist: a uid is printed as it is only
+when the --manifest lists it and it has the shape the web app generates (six
+of A-Z0-9, run_creation.generate_run_id); every other uid becomes "h:" plus 8
+hex characters of its sha256. Nothing is printed from a CV: counts, masked
+uids and lint names only. The subprocesses' own output, which does carry full
+uids and can carry CV text in a traceback, goes to log files under --work and
+is never echoed. Any exception, wherever it is raised (format_report
+included), prints only its class name; the traceback goes to
+--work/controls_traceback.log.
 
 Exit status: 0 when every control passed and head equals base; 1 when every
 control passed and head differs from base (the gate's result, to be read);
-2 when a control failed or the invocation was bad (no result is evidence).
+2 when a control failed, either comparison was refused or partial (an arm
+failed), the run crashed, or the invocation was bad: no result is evidence.
 Dates: Date of preparation and tracked-change w:date are masked by
 render_gate_compare itself. Two more stage-6 call sites read the current year,
 so a run whose renders straddle a new year fails the determinism control.
@@ -55,13 +67,12 @@ import argparse
 import datetime
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
-import traceback
-import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -71,7 +82,6 @@ import doctor_gate_compare as dgc
 import render_gate as rg
 import render_gate_compare as rgc
 from docx import Document
-from docx.opc.exceptions import PackageNotFoundError
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -92,12 +102,8 @@ WORK_EMAIL_LABEL = "work email"
 
 STALE_SENTINEL = "_stale_sentinel_wcm.docx"
 CRASH_LOG = "controls_traceback.log"
-#: What reading a farm, a checkout or a rendered docx can raise: file and
-#: copy errors, a subprocess timeout, malformed JSON, a corrupt docx (python-
-#: docx's PackageNotFoundError, zipfile's BadZipFile, lxml's XMLSyntaxError,
-#: a SyntaxError subclass).
-RUN_FAILURES = (OSError, ValueError, KeyError, SyntaxError, subprocess.SubprocessError,
-                zipfile.BadZipFile, PackageNotFoundError)
+#: The farm manifest's list of document uids (build_gate_farm.manifest).
+MANIFEST_UIDS_KEY = "document_uids"
 DOCX_SUFFIX = "_wcm.docx"
 SUBPROCESS_TIMEOUT_S = 3600
 MAX_UID_ROWS = 60
@@ -106,40 +112,57 @@ DEFAULT_JOBS = 4
 
 EXIT_SAME, EXIT_DIFFERS, EXIT_NO_EVIDENCE = 0, 1, 2
 
-# A whole uid that is a stored run's document uid: six upper-case letters,
-# digits, "_" or "-" (the S3 run store has uids like "AB1_CD", the local farm "AB1-CD").
-_DOCUMENT_UID_RE = re.compile(r"[A-Z0-9_-]{6}")
-# A leading token of up to six letters/digits that ends at a separator or at
-# the end of the uid: "038WKA" of "038WKA_Jane Doe CV", "web08", "2003".
-_LEADING_UID_RE = re.compile(r"[A-Za-z0-9]{1,6}(?![A-Za-z0-9])")
+# The document uid the web app generates: six characters, A-Z today and A-Z0-9
+# before (web_interface/backend/app/services/run_creation.py generate_run_id;
+# the orchestrator requires document_uid == run_id). The older token_urlsafe
+# ids could hold "_" or "-", which is also how "LI_WEI" looks, so those are
+# never printed or farmed.
+GENERATED_UID_RE = re.compile(r"[A-Z0-9]{6}")
+MASK_PREFIX = "h:"
+MASK_HEX_CHARS = 8
+
+#: Where a crash's traceback goes: a file under --work, never the console.
+_CRASH_LOGGER = logging.getLogger("render_gate_controls.crash")
+_CRASH_LOGGER.propagate = False
 
 
-def mask_uid(uid: str) -> str:
-    """The part of a uid that is safe to print: its 6-character document uid.
+def is_generated_uid(uid: str) -> bool:
+    """True for a uid with exactly the shape generate_run_id produces."""
+    return GENERATED_UID_RE.fullmatch(uid) is not None
 
-    A uid that IS a document uid is kept whole. Otherwise its leading token is
-    kept only when it has the shape of one -- six upper-case letters or
-    digits, or a short token with a digit in it (a farm number like "2003" or
-    "web08"). Anything else ("Smith_CV", a name with no leading uid) becomes
-    "uid-" plus 8 hex characters of its sha256, so it stays distinguishable
-    without being readable.
+
+def mask_uid(uid: str, allowed: frozenset[str]) -> str:
+    """The uid itself when `allowed` (the farm manifest's uids) holds it and
+    it has the generated shape; otherwise "h:" plus 8 hex characters of its
+    sha256, stable across runs and distinct per uid but not readable.
+
+    An allowlist and not a shape test: "LI_WEI", "WILSON" of "WILSON_CV" and
+    "Smith2" of "Smith2_cv" all look like a uid or a leading uid token.
     """
-    if _DOCUMENT_UID_RE.fullmatch(uid):
+    if uid in allowed and is_generated_uid(uid):
         return uid
-    m = _LEADING_UID_RE.match(uid)
-    if m:
-        token = m.group()
-        if any(c.isdigit() for c in token) or (len(token) == 6 and token.isupper()):
-            return token
-    return "uid-" + hashlib.sha256(uid.encode("utf-8")).hexdigest()[:8]
+    return MASK_PREFIX + hashlib.sha256(uid.encode("utf-8")).hexdigest()[:MASK_HEX_CHARS]
+
+
+def load_allowed_uids(manifest: Path | None) -> frozenset[str]:
+    """The manifest's document uids that have the generated shape; none
+    without a manifest, so every uid is hashed. Raises OSError/ValueError on
+    an unreadable or malformed manifest."""
+    if manifest is None:
+        return frozenset()
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    uids = data.get(MANIFEST_UIDS_KEY) if isinstance(data, dict) else None
+    if not isinstance(uids, list):
+        raise ValueError(f"no {MANIFEST_UIDS_KEY} list in the manifest")
+    return frozenset(u for u in uids if isinstance(u, str) and is_generated_uid(u))
 
 
 def _uid_of_docx(name: str) -> str:
     return name[:-len(DOCX_SUFFIX)] if name.endswith(DOCX_SUFFIX) else name
 
 
-def _masked(uids) -> str:
-    return " ".join(sorted({mask_uid(u) for u in uids})) or "none"
+def _masked(uids, allowed: frozenset[str]) -> str:
+    return " ".join(sorted({mask_uid(u, allowed) for u in uids})) or "none"
 
 
 @dataclass(frozen=True)
@@ -163,6 +186,20 @@ class ArmRun:
 
 
 @dataclass(frozen=True)
+class DoctorRun:
+    """One doctor_gate.py run: its exit code and the report it wrote."""
+    label: str
+    exit_code: int
+    report: dict
+
+    def clean_over(self, n: int) -> bool:
+        """Exit 0, an empty "_failed", and a report for each of n CVs."""
+        failed = self.report.get(dgc.FAILED_KEY)
+        uids = [u for u in self.report if u != dgc.FAILED_KEY]
+        return self.exit_code == 0 and failed == {} and len(uids) == n
+
+
+@dataclass(frozen=True)
 class ControlRow:
     name: str
     measured: str
@@ -176,14 +213,24 @@ class GateReport:
     farm_uids: int
     source_dir: bool
     labels: tuple[str, str]
+    allowed_uids: frozenset[str] = frozenset()
     controls: list[ControlRow] = field(default_factory=list)
     render: rgc.RenderComparison | None = None
     doctor: dgc.DoctorComparison | None = None
     doctor_delta: dict = field(default_factory=dict)
-    note: str = ""
 
     def controls_passed(self) -> bool:
         return bool(self.controls) and all(c.passed for c in self.controls)
+
+    def comparison_complete(self) -> bool:
+        """Both comparisons ran, neither refused an arm, and each covered
+        every farm CV in both arms. Anything less is an arm that failed, so
+        a difference would be that failure, not head's change."""
+        r, d, n = self.render, self.doctor, self.farm_uids
+        return (r is not None and d is not None and n > 0
+                and not r.guard_problems and not d.guard_problems
+                and len(r.common) == n and not r.only_a and not r.only_b
+                and len(d.common) == n and not d.missing)
 
     def head_differs(self) -> bool:
         return not (self.render is not None and self.render.ok
@@ -197,6 +244,10 @@ def _parse_args(argv):
     parser.add_argument("--head", type=Path, required=True, help="head checkout root")
     parser.add_argument("--source-dir", type=Path, default=None,
                         help="directory holding <uid>*.docx (render_gate.py --source-dir)")
+    parser.add_argument("--allow-missing-sources", action="store_true",
+                        help="with --source-dir: pass with a source docx for fewer than N CVs")
+    parser.add_argument("--manifest", type=Path, default=None,
+                        help="the farm's manifest.json; only its uids are printed unhashed")
     parser.add_argument("--work", type=Path, default=Path("render_gate_controls_work"),
                         help="scratch directory (wiped and recreated)")
     parser.add_argument("--summary", type=Path, default=None,
@@ -212,6 +263,10 @@ def _parse_args(argv):
         parser.error(f"no stage_4_field_extraction under {args.farm}")
     if args.source_dir is not None and not args.source_dir.is_dir():
         parser.error(f"--source-dir is not a directory: {args.source_dir}")
+    if args.allow_missing_sources and args.source_dir is None:
+        parser.error("--allow-missing-sources needs --source-dir")
+    if args.manifest is not None and not args.manifest.is_file():
+        parser.error(f"--manifest is not a file: {args.manifest}")
     for flag, root in (("--base", args.base), ("--head", args.head)):
         missing = [str(rel) for rel in (STAGE6_REL, TEMPLATE_REL) if not (root / rel).is_file()]
         if missing:
@@ -275,19 +330,23 @@ def _doctor_view(farm: Path, render_out: Path, view: Path) -> Path:
     return view
 
 
-def _doctor_arm(runner, arm: ArmRun, arm_root, farm, source_dir, work) -> dict:
-    """doctor_gate.py over the farm plus this arm's render; {} when it wrote
-    nothing readable, which compare_reports then refuses."""
+def _doctor_arm(runner, arm: ArmRun, arm_root, farm, source_dir, work) -> DoctorRun:
+    """doctor_gate.py over the farm plus this arm's render. A run that wrote
+    nothing readable gets a report whose "_failed" says so, which
+    compare_reports then refuses."""
     view = _doctor_view(farm, arm.out, work / f"doctor_view_{arm.label}")
     out = work / f"doctor_{arm.label}.json"
     args = [view.resolve(), out.resolve()]
     if source_dir is not None:
         args += ["--source-dir", source_dir.resolve()]
-    runner("doctor_gate.py", arm_root, args, work / "logs" / f"doctor_{arm.label}.log")
+    code = runner("doctor_gate.py", arm_root, args, work / "logs" / f"doctor_{arm.label}.log")
     try:
-        return json.loads(out.read_text(encoding="utf-8"))
+        report = json.loads(out.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {dgc.FAILED_KEY: {"(doctor_gate.py)": "no readable report"}}
+        report = None
+    if not isinstance(report, dict):
+        report = {dgc.FAILED_KEY: {"(doctor_gate.py)": "no readable report"}}
+    return DoctorRun(arm.label, code, report)
 
 
 def mutate_arm(head_root: Path, dest: Path) -> int:
@@ -354,17 +413,31 @@ def _crash_guard_row(arms: list[ArmRun], work: Path) -> ControlRow:
     return ControlRow("crash guard", measured, wiped == len(arms) and refused)
 
 
-def _real_cv_row(arms: list[ArmRun], n: int, source_dir) -> ControlRow:
+def _real_cv_row(report: GateReport, arms: list[ArmRun], doctors: list[DoctorRun],
+                 allow_missing_sources: bool) -> ControlRow:
+    """Every render and every doctor run covered all n CVs cleanly, and with
+    --source-dir each render found every CV's source docx."""
+    n, allowed = report.farm_uids, report.allowed_uids
     parts, ok = [], n > 0
     for a in arms:
-        good = a.exit_code == 0 and a.rendered() == n and not a.failed_uids()
-        ok = ok and good
+        ok = ok and a.exit_code == 0 and a.rendered() == n and not a.failed_uids()
         part = f"{a.label} {a.rendered()}/{n} exit {a.exit_code}"
         if a.failed_uids():
-            part += f" failed {_masked(a.failed_uids())}"
+            part += f" failed {_masked(a.failed_uids(), allowed)}"
         parts.append(part)
-    if source_dir is not None:
-        parts.append(f"source docx for {arms[0].sources_found()}/{n}")
+    for d in doctors:
+        ok = ok and d.clean_over(n)
+        reported = sum(1 for u in d.report if u != dgc.FAILED_KEY)
+        failed = d.report.get(dgc.FAILED_KEY)
+        part = f"doctor {d.label} {reported}/{n} exit {d.exit_code}"
+        if failed != {}:
+            part += f" failed {len(failed) if isinstance(failed, dict) else 'unreadable'}"
+        parts.append(part)
+    if report.source_dir:
+        found = min(a.sources_found() for a in arms)
+        ok = ok and (found == n or allow_missing_sources)
+        parts.append(f"source docx for {found}/{n}"
+                     + (" (missing allowed)" if allow_missing_sources and found < n else ""))
     return ControlRow("real-CV rendering", "; ".join(parts), ok)
 
 
@@ -409,12 +482,13 @@ def _per_uid_rows(report: GateReport) -> list[str]:
     render = report.render
     para = {_uid_of_docx(d.name): d for d in render.paragraph_changed} if render else {}
     fp = {_uid_of_docx(n) for n in render.fingerprint_changed} if render else set()
-    uids = sorted(set(para) | fp | set(report.doctor_delta), key=mask_uid)
+    allowed = report.allowed_uids
+    uids = sorted(set(para) | fp | set(report.doctor_delta), key=lambda u: mask_uid(u, allowed))
     rows = []
     for uid in uids[:MAX_UID_ROWS]:
         d = para.get(uid)
         gained, lost = report.doctor_delta.get(uid, ([], []))
-        rows.append(f"| {mask_uid(uid)} | {len(d.added) if d else 0} | {len(d.removed) if d else 0} "
+        rows.append(f"| {mask_uid(uid, allowed)} | {len(d.added) if d else 0} | {len(d.removed) if d else 0} "
                     f"| {'yes' if uid in fp else 'no'} | {len(gained)} | {len(lost)} |")
     if len(uids) > MAX_UID_ROWS:
         rows.append(f"| ... {len(uids) - MAX_UID_ROWS} more | | | | | |")
@@ -441,7 +515,7 @@ def format_report(report: GateReport) -> str:
               for c in report.controls]
     lines += ["", "### Base vs head", ""]
     if report.render is None or report.doctor is None:
-        lines.append(f"Not compared: {report.note or 'a control failed before the comparison'}.")
+        lines.append("Not compared: a control failed before the comparison.")
         return "\n".join(lines) + "\n"
     lines += ["| check | result |", "|---|---|",
               f"| render | {_render_counts(report.render)} |",
@@ -461,6 +535,9 @@ def format_report(report: GateReport) -> str:
 def _verdict(report: GateReport) -> str:
     if not report.controls_passed():
         return "**No evidence**: a control failed, so the comparison above proves nothing."
+    if not report.comparison_complete():
+        return ("**No evidence**: base or head failed or was partial in the comparison, "
+                "so a difference above would be that failure, not head's change.")
     if report.head_differs():
         return "**Controls passed. Head differs from base** in the runs listed above."
     return "**Controls passed. Head renders and doctors identically to base.**"
@@ -481,7 +558,7 @@ def _render_all(runner, args, work) -> tuple[dict, int]:
         return {label: f.result() for label, f in futures.items()}, hits
 
 
-def _doctor_all(runner, args, arms, work) -> dict:
+def _doctor_all(runner, args, arms, work) -> dict[str, DoctorRun]:
     plan = (("head_a", args.head), ("head_b", args.head), ("base", args.base))
     with ThreadPoolExecutor(args.jobs) as pool:
         futures = {label: pool.submit(_doctor_arm, runner, arms[label], root, args.farm,
@@ -495,48 +572,86 @@ def run_controls(args, runner=run_script) -> GateReport:
     shutil.rmtree(work, ignore_errors=True)
     (work / "logs").mkdir(parents=True)
     n = len(rg._discover_uids(args.farm, set()))
-    report = GateReport(n, args.source_dir is not None, (args.base_label, args.head_label))
+    report = GateReport(n, args.source_dir is not None, (args.base_label, args.head_label),
+                        load_allowed_uids(args.manifest))
     years = [datetime.date.today().year]
     arms, hits = _render_all(runner, args, work)
     docs = _doctor_all(runner, args, arms, work)
     years.append(datetime.date.today().year)
 
     report.controls.append(_determinism_row(arms["head_a"], arms["head_b"],
-                                            docs["head_a"], docs["head_b"], years))
+                                            docs["head_a"].report, docs["head_b"].report, years))
     report.controls.append(_crash_guard_row(list(arms.values()), work))
-    report.controls.append(_real_cv_row(list(arms.values()), n, args.source_dir))
+    report.controls.append(_real_cv_row(report, list(arms.values()), list(docs.values()),
+                                        args.allow_missing_sources))
     report.controls.append(_mutation_row(hits, arms["head_a"], arms.get("mutated", arms["head_a"]),
                                          args.head / TEMPLATE_REL))
 
+    base, head = docs["base"].report, docs["head_a"].report
     report.render = rgc.compare_dirs(arms["base"].out, arms["head_a"].out)
-    report.doctor = dgc.compare_reports(docs["base"], docs["head_a"])
+    report.doctor = dgc.compare_reports(base, head)
     if not report.doctor.guard_problems:
-        report.doctor_delta = _doctor_deltas(docs["base"], docs["head_a"], report.doctor.changed)
+        report.doctor_delta = _doctor_deltas(base, head, report.doctor.changed)
     return report
 
 
-def main(argv=None, runner=run_script) -> int:
-    args = _parse_args(argv)
-    try:
-        report = run_controls(args, runner)
-    except RUN_FAILURES as e:
-        # A traceback printed here would carry paths with full uids in them.
-        # It goes to a log under --work instead, and the run reports no
-        # evidence. Anything outside RUN_FAILURES is a bug in this script and
-        # propagates.
-        args.work.mkdir(parents=True, exist_ok=True)
-        (args.work / CRASH_LOG).write_text(traceback.format_exc(), encoding="utf-8")
-        report = GateReport(0, args.source_dir is not None, (args.base_label, args.head_label),
-                            note=f"the run stopped on {type(e).__name__} (traceback in "
-                                 f"--work's {CRASH_LOG})")
-    text = format_report(report)
+def _emit(text: str, summary: Path | None) -> None:
     print(text, end="")
-    if args.summary is not None:
-        with open(args.summary, "a", encoding="utf-8") as fh:
+    if summary is not None:
+        with open(summary, "a", encoding="utf-8") as fh:
             fh.write(text)
-    if not report.controls_passed():
+
+
+def _exit_code(report: GateReport) -> int:
+    if not report.controls_passed() or not report.comparison_complete():
         return EXIT_NO_EVIDENCE
     return EXIT_DIFFERS if report.head_differs() else EXIT_SAME
+
+
+class _QuietFileHandler(logging.FileHandler):
+    """A crash-log handler that never reports its own failure on stderr:
+    logging's default would print the record, which carries the crash."""
+
+    def handleError(self, record):  # noqa: N802 -- logging.Handler's name
+        pass
+
+
+def _crash_handler(work: Path | None) -> logging.Handler:
+    if work is None:
+        return logging.NullHandler()
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        return _QuietFileHandler(work / CRASH_LOG, mode="w", encoding="utf-8")
+    except OSError:
+        return logging.NullHandler()  # no traceback file; the console still gets none
+
+
+def _crash_text(exc_type: str) -> str:
+    return (f"## Render/doctor gate (#783, #2176)\n\n**No evidence**: the run stopped on "
+            f"{exc_type}. Its traceback is in --work's {CRASH_LOG}, not here: it can name "
+            f"a CV's owner.\n")
+
+
+def main(argv=None, runner=run_script) -> int:
+    """Parse, run, print. Any exception after parsing -- in a render, a
+    compare, or format_report itself -- prints only its class name (its
+    message and traceback can carry a full uid) and exits 2."""
+    args = None
+    try:
+        args = _parse_args(argv)
+        report = run_controls(args, runner)
+        _emit(format_report(report), args.summary)
+        return _exit_code(report)
+    except (Exception, KeyboardInterrupt) as e:
+        handler = _crash_handler(args.work if args is not None else None)
+        _CRASH_LOGGER.addHandler(handler)
+        _CRASH_LOGGER.exception("render_gate_controls.py stopped")
+        _CRASH_LOGGER.removeHandler(handler)
+        handler.close()
+        exc_type = type(e).__name__
+    # Outside the except block, so a failure here chains nothing from the crash.
+    _emit(_crash_text(exc_type), args.summary if args is not None else None)
+    return EXIT_NO_EVIDENCE
 
 
 if __name__ == "__main__":

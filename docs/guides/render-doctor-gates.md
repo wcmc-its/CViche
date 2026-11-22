@@ -37,7 +37,8 @@ difference, a crashed render, a missing/unreadable input -- exits non-zero.
 
 ```bash
 python3 scripts/render_gate_controls.py <farm> --source-dir <source-docx-dir> \
-  --base <base-checkout> --head <head-checkout> --work <scratch-dir> [--summary FILE]
+  --base <base-checkout> --head <head-checkout> --work <scratch-dir> \
+  [--manifest <farm-manifest.json>] [--allow-missing-sources] [--summary FILE]
 ```
 
 Both arms are whole checkouts (a `git worktree` or a `git archive` of each
@@ -50,7 +51,7 @@ prints the table the control logs below were written by hand:
 |---|---|---|
 | determinism | head rendered twice and doctored twice; both must be `CHANGED 0`, and the renders must not straddle a new year | the differ reporting noise |
 | crash guard | each render directory is seeded with a stale `_wcm.docx` that must be gone afterwards; a copy of a clean arm whose index says every uid failed, with its docx left in place, must be refused | comparing files that prove nothing |
-| real-CV rendering | every arm renders N of N farm CVs and exits 0 | an empty or partial arm reading as clean |
+| real-CV rendering | every arm renders N of N farm CVs and exits 0; every doctor run (head twice, base once) reports N of N, records no failure and exits 0; with `--source-dir`, a source docx was found for N of N (fewer passes only with `--allow-missing-sources`, for a local farm with PDF-sourced runs) | an empty or partial arm reading as clean |
 | mutation | a copy of head with the PERSONAL DATA work-email write removed; the CVs that change must be exactly the ones whose head render has a work email | the differ being blind |
 
 The mutation is the 2026-09-07 control's shape (a real behaviour removed,
@@ -65,13 +66,21 @@ arm's own fresh render as `stage_6_wcm_documents`, so lints gated on the
 rendered docx (`table_shape` among them) run too.
 
 Exit 0: every control passed and head equals base. Exit 1: every control
-passed and head differs (read the table). Exit 2: a control failed, so the
-comparison is not evidence.
+passed and head differs (read the table). Exit 2: no evidence. That is a
+failed control, a base-vs-head comparison that refused an arm or did not
+cover every CV in both (a failed arm, not a change in head), a crash, or a
+bad invocation.
 
-Everything it prints, and writes to `--summary`, names a run by its leading
-6-character document uid only, and carries no CV text: counts, uids and lint
-names. Corpus uids come from real filenames and contain owners' names. The
-render and doctor logs, which name full uids, stay under `--work`.
+Everything it prints, and writes to `--summary`, carries no CV text: counts,
+uids and lint names. Corpus uids come from real filenames and contain owners'
+names, and no shape test separates them from a document uid (`LI_WEI`,
+`WILSON_CV`, `Smith2_cv`). So uids are printed by allowlist: a uid appears
+as it is only when `--manifest` (the farm's `manifest.json`) lists it and it
+has the shape the web app generates (six of A-Z0-9). Every other uid is
+printed as `h:` plus 8 hex characters of its sha256. Without `--manifest`,
+every uid is hashed. An exception of any class prints only its class name;
+its traceback goes to `--work/controls_traceback.log`. The render and doctor
+logs, which name full uids, stay under `--work`.
 
 Renders take about 9 s per CV on dev as of 2026-11-22, not the 1.7 s measured
 in August; four arms run side by side (`--jobs`, default 4).
@@ -248,7 +257,10 @@ of stage-6 and doctor merges behind head). Controls as above, all PASS. Base
 vs head: render paragraph CHANGED 24, fingerprint CHANGED 66 of 66; doctor
 CHANGED 66 of 66. The per-run table listed each run by its masked uid
 (`038WKA`, `2003`, `NSUJZG`, ...), and no name from the farm's name-bearing
-uids appeared in it. 66 of the doctor deltas are `model_review`, a lint added
+uids appeared in it. (That was the first masking rule, which kept a uid's
+leading token. It kept name-shaped tokens too, so it was replaced by the
+manifest allowlist above, under which every uid of this farm is hashed.)
+66 of the doctor deltas are `model_review`, a lint added
 in those ten days, which reports itself on every run. The next largest is
 `section_consistency` (35 gained), not traced here. None of it is noise:
 determinism was 0.
@@ -265,11 +277,19 @@ a pull request when all of these hold:
   `stage_6_word_template.py`, `src/unified_pipeline/doctor/` or
   `run_doctor.py`.
 
-It checks out head and the merge base, syncs the farm from
-`s3://wcm-cviche-storage/cviche/gate-farm/`, runs the script, and writes the
-table to the job's step summary. It is report-only: the gate step always
-exits 0 and the job has `continue-on-error`. Whether it blocks a merge is a
-later decision. Nothing is uploaded as an artifact.
+The path check is its own job, `corpus-gate-paths`, on a GitHub-hosted
+runner. It has the same first two guards, reads only the repository, and
+outputs whether the gate should run and the merge base. `corpus-gate` needs
+it and runs only when it says so, so a PR that touches no stage-6 or doctor
+file starts no CodeBuild runner. A job skipped by its `if` shows as skipped,
+which holds no merge. Neither job is a required check.
+
+`corpus-gate` checks out head and the merge base, syncs the farm from
+`s3://wcm-cviche-storage/cviche/gate-farm/`, runs the script with the farm's
+`manifest.json` as `--manifest`, and writes the table to the job's step
+summary. It is report-only: the gate step always exits 0 and the job has
+`continue-on-error`. Whether it blocks a merge is a later decision. Nothing
+is uploaded as an artifact.
 
 It runs on a CodeBuild-hosted GitHub Actions runner in the CViche AWS
 account, one fresh build per job, so no CV reaches a GitHub-hosted runner.
@@ -288,15 +308,18 @@ About 60 stored runs, copied under their own prefix so the role never needs
 ```
 cviche/gate-farm/outputs/stage_*/<uid>_*.json   stage 1a-5d JSON, the layout render_gate.py reads
 cviche/gate-farm/sources/<uid>.docx             each run's uploaded original, for --source-dir
-cviche/gate-farm/manifest.json                  uids and taxonomy codes, no names
+cviche/gate-farm/manifest.json                  uids (document_uids) and taxonomy codes, no names
 ```
 
 `scripts/build_gate_farm.py` builds it. It lists `cviche/runs/`, keeps runs
-with a stage-4 `_fields.json` and a `.docx` upload, collapses re-runs of one
+with a stage-4 `_fields.json` and a `.docx` upload whose uid is the run's own
+id in the generated shape (six of A-Z0-9; an older id with `_` or `-` in it
+is left out, since `LI_WEI` has that shape too), collapses re-runs of one
 CV to the latest (by upload hash, then by stage-4 owner name, hashed in
 memory only), and picks runs by greedy set cover over the taxonomy codes in
 their stage-4 entries, then fills to 60 favouring the codes the farm holds
-fewest of. Copies are server side.
+fewest of. Copies are server side. The manifest's `document_uids` list is
+the allowlist `render_gate_controls.py --manifest` prints uids from.
 
 ```bash
 # Read-only: print the selection (6-character uids and code coverage).
