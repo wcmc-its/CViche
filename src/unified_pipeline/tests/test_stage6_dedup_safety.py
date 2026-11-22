@@ -68,6 +68,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _shorter_journal_than_kept,
     _split_record_family,
     _standalone_numerals,
+    _start_months_apart,
     _teaching_parts_apart,
     _title_only_fragment,
     _titles_disagree,
@@ -4262,3 +4263,95 @@ def test_dedup_keeps_one_evaluation_item_rated_9_and_10():
 
 def test_a_lone_number_before_a_semicolon_is_read():
     assert _lone_numbers("Example Cohort 2; Widget Program") == {"2"}
+
+
+def _dated(start=None, end=None, **fields) -> dict:
+    return _in_list(_entry("P", "Member, Gizmo Sprocket Guild", start_date=start, end_date=end,
+                           **fields))
+
+
+def _in_list(entry: dict, heading: str = "Committees") -> dict:
+    entry["hierarchy"] = ["Service", heading]
+    return entry
+
+
+@pytest.mark.parametrize("dropped, kept, apart", [
+    (_dated("2029-04", "present"), _dated("2029-03", "present"), True),
+    (_dated("2028-03", "2030"), _dated("2029-03", "2030"), True),
+    (_in_list(_entry("R", "Example Lecture", date="2029-05")),
+     _in_list(_entry("R", "Example Lecture", date="2029-03")), True),
+    (_dated("2029-04"), _in_list(_dated("2029-03"), "Other Activities"), False),  # two headings
+    ({**_dated("2029-04"), "hierarchy": []}, {**_dated("2029-03"), "hierarchy": []}, False),
+    (_dated("3/2029"), _dated("March 2029"), False),  # one month in two formats
+    (_dated("2029-03"), _dated("Mar. 2029"), False),
+    (_dated("2029-03-05"), _dated("2029-03-20"), False),  # the month, not the day
+    (_dated("2029"), _dated("2029-03"), False),  # a year alone states no month
+    (_dated("2029", "2030"), _dated("2028", "2030"), False),  # years only
+    (_dated("2029-03", "2030-07"), _dated("2029-03", "2030-06"), False),  # the end alone
+    (_dated(), _dated("2029-03", "present"), False),  # undated
+    (_dated("3/29"), _dated("4/29"), False),  # a bare mm/yy is not read (#867)
+])
+def test_start_months_apart(dropped, kept, apart):
+    assert _start_months_apart(dropped, kept) is apart
+
+
+def _member_row(when: str, **dates) -> dict:
+    return _in_list(_committee(f"Member- Gizmo Sprocket Guild Acme College {when}".strip(),
+                               "Gizmo Sprocket Guild", role="Member", institution="Acme College",
+                               **dates))
+
+
+def test_a_membership_that_began_in_another_month_is_kept():
+    """#666 (YJQBML): the text reduces to the same organization and writes
+    its month with a two-digit year; stage 4 stored both start dates."""
+    kept = _member_row("3/29 - present", start_date="2029-03", end_date="present")
+    dropped = _member_row("4/29 - present", start_date="2029-04", end_date="present")
+    assert _kept_both("P", dropped, kept)
+
+
+def _honors_row(text: str, date: str, name: str | None = "Gizmo Teaching Award") -> dict:
+    return _in_list(_entry("H", text, award_name=name, date=date), "Honors")
+
+
+def test_an_award_whose_text_sits_verbatim_in_another_month_s_award_is_kept():
+    """#666: the dropped row's date went to the next element, so its text is a
+    verbatim prefix of the kept row's and only the fields show another month.
+    The award's row of a third year does not carry it: its text reads no date
+    for the dropped row's text to be compared with."""
+    kept = _honors_row("Gizmo Teaching Award, Acme College, June, 2029.", "2029-06")
+    dropped = _honors_row("Gizmo Teaching Award, Acme College,", "2028-02")
+    split_date = _honors_row("February, 2028.", "2028-02", name=None)
+    third_year = _honors_row("Gizmo Teaching Award, Acme College, May, 2031.", "2031-05")
+    assert _kept_both("H", dropped, kept, split_date, third_year)
+
+
+def test_a_membership_listed_under_two_headings_a_month_apart_still_drops():
+    """#666 (YOXXOH 68): one appointment listed in two sections."""
+    kept = _member_row("3/29 - present", start_date="2029-03", end_date="present")
+    dropped = _in_list(_member_row("4/29 - present", start_date="2029-04", end_date="present"),
+                       "Other Activities")
+    assert not _kept_both("P", dropped, kept)
+
+
+def test_an_undated_copy_of_a_dated_membership_still_drops():
+    kept = _member_row("3/29 - present", start_date="2029-03", end_date="present")
+    dropped = _member_row("", start_date=None, end_date=None)
+    assert not _kept_both("P", dropped, kept)
+
+
+def test_one_start_month_in_two_formats_still_drops():
+    kept = _member_row("3/29 - present", start_date="2029-03", end_date="present")
+    dropped = _member_row("3/29 - present", start_date="March 2029", end_date="Present")
+    dropped["text"] = dropped["text"].replace("Member- ", "Member ")
+    assert not _kept_both("P", dropped, kept)
+
+
+@pytest.mark.parametrize("dropped_dates, kept_dates", [
+    (("2029", "2030"), ("2028", "2030")),  # overlapping spans stated to the year
+    (("2029-03", "2030-07"), ("2029-03", "2030-06")),  # another end month only
+])
+def test_a_second_listing_of_one_term_still_drops(dropped_dates, kept_dates):
+    kept = _member_row("(Sprocket Division)", start_date=kept_dates[0], end_date=kept_dates[1])
+    dropped = _member_row("", start_date=dropped_dates[0], end_date=dropped_dates[1])
+    dropped["text"] = "Member, Gizmo Sprocket Guild, Acme College"
+    assert not _kept_both("P", dropped, kept)
