@@ -180,6 +180,9 @@ run against what, alongside the machine-readable `run_meta.jsonl`.
 column -t -s$'\t' <results_dir>/summary.tsv     # scan exit codes + entry counts
 # rows with exit≠0 or wcm_output=— are failures; read the matching logs/<cv>.log
 ```
+A failed run stops at its first failed stage, as a web run does (#2177): its log names the
+stage and the ones that did not run, and its metric columns are blank from that stage on. To
+replay one CV through every stage regardless, run `python3 run_full_pipeline.py <cv> --keep-going`.
 Spot-check a few `_wcm.docx` outputs in Word. Compare `entries` vs `classified` for large
 drops (but note: headers/boilerplate aren't meant to classify, so <100% coverage isn't loss
 by itself). For deeper diagnosis of a single run, use the `run-autopsy` skill on its uid.
