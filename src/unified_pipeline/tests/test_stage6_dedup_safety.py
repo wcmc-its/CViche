@@ -71,6 +71,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _teaching_parts_apart,
     _title_only_fragment,
     _titles_disagree,
+    _trailing_number_apart,
     _undated_split_record_absorbs_date,
     _under_another_year_head,
     _unlabelled_beside_class_award,
@@ -4235,6 +4236,28 @@ def test_a_number_the_kept_row_lacks_beside_one_it_names_is_apart():
     # The dropped row names "1" and "2", the kept row "1" only: not a subset.
     assert _numbers_apart("Example Award Year 1 and Year 2, Gizmos",
                           "Example Award Year 1, Gizmos")
+
+
+@pytest.mark.parametrize("dropped_text, kept_text, apart", [
+    ("The course helped me improve my writing 9", "The course helped me improve my writing 10", True),
+    ("Overall, How satisfied were you with this course? 9",
+     "Overall, How satisfied were you with this course? 10", True),
+    ("The course helped me improve my writing 10", "The course helped me improve my writing 10", False),
+    ("The course helped me improve my writing 9", "The course improved my writing 10", False),
+    ("The course helped me improve my writing", "The course helped me improve my writing 10", False),
+    ("Example lecture 2019", "Example lecture 2020", False),  # a year is a date, not a rating
+])
+def test_rows_apart_only_by_their_trailing_number(dropped_text, kept_text, apart):
+    """#666 (XNAVXT): one evaluation item rated 9 and 10 is two rows."""
+    assert _trailing_number_apart(dropped_text, kept_text) is apart
+
+
+def test_dedup_keeps_one_evaluation_item_rated_9_and_10():
+    kept = {"text": "The course gave me a deeper insight into the topic 10", "taxonomy_code": "T",
+            "element_idx_start": 1}
+    dropped = {"text": "The course gave me a deeper insight into the topic 9", "taxonomy_code": "T",
+               "element_idx_start": 2}
+    assert _kept_both("T", dropped, kept)
 
 
 def test_a_lone_number_before_a_semicolon_is_read():
