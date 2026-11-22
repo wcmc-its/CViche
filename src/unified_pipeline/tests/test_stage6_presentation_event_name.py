@@ -86,6 +86,27 @@ def test_event_name_after_a_clause_mark_in_the_title_is_not_repeated():
                   institution="Larchmere, ZZ", event_name="QRX") == "Larchmere, ZZ"
 
 
+@pytest.mark.parametrize(("title", "event_name"), [
+    ("Keynote at Zorb 2022 annual meeting", "Zorb 2022"),
+    ("Presented at the Quill Society Annual Meeting in Larchmere",
+     "Quill Society Annual Meeting"),
+    ("Invited lecture to the Quill Society on Fernosis", "Quill Society"),
+    ("Guest speaker for the Quill Society Fernosis Day", "Quill Society"),
+    ("Grand rounds; the Quill Society", "Quill Society"),
+])
+def test_event_name_the_title_names_as_where_the_talk_was_given_is_not_repeated(
+        title, event_name):
+    # The VYJMXR-18 fix must not reach a title that names the meeting as its
+    # venue: after a preposition, or with no word after it. Invented values.
+    assert _venue(title=title, institution="Larchmere, ZZ",
+                  event_name=event_name) == "Larchmere, ZZ"
+
+
+def test_an_article_opening_a_later_clause_on_the_event_still_leads_the_venue():
+    assert _venue(title="Pediatric Fernosis: the QRX Zorblax Advisory",
+                  institution="Larchmere, ZZ", event_name="QRX") == "QRX, Larchmere, ZZ"
+
+
 def test_an_empty_event_name_is_never_shown_by_the_title():
     from unified_pipeline.stage6.sections.presentations import _title_names_event
     assert not _title_names_event("Zorblax Methods", "")

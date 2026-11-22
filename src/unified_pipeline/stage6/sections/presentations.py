@@ -257,24 +257,26 @@ def _talk_event_value(fields: Mapping) -> object:
     return _first_value(fields, _TALK_EVENT_KEYS)
 
 
-# The marks that close a clause of a talk title. An event name the title
-# holds at a clause edge ("SAGES 2022 keynote: ...", "Invited speaker at the
-# Jonas Symposium") names where the talk was given; one held inside a clause
-# ("The FDA Sildenafil Warning for ...") is the talk's subject, and the venue
-# cell still owes the reader the meeting (VYJMXR-18, #2157 item 30).
+# The marks that close a clause of a talk title.
 _CLAUSE_MARKS = ',;:|.()-–—'
 
 
 def _title_names_event(title: str, event_name: str) -> bool:
-    """Whether `title` already shows `event_name` as its venue: the name
-    occurs, case-insensitively, against the title's start or end or a
-    `_CLAUSE_MARKS` mark on at least one side."""
-    if not event_name:
+    """Whether `title` already shows `event_name`, so the venue cell need not
+    repeat it: the name occurs in it, case-insensitively, other than as the
+    subject the talk is about. The title names where the talk was given
+    ("Invited speaker at the Jonas Symposium", "SAGES 2022 keynote: ...");
+    it speaks about the event only where an article opens the title or a
+    clause on the name and a word of the same clause follows ("The FDA
+    Sildenafil Warning for ..." - VYJMXR-18, #2157 item 30), and there the
+    venue cell still owes the reader the meeting."""
+    title = _normalize_space(title).casefold()
+    event = _normalize_space(event_name).casefold()
+    if not event or event not in title:
         return False
     marks = re.escape(_CLAUSE_MARKS)
-    event = re.escape(_normalize_space(event_name).casefold())
-    clause_edge = re.compile(rf'(?:^|[{marks}]\s*){event}|{event}(?:\s*[{marks}]|$)')
-    return clause_edge.search(_normalize_space(title).casefold()) is not None
+    subject = re.compile(rf'(?:^|[{marks}]\s*)(?:the|an?)\s+{re.escape(event)}\s+\w')
+    return subject.search(title) is None
 
 
 def _talk_date_cell(fields: dict) -> str:
