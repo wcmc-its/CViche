@@ -58,6 +58,14 @@ spec:
             - name: certs-volume
               mountPath: /app/web_interface/backend/certs/sp.crt
               subPath: saml.crt    
+      # The SAML SP key must not be world-readable (#692), and the app runs as
+      # uid/gid 1000 (backend Dockerfile). A Secret file without fsGroup is
+      # root:root, so a 0400 or 0440 mode would lock uid 1000 out of its own key
+      # and break SSO. fsGroup makes the kubelet chgrp the volume to 1000; it
+      # also ORs 0440 into a read-only volume's file modes, so 0440 is what the
+      # file gets either way. Net: root:1000 0440, readable by the app only.
+      securityContext:
+        fsGroup: 1000
       # --- New Volume Definition ---
       volumes:
         - name: auth-config-volume
@@ -66,4 +74,5 @@ spec:
         # --- Declare the Shared Secret Volume ---
         - name: certs-volume
           secret:
-            secretName: cviche-saml-certs    
+            secretName: cviche-saml-certs
+            defaultMode: 0440 # octal: owner + group (fsGroup above) read, no world    
