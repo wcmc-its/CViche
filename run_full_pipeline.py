@@ -18,11 +18,17 @@ Runs the complete CViche processing pipeline:
 - Stage 6: WCM Word Template Generation (creates formatted Word document)
 
 Usage:
-    python3 run_full_pipeline.py <cv_path> [--stage STAGE]
+    python3 run_full_pipeline.py <cv_path> [--stage STAGE] [--keep-going]
 
 Arguments:
     cv_path       : Path to Word document or just the document UID
     --stage STAGE : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', '4', '4.5', '5', '5b', '5c', '5d', or '6'. Default: run all
+    --keep-going  : After a stage fails, run the remaining stages anyway (for replay
+                    and debugging). Default: stop at the first failed stage, as the
+                    web orchestrator does. The exit status is non-zero either way.
+                    Stage 4.5 (research summary) is best-effort in both drivers: its
+                    failure is recorded, the run goes on to 5-6, and, as the web run
+                    still ends "complete", the exit status stays 0.
 
 The model is not a CLI argument. Each stage resolves its own from
 llm_config.yaml (any stage can override the default), so there is no single model
@@ -80,6 +86,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NamedTuple
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -199,8 +206,19 @@ def configure_cli_logging() -> None:
 
 # '3' is a CLI alias for "run 3a then 3b", not a stage with a runner of its own.
 _COMPOSITE_STAGE = '3'
-# Nothing runs after stage 6, so its failure notice does not promise to continue.
-_FINAL_STAGE = '6'
+# Opt back into running the stages after a failed one (#2177). Off by default:
+# the web orchestrator fails the run at the first stage exception, and the CLI
+# follows it so downstream stages never run on partial input.
+_KEEP_GOING_FLAG = '--keep-going'
+
+# Stages whose failure does not end the run: the web orchestrator's
+# RESEARCH_SUMMARY_STAGE_ID (orchestrator.py, #1174). A research summary is one
+# section, so stage 6 renders without it. Not imported from there: the
+# orchestrator pulls in the web backend, which this CLI never imports (§1.4).
+# The failure is recorded non-fatal, and the exit status ignores it, because the
+# web run that hits it still ends "complete" -- except under `--stage 4.5`, where
+# that stage is all the run was asked for (§5.2).
+_BEST_EFFORT_STAGES = frozenset({'4.5'})
 
 #: The repo root, taken from this script's own location so no path below
 #: depends on the directory the CLI happens to be launched from (#490). Only
@@ -295,11 +313,13 @@ def _produced_a_file(output_file: str | None) -> bool:
     return bool(output_file) and Path(output_file).is_file()
 
 
-def failed_stages(results: Mapping[str, StageResult]) -> list[str]:
+def failed_stages(results: Mapping[str, StageResult],
+                  best_effort: frozenset[str] = _BEST_EFFORT_STAGES) -> list[str]:
     """Return the names of stages that did not produce what they were asked to.
 
     Every stage runs inside ``run_stage``, which records its exception as
-    ``results['stage_X'].error`` and carries on. Nothing ever read that back: a
+    ``results['stage_X'].error`` and leaves the decision to go on to
+    ``run_pipeline``. Nothing used to read that record back: a
     stage-6 crash printed a warning, then printed PIPELINE COMPLETE and exited 0
     with no document on disk (#443). Batch tooling that filters on the exit
     column -- which is what any reasonable consumer does -- counted two
@@ -309,16 +329,21 @@ def failed_stages(results: Mapping[str, StageResult]) -> list[str]:
 
     - a stage that stored an ``error``
     - a stage that was reached but skipped for a missing prerequisite, which
-      only happens downstream of an earlier failure
+      only happens downstream of an earlier failure under ``--keep-going``
     - stage 6 whose ``output_file`` is not a file on disk, because stage 6 is
       the deliverable: if it produced no document the run produced nothing,
       whatever else succeeded
 
     A stage absent from ``results`` never ran (``--stage`` targeted a different
-    one) and is not a failure.
+    one, or the run stopped at an earlier failure) and is not listed: the
+    failure that stopped the run already is. Nor is a stage in ``best_effort``
+    (stage 4.5 by default): its failure does not fail the run, as it does not
+    fail a web run.
     """
     failed = []
     for name, result in results.items():
+        if name.removeprefix('stage_') in best_effort:
+            continue
         if result.error is not None or result.skipped_reason is not None:
             failed.append(name)
         elif name == 'stage_6' and not _produced_a_file(result.output_file):
@@ -477,6 +502,7 @@ class PipelineContext:
     cv_path: Path
     document_uid: str
     target_stage: str | None = None
+    keep_going: bool = False
     outputs: dict[str, str] = field(default_factory=dict)
     results: dict[str, StageResult] = field(default_factory=dict)
 
@@ -547,6 +573,12 @@ class PipelineResult:
     def exit_code(self) -> int:
         return 1 if self.failed else 0
 
+    @property
+    def best_effort_failed(self) -> list[str]:
+        """Stages that did not succeed but did not fail the run (stage 4.5)."""
+        return [name for name, result in self.results.items()
+                if not result.succeeded and name not in self.failed]
+
 
 def _banner(title: str) -> None:
     """The rule/title/rule block each stage opens with."""
@@ -580,7 +612,8 @@ def _record_stage_outcome(document_uid: str, stage: str, error: StageError | Non
     Failing to write it must neither turn a clean stage into a failure nor mask
     the stage's own exception, which run_stage has already logged and recorded
     in the summary -- so the write failure is logged with its traceback and the
-    run carries on, the CLI's documented continue-on-error behaviour.
+    run carries on. Best-effort, as the orchestrator's own copy of this write
+    is: it never stops the run.
     """
     try:
         record_stage_outcome(stage_errors_path(_OUTPUTS_ROOT, document_uid), stage, error)
@@ -596,21 +629,25 @@ def run_stage(ctx: PipelineContext, stage: str,
     so every stage, stage 1a included, behaves identically when it raises. Stage
     1a used to run outside any handler: a segmentation failure escaped main(),
     so no summary printed and failed_stages() never ran.
+
+    It records a failure and returns; whether the run goes on is run_pipeline's
+    call (#2177).
     """
     start = time.perf_counter()
     stage_error: StageError | None = None
     try:
         result = fn(ctx)
     except Exception as e:
-        # Continue-on-error is the CLI's documented behaviour, so this catches
-        # everything -- but it never swallows: the traceback goes to the logger
-        # and the reason is carried into the summary and the exit code.
+        # Caught here so the summary and the exit code always see it, and never
+        # swallowed: the traceback goes to the logger and the reason is carried
+        # into the summary and the exit code. run_pipeline then stops the run,
+        # unless the stage is best-effort or --keep-going asked it not to.
         logger.exception("Stage %s failed", stage)
         logger.warning("  Warning: Stage %s failed: %s: %s", stage, type(e).__name__, e)
-        if stage != _FINAL_STAGE:
-            logger.warning("  Continuing with remaining stages...")
         result = StageResult(stage=stage, error=f"{type(e).__name__}: {e}")
-        stage_error = StageError.from_exception(stage, e)
+        # Non-fatal for a best-effort stage, as the orchestrator records it.
+        stage_error = StageError.from_exception(stage, e,
+                                                fatal=stage not in _BEST_EFFORT_STAGES)
     result = replace(result, duration_seconds=time.perf_counter() - start)
     if stage_error is not None or result.succeeded:
         _record_stage_outcome(ctx.document_uid, stage, stage_error)
@@ -1003,18 +1040,48 @@ def _load_existing_results(ctx: PipelineContext) -> None:
                 stage=stage, output_file=str(expected[stage]))
 
 
+def _stages_to_run(ctx: PipelineContext) -> list[str]:
+    """The runner stages this context selects, in pipeline order."""
+    # _COMPOSITE_STAGE is an alias for 3a+3b, not a runner of its own.
+    return [stage for stage in get_stage_order()
+            if stage != _COMPOSITE_STAGE and ctx.should_run(stage)]
+
+
 def run_pipeline(ctx: PipelineContext) -> PipelineResult:
-    """Run every stage this context selects, in order, through run_stage()."""
+    """Run every stage this context selects, in order, through run_stage().
+
+    The CLI's error policy lives here (CODING_STANDARDS.md §5.1, #2177): the
+    first stage that does not succeed ends the run, as a stage exception does in
+    the web orchestrator, so no later stage runs on partial input.
+    ``--keep-going`` restores the old run-everything behaviour for replay and
+    debugging. Either way the failure reaches failed_stages() and the exit
+    status. A best-effort stage (4.5) is the exception in both drivers: the run
+    goes on without it and, unless it was the only stage asked for, still exits 0.
+    """
     start = time.perf_counter()
     _load_existing_results(ctx)
-    for stage in get_stage_order():
-        if stage == _COMPOSITE_STAGE:
-            continue  # an alias for 3a+3b, not a runner of its own
-        if ctx.should_run(stage):
-            run_stage(ctx, stage, _STAGE_RUNNERS[stage])
+    stages = _stages_to_run(ctx)
+    for index, stage in enumerate(stages):
+        result = run_stage(ctx, stage, _STAGE_RUNNERS[stage])
+        not_run = stages[index + 1:]
+        if result.succeeded or not not_run:
+            continue
+        if stage in _BEST_EFFORT_STAGES:
+            logger.warning("  Stage %s is best-effort, as in the web run: continuing "
+                           "without it", stage)
+            continue
+        if not ctx.keep_going:
+            logger.warning("  Stopping: stage %s did not succeed, so %s will not run "
+                           "(%s runs them anyway)", stage, ", ".join(not_run),
+                           _KEEP_GOING_FLAG)
+            break
+        if result.error is not None:
+            logger.warning("  Continuing with remaining stages...")
+    # A stage run on its own is all this run was asked for, so it is not best-effort.
+    best_effort = _BEST_EFFORT_STAGES - {ctx.target_stage}
     return PipelineResult(results=dict(ctx.results),
                           total_duration_seconds=time.perf_counter() - start,
-                          failed=failed_stages(ctx.results))
+                          failed=failed_stages(ctx.results, best_effort))
 
 
 # Stage label -> the padded prefix the summary prints it under. Padding is part
@@ -1126,6 +1193,18 @@ def _print_code_distribution(stage_3b: StageResult | None) -> None:
         logger.info("  %s: %s", code, count)
 
 
+def _print_stage_failures(heading: str, names: list[str], result: PipelineResult) -> None:
+    if not names:
+        return
+    logger.info("%s", heading)
+    for name in names:
+        stage_result = result.results[name]
+        reason = (stage_result.error or stage_result.skipped_reason
+                  or 'produced no output document')
+        logger.info("  %s: %s", name, reason)
+    logger.info("")
+
+
 def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
     """The run's operator-facing report.
 
@@ -1142,14 +1221,9 @@ def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
     logger.info("Document: %s", ctx.document_uid)
     logger.info("Models: %s", format_models_used())
     logger.info("")
-    if result.failed:
-        logger.info("Failed stages:")
-        for name in result.failed:
-            stage_result = result.results[name]
-            reason = (stage_result.error or stage_result.skipped_reason
-                      or 'produced no output document')
-            logger.info("  %s: %s", name, reason)
-        logger.info("")
+    _print_stage_failures("Failed stages:", result.failed, result)
+    _print_stage_failures("Best-effort stages that failed (the run continued without them):",
+                          result.best_effort_failed, result)
     _print_outputs(result)
     _print_timing(result)
     _print_costs(result)
@@ -1157,13 +1231,18 @@ def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
 
 
 def _print_usage() -> None:
-    logger.info("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]")
+    logger.info("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE] [%s]",
+                _KEEP_GOING_FLAG)
     logger.info("")
     logger.info("Arguments:")
     logger.info("  cv_path_or_uid : Path to Word document OR just the document UID")
     logger.info("                   (if UID only, looks in data/sample_cvs/word/)")
     logger.info("  --stage STAGE  : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', or '4'")
     logger.info("                   (omit for full pipeline)")
+    logger.info("  %s   : Run the remaining stages after one fails (default: stop at",
+                _KEEP_GOING_FLAG)
+    logger.info("                   the first failed stage). Exits non-zero either way.")
+    logger.info("                   Stage 4.5 is best-effort: the run goes on without it.")
     logger.info("")
     logger.info("Examples:")
     logger.info("  # Full pipeline")
@@ -1185,13 +1264,22 @@ def _print_usage() -> None:
     logger.info("  python3 run_full_pipeline.py 9999_Doe_Jane_CV --stage 4")
 
 
-def parse_args(argv: list[str]) -> tuple[str, str | None]:
-    """(cv_path_or_uid, target_stage). Exits 1 on a missing or invalid argument."""
+class CliArgs(NamedTuple):
+    """What the command line asked for."""
+
+    cv_path_or_uid: str
+    target_stage: str | None  # None = run all stages; otherwise run only that stage
+    keep_going: bool
+
+
+def parse_args(argv: list[str]) -> CliArgs:
+    """Parse argv. Exits 1 on a missing or invalid argument."""
     if len(argv) < 2:
         _print_usage()
         sys.exit(1)
 
-    target_stage = None  # None = run all stages; otherwise run only that stage
+    target_stage = None
+    keep_going = False
     valid_stages = get_stage_order()
     i = 2  # Start after the cv_path_or_uid argument
     while i < len(argv):
@@ -1204,8 +1292,10 @@ def parse_args(argv: list[str]) -> tuple[str, str | None]:
                 sys.exit(1)
             i += 2
         else:
+            if arg == _KEEP_GOING_FLAG:
+                keep_going = True
             i += 1
-    return argv[1], target_stage
+    return CliArgs(argv[1], target_stage, keep_going)
 
 
 def _exit_if_prerequisites_missing(target_stage: str, document_uid: str) -> None:
@@ -1243,7 +1333,7 @@ def _cv_is_missing(cv_path: str, target_stage: str | None) -> bool:
 
 @_scope_prompt_logger_per_run
 def main() -> int:
-    cv_path_or_uid, target_stage = parse_args(sys.argv)
+    cv_path_or_uid, target_stage, keep_going = parse_args(sys.argv)
     cv_path, document_uid = resolve_cv_path_for_run(cv_path_or_uid)
 
     if _cv_is_missing(cv_path, target_stage):
@@ -1263,13 +1353,11 @@ def main() -> int:
     logger.info("")
 
     ctx = PipelineContext(cv_path=Path(cv_path), document_uid=document_uid,
-                          target_stage=target_stage)
+                          target_stage=target_stage, keep_going=keep_going)
     result = run_pipeline(ctx)
     print_summary(result, ctx)
-
-    # Continue-on-error is kept deliberately -- the partial stage artifacts are
-    # worth having for diagnosis. What changes is that the run stops claiming
-    # success it did not have.
+    # Non-zero whenever a stage failed, whether the run stopped there (the
+    # default) or ran on under --keep-going.
     return result.exit_code
 
 

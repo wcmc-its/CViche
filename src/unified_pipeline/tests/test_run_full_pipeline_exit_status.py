@@ -152,9 +152,18 @@ def test_any_stage_error_is_reported_not_just_stage_6(tmp_path):
     """The class fix: all eleven wrappers share the swallow-and-continue shape."""
     docx = _real_docx(tmp_path)
     for stage in ('stage_1b', 'stage_2', 'stage_3a', 'stage_3b', 'stage_4',
-                  'stage_4.5', 'stage_5', 'stage_5b', 'stage_5c', 'stage_5d'):
+                  'stage_5', 'stage_5b', 'stage_5c', 'stage_5d'):
         assert failed_stages({stage: _result(stage, error='boom'),
                               'stage_6': _result('6', output_file=docx)}) == [stage]
+
+
+def test_a_best_effort_stage_error_is_not_a_run_failure(tmp_path):
+    """Stage 4.5 is best-effort, as in the orchestrator (#1174): a web run whose
+    only failure is 4.5 ends "complete". Asked for alone, it is not best-effort."""
+    results = {'stage_4.5': _result('4.5', error='boom'),
+               'stage_6': _result('6', output_file=_real_docx(tmp_path))}
+    assert failed_stages(results) == []
+    assert failed_stages(results, best_effort=frozenset()) == ['stage_4.5']
 
 
 def test_stage_skipped_for_a_missing_prerequisite_is_a_failure():
@@ -233,6 +242,9 @@ _FILES = {
     '6': _OUT / 'stage_6_wcm_documents' / f'{UID}_wcm.docx',
 }
 _DOCX = f'data/sample_cvs/word/{UID}.docx'
+# The old run-every-stage policy (#2177). Tests about what a stage does AFTER an
+# earlier one failed need it: by default the run stops at the failure.
+_KEEP_GOING_ARGV = ['run_full_pipeline.py', UID, '--keep-going']
 
 
 def _write(path, payload=None):
@@ -418,7 +430,8 @@ def test_stage_6_crash_exits_non_zero_and_says_so(tmp_path, monkeypatch, capsys)
 
 
 def test_a_mid_pipeline_crash_also_exits_non_zero(tmp_path, monkeypatch, capsys):
-    """The class fix: not just the terminal stage."""
+    """The class fix: not just the terminal stage. The run stops at 3b by
+    default (#2177) and still exits non-zero."""
     rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'3b'})
     assert rc == 1
     assert "PIPELINE COMPLETE WITH ERRORS" in out
@@ -478,6 +491,9 @@ def test_a_rerun_that_skips_a_stage_keeps_its_earlier_failure(tmp_path, monkeypa
     _enter_tmp_repo(tmp_path, monkeypatch)
     capsys.readouterr()
     _install_stubs(monkeypatch, _Calls(), {'3b'}, None, None, tmp_path)
+    # --keep-going so the rerun reaches stage 4 and skips it; by default it
+    # stops at 3b and never touches stage 4's record at all.
+    monkeypatch.setattr(sys, 'argv', _KEEP_GOING_ARGV)
     run_full_pipeline.main()
     assert sorted(e.stage for e in read_stage_errors(tmp_path / _STAGE_ERRORS)) == ['3b', '4']
 
@@ -497,6 +513,138 @@ def test_entrypoint_propagates_the_return_value_to_the_exit_status():
     assert "sys.exit(main())" in calls, (
         f"__main__ must call sys.exit(main()); found {calls}. "
         "A bare main() discards the exit status and every run reports success.")
+
+
+# -- #2177: stop at the first failed stage, as the orchestrator does ---------
+# CODING_STANDARDS.md §5.1. The orchestrator re-raises a stage exception and
+# fails the run; the CLI used to log it and run every later stage on partial
+# input. Mutant that kills the first two tests: drop the `break` (or the whole
+# `if not ctx.keep_going` block) from run_pipeline.
+
+_RUNNER_STAGES = [s for s in run_full_pipeline.get_stage_order() if s != '3']
+# Stage 4.5 is best-effort in the orchestrator (RESEARCH_SUMMARY_STAGE_ID, #1174),
+# so it never stops the run; test_a_stage_4_5_failure_does_not_stop_the_run pins it.
+_STOPPING_STAGES = [s for s in _RUNNER_STAGES if s != '4.5']
+
+
+@pytest.mark.parametrize('failing', _STOPPING_STAGES)
+def test_a_failed_stage_stops_the_run_by_default(failing, tmp_path, monkeypatch, capsys):
+    calls = _Calls()
+    run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={failing}, calls=calls)
+    upto = _RUNNER_STAGES[:_RUNNER_STAGES.index(failing) + 1]
+    assert calls.order == upto, f"stages ran after {failing} failed: {calls.order}"
+    assert run.rc == 1
+    assert "PIPELINE COMPLETE WITH ERRORS" in run.out
+    assert f"stage_{failing}: RuntimeError: simulated {failing} failure" in run.out
+    # Only the failure is listed: a stage that never ran is not a second failure.
+    listed = [line for line in run.out.splitlines() if line.startswith('  stage_')]
+    assert listed == [f"  stage_{failing}: RuntimeError: simulated {failing} failure"]
+    assert "Continuing with remaining stages" not in run.err
+
+
+def test_a_stage_4_5_failure_does_not_stop_the_run(tmp_path, monkeypatch, capsys):
+    """Stage 4.5 is best-effort in both drivers. The web run records the
+    failure non-fatal, runs 5..6 and ends "complete"
+    (test_error_policy_driver_contract.py::
+    test_a_stage_4_5_exception_lets_the_run_continue_and_records_it_non_fatal),
+    so the CLI runs every stage, exits 0, and still names the failure.
+
+    Mutants that kill this: drop the best-effort `continue` from run_pipeline
+    (the run stops after 4.5), or the best_effort exclusion from failed_stages
+    (rc 1), or `fatal=` from run_stage (the record says fatal).
+    """
+    from unified_pipeline.stage_errors import StageError, read_stage_errors
+    calls = _Calls()
+    run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={'4.5'}, calls=calls)
+    assert calls.order == _RUNNER_STAGES, f"the run stopped at 4.5: {calls.order}"
+    assert run.rc == 0
+    assert "PIPELINE COMPLETE WITH ERRORS" not in run.out
+    assert "Failed stages:" not in run.out
+    assert ("Best-effort stages that failed (the run continued without them):\n"
+            "  stage_4.5: RuntimeError: simulated 4.5 failure") in run.out
+    assert "Stage 4.5 is best-effort, as in the web run: continuing without it" in run.err
+    assert "Stopping:" not in run.err
+    assert read_stage_errors(tmp_path / _STAGE_ERRORS) == [
+        StageError('4.5', 'RuntimeError', 'simulated 4.5 failure', fatal=False)]
+
+
+def test_a_standalone_stage_4_5_failure_still_exits_non_zero(tmp_path, monkeypatch, capsys):
+    """`--stage 4.5` asks for nothing else, so its failure is the run's (§5.2)."""
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'4.5'},
+                        setup=lambda: _write(_FILES['4']),
+                        argv=['run_full_pipeline.py', UID, '--stage', '4.5'])
+    assert rc == 1
+    assert "Failed stages:\n  stage_4.5: RuntimeError: simulated 4.5 failure" in out
+
+
+def test_the_stop_names_the_stages_that_did_not_run(tmp_path, monkeypatch, capsys):
+    """An operator reading a batch log has to see that the run stopped, not
+    just that it ended early. Diagnostic, so stderr: stdout is parsed."""
+    run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={'5c'})
+    assert ("Stopping: stage 5c did not succeed, so 5d, 6 will not run "
+            "(--keep-going runs them anyway)") in run.err
+    assert "Stopping:" not in run.out
+
+
+def test_a_failure_in_the_last_stage_does_not_announce_a_stop(tmp_path, monkeypatch, capsys):
+    """Nothing comes after stage 6, so there is nothing to stop."""
+    run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={'6'})
+    assert run.rc == 1
+    assert "Stopping:" not in run.err
+
+
+def test_keep_going_runs_every_stage_after_a_failure(tmp_path, monkeypatch, capsys):
+    """The old behaviour, kept behind an explicit flag for replay and debugging.
+
+    Mutant that kills this: ignore ctx.keep_going and always break.
+    """
+    calls = _Calls()
+    run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={'5b'}, calls=calls,
+                            argv=_KEEP_GOING_ARGV)
+    assert calls.order == _RUNNER_STAGES, f"--keep-going stopped early: {calls.order}"
+    assert "Continuing with remaining stages" in run.err
+    assert "Stopping:" not in run.err
+
+
+def test_keep_going_still_exits_non_zero(tmp_path, monkeypatch, capsys):
+    """Running on is not succeeding (§5.2): stage 6 still renders a document
+    here, and the run must still exit 1 and say which stage failed."""
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'5b'}, argv=_KEEP_GOING_ARGV)
+    assert rc == 1
+    assert "stage_5b: RuntimeError: simulated 5b failure" in out
+
+
+@pytest.mark.parametrize('argv, keep_going', [
+    (['run_full_pipeline.py', UID], False),
+    (['run_full_pipeline.py', UID, '--keep-going'], True),
+    (['run_full_pipeline.py', UID, '--keep-going', '--stage', '4'], True),
+    (['run_full_pipeline.py', UID, '--stage', '4', '--keep-going'], True),
+])
+def test_keep_going_is_off_unless_asked_for(argv, keep_going):
+    """Stop-on-first-failure is the default; the flag is the only way out of it,
+    and it parses on either side of --stage."""
+    assert run_full_pipeline.parse_args(argv).keep_going is keep_going
+
+
+def test_a_failed_stage_error_record_write_does_not_stop_the_run(
+        tmp_path, monkeypatch, capsys, caplog):
+    """The stage-error record is best-effort in both drivers (the orchestrator's
+    _record_stage_outcome swallows the same OSError). A failed write must not
+    read as a failed stage and stop the run now that a failure does.
+
+    Mutant that kills this: let _record_stage_outcome re-raise; the write
+    failure then escapes run_stage and ends the run after stage 1a.
+    """
+    def unwritable(*_args, **_kwargs):
+        raise OSError("read-only outputs tree")
+
+    monkeypatch.setattr(run_full_pipeline, 'record_stage_outcome', unwritable)
+    calls = _Calls()
+    rc, _ = _run_main(tmp_path, monkeypatch, capsys, calls=calls)
+    assert rc == 0
+    assert calls.order == _RUNNER_STAGES
+    assert any("Could not update the stage-error record" in r.getMessage()
+               for r in caplog.records)
 
 
 # -- r3960595385 / r3965457325: stage 1a is inside the failure boundary ------
@@ -519,9 +667,11 @@ def test_stage_1a_failure_is_recorded_and_still_prints_the_summary(
 
 
 def test_a_stage_1a_failure_skips_everything_downstream(tmp_path, monkeypatch, capsys):
-    """No stage invents an input the run never produced."""
+    """No stage invents an input the run never produced -- even under
+    --keep-going, where the stages below the failure are reached."""
     calls = _Calls()
-    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'1a'}, calls=calls)
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'1a'}, calls=calls,
+                        argv=_KEEP_GOING_ARGV)
     assert rc == 1
     assert calls.order == ['1a'], f"downstream stages ran anyway: {calls.order}"
     assert "stage_1b: Stage 1a required" in out
@@ -760,14 +910,15 @@ def test_stage3_runs_both_3a_and_3b(tmp_path, monkeypatch, capsys):
 def test_stage6_does_not_use_stale_artifact(tmp_path, monkeypatch, capsys):
     """A previous run left a 5d artifact for this same uid on disk. This run's
     5d fails, so stage 6 must render 5c's output FROM THIS RUN -- rendering the
-    stale file and reporting success is the #780 defect."""
+    stale file and reporting success is the #780 defect. Stage 6 is reached
+    after a failure only under --keep-going."""
     calls = _Calls()
 
     def plant_stale():
         _write(_FILES['5d'], {'document_uid': UID, 'stale': 'from an earlier run'})
 
     rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'5d'}, calls=calls,
-                        setup=plant_stale)
+                        setup=plant_stale, argv=_KEEP_GOING_ARGV)
     assert rc == 1, "the run had a failed stage"
     assert calls.kwargs['6'] == {'input_path': str(_FILES['5c']), 'verbose': True,
                                  'original_doc_path': _DOCX, 'repair_protected_data': False,
@@ -780,9 +931,9 @@ def test_full_run_never_reads_a_stale_artifact_from_disk(tmp_path, monkeypatch, 
     """A full run resolves inputs ONLY from what it produced itself.
 
     Stage 4's and stage 5d's artifacts from a previous run are sitting at their
-    exact expected paths. This run's stage 4 fails, so every stage below it has
-    no input -- and must say so rather than quietly picking up the stale files
-    and rendering a document out of last week's data.
+    exact expected paths. This run's stage 4 fails and --keep-going runs on, so
+    every stage below it has no input -- and must say so rather than quietly
+    picking up the stale files and rendering a document out of last week's data.
 
     Mutant that kills this: delete `if self.target_stage is None: return None`
     from PipelineContext.best_input, so a full run falls through to the same
@@ -796,7 +947,7 @@ def test_full_run_never_reads_a_stale_artifact_from_disk(tmp_path, monkeypatch, 
         _write(_FILES['5d'], {'document_uid': UID, 'stale': 'from an earlier run'})
 
     rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'4'}, calls=calls,
-                        setup=plant_stale)
+                        setup=plant_stale, argv=_KEEP_GOING_ARGV)
 
     assert rc == 1
     assert calls.order == ['1a', '1b', '2', '3a', '3b', '4'], (
@@ -960,7 +1111,8 @@ def test_stage5b_missing_output_file_flags_cost_as_unknown(tmp_path, monkeypatch
 
 def test_every_stage_failure_is_logged_with_its_traceback(tmp_path, monkeypatch, capsys, caplog):
     caplog.set_level(logging.ERROR)
-    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'5c', '6'})
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'5c', '6'},
+                        argv=_KEEP_GOING_ARGV)
     assert rc == 1
     logged = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert {r.getMessage() for r in logged} == {"Stage 5c failed", "Stage 6 failed"}
