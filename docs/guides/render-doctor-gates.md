@@ -33,6 +33,49 @@ python3 scripts/doctor_gate_compare.py a.json b.json
 Both `_compare` scripts exit 0 only on a real PASS. Anything else -- a real
 difference, a crashed render, a missing/unreadable input -- exits non-zero.
 
+## One command: the controls and the gate together (#783)
+
+```bash
+python3 scripts/render_gate_controls.py <farm> --source-dir <source-docx-dir> \
+  --base <base-checkout> --head <head-checkout> --work <scratch-dir> [--summary FILE]
+```
+
+Both arms are whole checkouts (a `git worktree` or a `git archive` of each
+commit), not just `src/`: without `key_files/` stage 6 falls back to a
+template with no grant tables and nothing raises. The script renders head
+twice, base once and a mutated copy of head once, doctors three of those, and
+prints the table the control logs below were written by hand:
+
+| control | what it does | rules out |
+|---|---|---|
+| determinism | head rendered twice and doctored twice; both must be `CHANGED 0`, and the renders must not straddle a new year | the differ reporting noise |
+| crash guard | each render directory is seeded with a stale `_wcm.docx` that must be gone afterwards; a copy of a clean arm whose index says every uid failed, with its docx left in place, must be refused | comparing files that prove nothing |
+| real-CV rendering | every arm renders N of N farm CVs and exits 0 | an empty or partial arm reading as clean |
+| mutation | a copy of head with the PERSONAL DATA work-email write removed; the CVs that change must be exactly the ones whose head render has a work email | the differ being blind |
+
+The mutation is the 2026-09-07 control's shape (a real behaviour removed,
+the deltas exactly the CVs it serves), moved to a line that every farm
+exercises: the #550 write-back it used then only fires with `--source-dir`.
+The mutation is applied to a copy under `--work`, never to the checkout, and
+an anchor that no longer matches exactly once fails the control.
+
+Then base vs head: paragraphs added and removed, fingerprint changes and
+doctor findings gained and lost, per run and per lint. The doctor reads each
+arm's own fresh render as `stage_6_wcm_documents`, so lints gated on the
+rendered docx (`table_shape` among them) run too.
+
+Exit 0: every control passed and head equals base. Exit 1: every control
+passed and head differs (read the table). Exit 2: a control failed, so the
+comparison is not evidence.
+
+Everything it prints, and writes to `--summary`, names a run by its leading
+6-character document uid only, and carries no CV text: counts, uids and lint
+names. Corpus uids come from real filenames and contain owners' names. The
+render and doctor logs, which name full uids, stay under `--work`.
+
+Renders take about 9 s per CV on dev as of 2026-11-22, not the 1.7 s measured
+in August; four arms run side by side (`--jobs`, default 4).
+
 ## What each script does, and why it exists in this shape
 
 - **`render_gate.py`** -- renders every CV in a farm through stage 6 for one
@@ -169,14 +212,186 @@ that wiring the web driver reached it anyway -- `_copy_to_pipeline_input`
 drops the upload where stage 6's `SAMPLE_CV_DIR` guess looks -- and the
 CLI reached it only for a uid-style run from the repo root.)
 
+## The CI job (#2176)
+
+`corpus-gate` in `.github/workflows/ci.yml` runs `render_gate_controls.py` on
+a pull request when all of these hold:
+
+- the repository variable `CORPUS_GATE_ENABLED` is `true` (until then the job
+  is skipped and never queues);
+- the PR's branch is in this repository, not a fork;
+- the diff from the merge base touches `src/unified_pipeline/stage6/`,
+  `stage_6_word_template.py`, `src/unified_pipeline/doctor/` or
+  `run_doctor.py`.
+
+It checks out head and the merge base, syncs the farm from
+`s3://wcm-cviche-storage/cviche/gate-farm/`, runs the script, and writes the
+table to the job's step summary. It is report-only: the gate step always
+exits 0 and the job has `continue-on-error`. Whether it blocks a merge is a
+later decision. Nothing is uploaded as an artifact.
+
+It runs on a CodeBuild-hosted GitHub Actions runner in the CViche AWS
+account, one fresh build per job, so no CV reaches a GitHub-hosted runner.
+The runner's role can read the farm prefix and nothing else: no
+`cviche/runs/`, no Bedrock, no database, no writes.
+
+Trust boundary: the job runs the PR's own code with that role. Anyone who can
+push a branch to this repository can therefore read the farm. Forks cannot,
+because the job never runs for them.
+
+### The farm
+
+About 60 stored runs, copied under their own prefix so the role never needs
+`cviche/runs/`:
+
+```
+cviche/gate-farm/outputs/stage_*/<uid>_*.json   stage 1a-5d JSON, the layout render_gate.py reads
+cviche/gate-farm/sources/<uid>.docx             each run's uploaded original, for --source-dir
+cviche/gate-farm/manifest.json                  uids and taxonomy codes, no names
+```
+
+`scripts/build_gate_farm.py` builds it. It lists `cviche/runs/`, keeps runs
+with a stage-4 `_fields.json` and a `.docx` upload, collapses re-runs of one
+CV to the latest (by upload hash, then by stage-4 owner name, hashed in
+memory only), and picks runs by greedy set cover over the taxonomy codes in
+their stage-4 entries, then fills to 60 favouring the codes the farm holds
+fewest of. Copies are server side.
+
+```bash
+# Read-only: print the selection (6-character uids and code coverage).
+PYTHONPATH=src python3 scripts/build_gate_farm.py --dry-run
+# Optionally pull the same selection to disk and run the controls on it locally.
+PYTHONPATH=src python3 scripts/build_gate_farm.py --dry-run --local-out <dir>
+# Write the farm (needs write access to cviche/gate-farm/). --replace rebuilds it.
+PYTHONPATH=src python3 scripts/build_gate_farm.py --write
+```
+
+Rebuild it when stage 4 or the stored artifacts change shape. A rebuild
+changes what every later gate run measures, so note it in the PR that
+follows.
+
+### AWS setup (Paul)
+
+1. **Build the farm** with `--write`, above.
+
+2. **Find the bucket's KMS key.** The bucket encrypts with SSE-KMS by
+   default (with a bucket key, as of 2026-11-22), so reading an object needs
+   `kms:Decrypt` on that key:
+
+   ```bash
+   aws s3api get-bucket-encryption --bucket wcm-cviche-storage \
+     --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID'
+   ```
+
+3. **Create the role** the CodeBuild project runs as, say
+   `cviche-corpus-gate-codebuild`. Trust policy:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Principal": {"Service": "codebuild.amazonaws.com"},
+         "Action": "sts:AssumeRole"
+       }
+     ]
+   }
+   ```
+
+   Permissions policy. Replace `<account-id>`, `<key-id>` (from step 2) and
+   `<project>` (the CodeBuild project name from step 4):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Sid": "ListGateFarmOnly",
+         "Effect": "Allow",
+         "Action": "s3:ListBucket",
+         "Resource": "arn:aws:s3:::wcm-cviche-storage",
+         "Condition": {"StringLike": {"s3:prefix": ["cviche/gate-farm/", "cviche/gate-farm/*"]}}
+       },
+       {
+         "Sid": "ReadGateFarm",
+         "Effect": "Allow",
+         "Action": "s3:GetObject",
+         "Resource": "arn:aws:s3:::wcm-cviche-storage/cviche/gate-farm/*"
+       },
+       {
+         "Sid": "DecryptViaS3",
+         "Effect": "Allow",
+         "Action": "kms:Decrypt",
+         "Resource": "arn:aws:kms:us-east-1:<account-id>:key/<key-id>",
+         "Condition": {"StringEquals": {"kms:ViaService": "s3.us-east-1.amazonaws.com"}}
+       },
+       {
+         "Sid": "BuildLogs",
+         "Effect": "Allow",
+         "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+         "Resource": [
+           "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/codebuild/<project>",
+           "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/codebuild/<project>:*"
+         ]
+       }
+     ]
+   }
+   ```
+
+   With a bucket key, the KMS encryption context is the bucket, not the
+   object, so the key grant cannot itself be narrowed to the prefix; the S3
+   statements are what confine the role to `cviche/gate-farm/`. If the
+   project authenticates to GitHub through a CodeConnections connection (the
+   GitHub App), add `codeconnections:GetConnectionToken` and
+   `codeconnections:GetConnection` on that connection's ARN.
+
+4. **Create the CodeBuild project** as a GitHub Actions runner project:
+   source GitHub, repository `wcmc-its/CViche`, connected through the GitHub
+   App (CodeConnections); webhook on, with one filter group whose event type is
+   `WORKFLOW_JOB_QUEUED`; environment a managed Ubuntu image
+   (`aws/codebuild/standard:7.0`, Ubuntu 22.04 with the AWS CLI; an Amazon
+   Linux image is not one `actions/setup-python` supports, and the first run
+   on the Ubuntu one is the check that it installs 3.14), 4 vCPU or more
+   (`BUILD_GENERAL1_MEDIUM`), not privileged, no VPC needed; service role the
+   one from step 3; timeout 60 minutes; logs to CloudWatch. A runner project
+   ignores the buildspec. CLI equivalent:
+
+   ```bash
+   aws codebuild create-project --name <project> \
+     --source type=GITHUB,location=https://github.com/wcmc-its/CViche.git \
+     --artifacts type=NO_ARTIFACTS \
+     --environment type=LINUX_CONTAINER,image=aws/codebuild/standard:7.0,computeType=BUILD_GENERAL1_MEDIUM \
+     --service-role arn:aws:iam::<account-id>:role/cviche-corpus-gate-codebuild \
+     --timeout-in-minutes 60
+   aws codebuild create-webhook --project-name <project> \
+     --filter-groups '[[{"type":"EVENT","pattern":"WORKFLOW_JOB_QUEUED"}]]'
+   ```
+
+5. **Set the two repository variables** (Settings, Secrets and variables,
+   Actions, Variables), in this order:
+
+   ```bash
+   gh variable set CORPUS_GATE_CODEBUILD_PROJECT --repo wcmc-its/CViche --body <project>
+   gh variable set CORPUS_GATE_ENABLED --repo wcmc-its/CViche --body true
+   ```
+
+   The job's `runs-on` label is `codebuild-<project>-<run id>-<attempt>`,
+   which is how CodeBuild knows the queued job is its own.
+
+6. **Check it** on the next PR that touches stage 6: the `corpus-gate` job's
+   summary should show all four controls `PASS` over the farm. To turn the
+   job off again, set `CORPUS_GATE_ENABLED` to anything but `true`.
+
 ## Known gaps, not fixed here
 
 - **`lint_pipeline_errors` untested by either gate.** It never fires on a
   farm with no failed runs; needs a synthetic failed-run fixture, which
   belongs in `run_doctor`'s own test suite
   (`src/unified_pipeline/tests/test_run_doctor.py`), not a corpus gate.
-- **`table_shape` (and any lint gated on `stage_6_docx`) untested here.**
-  Needs a farm with `render_gate.py`'s own output symlinked back in as
+- **`table_shape` (and any lint gated on `stage_6_docx`) untested by
+  `doctor_gate.py` on a JSON-only farm.** `render_gate_controls.py` closes
+  this for its own runs: it links each arm's fresh render in as
   `stage_6_wcm_documents/`.
 - **No 100+ CV run yet.** This formalizes the instrument; running it at the
   scale wave 2's 24 issues will need is a separate, larger effort (real

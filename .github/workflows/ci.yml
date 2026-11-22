@@ -234,3 +234,87 @@ jobs:
         with:
           version: 3.97.4
           extra_args: --exclude-paths=.trufflehog-exclude.txt
+
+  corpus-gate:
+    # The render/doctor corpus gate (#2176) on a stage-6 or doctor PR: render
+    # a fixed farm of stored runs at the merge base and at head, run the
+    # doctor on both, and run #783's four controls first so the result means
+    # something (scripts/render_gate_controls.py). The farm holds real CVs, so
+    # this runs on a CodeBuild-hosted runner in the CViche AWS account whose
+    # role can only read cviche/gate-farm/ -- never on a GitHub-hosted runner.
+    #
+    # Off until the repository variable CORPUS_GATE_ENABLED is 'true': until
+    # then the job is skipped and never queues (runs-on below names a CodeBuild
+    # project that does not exist yet). Never on a fork's PR: its code would run
+    # with the farm role. Setup: docs/guides/render-doctor-gates.md.
+    #
+    # Report-only: the result is the step summary (counts and 6-character
+    # document uids, nothing from a CV), the gate step always exits 0, and
+    # continue-on-error keeps an infrastructure failure from failing the run.
+    # The path check is a step, not a job-level filter, for the reason
+    # frontend-typecheck gives (#417).
+    if: >-
+      vars.CORPUS_GATE_ENABLED == 'true'
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: codebuild-${{ vars.CORPUS_GATE_CODEBUILD_PROJECT }}-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      GATE_FARM: s3://wcm-cviche-storage/cviche/gate-farm/
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          fetch-depth: 0  # the base branch too, for the merge base
+          persist-credentials: false
+      - name: Does this PR touch stage 6 or the doctor?
+        id: changes
+        working-directory: head
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
+          echo "merge_base=$merge_base" >> "$GITHUB_OUTPUT"
+          if git diff --name-only "$merge_base" HEAD \
+              | grep -qE '^src/unified_pipeline/(stage6/|stage_6_word_template\.py$|doctor/|run_doctor\.py$)'; then
+            echo "gate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gate=false" >> "$GITHUB_OUTPUT"
+            echo "No stage-6 or doctor change: corpus gate not run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Check out the merge base
+        if: steps.changes.outputs.gate == 'true'
+        env:
+          MERGE_BASE: ${{ steps.changes.outputs.merge_base }}
+        run: git -C head worktree add --detach "$GITHUB_WORKSPACE/base" "$MERGE_BASE"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.changes.outputs.gate == 'true'
+        with:
+          python-version: "3.14"  # match the build image (python:3.14-slim)
+      - name: Install Python deps
+        if: steps.changes.outputs.gate == 'true'
+        # Head's pins only: both arms render under them.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r head/requirements.txt
+      - name: Fetch the gate farm (read-only)
+        if: steps.changes.outputs.gate == 'true'
+        run: aws s3 sync "$GATE_FARM" "$RUNNER_TEMP/gate-farm" --only-show-errors --no-progress
+      - name: Render/doctor gate (report-only)
+        if: steps.changes.outputs.gate == 'true'
+        env:
+          BASE_SHA: ${{ steps.changes.outputs.merge_base }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Prints and summarises masked counts only; the render and doctor
+          # logs, which name full uids, stay in $RUNNER_TEMP and are never
+          # uploaded.
+          rc=0
+          python3 head/scripts/render_gate_controls.py "$RUNNER_TEMP/gate-farm/outputs" \
+            --source-dir "$RUNNER_TEMP/gate-farm/sources" \
+            --base base --head head --work "$RUNNER_TEMP/gate-work" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --base-label "${BASE_SHA:0:8}" --head-label "${HEAD_SHA:0:8}" || rc=$?
+          echo "render_gate_controls.py exit $rc (0 same as base, 1 differs, 2 no evidence); report-only."
