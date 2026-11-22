@@ -251,7 +251,7 @@ Two rules:
    zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on every
    PR, whatever its base, and on pushes to `dev` and `main`: `backend-tests`,
    `pipeline-tests`, `function-size`, `frontend-typecheck`, `type-check`,
-   `secret-scan`. A newer push to a PR cancels that PR's in-progress run.
+   `k8s-manifests`, `secret-scan`. A newer push to a PR cancels that PR's in-progress run.
    On a PR that touches neither `web_interface/frontend/` nor `ci.yml`,
    `frontend-typecheck` goes green without running its npm steps; it always
    runs them on `dev`/`main`. `issue-narrowing.yml` adds `gate`.
@@ -265,7 +265,7 @@ Two rules:
    of every job counts as green, provided all of the following hold:
    - The run is against the PR head merged onto current `origin/dev`.
    - Each job runs exactly what `ci.yml` runs, on the same Python and the same
-     tool pins (ruff, TruffleHog), with the backend suite in CI's env vars.
+     tool pins (ruff, TruffleHog, kustomize, kubeconform), with the backend suite in CI's env vars.
    - `check_standards.py` runs on a depth-1 clone, as CI does.
    - A job is skipped only when its whole path is untouched (for example, no
      `web_interface/frontend` change means no `frontend-typecheck`), and the
