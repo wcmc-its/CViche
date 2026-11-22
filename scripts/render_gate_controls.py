@@ -28,8 +28,11 @@ docs/guides/render-doctor-gates.md. This runs them, in order:
    must refuse to compare it.
 3. Real-CV rendering. Every arm renders N of N farm CVs and exits 0, and
    every doctor run (head twice, base once) reports N of N with no failure and
-   exits 0. With --source-dir, render_gate.py found a source docx for N of N,
-   unless --allow-missing-sources.
+   exits 0, and no lint in it crashed or found its input unreadable. run_doctor
+   turns either into an ordinary finding rather than a "_failed" entry, so
+   without this a lint that crashed in one arm would read as head differing.
+   With --source-dir, render_gate.py found a source docx for N of N, unless
+   --allow-missing-sources.
 4. Intentional mutation. A temporary copy of head has the PERSONAL DATA
    work-email write removed (render_gate_controls.MUTATION_*), the shape of
    the 2026-09-07 control, where removing the #550 write-back changed exactly
@@ -44,11 +47,12 @@ fresh render as stage_6_wcm_documents, so lints gated on the rendered docx
 built from JSON alone.
 
 PRIVACY (#2176). Corpus uids come from real filenames and carry owners' names
-("038WKA_Jane Doe CV ...", "LI_WEI", "Smith2_cv"), and no shape test tells a
-name from a uid. So mask_uid() is an allowlist: a uid is printed as it is only
-when the --manifest lists it and it has the shape the web app generates (six
-of A-Z0-9, run_creation.generate_run_id); every other uid becomes "h:" plus 8
-hex characters of its sha256. Nothing is printed from a CV: counts, masked
+(invented examples of the real shapes: "038WKA_Jane Doe CV ...", "QX_ZRV",
+"Zqxvw7_cv"), and no shape test tells a name from a uid. So mask_uid() is an
+allowlist: a uid is printed as it is only when the --manifest lists it and it
+has the shape the web app generates (six of A-Z0-9,
+run_creation.generate_run_id); every other uid becomes "h:" plus 8 hex
+characters of its sha256. Nothing is printed from a CV: counts, masked
 uids and lint names only. The subprocesses' own output, which does carry full
 uids and can carry CV text in a traceback, goes to log files under --work and
 is never echoed. Any exception, wherever it is raised (format_report
@@ -57,8 +61,10 @@ included), prints only its class name; the traceback goes to
 
 Exit status: 0 when every control passed and head equals base; 1 when every
 control passed and head differs from base (the gate's result, to be read);
-2 when a control failed, either comparison was refused or partial (an arm
-failed), the run crashed, or the invocation was bad: no result is evidence.
+2 when a control failed (a doctor lint that crashed or found its input
+unreadable, in either arm, fails the real-CV control), either comparison was
+refused or partial (an arm failed), the run crashed, or the invocation was
+bad: no result is evidence.
 Dates: Date of preparation and tracked-change w:date are masked by
 render_gate_compare itself. Two more stage-6 call sites read the current year,
 so a run whose renders straddle a new year fails the determinism control.
@@ -112,10 +118,20 @@ DEFAULT_JOBS = 4
 
 EXIT_SAME, EXIT_DIFFERS, EXIT_NO_EVIDENCE = 0, 1, 2
 
+#: How run_doctor reports a lint it could not run, as a finding and not a
+#: "_failed" entry. A lint that raised: run_doctor._run_lint's ERROR finding,
+#: whose message starts "lint <lint> crashed: ". An input that exists but
+#: would not load: run_doctor._ready's finding with status
+#: doctor.shared.STATUS_UNREADABLE. run_doctor has no constant for the first;
+#: scripts/test_render_doctor_gates.py pins both against run_doctor itself.
+LINT_CRASH_SEVERITY = "ERROR"
+LINT_CRASH_MESSAGE = "lint {lint} crashed: "
+LINT_STATUS_UNREADABLE = "unreadable"
+
 # The document uid the web app generates: six characters, A-Z today and A-Z0-9
 # before (web_interface/backend/app/services/run_creation.py generate_run_id;
 # the orchestrator requires document_uid == run_id). The older token_urlsafe
-# ids could hold "_" or "-", which is also how "LI_WEI" looks, so those are
+# ids could hold "_" or "-", which is also how "QX_ZRV" looks, so those are
 # never printed or farmed.
 GENERATED_UID_RE = re.compile(r"[A-Z0-9]{6}")
 MASK_PREFIX = "h:"
@@ -136,8 +152,8 @@ def mask_uid(uid: str, allowed: frozenset[str]) -> str:
     it has the generated shape; otherwise "h:" plus 8 hex characters of its
     sha256, stable across runs and distinct per uid but not readable.
 
-    An allowlist and not a shape test: "LI_WEI", "WILSON" of "WILSON_CV" and
-    "Smith2" of "Smith2_cv" all look like a uid or a leading uid token.
+    An allowlist and not a shape test: "QX_ZRV", "ZQXVWB" of "ZQXVWB_CV" and
+    "Zqxvw7" of "Zqxvw7_cv" all look like a uid or a leading uid token.
     """
     if uid in allowed and is_generated_uid(uid):
         return uid
@@ -155,6 +171,26 @@ def load_allowed_uids(manifest: Path | None) -> frozenset[str]:
     if not isinstance(uids, list):
         raise ValueError(f"no {MANIFEST_UIDS_KEY} list in the manifest")
     return frozenset(u for u in uids if isinstance(u, str) and is_generated_uid(u))
+
+
+def _lint_not_run(finding) -> bool:
+    """True for a finding saying its lint crashed or could not read its input."""
+    if not isinstance(finding, dict):
+        return False
+    lint = str(finding.get("lint", ""))
+    crashed = (finding.get("severity") == LINT_CRASH_SEVERITY
+               and str(finding.get("message", "")).startswith(LINT_CRASH_MESSAGE.format(lint=lint)))
+    return crashed or finding.get("status") == LINT_STATUS_UNREADABLE
+
+
+def lints_not_run(report: dict) -> list[str]:
+    """The lints that crashed or found an input unreadable on any CV of a
+    doctor_gate.py report: names only, never the uid or the message."""
+    lints = set()
+    for uid, rep in report.items():
+        if uid != dgc.FAILED_KEY and isinstance(rep, dict):
+            lints.update(str(f.get("lint", "?")) for f in rep.get("findings") or [] if _lint_not_run(f))
+    return sorted(lints)
 
 
 def _uid_of_docx(name: str) -> str:
@@ -193,10 +229,12 @@ class DoctorRun:
     report: dict
 
     def clean_over(self, n: int) -> bool:
-        """Exit 0, an empty "_failed", and a report for each of n CVs."""
+        """Exit 0, an empty "_failed", a report for each of n CVs, and every
+        lint ran on every CV."""
         failed = self.report.get(dgc.FAILED_KEY)
         uids = [u for u in self.report if u != dgc.FAILED_KEY]
-        return self.exit_code == 0 and failed == {} and len(uids) == n
+        return (self.exit_code == 0 and failed == {} and len(uids) == n
+                and not lints_not_run(self.report))
 
 
 @dataclass(frozen=True)
@@ -432,6 +470,8 @@ def _real_cv_row(report: GateReport, arms: list[ArmRun], doctors: list[DoctorRun
         part = f"doctor {d.label} {reported}/{n} exit {d.exit_code}"
         if failed != {}:
             part += f" failed {len(failed) if isinstance(failed, dict) else 'unreadable'}"
+        if not_run := lints_not_run(d.report):
+            part += f" lint crashed or input unreadable: {', '.join(not_run)}"
         parts.append(part)
     if report.source_dir:
         found = min(a.sources_found() for a in arms)

@@ -279,10 +279,11 @@ jobs:
           extra_args: --exclude-paths=.trufflehog-exclude.txt
 
   corpus-gate-paths:
-    # Does this PR touch stage 6 or the doctor? A cheap GitHub-hosted job, so
-    # a PR that does not never starts a CodeBuild runner for corpus-gate below.
-    # It reads only this repository's code, never the farm. Same guards as
-    # corpus-gate: off until CORPUS_GATE_ENABLED is 'true', same-repo PRs only.
+    # Does this PR touch stage 6, the doctor, the template or the gate itself?
+    # A cheap GitHub-hosted job, so a PR that does not never starts a CodeBuild
+    # runner for corpus-gate below. It reads only this repository's code, never
+    # the farm. Same guards as corpus-gate: off until CORPUS_GATE_ENABLED is
+    # 'true', same-repo PRs only.
     # A job skipped by its `if` reports as skipped, which does not hold a merge
     # (only a workflow that never starts does, the #417 reason frontend-typecheck
     # gives for not path-filtering the workflow); neither job is a required check.
@@ -301,19 +302,24 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0  # the base branch too, for the merge base
           persist-credentials: false
-      - name: Does this PR touch stage 6 or the doctor?
+      - name: Does this PR touch stage 6, the doctor, the template or the gate?
         id: changes
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Stage 6, the doctor, key_files/ (the template docx stage 6 renders
+          # into), and the gate's own scripts. One line: the self-test
+          # (scripts/test_render_doctor_gates.py) reads it and runs it through
+          # grep -E against paths that must and must not fire.
+          GATE_PATHS: >-
+            ^(src/unified_pipeline/(stage6/|stage_6_word_template\.py$|doctor/|run_doctor\.py$)|key_files/|scripts/(render_gate[^/]*|doctor_gate[^/]*|render_gate_controls|build_gate_farm)\.py$)
         run: |
           merge_base=$(git merge-base "origin/$BASE_REF" HEAD)
           echo "merge_base=$merge_base" >> "$GITHUB_OUTPUT"
-          if git diff --name-only "$merge_base" HEAD \
-              | grep -qE '^src/unified_pipeline/(stage6/|stage_6_word_template\.py$|doctor/|run_doctor\.py$)'; then
+          if git diff --name-only "$merge_base" HEAD | grep -qE "$GATE_PATHS"; then
             echo "gate=true" >> "$GITHUB_OUTPUT"
           else
             echo "gate=false" >> "$GITHUB_OUTPUT"
-            echo "No stage-6 or doctor change: corpus gate not run." >> "$GITHUB_STEP_SUMMARY"
+            echo "No stage-6, doctor, template or gate change: corpus gate not run." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   corpus-gate:
@@ -326,10 +332,18 @@ jobs:
     #
     # Off until the repository variable CORPUS_GATE_ENABLED is 'true': until
     # then the job is skipped and never queues (runs-on below names a CodeBuild
-    # project that does not exist yet). Never on a fork's PR: its code would run
-    # with the farm role. Runs only when corpus-gate-paths found a stage-6 or
-    # doctor change, so other PRs start no runner. Setup:
-    # docs/guides/render-doctor-gates.md.
+    # project that does not exist yet). Runs only when corpus-gate-paths found
+    # a stage-6, doctor, template or gate change, so other PRs start no runner.
+    #
+    # The same-repo condition below keeps THIS job off a fork's PR, but it is
+    # not the guard against forks: a fork's PR runs the fork's copy of this
+    # file, which can drop the condition or add its own job with a codebuild-
+    # runs-on label. What stops that is on the AWS side: the CodeBuild
+    # webhook's filter group accepts only workflow jobs queued by an allowlist
+    # of GitHub account ids, for this repository's `ci` workflow, and the
+    # repository requires approval before any outside contributor's workflow
+    # runs. Setup, and what each of those does not stop:
+    # docs/guides/render-doctor-gates.md, "AWS setup (Paul)".
     #
     # Report-only: the result is the step summary (counts, lint names, and
     # uids that are either in the farm manifest or hashed; nothing from a CV),

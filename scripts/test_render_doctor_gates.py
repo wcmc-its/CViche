@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -627,8 +628,8 @@ _PLAIN_UID = "QWERTY"
 _NAME_PARTS = ("Jane", "Doe", "jane.doe", "Updated")
 _HASHED_RE = re.compile(r"h:[0-9a-f]{8}")
 # Name-shaped tokens a shape test would print: a bare name in uid shape, and
-# the leading tokens of "WILSON_CV" and "Smith2_cv".
-_NAME_TOKENS = ("LI_WEI", "WILSON_CV", "Smith2_cv", "Smith2")
+# the leading tokens of "ZQXVWB_CV" and "Zqxvw7_cv".
+_NAME_TOKENS = ("QX_ZRV", "ZQXVWB_CV", "Zqxvw7_cv", "Zqxvw7")
 
 
 def _assert_no_name(text, where):
@@ -641,27 +642,27 @@ def _masked_named():
 
 
 def test_controls_mask_uid_prints_only_allowlisted_generated_uids():
-    # A manifest that lists two real ids, a bare 038WKA, and "LI_WEI".
-    allowed = frozenset({"QZKMRT", "AB12CD", "038WKA", "LI_WEI"})
+    # A manifest that lists two real ids, a bare 038WKA, and "QX_ZRV".
+    allowed = frozenset({"QZKMRT", "AB12CD", "038WKA", "QX_ZRV"})
     assert rgctl.mask_uid("QZKMRT", allowed) == "QZKMRT"
     assert rgctl.mask_uid("AB12CD", allowed) == "AB12CD"
     # Not in the manifest: hashed, though it has the generated shape.
     assert _HASHED_RE.fullmatch(rgctl.mask_uid("QZKMRT", frozenset()))
-    for named in (*_NAME_TOKENS, _NAMED_UID, "WILSON", "web08", "2003_Dr_Jane_Doe"):
+    for named in (*_NAME_TOKENS, _NAMED_UID, "ZQXVWB", "web08", "2003_Dr_Jane_Doe"):
         masked = rgctl.mask_uid(named, allowed)
         assert _HASHED_RE.fullmatch(masked), (named, masked)
-    # "LI_WEI" stays hashed even when a manifest lists it: not the generated shape.
-    assert rgctl.mask_uid("WILSON_CV", allowed) != "WILSON"
-    assert rgctl.mask_uid("Smith2_cv", allowed) != "Smith2"
+    # "QX_ZRV" stays hashed even when a manifest lists it: not the generated shape.
+    assert rgctl.mask_uid("ZQXVWB_CV", allowed) != "ZQXVWB"
+    assert rgctl.mask_uid("Zqxvw7_cv", allowed) != "Zqxvw7"
     # Stable, and distinct per uid.
-    assert rgctl.mask_uid("Smith_CV", allowed) == rgctl.mask_uid("Smith_CV", frozenset())
-    assert rgctl.mask_uid("Smith_CV", allowed) != rgctl.mask_uid("Jones_CV", allowed)
+    assert rgctl.mask_uid("Qzxv_CV", allowed) == rgctl.mask_uid("Qzxv_CV", frozenset())
+    assert rgctl.mask_uid("Qzxv_CV", allowed) != rgctl.mask_uid("Vxqz_CV", allowed)
 
 
 def test_controls_load_allowed_uids_keeps_only_generated_shapes():
     with tempfile.TemporaryDirectory() as tmp:
         man = Path(tmp) / "manifest.json"
-        man.write_text(json.dumps({rgctl.MANIFEST_UIDS_KEY: ["QZKMRT", "LI_WEI", "Smith2", 7]}))
+        man.write_text(json.dumps({rgctl.MANIFEST_UIDS_KEY: ["QZKMRT", "QX_ZRV", "Zqxvw7", 7]}))
         assert rgctl.load_allowed_uids(man) == frozenset({"QZKMRT"})
         man.write_text(json.dumps({"codes_by_uid": {"QZKMRT": []}}))
         try:
@@ -723,12 +724,14 @@ def _fake_render(out, label, leave_stale, with_sources):
     (out / "_render_index.json").write_text(json.dumps(index))
 
 
-def _fake_runner(leave_stale=False, base_doctor="clean"):
+def _fake_runner(leave_stale=False, base_doctor="clean", extra_finding=None, extra_arm="base"):
     """Stands in for the render_gate.py / doctor_gate.py subprocesses. Base
     differs from head on the named uid in both render and doctor; the mutated
     copy loses the work email; the log it writes carries the full uid, as the
     real ones do. `base_doctor` is "clean", "partial" (a "_failed" uid, exit
-    1), "absent" (no report, exit 1) or "short" (one uid missing, exit 0)."""
+    1), "absent" (no report, exit 1) or "short" (one uid missing, exit 0).
+    `extra_finding` is added to the named uid's findings in `extra_arm`'s
+    doctor runs ("base", or "head" for both head runs)."""
     def run(script, arm_root, args, log):
         log.write_text(f"[1/2] {_NAMED_UID} OK\n")
         label = Path(arm_root).name
@@ -737,6 +740,8 @@ def _fake_runner(leave_stale=False, base_doctor="clean"):
             _fake_render(out, label, leave_stale, "--source-dir" in map(str, args))
             return 0
         findings = [{"lint": "section_lost", "message": "Jane Doe lost"}] if label == "base" else []
+        if extra_finding is not None and label == extra_arm:
+            findings = [*findings, extra_finding]
         report = {uid: {"findings": findings if uid == _NAMED_UID else []}
                   for uid in (_NAMED_UID, _PLAIN_UID)}
         mode = base_doctor if label == "base" else "clean"
@@ -877,6 +882,48 @@ def test_controls_a_failed_base_doctor_run_is_no_evidence():
             _assert_no_name(out, f"stdout with base doctor {mode}")
 
 
+def _findings_for_lints_that_did_not_run():
+    """A lint that raised and a lint whose input would not load, as
+    run_doctor itself records them: (crash finding, unreadable finding)."""
+    from unified_pipeline.run_doctor import _ready, _run_lint
+
+    def crashing_rule():
+        raise TypeError(f"bad entry in {_NAMED_UID}")
+
+    findings = []
+    with contextlib.redirect_stderr(io.StringIO()):  # run_doctor logs the crash
+        _run_lint("table_shape", crashing_rule, (), findings)
+    _ready("section_consistency", unreadable={"stage_4": "JSONDecodeError"},
+           findings=findings, stage_4=None)
+    return tuple(findings)
+
+
+def test_controls_a_lint_that_did_not_run_is_no_evidence():
+    """run_doctor records a lint that crashed, or whose input would not
+    load, as a finding, not a "_failed" entry. In either arm that is no
+    evidence (exit 2, the lint named, no uid), never head differing."""
+    crash, unreadable = _findings_for_lints_that_did_not_run()
+    assert rgctl._lint_not_run(crash) and rgctl._lint_not_run(unreadable)
+    for finding, arm in ((crash, "base"), (crash, "head"), (unreadable, "head")):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, summary = _run_controls_main(
+                Path(tmp), _fake_runner(extra_finding=finding, extra_arm=arm))
+            assert rc == rgctl.EXIT_NO_EVIDENCE, (finding, arm, out)
+            row = _row(out, "real-CV rendering")
+            doctor = "base" if arm == "base" else "head_a"
+            assert (f"doctor {doctor} 2/2 exit 0 lint crashed or input unreadable: "
+                    f"{finding['lint']}") in row, row
+            assert row.endswith("| FAIL |") and "**Controls passed" not in out, out
+            _assert_no_name(out + summary, f"stdout with {finding['lint']} not run in {arm}")
+    # A finding that only mentions another lint's crash is a result, not a lint that did not run.
+    lookalike = {"lint": "section_lost", "severity": "ERROR", "message": "lint table_shape crashed: TypeError",
+                 "evidence": [], "status": "ran", "reason": ""}
+    assert not rgctl._lint_not_run(lookalike)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, out, _ = _run_controls_main(Path(tmp), _fake_runner(extra_finding=lookalike))
+        assert rc == rgctl.EXIT_DIFFERS, out
+
+
 def test_controls_exit_no_evidence_when_a_comparison_refused_an_arm():
     """Even with every control row passing, a refused or partial comparison
     is no evidence."""
@@ -938,6 +985,38 @@ def test_controls_refuse_an_arm_that_is_not_a_whole_checkout():
 def test_controls_render_stage_dir_is_run_doctors():
     from unified_pipeline.run_doctor import artifact_layout
     assert artifact_layout(Path(), "u")["stage_6_docx"].parent.name == rgctl.RENDER_STAGE_DIR
+
+
+_CI_YML = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+
+
+def _corpus_gate_paths_regex():
+    """The GATE_PATHS pattern corpus-gate-paths greps the PR's diff with."""
+    lines = _CI_YML.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line.strip() == "GATE_PATHS: >-")
+    return lines[at + 1].strip()
+
+
+def test_corpus_gate_paths_fires_on_stage6_the_doctor_the_template_and_the_gate():
+    """Run through grep -E, as the job does: stage 6, the doctor, key_files/
+    and the gate's own scripts start the gate; nothing else does."""
+    fires = ["src/unified_pipeline/stage6/sections/personal_data.py",
+             "src/unified_pipeline/stage_6_word_template.py",
+             "src/unified_pipeline/doctor/shared.py",
+             "src/unified_pipeline/run_doctor.py",
+             "key_files/wcm_cv_template_faculty_october_2022_final.docx",
+             "scripts/render_gate.py", "scripts/render_gate_compare.py",
+             "scripts/render_gate_controls.py", "scripts/doctor_gate.py",
+             "scripts/doctor_gate_compare.py", "scripts/build_gate_farm.py"]
+    quiet = ["src/unified_pipeline/stage_4_field_extraction.py",
+             "src/unified_pipeline/run_doctor.py.orig",
+             "src/unified_pipeline/tests/test_run_doctor.py",
+             "scripts/test_render_doctor_gates.py", "scripts/render_gate.sh",
+             "scripts/sub/render_gate.py", "docs/key_files/x.docx",
+             "web_interface/backend/app/pipeline/orchestrator.py"]
+    proc = subprocess.run(["grep", "-E", _corpus_gate_paths_regex()], input="\n".join(fires + quiet) + "\n",
+                          capture_output=True, text=True, check=False)
+    assert proc.stdout.splitlines() == fires, proc.stdout
 
 
 def test_render_compare_dirs_reports_each_changed_cv():
@@ -1015,8 +1094,8 @@ def test_gate_farm_layout_holds_every_render_input_and_no_render_output():
 
 def test_gate_farm_takes_only_a_generated_run_id_as_a_uid():
     assert bgf.gateable_uid("QZKMRT", "QZKMRT") and bgf.gateable_uid("AB12CD", "AB12CD")
-    for run_id, uid in (("LI_WEI", "LI_WEI"), ("QZKMRT", "WILSON_CV"), ("QZKMRT", "Smith2_cv"),
-                        ("Smith2", "Smith2"), ("QZKMRT", "WILSON"), ("AB1-CD", "AB1-CD")):
+    for run_id, uid in (("QX_ZRV", "QX_ZRV"), ("QZKMRT", "ZQXVWB_CV"), ("QZKMRT", "Zqxvw7_cv"),
+                        ("Zqxvw7", "Zqxvw7"), ("QZKMRT", "ZQXVWB"), ("AB1-CD", "AB1-CD")):
         assert not bgf.gateable_uid(run_id, uid), (run_id, uid)
 
 
@@ -1079,10 +1158,12 @@ if __name__ == "__main__":
     test_controls_fail_when_the_mutation_anchor_is_gone()
     test_controls_any_crash_prints_only_the_exception_class()
     test_controls_a_failed_base_doctor_run_is_no_evidence()
+    test_controls_a_lint_that_did_not_run_is_no_evidence()
     test_controls_exit_no_evidence_when_a_comparison_refused_an_arm()
     test_controls_real_cv_control_fails_on_missing_sources_unless_allowed()
     test_controls_refuse_an_arm_that_is_not_a_whole_checkout()
     test_controls_render_stage_dir_is_run_doctors()
+    test_corpus_gate_paths_fires_on_stage6_the_doctor_the_template_and_the_gate()
     test_render_compare_dirs_reports_each_changed_cv()
     test_doctor_findings_delta_counts_a_repeated_finding_once_per_copy()
     test_doctor_compare_reports_does_not_consume_the_failed_key()

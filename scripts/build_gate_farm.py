@@ -31,7 +31,7 @@ Selection. A candidate is a run with a stage-4 _fields.json and a .docx
 upload (a PDF upload cannot back --source-dir), whose uid is its run id and
 has exactly the generated shape (render_gate_controls.is_generated_uid: six of
 A-Z0-9). Any other uid -- a filename stem, or an old id with "_" in it, which
-is also what "LI_WEI" looks like -- could carry a name into the farm's
+is also what "QX_ZRV" looks like -- could carry a name into the farm's
 filenames and the printed output, so it is never farmed. Runs of the
 same CV are collapsed to the latest one, first by the upload's sha256
 (input/manifest.json), then by the stage-4 cv_owner name, hashed in memory and

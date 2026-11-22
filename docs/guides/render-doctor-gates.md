@@ -69,14 +69,19 @@ Exit 0: every control passed and head equals base. Exit 1: every control
 passed and head differs (read the table). Exit 2: no evidence. That is a
 failed control, a base-vs-head comparison that refused an arm or did not
 cover every CV in both (a failed arm, not a change in head), a crash, or a
-bad invocation.
+bad invocation. A doctor lint that crashed, or found an input unreadable, on
+any CV in either arm fails the real-CV control, and the row names the lint
+(no uid). run_doctor records both as ordinary findings (`lint <name>
+crashed: <class>`, and `status: unreadable`), not as a `_failed` entry, so
+without this a lint that crashed in one arm would read as head differing.
 
 Everything it prints, and writes to `--summary`, carries no CV text: counts,
 uids and lint names. Corpus uids come from real filenames and contain owners'
-names, and no shape test separates them from a document uid (`LI_WEI`,
-`WILSON_CV`, `Smith2_cv`). So uids are printed by allowlist: a uid appears
-as it is only when `--manifest` (the farm's `manifest.json`) lists it and it
-has the shape the web app generates (six of A-Z0-9). Every other uid is
+names, and no shape test separates them from a document uid (invented
+examples of the real shapes: `QX_ZRV`, `ZQXVWB_CV`, `Zqxvw7_cv`). So uids
+are printed by allowlist: a uid appears as it is only when `--manifest` (the
+farm's `manifest.json`) lists it and it has the shape the web app generates
+(six of A-Z0-9). Every other uid is
 printed as `h:` plus 8 hex characters of its sha256. Without `--manifest`,
 every uid is hashed. An exception of any class prints only its class name;
 its traceback goes to `--work/controls_traceback.log`. The render and doctor
@@ -274,14 +279,18 @@ a pull request when all of these hold:
   is skipped and never queues);
 - the PR's branch is in this repository, not a fork;
 - the diff from the merge base touches `src/unified_pipeline/stage6/`,
-  `stage_6_word_template.py`, `src/unified_pipeline/doctor/` or
-  `run_doctor.py`.
+  `stage_6_word_template.py`, `src/unified_pipeline/doctor/`,
+  `run_doctor.py`, `key_files/` (the template docx stage 6 renders into), or
+  one of the gate's own scripts (`scripts/render_gate*.py`,
+  `scripts/doctor_gate*.py`, `scripts/build_gate_farm.py`). The pattern is
+  `GATE_PATHS` in `ci.yml`; `scripts/test_render_doctor_gates.py` runs it
+  through `grep -E` against paths that must and must not fire.
 
 The path check is its own job, `corpus-gate-paths`, on a GitHub-hosted
 runner. It has the same first two guards, reads only the repository, and
 outputs whether the gate should run and the merge base. `corpus-gate` needs
-it and runs only when it says so, so a PR that touches no stage-6 or doctor
-file starts no CodeBuild runner. A job skipped by its `if` shows as skipped,
+it and runs only when it says so, so a PR that touches none of those paths
+starts no CodeBuild runner. A job skipped by its `if` shows as skipped,
 which holds no merge. Neither job is a required check.
 
 `corpus-gate` checks out head and the merge base, syncs the farm from
@@ -296,9 +305,18 @@ account, one fresh build per job, so no CV reaches a GitHub-hosted runner.
 The runner's role can read the farm prefix and nothing else: no
 `cviche/runs/`, no Bedrock, no database, no writes.
 
-Trust boundary: the job runs the PR's own code with that role. Anyone who can
-push a branch to this repository can therefore read the farm. Forks cannot,
-because the job never runs for them.
+Trust boundary: the job runs the PR's own code with that role, so whoever
+can get a job onto that runner can read the farm. The `if:` guards in
+`ci.yml` do not decide who that is. The repository is public, and a fork's
+PR runs the fork's copy of `ci.yml`, which can drop the same-repo condition
+or add a job of its own whose `runs-on` names the CodeBuild project. GitHub
+runs such a workflow without asking unless the author is a first-time
+contributor (the repository's setting as of 2026-11-22). The guard has to be
+where the workflow file cannot reach, so it is on the AWS side: the
+CodeBuild webhook's filter group (step 4 of the setup below) starts a build
+only for a workflow job that an allowlisted GitHub account caused to queue.
+Step 5 also makes GitHub hold every outside contributor's workflow for
+approval. What each of those does not stop is listed with it.
 
 ### The farm
 
@@ -314,7 +332,7 @@ cviche/gate-farm/manifest.json                  uids (document_uids) and taxonom
 `scripts/build_gate_farm.py` builds it. It lists `cviche/runs/`, keeps runs
 with a stage-4 `_fields.json` and a `.docx` upload whose uid is the run's own
 id in the generated shape (six of A-Z0-9; an older id with `_` or `-` in it
-is left out, since `LI_WEI` has that shape too), collapses re-runs of one
+is left out, since `QX_ZRV` has that shape too), collapses re-runs of one
 CV to the latest (by upload hash, then by stage-4 owner name, hashed in
 memory only), and picks runs by greedy set cover over the taxonomy codes in
 their stage-4 entries, then fills to 60 favouring the codes the farm holds
@@ -412,8 +430,8 @@ follows.
 
 4. **Create the CodeBuild project** as a GitHub Actions runner project:
    source GitHub, repository `wcmc-its/CViche`, connected through the GitHub
-   App (CodeConnections); webhook on, with one filter group whose event type is
-   `WORKFLOW_JOB_QUEUED`; environment a managed Ubuntu image
+   App (CodeConnections); webhook on, with the one filter group below;
+   environment a managed Ubuntu image
    (`aws/codebuild/standard:7.0`, Ubuntu 22.04 with the AWS CLI; an Amazon
    Linux image is not one `actions/setup-python` supports, and the first run
    on the Ubuntu one is the check that it installs 3.14), 4 vCPU or more
@@ -429,10 +447,90 @@ follows.
      --service-role arn:aws:iam::<account-id>:role/cviche-corpus-gate-codebuild \
      --timeout-in-minutes 60
    aws codebuild create-webhook --project-name <project> \
-     --filter-groups '[[{"type":"EVENT","pattern":"WORKFLOW_JOB_QUEUED"}]]'
+     --filter-groups '[[
+       {"type":"EVENT","pattern":"WORKFLOW_JOB_QUEUED"},
+       {"type":"ACTOR_ACCOUNT_ID","pattern":"^(<id-1>|<id-2>)$"},
+       {"type":"WORKFLOW_NAME","pattern":"^ci$"}
+     ]]'
    ```
 
-5. **Set the two repository variables** (Settings, Secrets and variables,
+   **The webhook filter is the guard against forks**, not `ci.yml`. A build
+   starts only when every filter in a group matches (and there is only one
+   group), and CodeBuild matches each pattern as an RE2 regular expression,
+   so anchor it with `^...$`:
+
+   - `EVENT` `WORKFLOW_JOB_QUEUED`: a queued Actions job, the only event a
+     runner project acts on.
+   - `ACTOR_ACCOUNT_ID`: the numeric GitHub account id in the payload's
+     `sender.id`, the account whose action queued the job. List the people
+     whose PRs should be gated, one id each:
+
+     ```bash
+     gh api users/<login> --jq .id
+     ```
+
+     Use the id, not the login: a login can be renamed and then registered
+     by someone else, an id cannot.
+   - `WORKFLOW_NAME` `^ci$`: only jobs of a workflow named `ci`, which is
+     `ci.yml`'s `name:`. Rename that workflow and update this pattern.
+
+   What they stop: a job queued by any account not on the list, whatever
+   workflow file it comes from. That covers a stranger's fork PR, and a
+   collaborator's PR (fork or branch) when the collaborator is not on the
+   list.
+
+   What they do not stop:
+
+   - **Anyone on the list.** Their PR's jobs run on the runner whatever its
+     workflow file says, fork or branch. The list is the set of people
+     trusted with the farm, so keep it short.
+   - **A job that someone on the list queues for someone else's PR.** When
+     a listed account re-runs a job, GitHub may report that account as the
+     sender; when it approves a held fork run (step 5), it may too. Neither
+     is verified here, so treat both as letting the run through: read a fork
+     PR's workflow changes before you approve or re-run it.
+   - **The workflow name.** `WORKFLOW_NAME` narrows which of a listed
+     account's jobs start a build. It protects nothing by itself, because
+     the name comes from the workflow file, which a fork's PR can set to
+     `ci`.
+   - **Repository.** A runner project's webhook is created on this one
+     repository, which is what confines it; `REPOSITORY_NAME` is a filter
+     for organization and global webhooks only. `HEAD_REF` and `BASE_REF`
+     are documented for push and pull request events, not for
+     `WORKFLOW_JOB_QUEUED`, so they are not used.
+
+   A PR by someone not on the list leaves its `corpus-gate` job queued with
+   no runner until GitHub gives up on it (24 hours) or someone cancels it. It
+   is not a required check, so it holds no merge.
+
+   CodeBuild's pull request build policy (comment approval) is documented
+   for pull request builds, not for runner projects' `WORKFLOW_JOB_QUEUED`
+   events, so do not count on it here.
+
+   To change the list later, `aws codebuild update-webhook` with the same
+   `--filter-groups`.
+
+5. **Hold every outside contributor's workflow for approval.** The
+   repository is public, and as of 2026-11-22 GitHub asks for approval only
+   before a first-time contributor's workflow runs:
+
+   ```bash
+   gh api repos/wcmc-its/CViche/actions/permissions/fork-pr-contributor-approval
+   # {"approval_policy":"first_time_contributors"}
+   gh api -X PUT repos/wcmc-its/CViche/actions/permissions/fork-pr-contributor-approval \
+     -f approval_policy=all_external_contributors
+   ```
+
+   With `all_external_contributors`, a fork PR from anyone who is not a
+   collaborator waits for a maintainer to approve its workflow run. This is
+   a second layer, not the guard: it does nothing about a collaborator's
+   fork PR, and an approved run is then up to step 4's list.
+
+6. **Before enabling, check both guards are in place**: the webhook has the
+   filter group from step 4 (`aws codebuild batch-get-projects --names
+   <project> --query 'projects[0].webhook.filterGroups'` shows all three
+   filters), and the approval policy reads `all_external_contributors`.
+   Then set the two repository variables (Settings, Secrets and variables,
    Actions, Variables), in this order:
 
    ```bash
@@ -443,11 +541,23 @@ follows.
    The job's `runs-on` label is `codebuild-<project>-<run id>-<attempt>`,
    which is how CodeBuild knows the queued job is its own.
 
-6. **Check it** on the next PR that touches stage 6: the `corpus-gate` job's
-   summary should show all four controls `PASS` over the farm. To turn the
-   job off again, set `CORPUS_GATE_ENABLED` to anything but `true`.
+7. **Check it** on the next PR that touches stage 6, opened by someone on
+   step 4's list: the `corpus-gate` job's summary should show all four
+   controls `PASS` over the farm. To turn the job off again, set
+   `CORPUS_GATE_ENABLED` to anything but `true`. That only skips the job in
+   this repository's `ci.yml`; to stop the runner itself, delete the webhook
+   (`aws codebuild delete-webhook --project-name <project>`).
 
 ## Known gaps, not fixed here
+
+- **A stage-6 catch-all hides a failure from the render side of the gate.**
+  Stage 6 has its own `except Exception` paths (14 in `stage6/` and
+  `stage_6_word_template.py` as of 2026-11-22). One that fires renders a
+  docx without the part it guarded, exits 0 and records no error, so the
+  real-CV control passes and the comparison reads it as an ordinary
+  difference, or as none when it fires in both arms. The doctor side is
+  covered: a lint that crashed or could not read its input fails the real-CV
+  control.
 
 - **`lint_pipeline_errors` untested by either gate.** It never fires on a
   farm with no failed runs; needs a synthetic failed-run fixture, which
