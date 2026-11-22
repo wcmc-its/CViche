@@ -10,7 +10,7 @@
 each needs src/ and key_files/, because stage 6 falls back to a template with
 no grant tables when key_files/ is missing and nothing raises (a vacuous arm).
 --work is wiped and recreated; it defaults to ./render_gate_controls_work.
---summary appends the same Markdown table to FILE ($GITHUB_STEP_SUMMARY in CI).
+--summary appends the same Markdown table to FILE (the masked report a remote run returns).
 --manifest is the farm's manifest.json (build_gate_farm.py): the only uids
 printed as they are. --allow-missing-sources lets a --source-dir run pass
 with a source docx for fewer than all CVs (a local farm with PDF-sourced runs).
@@ -47,7 +47,7 @@ fresh render as stage_6_wcm_documents, so lints gated on the rendered docx
 built from JSON alone.
 
 PRIVACY (#2176). Corpus uids come from real filenames and carry owners' names
-(invented examples of the real shapes: "038WKA_Jane Doe CV ...", "QX_ZRV",
+(invented examples of the real shapes: "7QZXJV_Xanthe Quorbel CV ...", "QX_ZRV",
 "Zqxvw7_cv"), and no shape test tells a name from a uid. So mask_uid() is an
 allowlist: a uid is printed as it is only when the --manifest lists it and it
 has the shape the web app generates (six of A-Z0-9,
@@ -228,13 +228,17 @@ class DoctorRun:
     exit_code: int
     report: dict
 
+    def unreadable_uids(self) -> int:
+        """How many CVs' reports are not a dict: nothing was read from them."""
+        return sum(1 for u, rep in self.report.items() if u != dgc.FAILED_KEY and not isinstance(rep, dict))
+
     def clean_over(self, n: int) -> bool:
-        """Exit 0, an empty "_failed", a report for each of n CVs, and every
-        lint ran on every CV."""
+        """Exit 0, an empty "_failed", a readable report for each of n CVs,
+        and every lint ran on every CV."""
         failed = self.report.get(dgc.FAILED_KEY)
         uids = [u for u in self.report if u != dgc.FAILED_KEY]
         return (self.exit_code == 0 and failed == {} and len(uids) == n
-                and not lints_not_run(self.report))
+                and not self.unreadable_uids() and not lints_not_run(self.report))
 
 
 @dataclass(frozen=True)
@@ -470,6 +474,8 @@ def _real_cv_row(report: GateReport, arms: list[ArmRun], doctors: list[DoctorRun
         part = f"doctor {d.label} {reported}/{n} exit {d.exit_code}"
         if failed != {}:
             part += f" failed {len(failed) if isinstance(failed, dict) else 'unreadable'}"
+        if unreadable := d.unreadable_uids():
+            part += f" report not a dict for {unreadable}"
         if not_run := lints_not_run(d.report):
             part += f" lint crashed or input unreadable: {', '.join(not_run)}"
         parts.append(part)
@@ -675,14 +681,18 @@ def _crash_text(exc_type: str) -> str:
 def main(argv=None, runner=run_script) -> int:
     """Parse, run, print. Any exception after parsing -- in a render, a
     compare, or format_report itself -- prints only its class name (its
-    message and traceback can carry a full uid) and exits 2."""
+    message and traceback can carry a full uid) and exits 2. So does a
+    SystemExit from a runner; argparse's own (a usage error, --help) is
+    raised before args is set and passes through as its intended exit."""
     args = None
     try:
         args = _parse_args(argv)
         report = run_controls(args, runner)
         _emit(format_report(report), args.summary)
         return _exit_code(report)
-    except (Exception, KeyboardInterrupt) as e:
+    except (Exception, KeyboardInterrupt, SystemExit) as e:
+        if isinstance(e, SystemExit) and args is None:
+            raise
         handler = _crash_handler(args.work if args is not None else None)
         _CRASH_LOGGER.addHandler(handler)
         _CRASH_LOGGER.exception("render_gate_controls.py stopped")

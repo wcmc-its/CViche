@@ -74,6 +74,8 @@ any CV in either arm fails the real-CV control, and the row names the lint
 (no uid). run_doctor records both as ordinary findings (`lint <name>
 crashed: <class>`, and `status: unreadable`), not as a `_failed` entry, so
 without this a lint that crashed in one arm would read as head differing.
+A CV whose doctor report is not a JSON object fails it too, and a
+`SystemExit` raised inside the run is a crash like any other exception.
 
 Everything it prints, and writes to `--summary`, carries no CV text: counts,
 uids and lint names. Corpus uids come from real filenames and contain owners'
@@ -260,9 +262,8 @@ shows the gate could have seen a change if there had been one.
 **Local farm against an older base** (`f7e11a2c`, dev on 2026-11-12, ten days
 of stage-6 and doctor merges behind head). Controls as above, all PASS. Base
 vs head: render paragraph CHANGED 24, fingerprint CHANGED 66 of 66; doctor
-CHANGED 66 of 66. The per-run table listed each run by its masked uid
-(`038WKA`, `2003`, `NSUJZG`, ...), and no name from the farm's name-bearing
-uids appeared in it. (That was the first masking rule, which kept a uid's
+CHANGED 66 of 66. The per-run table listed each run by its masked uid,
+and no name from the farm's name-bearing uids appeared in it. (That was the first masking rule, which kept a uid's
 leading token. It kept name-shaped tokens too, so it was replaced by the
 manifest allowlist above, under which every uid of this farm is hashed.)
 66 of the doctor deltas are `model_review`, a lint added
@@ -270,53 +271,77 @@ in those ten days, which reports itself on every run. The next largest is
 `section_consistency` (35 gained), not traced here. None of it is noise:
 determinism was 0.
 
-## The CI job (#2176)
+## Running it on a PR (#2176)
 
-`corpus-gate` in `.github/workflows/ci.yml` runs `render_gate_controls.py` on
-a pull request when all of these hold:
+There is no GitHub-triggered job. Someone with AWS credentials in the CViche
+account runs `scripts/corpus_gate_remote.sh` from their own machine, and it
+starts one CodeBuild build that runs `render_gate_controls.py` against the
+gate farm.
 
-- the repository variable `CORPUS_GATE_ENABLED` is `true` (until then the job
-  is skipped and never queues);
-- the PR's branch is in this repository, not a fork;
-- the diff from the merge base touches `src/unified_pipeline/stage6/`,
-  `stage_6_word_template.py`, `src/unified_pipeline/doctor/`,
-  `run_doctor.py`, `key_files/` (the template docx stage 6 renders into), or
-  one of the gate's own scripts (`scripts/render_gate*.py`,
-  `scripts/doctor_gate*.py`, `scripts/build_gate_farm.py`). The pattern is
-  `GATE_PATHS` in `ci.yml`; `scripts/test_render_doctor_gates.py` runs it
-  through `grep -E` against paths that must and must not fire.
+Why not a CI job: the repository is public and has 42 organization members
+(as of 2026-11-22). Any PR's own copy of `ci.yml` can target a
+CodeBuild-hosted Actions runner, and the webhook's `ACTOR_ACCOUNT_ID` filter
+matches the event's sender, not the PR's author. So nothing on the GitHub
+side decides whose code would run next to the farm. Here an AWS principal
+has to start every build.
 
-The path check is its own job, `corpus-gate-paths`, on a GitHub-hosted
-runner. It has the same first two guards, reads only the repository, and
-outputs whether the gate should run and the merge base. `corpus-gate` needs
-it and runs only when it says so, so a PR that touches none of those paths
-starts no CodeBuild runner. A job skipped by its `if` shows as skipped,
-which holds no merge. Neither job is a required check.
+```bash
+scripts/corpus_gate_remote.sh <PR number>                 # asks you to type the PR number
+scripts/corpus_gate_remote.sh <PR number> --i-read-the-diff --comment
+```
 
-`corpus-gate` checks out head and the merge base, syncs the farm from
-`s3://wcm-cviche-storage/cviche/gate-farm/`, runs the script with the farm's
-`manifest.json` as `--manifest`, and writes the table to the job's step
-summary. It is report-only: the gate step always exits 0 and the job has
-`continue-on-error`. Whether it blocks a merge is a later decision. Nothing
-is uploaded as an artifact.
+The script:
 
-It runs on a CodeBuild-hosted GitHub Actions runner in the CViche AWS
-account, one fresh build per job, so no CV reaches a GitHub-hosted runner.
-The runner's role can read the farm prefix and nothing else: no
-`cviche/runs/`, no Bedrock, no database, no writes.
+1. Resolves the PR's head SHA and its merge base with `gh` (the compare
+   API's `merge_base_commit`), and prints both and the changed files.
+2. Stops unless you type the PR number at the prompt, or pass
+   `--i-read-the-diff`. Either one says you have read the whole diff at
+   the printed head SHA.
+3. Runs `aws codebuild start-build --source-version <head sha>`, passing
+   `HEAD_SHA`, `BASE_SHA` and `PR_NUMBER` as environment variable
+   overrides. It sends no buildspec override: the buildspec is the
+   project's (step 4 of the setup below), not the repository's.
+4. Waits for the build, reads the one line the buildspec logs to CloudWatch,
+   `CORPUS_GATE_SUMMARY <base64>`, and prints the decoded report: the masked
+   table `render_gate_controls.py` wrote to `--summary`. It prints the
+   script's exit code too: 0 means same as base, 1 means head differs, 2
+   means no evidence.
+5. With `--comment`, posts that report on the PR (`gh pr comment`).
 
-Trust boundary: the job runs the PR's own code with that role, so whoever
-can get a job onto that runner can read the farm. The `if:` guards in
-`ci.yml` do not decide who that is. The repository is public, and a fork's
-PR runs the fork's copy of `ci.yml`, which can drop the same-repo condition
-or add a job of its own whose `runs-on` names the CodeBuild project. GitHub
-runs such a workflow without asking unless the author is a first-time
-contributor (the repository's setting as of 2026-11-22). The guard has to be
-where the workflow file cannot reach, so it is on the AWS side: the
-CodeBuild webhook's filter group (step 4 of the setup below) starts a build
-only for a workflow job that an allowlisted GitHub account caused to queue.
-Step 5 also makes GitHub hold every outside contributor's workflow for
-approval. What each of those does not stop is listed with it.
+`CORPUS_GATE_PROJECT` names the project when it is not `cviche-corpus-gate`.
+
+Run it on a PR that touches `src/unified_pipeline/stage6/`,
+`stage_6_word_template.py`, `src/unified_pipeline/doctor/`,
+`run_doctor.py`, `key_files/` (the template docx stage 6 renders into), or
+the gate's own scripts. It is report-only. Whether it should block a merge is
+a later decision.
+
+What the build runs: CodeBuild checks out the head SHA the script printed,
+not the branch, so a push made after you read the diff is not what runs, and
+the buildspec stops unless the checkout is `HEAD_SHA`. It fetches `dev` and
+checks that `BASE_SHA` is on it. It checks out the merge base as a second
+worktree, installs the merge base's `requirements.txt`,
+syncs the farm, and runs the **merge base's** `render_gate_controls.py`
+with `--base` set to the merge base and `--head` to the PR's checkout. So
+the controls, `render_gate.py`, `doctor_gate.py`, the comparisons and the
+uid masking are all code already merged to `dev`. The PR's code runs only as
+the head arm, its `src/` and `key_files/`. A PR that changes the gate's own
+scripts is still measured with `dev`'s copy of them, and its changes to those
+scripts are checked by `scripts/test_render_doctor_gates.py`, not by this
+run.
+
+**Trust boundary.** Only someone whose AWS credentials allow
+`codebuild:StartBuild` on the project can run the gate. That IAM permission
+is the whole gate: nothing on GitHub can start a build. The build runs the
+PR's code with the farm on local disk and a role that can read it. That
+means about 60 real CVs, with owners' names and contact details.
+`render_gate_controls.py` strips `AWS_*` variables from the arms'
+environment, which also hides CodeBuild's container-credentials URI, but
+that is not a sandbox: head's code can read the farm files and send them
+over the network. So the operator reads the PR's whole diff first, every
+time, at the head SHA the script prints, which is the commit that runs.
+Anyone who can start builds can also override the buildspec or the
+environment. They are trusted with the farm either way.
 
 ### The farm
 
@@ -366,7 +391,10 @@ follows.
    ```
 
 3. **Create the role** the CodeBuild project runs as, say
-   `cviche-corpus-gate-codebuild`. Trust policy:
+   `cviche-corpus-gate-codebuild`. It can read the farm prefix, decrypt
+   through S3, and write its own build log, which is where the report
+   comes back. It gets no `cviche/runs/`, no Bedrock, no database, and no S3
+   writes. Trust policy:
 
    ```json
    {
@@ -381,8 +409,8 @@ follows.
    }
    ```
 
-   Permissions policy. Replace `<account-id>`, `<key-id>` (from step 2) and
-   `<project>` (the CodeBuild project name from step 4):
+   Permissions policy. Replace `<account-id>` and `<key-id>` (from step 2);
+   `cviche-corpus-gate` is the project name from step 4:
 
    ```json
    {
@@ -409,12 +437,12 @@ follows.
          "Condition": {"StringEquals": {"kms:ViaService": "s3.us-east-1.amazonaws.com"}}
        },
        {
-         "Sid": "BuildLogs",
+         "Sid": "OwnBuildLog",
          "Effect": "Allow",
          "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
          "Resource": [
-           "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/codebuild/<project>",
-           "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/codebuild/<project>:*"
+           "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/codebuild/cviche-corpus-gate",
+           "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/codebuild/cviche-corpus-gate:*"
          ]
        }
      ]
@@ -423,130 +451,132 @@ follows.
 
    With a bucket key, the KMS encryption context is the bucket, not the
    object, so the key grant cannot itself be narrowed to the prefix; the S3
-   statements are what confine the role to `cviche/gate-farm/`. If the
-   project authenticates to GitHub through a CodeConnections connection (the
-   GitHub App), add `codeconnections:GetConnectionToken` and
-   `codeconnections:GetConnection` on that connection's ARN.
+   statements are what confine the role to `cviche/gate-farm/`.
 
-4. **Create the CodeBuild project** as a GitHub Actions runner project:
-   source GitHub, repository `wcmc-its/CViche`, connected through the GitHub
-   App (CodeConnections); webhook on, with the one filter group below;
-   environment a managed Ubuntu image
-   (`aws/codebuild/standard:7.0`, Ubuntu 22.04 with the AWS CLI; an Amazon
-   Linux image is not one `actions/setup-python` supports, and the first run
-   on the Ubuntu one is the check that it installs 3.14), 4 vCPU or more
-   (`BUILD_GENERAL1_MEDIUM`), not privileged, no VPC needed; service role the
-   one from step 3; timeout 60 minutes; logs to CloudWatch. A runner project
-   ignores the buildspec. CLI equivalent:
+4. **Create the CodeBuild project, with no webhook.** Source GitHub, the
+   public repository URL, no connection or token needed to clone it, and a
+   full clone (depth 0): the build needs the merge base and `dev`'s
+   history. No artifacts. The build image is `python:3.14-slim`, from ECR
+   Public, the same base as the app's image. Compute is
+   `BUILD_GENERAL1_MEDIUM` (4 vCPU; the script runs four renders side by
+   side). Not privileged, no VPC, 60-minute timeout, logs to CloudWatch.
+   The buildspec is part of the project definition below, so a PR cannot
+   change it. Save this as `corpus-gate-project.yaml`, replace
+   `<account-id>`, and create it:
 
-   ```bash
-   aws codebuild create-project --name <project> \
-     --source type=GITHUB,location=https://github.com/wcmc-its/CViche.git \
-     --artifacts type=NO_ARTIFACTS \
-     --environment type=LINUX_CONTAINER,image=aws/codebuild/standard:7.0,computeType=BUILD_GENERAL1_MEDIUM \
-     --service-role arn:aws:iam::<account-id>:role/cviche-corpus-gate-codebuild \
-     --timeout-in-minutes 60
-   aws codebuild create-webhook --project-name <project> \
-     --filter-groups '[[
-       {"type":"EVENT","pattern":"WORKFLOW_JOB_QUEUED"},
-       {"type":"ACTOR_ACCOUNT_ID","pattern":"^(<id-1>|<id-2>)$"},
-       {"type":"WORKFLOW_NAME","pattern":"^ci$"}
-     ]]'
+   ```yaml
+   name: cviche-corpus-gate
+   description: Render/doctor corpus gate (#2176). Started by hand with scripts/corpus_gate_remote.sh. No webhook.
+   source:
+     type: GITHUB
+     location: https://github.com/wcmc-its/CViche.git
+     gitCloneDepth: 0
+     reportBuildStatus: false
+     buildspec: |
+       version: 0.2
+       env:
+         shell: bash
+         variables:
+           DEBIAN_FRONTEND: noninteractive
+           GATE_FARM: s3://wcm-cviche-storage/cviche/gate-farm/
+           REPO_URL: https://github.com/wcmc-its/CViche.git
+       phases:
+         install:
+           commands:
+             - apt-get update -qq && apt-get install -y -qq --no-install-recommends git > /dev/null
+             - pip install --quiet --root-user-action=ignore awscli
+         pre_build:
+           commands:
+             - git config --global --add safe.directory '*'
+             # The checkout must be the head the operator read.
+             - test -n "$HEAD_SHA" && test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+             # The merge base must already be on dev: it supplies the base arm and every tool below.
+             - git fetch --quiet "$REPO_URL" dev
+             - git merge-base --is-ancestor "$BASE_SHA" FETCH_HEAD
+             - git worktree add --detach /tmp/base "$BASE_SHA"
+             - pip install --quiet --root-user-action=ignore -r /tmp/base/requirements.txt
+             - aws s3 sync "$GATE_FARM" /tmp/gate-farm --only-show-errors --no-progress
+         build:
+           commands:
+             # The merge base's script, with the PR's checkout only as the head arm.
+             # Report-only: this step never fails the build. stdout is dropped; the
+             # same masked report is in --summary, logged as one base64 line.
+             - |
+               echo "PR #$PR_NUMBER: base ${BASE_SHA:0:8}, head ${HEAD_SHA:0:8}"
+               rc=0
+               python3 /tmp/base/scripts/render_gate_controls.py /tmp/gate-farm/outputs \
+                 --source-dir /tmp/gate-farm/sources --manifest /tmp/gate-farm/manifest.json \
+                 --base /tmp/base --head "$CODEBUILD_SRC_DIR" --work /tmp/gate-work \
+                 --summary /tmp/gate-summary.md \
+                 --base-label "${BASE_SHA:0:8}" --head-label "${HEAD_SHA:0:8}" > /dev/null || rc=$?
+               echo "CORPUS_GATE_EXIT $rc"
+               echo "CORPUS_GATE_SUMMARY $(base64 -w0 /tmp/gate-summary.md 2> /dev/null)"
+   artifacts:
+     type: NO_ARTIFACTS
+   environment:
+     type: LINUX_CONTAINER
+     image: public.ecr.aws/docker/library/python:3.14-slim
+     computeType: BUILD_GENERAL1_MEDIUM
+     privilegedMode: false
+   serviceRole: arn:aws:iam::<account-id>:role/cviche-corpus-gate-codebuild
+   timeoutInMinutes: 60
+   logsConfig:
+     cloudWatchLogs:
+       status: ENABLED
    ```
 
-   **The webhook filter is the guard against forks**, not `ci.yml`. A build
-   starts only when every filter in a group matches (and there is only one
-   group), and CodeBuild matches each pattern as an RE2 regular expression,
-   so anchor it with `^...$`:
-
-   - `EVENT` `WORKFLOW_JOB_QUEUED`: a queued Actions job, the only event a
-     runner project acts on.
-   - `ACTOR_ACCOUNT_ID`: the numeric GitHub account id in the payload's
-     `sender.id`, the account whose action queued the job. List the people
-     whose PRs should be gated, one id each:
-
-     ```bash
-     gh api users/<login> --jq .id
-     ```
-
-     Use the id, not the login: a login can be renamed and then registered
-     by someone else, an id cannot.
-   - `WORKFLOW_NAME` `^ci$`: only jobs of a workflow named `ci`, which is
-     `ci.yml`'s `name:`. Rename that workflow and update this pattern.
-
-   What they stop: a job queued by any account not on the list, whatever
-   workflow file it comes from. That covers a stranger's fork PR, and a
-   collaborator's PR (fork or branch) when the collaborator is not on the
-   list.
-
-   What they do not stop:
-
-   - **Anyone on the list.** Their PR's jobs run on the runner whatever its
-     workflow file says, fork or branch. The list is the set of people
-     trusted with the farm, so keep it short.
-   - **A job that someone on the list queues for someone else's PR.** When
-     a listed account re-runs a job, GitHub may report that account as the
-     sender; when it approves a held fork run (step 5), it may too. Neither
-     is verified here, so treat both as letting the run through: read a fork
-     PR's workflow changes before you approve or re-run it.
-   - **The workflow name.** `WORKFLOW_NAME` narrows which of a listed
-     account's jobs start a build. It protects nothing by itself, because
-     the name comes from the workflow file, which a fork's PR can set to
-     `ci`.
-   - **Repository.** A runner project's webhook is created on this one
-     repository, which is what confines it; `REPOSITORY_NAME` is a filter
-     for organization and global webhooks only. `HEAD_REF` and `BASE_REF`
-     are documented for push and pull request events, not for
-     `WORKFLOW_JOB_QUEUED`, so they are not used.
-
-   A PR by someone not on the list leaves its `corpus-gate` job queued with
-   no runner until GitHub gives up on it (24 hours) or someone cancels it. It
-   is not a required check, so it holds no merge.
-
-   CodeBuild's pull request build policy (comment approval) is documented
-   for pull request builds, not for runner projects' `WORKFLOW_JOB_QUEUED`
-   events, so do not count on it here.
-
-   To change the list later, `aws codebuild update-webhook` with the same
-   `--filter-groups`.
-
-5. **Hold every outside contributor's workflow for approval.** The
-   repository is public, and as of 2026-11-22 GitHub asks for approval only
-   before a first-time contributor's workflow runs:
-
    ```bash
-   gh api repos/wcmc-its/CViche/actions/permissions/fork-pr-contributor-approval
-   # {"approval_policy":"first_time_contributors"}
-   gh api -X PUT repos/wcmc-its/CViche/actions/permissions/fork-pr-contributor-approval \
-     -f approval_policy=all_external_contributors
+   aws codebuild create-project --cli-input-yaml file://corpus-gate-project.yaml
    ```
 
-   With `all_external_contributors`, a fork PR from anyone who is not a
-   collaborator waits for a maintainer to approve its workflow run. This is
-   a second layer, not the guard: it does nothing about a collaborator's
-   fork PR, and an approved run is then up to step 4's list.
+   The render and doctor logs, which name full uids, stay under `/tmp/gate-work`
+   in the build container and go nowhere. The build log can still name a
+   farm key if `aws s3 sync` reports an error, so it is for AWS principals
+   only; the script prints only the `CORPUS_GATE_SUMMARY` line from it.
 
-6. **Before enabling, check both guards are in place**: the webhook has the
-   filter group from step 4 (`aws codebuild batch-get-projects --names
-   <project> --query 'projects[0].webhook.filterGroups'` shows all three
-   filters), and the approval policy reads `all_external_contributors`.
-   Then set the two repository variables (Settings, Secrets and variables,
-   Actions, Variables), in this order:
+   If CodeBuild refuses the GitHub source for want of credentials, connect
+   it read-only: a CodeConnections GitHub App connection limited to this
+   repository, then `codeconnections:GetConnection` and
+   `codeconnections:GetConnectionToken` on that connection's ARN in the
+   role. A connection does not create a webhook; the check below still
+   applies.
+
+   **Never add a webhook or a runner configuration.** Do not run `aws
+   codebuild create-webhook`. Do not tick "Rebuild every time a code change
+   is pushed" in the console. Do not make this, or any project that can read
+   the farm, a GitHub Actions runner project. No workflow in the repository
+   may name it in a `codebuild-...` `runs-on` label. Check that there is no
+   webhook after creating the project, and again after any change to it:
 
    ```bash
-   gh variable set CORPUS_GATE_CODEBUILD_PROJECT --repo wcmc-its/CViche --body <project>
-   gh variable set CORPUS_GATE_ENABLED --repo wcmc-its/CViche --body true
+   aws codebuild batch-get-projects --names cviche-corpus-gate --query 'projects[0].webhook'
+   # null
    ```
 
-   The job's `runs-on` label is `codebuild-<project>-<run id>-<attempt>`,
-   which is how CodeBuild knows the queued job is its own.
+5. **Decide who can start it.** `codebuild:StartBuild` and
+   `codebuild:BatchGetBuilds` on the project, plus `logs:GetLogEvents` on its
+   log group, is what `scripts/corpus_gate_remote.sh` needs. Whoever holds
+   `StartBuild` can run any code next to the farm, so grant it only to people
+   trusted with the farm's CVs.
 
-7. **Check it** on the next PR that touches stage 6, opened by someone on
-   step 4's list: the `corpus-gate` job's summary should show all four
-   controls `PASS` over the farm. To turn the job off again, set
-   `CORPUS_GATE_ENABLED` to anything but `true`. That only skips the job in
-   this repository's `ci.yml`; to stop the runner itself, delete the webhook
-   (`aws codebuild delete-webhook --project-name <project>`).
+6. **First manual run**, on a PR that touches stage 6 or the doctor, after
+   reading its diff. The build runs the merge base's
+   `render_gate_controls.py`, so the PR has to be based on a `dev` that
+   already has it (#2190 merged):
+
+   ```bash
+   scripts/corpus_gate_remote.sh <PR number>
+   ```
+
+   The report should show all four controls `PASS` over the farm. The
+   install and pre_build commands were run by hand in
+   `python:3.14-slim` (2026-11-22, without the S3 sync): git and the AWS CLI
+   install, the head and merge-base checks pass, and the requirements
+   install. Nobody has run them in CodeBuild yet, so this run is also the
+   check that CodeBuild accepts a commit SHA as the source version (not yet
+   tried with a fork PR's head). To turn the gate off, delete the project
+   (`aws codebuild delete-project --name cviche-corpus-gate`) or take
+   `StartBuild` away.
 
 ## Known gaps, not fixed here
 

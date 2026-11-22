@@ -6,8 +6,8 @@
     PYTHONPATH=src python3 scripts/build_gate_farm.py --dry-run --local-out DIR
 
 Run by hand, from a machine whose AWS credentials can read cviche/runs/ and
-write cviche/gate-farm/ (#2176). The CI job that reads the farm
-(.github/workflows/ci.yml, corpus-gate) has read access to the farm prefix
+write cviche/gate-farm/ (#2176). The CodeBuild project that reads the farm
+(scripts/corpus_gate_remote.sh starts it) has read access to the farm prefix
 only, never to cviche/runs/.
 
 Source: s3://<bucket>/cviche/runs/<run_id>/, the per-run layout every web run

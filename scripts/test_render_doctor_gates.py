@@ -22,8 +22,8 @@ pins each in isolation.
 
 It also covers render_gate_controls.py (#783), the script that runs those
 controls, end to end against a fake renderer -- above all that a uid carrying
-an owner's name never reaches what it prints or writes to the CI step
-summary (#2176) -- and build_gate_farm.py's selection logic, without S3.
+an owner's name never reaches what it prints or writes to its --summary
+file (#2176) -- and build_gate_farm.py's selection logic, without S3.
 """
 import contextlib
 import io
@@ -31,7 +31,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import zipfile
@@ -389,7 +388,7 @@ def test_render_gate_source_dir_resolver_pins_an_ambiguous_uid_to_one_docx():
     """Two docx both legitimately owned by the uid -- pin which one wins.
 
     Nothing in the corpus guarantees one file per uid ("... CV.docx" beside
-    "... CV (Updated 1-26-26).docx" is exactly this repo's naming), and an
+    "... CV (Proof 9-9-99).docx" is exactly this repo's naming), and an
     unpinned choice here is a silently non-deterministic gate arm: two runs of
     the same code could recover contact fields from two different documents.
     Today's rule is sorted()[0], and this test is what makes changing it a
@@ -623,9 +622,9 @@ def test_render_gate_rejects_a_non_directory_source_dir():
 
 # A uid of the shape the corpus really has: the document uid, then the
 # original filename, which carries the owner's name. Invented name.
-_NAMED_UID = "038WKA_Jane Doe CV (Updated 1-26-26)"
+_NAMED_UID = "7QZXJV_Xanthe Quorbel CV (Proof 9-9-99)"
 _PLAIN_UID = "QWERTY"
-_NAME_PARTS = ("Jane", "Doe", "jane.doe", "Updated")
+_NAME_PARTS = ("Xanthe", "Quorbel", "xanthe.quorbel", "Proof")
 _HASHED_RE = re.compile(r"h:[0-9a-f]{8}")
 # Name-shaped tokens a shape test would print: a bare name in uid shape, and
 # the leading tokens of "ZQXVWB_CV" and "Zqxvw7_cv".
@@ -642,13 +641,13 @@ def _masked_named():
 
 
 def test_controls_mask_uid_prints_only_allowlisted_generated_uids():
-    # A manifest that lists two real ids, a bare 038WKA, and "QX_ZRV".
-    allowed = frozenset({"QZKMRT", "AB12CD", "038WKA", "QX_ZRV"})
+    # A manifest that lists two real ids, a bare 7QZXJV, and "QX_ZRV".
+    allowed = frozenset({"QZKMRT", "AB12CD", "7QZXJV", "QX_ZRV"})
     assert rgctl.mask_uid("QZKMRT", allowed) == "QZKMRT"
     assert rgctl.mask_uid("AB12CD", allowed) == "AB12CD"
     # Not in the manifest: hashed, though it has the generated shape.
     assert _HASHED_RE.fullmatch(rgctl.mask_uid("QZKMRT", frozenset()))
-    for named in (*_NAME_TOKENS, _NAMED_UID, "ZQXVWB", "web08", "2003_Dr_Jane_Doe"):
+    for named in (*_NAME_TOKENS, _NAMED_UID, "ZQXVWB", "web08", "2003_Dr_Xanthe_Quorbel"):
         masked = rgctl.mask_uid(named, allowed)
         assert _HASHED_RE.fullmatch(masked), (named, masked)
     # "QX_ZRV" stays hashed even when a manifest lists it: not the generated shape.
@@ -682,13 +681,13 @@ def test_controls_report_never_carries_a_name_bearing_uid_or_cv_text():
     report.controls.append(rgctl.ControlRow("determinism", "ok", True))
     report.render = rgc.RenderComparison(
         common=[docx_name, _PLAIN_UID + rgctl.DOCX_SUFFIX],
-        paragraph_changed=[rgc.ParagraphDelta(docx_name, 3, 4, ["Jane Doe, MD"], [])],
+        paragraph_changed=[rgc.ParagraphDelta(docx_name, 3, 4, ["Xanthe Quorbel, MD"], [])],
         fingerprint_changed=[docx_name])
     report.doctor = dgc.DoctorComparison(common=[_NAMED_UID, _PLAIN_UID], changed=[_NAMED_UID])
-    report.doctor_delta = {_NAMED_UID: ([{"lint": "section_lost", "message": "Jane Doe lost"}], [])}
+    report.doctor_delta = {_NAMED_UID: ([{"lint": "section_lost", "message": "Xanthe Quorbel lost"}], [])}
     text = rgctl.format_report(report)
     _assert_no_name(text, "format_report")
-    assert "038WKA" not in text, text
+    assert "7QZXJV" not in text, text
     assert f"| {_masked_named()} | 1 | 0 | yes | 1 | 0 |" in text, text
     assert "| section_lost | 1 | 0 |" in text, text
 
@@ -714,8 +713,8 @@ def _fake_render(out, label, leave_stale, with_sources):
         shutil.rmtree(out)
         out.mkdir()
     for uid in uids:
-        email = "jane.doe@example.org" if uid == _NAMED_UID and label != "arm_mutated" else ""
-        extra = "Jane Doe, base only" if uid == _NAMED_UID and label == "base" else None
+        email = "xanthe.quorbel@example.org" if uid == _NAMED_UID and label != "arm_mutated" else ""
+        extra = "Xanthe Quorbel, base only" if uid == _NAMED_UID and label == "base" else None
         _make_rendered_docx(out / f"{uid}{rgctl.DOCX_SUFFIX}", email, extra)
     index = {u: {"input": "x"} for u in uids}
     if with_sources:  # the named uid's source is a PDF, so it has no docx
@@ -729,7 +728,8 @@ def _fake_runner(leave_stale=False, base_doctor="clean", extra_finding=None, ext
     differs from head on the named uid in both render and doctor; the mutated
     copy loses the work email; the log it writes carries the full uid, as the
     real ones do. `base_doctor` is "clean", "partial" (a "_failed" uid, exit
-    1), "absent" (no report, exit 1) or "short" (one uid missing, exit 0).
+    1), "absent" (no report, exit 1), "short" (one uid missing, exit 0) or
+    "not_dict" (one uid's report is a string, exit 0).
     `extra_finding` is added to the named uid's findings in `extra_arm`'s
     doctor runs ("base", or "head" for both head runs)."""
     def run(script, arm_root, args, log):
@@ -739,7 +739,7 @@ def _fake_runner(leave_stale=False, base_doctor="clean", extra_finding=None, ext
         if script == "render_gate.py":
             _fake_render(out, label, leave_stale, "--source-dir" in map(str, args))
             return 0
-        findings = [{"lint": "section_lost", "message": "Jane Doe lost"}] if label == "base" else []
+        findings = [{"lint": "section_lost", "message": "Xanthe Quorbel lost"}] if label == "base" else []
         if extra_finding is not None and label == extra_arm:
             findings = [*findings, extra_finding]
         report = {uid: {"findings": findings if uid == _NAMED_UID else []}
@@ -753,6 +753,8 @@ def _fake_runner(leave_stale=False, base_doctor="clean", extra_finding=None, ext
             del report[_NAMED_UID]
         elif mode == "short":
             del report[_NAMED_UID]
+        elif mode == "not_dict":
+            report[_NAMED_UID] = "unreadable"
         out.write_text(json.dumps({**report, dgc.FAILED_KEY: failed}))
         return 1 if failed else 0
     return run
@@ -804,7 +806,7 @@ def test_controls_end_to_end_prints_and_summarises_only_masked_uids():
         assert rc == rgctl.EXIT_DIFFERS, out
         assert out == summary
         _assert_no_name(out, "stdout / $GITHUB_STEP_SUMMARY")
-        assert "038WKA" not in out, out
+        assert "7QZXJV" not in out, out
         for control in ("determinism", "crash guard", "real-CV rendering", "mutation"):
             assert _row(out, control).endswith("| PASS |"), _row(out, control)
         assert "doctor base 2/2 exit 0" in _row(out, "real-CV rendering"), out
@@ -852,7 +854,7 @@ def test_controls_any_crash_prints_only_the_exception_class():
         rc, out, summary = _run_controls_main(root, raising_runner)
         assert rc == rgctl.EXIT_NO_EVIDENCE, out
         _assert_no_name(out + summary, "stdout / stderr / $GITHUB_STEP_SUMMARY after a crash")
-        assert "Traceback" not in out and "038WKA" not in out, out
+        assert "Traceback" not in out and "7QZXJV" not in out, out
         assert "the run stopped on TypeError" in out and out == summary, out
         assert _NAMED_UID in (root / "work" / rgctl.CRASH_LOG).read_text()
 
@@ -880,6 +882,47 @@ def test_controls_a_failed_base_doctor_run_is_no_evidence():
             assert "doctor base" in row and row.endswith("| FAIL |"), (mode, row)
             assert "**Controls passed" not in out, (mode, out)
             _assert_no_name(out, f"stdout with base doctor {mode}")
+
+
+def test_controls_a_per_uid_doctor_report_that_is_not_a_dict_is_no_evidence():
+    """A CV whose doctor report is not a dict was not read; compare_reports
+    would count it as head differing. It fails the real-CV control: exit 2."""
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, out, summary = _run_controls_main(Path(tmp), _fake_runner(base_doctor="not_dict"))
+    assert rc == rgctl.EXIT_NO_EVIDENCE, out
+    row = _row(out, "real-CV rendering")
+    assert "doctor base 2/2 exit 0 report not a dict for 1" in row and row.endswith("| FAIL |"), row
+    assert "**Controls passed" not in out, out
+    _assert_no_name(out + summary, "stdout with a non-dict doctor report")
+    assert not rgctl.DoctorRun("base", 0, {"u": [], dgc.FAILED_KEY: {}}).clean_over(1)
+    assert rgctl.DoctorRun("base", 0, {"u": {"findings": []}, dgc.FAILED_KEY: {}}).clean_over(1)
+
+
+def test_controls_a_runner_systemexit_is_no_evidence_but_argparse_exits_pass_through():
+    """A runner that calls sys.exit() stops the run like any other crash:
+    exit 2 and the class name only. argparse's own SystemExit (a bad flag,
+    --help) is the script's intended exit, raised as it is, with no report."""
+    def exiting_runner(script, arm_root, args, log):
+        sys.exit(f"cannot render {_NAMED_UID}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rc, out, summary = _run_controls_main(root, exiting_runner)
+        assert rc == rgctl.EXIT_NO_EVIDENCE, out
+        assert "the run stopped on SystemExit" in out and out == summary, out
+        _assert_no_name(out + summary, "stdout after a runner's SystemExit")
+        assert _NAMED_UID in (root / "work" / rgctl.CRASH_LOG).read_text()
+
+    for argv, code in ((["--no-such-flag"], 2), (["--help"], 0)):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            try:
+                rgctl.main(argv)
+            except SystemExit as e:
+                assert e.code == code, (argv, e.code)
+            else:
+                raise AssertionError(f"{argv} returned instead of exiting")
+        assert "Render/doctor gate" not in printed.getvalue(), printed.getvalue()
 
 
 def _findings_for_lints_that_did_not_run():
@@ -985,38 +1028,6 @@ def test_controls_refuse_an_arm_that_is_not_a_whole_checkout():
 def test_controls_render_stage_dir_is_run_doctors():
     from unified_pipeline.run_doctor import artifact_layout
     assert artifact_layout(Path(), "u")["stage_6_docx"].parent.name == rgctl.RENDER_STAGE_DIR
-
-
-_CI_YML = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
-
-
-def _corpus_gate_paths_regex():
-    """The GATE_PATHS pattern corpus-gate-paths greps the PR's diff with."""
-    lines = _CI_YML.read_text(encoding="utf-8").splitlines()
-    at = next(i for i, line in enumerate(lines) if line.strip() == "GATE_PATHS: >-")
-    return lines[at + 1].strip()
-
-
-def test_corpus_gate_paths_fires_on_stage6_the_doctor_the_template_and_the_gate():
-    """Run through grep -E, as the job does: stage 6, the doctor, key_files/
-    and the gate's own scripts start the gate; nothing else does."""
-    fires = ["src/unified_pipeline/stage6/sections/personal_data.py",
-             "src/unified_pipeline/stage_6_word_template.py",
-             "src/unified_pipeline/doctor/shared.py",
-             "src/unified_pipeline/run_doctor.py",
-             "key_files/wcm_cv_template_faculty_october_2022_final.docx",
-             "scripts/render_gate.py", "scripts/render_gate_compare.py",
-             "scripts/render_gate_controls.py", "scripts/doctor_gate.py",
-             "scripts/doctor_gate_compare.py", "scripts/build_gate_farm.py"]
-    quiet = ["src/unified_pipeline/stage_4_field_extraction.py",
-             "src/unified_pipeline/run_doctor.py.orig",
-             "src/unified_pipeline/tests/test_run_doctor.py",
-             "scripts/test_render_doctor_gates.py", "scripts/render_gate.sh",
-             "scripts/sub/render_gate.py", "docs/key_files/x.docx",
-             "web_interface/backend/app/pipeline/orchestrator.py"]
-    proc = subprocess.run(["grep", "-E", _corpus_gate_paths_regex()], input="\n".join(fires + quiet) + "\n",
-                          capture_output=True, text=True, check=False)
-    assert proc.stdout.splitlines() == fires, proc.stdout
 
 
 def test_render_compare_dirs_reports_each_changed_cv():
@@ -1158,12 +1169,13 @@ if __name__ == "__main__":
     test_controls_fail_when_the_mutation_anchor_is_gone()
     test_controls_any_crash_prints_only_the_exception_class()
     test_controls_a_failed_base_doctor_run_is_no_evidence()
+    test_controls_a_per_uid_doctor_report_that_is_not_a_dict_is_no_evidence()
+    test_controls_a_runner_systemexit_is_no_evidence_but_argparse_exits_pass_through()
     test_controls_a_lint_that_did_not_run_is_no_evidence()
     test_controls_exit_no_evidence_when_a_comparison_refused_an_arm()
     test_controls_real_cv_control_fails_on_missing_sources_unless_allowed()
     test_controls_refuse_an_arm_that_is_not_a_whole_checkout()
     test_controls_render_stage_dir_is_run_doctors()
-    test_corpus_gate_paths_fires_on_stage6_the_doctor_the_template_and_the_gate()
     test_render_compare_dirs_reports_each_changed_cv()
     test_doctor_findings_delta_counts_a_repeated_finding_once_per_copy()
     test_doctor_compare_reports_does_not_consume_the_failed_key()
