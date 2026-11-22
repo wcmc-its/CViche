@@ -1016,6 +1016,94 @@ def record_holds_another_item(fields: dict, record: dict) -> bool:
                for title in (record.get('title'), record.get('vernacular_title')) if title)
 
 
+# A CV's journal field can hold two names for one journal ("Widget Res, Widget
+# Research" or "WR - Widget Research"); a place in parentheses follows some
+# PubMed full names ("Widget Research (London)").
+_JOURNAL_NAME_SEPARATOR_PATTERN = re.compile(r'[,;]|\s-\s')
+_PARENTHETICAL_PATTERN = re.compile(r'\([^)]*\)')
+
+
+def _journal_words(name: str) -> list[str]:
+    """`name`'s accent-folded lowercase words, without its parentheticals and
+    the words an abbreviation skips ("of", "the", "and": "&" is no word)."""
+    tokens = _folded_tokens(_PARENTHETICAL_PATTERN.sub(' ', name))
+    return [token.lower() for token in tokens if token.lower() not in _ACRONYM_SKIPPED_WORDS]
+
+
+def _abbreviates(short: str, word: str) -> bool:
+    """Whether `short` is `word` cut short: the same first letter, and its
+    letters found in `word` in order ("natl", "national"; "res", "research")."""
+    letters = iter(word)
+    return short[:1] == word[:1] and all(letter in letters for letter in short)
+
+
+def _same_journal_word(word: str, other: str) -> bool:
+    """Whether two journal-name words are one: one abbreviates the other, or
+    it is the other spelled another way (`_same_word_spelled_another_way`)."""
+    shorter, longer = sorted((word, other), key=len)
+    return _abbreviates(shorter, longer) or _same_word_spelled_another_way(word, other)
+
+
+def journal_names_agree(name: str, other: str) -> bool:
+    """Whether two journal names can be one journal: every word of the one
+    with fewer words is a word of the other (`_same_journal_word`), in any
+    order, so "J Widget Res" and "Widget Res" are both "The Journal of
+    Widget Research"; or it is one word that opens the other's initials
+    ("JWR"). A name with no words agrees with any."""
+    words, other_words = sorted((_journal_words(name), _journal_words(other)), key=len)
+    if len(words) == 1 and ''.join(word[0] for word in other_words).startswith(words[0]):
+        return True
+    return all(any(_same_journal_word(word, other_word) for other_word in other_words)
+               for word in words)
+
+
+def cv_journal_contradicts_record(fields: dict, record: dict) -> bool:
+    """Whether the CV names a journal and none of the names in its field
+    agrees with the record's journal or its ISO abbreviation
+    (`journal_names_agree`). A journal unknown on either side contradicts
+    nothing."""
+    cv_names = [name for name in _JOURNAL_NAME_SEPARATOR_PATTERN.split(fields.get('journal') or '')
+                if _journal_words(name)]
+    record_names = [name for name in (record.get('journal'), record.get('journal_iso')) if name]
+    return bool(cv_names and record_names) and not any(
+        journal_names_agree(cv_name, record_name) for cv_name in cv_names for record_name in record_names)
+
+
+def _first_page(pages: str | None) -> int | None:
+    ranges = page_ranges(pages)
+    return ranges[0][1] if ranges else None
+
+
+# A title-search hit can be a sibling paper by the CV's own group: another
+# title sharing 4 of the 5 words of the shorter one, an author and the year,
+# but printed in another journal, volume and pages (BQTFQZ e214 and e292,
+# dev-316, #2191). Over 5,106 title-search hits stored for 274 runs
+# (2026-11-22), 56 name another journal by `cv_journal_contradicts_record`;
+# 32 of those give the record's own volume and first page, or lack one (the
+# CV's journal misspelt, cut or renamed), and are kept. A renamed journal
+# keeps its volumes, and Crossref files back issues under the current name,
+# so where the volume agrees or is missing, a first page that differs
+# refuses only under a title that is not the record's (`_same_title`): the
+# 33rd, the CV's paper with another first page, is kept that way. The 23
+# refused (17 that no other guard refuses) are each another article, or the
+# same title printed in another journal.
+def record_in_another_journal(fields: dict, record: dict) -> bool:
+    """Whether the CV's citation puts its paper in another journal than the
+    record's (`cv_journal_contradicts_record`) and in another volume, or on
+    another first page under a title that is not the record's. A volume or
+    page unknown on either side contradicts nothing."""
+    if not cv_journal_contradicts_record(fields, record):
+        return False
+    cv_volume, record_volume = volume_number(fields.get('volume')), volume_number(record.get('volume'))
+    if cv_volume is not None and record_volume is not None and cv_volume != record_volume:
+        return True
+    cv_page, record_page = _first_page(fields.get('pages')), _first_page(record.get('pages'))
+    source_title = cv_title(fields)
+    return (cv_page is not None and record_page is not None and cv_page != record_page
+            and not any(_same_title(source_title, title or '')
+                        for title in (record.get('title'), record.get('vernacular_title'))))
+
+
 def cv_names_a_correction(entry: dict) -> bool:
     """Whether the CV's line or title calls the entry a correction."""
     fields = entry.get('extracted_fields') or {}
@@ -1734,16 +1822,18 @@ class PubMedEnricher:
         """Whether a title-search hit may be accepted: its title overlap
         clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the CV, its
         year is plausible for the CV's, the CV's year and volume do not
-        make it another paper (#2153), and it is not the article whose
-        pages hold the CV's item (#2168). `_accept_record`'s reply check
-        (#1438) cannot refuse such a hit: a record sharing a CV author is
-        never taken for the item a reply answers."""
+        make it another paper (#2153), it is not the article whose
+        pages hold the CV's item (#2168), and the CV's journal, volume and
+        pages do not put it in another journal (#2191). `_accept_record`'s
+        reply check (#1438) cannot refuse such a hit: a record sharing a CV
+        author is never taken for the item a reply answers."""
         fields = entry.get('extracted_fields') or {}
         return (overlap >= MIN_TITLE_SEARCH_OVERLAP
                 and shares_an_author(fields.get('authors'), record['authors'])
                 and plausible_publication_year(fields.get('year'), record['year'])
                 and not record_names_another_paper(fields, record)
-                and not record_holds_another_item(fields, record))
+                and not record_holds_another_item(fields, record)
+                and not record_in_another_journal(fields, record))
 
     def _search_pmids_by_title(self, title: str) -> list[str]:
         params = {
