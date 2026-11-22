@@ -300,6 +300,37 @@ def test_org_extraction_still_finds_a_real_grantor_after_887_guards():
         "Best Talk Award, Made-up University") == "Made-up University"
 
 
+def test_org_not_taken_from_the_award_recipient_2157_item_31():
+    """#2157 item 31: with no granting body, "<award> to the <group> at the
+    <center>" names who received the award; the keyword walk used to stop
+    at "to" and render the recipient as the organization."""
+    gen = WCMTemplateGenerator(verbose=False)
+    for text in ("2021 Example Team Award to the Imaginary Lab Group at the "
+                 "Made-up Research Center and Drs. Doe, Roe, and Poe",
+                 "Example Prize awarded to the Imaginary Unit at the "
+                 "Made-up Research Center",
+                 "Example Prize presented to Made-up Research Center",
+                 "Example Prize to the Made-up Research Center",
+                 "Example Prize given to the Made-up Research Center"):
+        assert gen._extract_organization_from_award(text) == "", text
+    # "to" after a membership verb introduces the body itself, not a recipient
+    assert gen._extract_organization_from_award(
+        "Elected to the Made-up Academy") == "the Made-up Academy"
+    # a grantor named with "from" still wins over the recipient
+    assert gen._extract_organization_from_award(
+        "Team Award to the Imaginary Lab Group from Made-up University") == \
+        "Made-up University"
+
+
+def test_recipient_group_renders_an_empty_org_2157_item_31():
+    award = ("Example Team Award to the Imaginary Lab Group at the Made-up "
+             "Research Center and Drs. Doe, Roe, and Poe")
+    entry = {"taxonomy_code": "H", "text": "2021 " + award,
+             "extracted_fields": {"award_name": award,
+                                  "granting_body": None, "date": "2021"}}
+    assert _render_honors([entry]) == [[award, "", "2021"]]
+
+
 def test_single_award_with_no_granting_body_renders_empty_org_887():
     entry = {"taxonomy_code": "H",
              "text": "College of Education 2015 Outstanding Thesis Award",

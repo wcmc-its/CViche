@@ -297,7 +297,12 @@ _FOUR_DIGIT_YEAR_RE = re.compile(r'\b((?:19|20)\d{2})\b')
 # *same* line -- with the full pattern's own greedy `rest` group, a skipped,
 # unanchored match's span already swallows the remainder of the line,
 # including any real label in it, so nothing would be left to find.
-_MAJOR_GOALS_ANCHOR_PATTERN = r'(?:the\s+)?major\s+(?:goals?|gals)\b'
+#
+# The leading determiner is part of the anchor because a whole-sentence goal
+# (`proj` with no `sep`) is returned from the anchor's start: "This major goals
+# of this project to ..." (ITMPWP, #2157 item 27) rendered "major goals of ...",
+# its first word cut, when only "the" was accepted.
+_MAJOR_GOALS_ANCHOR_PATTERN = r'(?:\b(?:the|this|these)\s+)?major\s+(?:goals?|gals)\b'
 MAJOR_GOALS_LABEL_RE = re.compile(
     _MAJOR_GOALS_ANCHOR_PATTERN
     + r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program|study)(?:\s+(?:are|is))?)?'
@@ -1061,6 +1066,16 @@ PI_LABEL_PATTERNS = (
 # owner being the grant's PI. "Sole" is the only qualifier the corpus carries
 # that still means the PI; "Contact PI" does not occur, so it is not accepted.
 OWNER_IS_PI_ROLE_RE = re.compile(r"\(?\s*(?:sole\s+)?p\.?\s*i\.?\s*\)?\s*:?", re.IGNORECASE)
+# Joins the owner's roles on one grant ("PI/Program Director", "PD/PI", #2157
+# item 29). Such a role names the owner as PI only when one part is a bare PI
+# label and every other part is a directorship (`_DIRECTORSHIP_ROLE_RE`): the
+# training-grant PD/PI pair. Any other partner keeps the role unresolved --
+# "Co-PD/PI", "Mentor/PI", "Administrator/PI", "Co-I/PI", "PI/Co-PI" -- since
+# the part beside the PI may make someone else the grant's PI.
+_COMBINED_ROLE_SEPARATOR = '/'
+# A directorship part of a combined role: "Program Director", "Director", "PD",
+# "P.D.", whole-part. A qualified one ("Co-PD", "Program Co-Director") fails it.
+_DIRECTORSHIP_ROLE_RE = re.compile(r"(?:program\s+)?director|p\.?\s*d\.?", re.IGNORECASE)
 # The long form "principal investigator", hyphen or space between the words.
 _PI_PHRASE = r"principal[\s-]*investigator"
 _PI_PHRASE_RE = re.compile(_PI_PHRASE, re.IGNORECASE)
@@ -1312,14 +1327,18 @@ def _role_names_owner_as_pi(role: str) -> bool:
     (`_QUALIFIED_PI_PHRASE_RE`, #1455): "Co-Principal Investigator" made the
     owner the grant's PI. One unqualified phrase is enough ("Co-Principal
     Investigator 2005-2010; Principal Investigator 2010-2011"). Or a bare PI
-    label (`OWNER_IS_PI_ROLE_RE`).
+    label (`OWNER_IS_PI_ROLE_RE`), whole or paired by slash with directorship
+    parts only ("PI/Program Director", "PD/PI"; QNERVB, #2157 item 29).
     """
     lowered = role.lower()
     if 'principal' in lowered and 'investigator' in lowered:
         if not _PI_PHRASE_RE.search(role):
             return True
         return _PI_PHRASE_RE.search(_QUALIFIED_PI_PHRASE_RE.sub(' ', role)) is not None
-    return OWNER_IS_PI_ROLE_RE.fullmatch(role) is not None
+    parts = [part.strip() for part in role.split(_COMBINED_ROLE_SEPARATOR)]
+    pi_parts = [part for part in parts if OWNER_IS_PI_ROLE_RE.fullmatch(part)]
+    return bool(pi_parts) and all(
+        part in pi_parts or _DIRECTORSHIP_ROLE_RE.fullmatch(part) for part in parts)
 
 
 # The WCM template's own M2A placeholder table has row-0 cell-0 "Award

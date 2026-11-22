@@ -545,6 +545,21 @@ _PART_DATE_RE = re.compile(
     r"(?:\b\d{1,2}/)?\b(?:19|20)\d{2}\b(?:\s*[-–—]\s*(?:\d{1,2}/)?\d{2,4}\b)?")
 # A field label inside a part ("Dates: 1989-1990"): the CV's layout, not its record.
 _FIELD_LABEL_RE = re.compile(r"[^\W\d_]+:")
+# A grant's funding-period label, every word of it: "Project period:",
+# "Budget dates:", "Period of support:". `_FIELD_LABEL_RE` takes only the word
+# before the colon, so "Project period: 2014 – 2017" kept "project", and no
+# output line held it with the years the grant row prints under "Duration of
+# support:" (#2157 item 25: the pass wrote the part as an orphan line after
+# the funding tables). Only these funding words: a label like "Chief resident
+# year:", "Sabbatical year:" or "Study period:" names the record itself, and
+# its words are what verify the part.
+_FUNDING_PERIOD_QUALIFIERS = ('project', 'funding', 'budget', 'award', 'grant', 'support')
+_FUNDING_PERIOD_NOUNS = ('period', 'dates')
+_FUNDING_PERIOD_OBJECTS = ('support', 'funding', 'award')
+_LEADING_DATE_LABEL_RE = re.compile(
+    rf"^[\W_]*(?:(?:{'|'.join(_FUNDING_PERIOD_QUALIFIERS)})\s+"
+    rf"(?:{'|'.join(_FUNDING_PERIOD_NOUNS)})"
+    rf"|period\s+of\s+(?:{'|'.join(_FUNDING_PERIOD_OBJECTS)}))\s*:", re.IGNORECASE)
 # Words that state a date, not a record: a render may spell a month or an open
 # end its own way ("Aug 2001", "2013-Current").
 _DATE_WORDS = _MONTH_WORDS | {'present', 'current', 'ongoing'}
@@ -565,7 +580,8 @@ def short_tab_part_words(part: str) -> set[str] | None:
     letters = "".join(ch for ch in part if ch.isalpha())
     if not letters or letters.isupper():
         return None
-    undated = _PART_DATE_RE.sub(" ", _FIELD_LABEL_RE.sub(" ", part))
+    unlabelled = _FIELD_LABEL_RE.sub(" ", _LEADING_DATE_LABEL_RE.sub(" ", part))
+    undated = _PART_DATE_RE.sub(" ", unlabelled)
     if re.search(r"\d", undated):
         return None
     words = set(_RENDER_TOKEN_RE.findall(_norm(undated))) - _DATE_WORDS

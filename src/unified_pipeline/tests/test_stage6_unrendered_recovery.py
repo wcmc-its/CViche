@@ -446,9 +446,55 @@ def test_short_record_line_outside_tabs_stays_unverifiable():
     ("COMMITTEES 1993-1994", None),
     ("students 2013-2014: 12", None),
     ("July 1992 - October 1994", None),
+    # #2157 item 25: a label naming the part's dates goes whole, not just its last word.
+    ("Project period: 2014 – 2017", None),
+    ("Funding dates: 2014-2017 Quokka Trust", {"quokka", "trust"}),
+    ("Budget dates: 5/2017-10/2020", None),
+    ("Period of support: 2001-2004", None),
+    # A label that names the record itself keeps its words: they verify the part.
+    ("Chief resident year: 2012-2013", {"chief", "resident"}),
+    ("Sabbatical year: 2015-2016", {"sabbatical"}),
+    ("Study period: 2010-2012", {"study"}),
+    ("Award year: 2015-2016", {"award"}),
 ])
 def test_short_tab_part_words(part, words):
     assert short_tab_part_words(part) == words
+
+
+def test_dated_label_part_of_a_rendered_grant_is_not_recovered():
+    # #2157 item 25: the grant row prints the title and, in a row of its own,
+    # the years without the source's "Project period:" label; the part is
+    # that record's dates, not a lost line after the funding tables.
+    gen = _generator()
+    grant = {
+        "taxonomy_code": "M2B",
+        "text": ("QTF 551204/2015-7 - Burrow depth of the southern quokka colony.\t"
+                 "Project period: 2015 – 2018\tRole: PI"),
+        "extracted_fields": {"grant_number": "QTF 551204/2015-7", "agency": "QTF",
+                             "title": "Burrow depth of the southern quokka colony.",
+                             "start_date": "2015", "end_date": "2018", "pi_role": "PI"},
+    }
+    gen.doc.add_paragraph("Project title: Burrow depth of the southern quokka colony.")
+    gen.doc.add_paragraph("Duration of support: 2015-2018")
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"M2B": [grant]})
+
+    assert len(gen.doc.paragraphs) == before
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+@pytest.mark.parametrize("part", [
+    "Chief resident year: 2012-2013",
+    "Sabbatical year: 2015-2016",
+    "Study period: 2010-2012",
+    "Award year: 2015-2016",
+])
+def test_record_naming_label_part_absent_from_output_is_unrendered(part):
+    # #2157 item 25 narrowed: only a funding-period label goes whole, so a
+    # part whose label is its record stays verifiable, and recoverable when lost.
+    sets = [{"wombat", "lecture", "2012", "2013", "2015", "2016", "2010"}]
+    assert short_tab_part_rendered(part, {}, sets) is False
 
 
 def test_short_tab_part_rendered_needs_its_years_on_the_line():

@@ -846,9 +846,26 @@ def test_bare_pi_role_auto_fills_cv_owner_through_the_grant_table():
     assert cells['Your role:'] == 'PI'
 
 
+def test_combined_pi_role_auto_fills_cv_owner_through_the_grant_table():
+    """"PI/Program Director" left the PI cell blank (#2157 item 29)."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title='Example Training Program', agency='NIH',
+                        pi_role='PI/Program Director', start_date='01/2019',
+                        end_date='Present')]},
+        cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
+        as_of=TEST_AS_OF)
+
+    cells = _cells(_tables_under(gen, CURRENT)[0])
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
+    assert cells['Your role:'] == 'PI/Program Director'
+
+
 @pytest.mark.parametrize('role', [
     'PI', 'pi', ' PI ', 'P.I.', 'P.I', 'P. I.', 'p.i.', '(PI)', '( PI )', '(PI) ', 'PI:', 'PI :',
     'Sole PI', 'sole P.I.',
+    # A combined role whose slash-joined part is a bare PI (#2157 item 29).
+    'PI/Program Director', 'PD/PI', 'Program Director / P.I.', 'PI/Director', 'P.D./PI',
 ])
 def test_bare_pi_role_forms_auto_fill_cv_owner(role):
     assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
@@ -857,6 +874,11 @@ def test_bare_pi_role_forms_auto_fill_cv_owner(role):
 @pytest.mark.parametrize('role', [
     'Co-PI', 'co-PI', 'Co-P.I.', 'Co PI', 'Co-I', 'Sub-PI', 'Subcontract PI', 'MPI', 'M-PI',
     'Multi-PI', 'Multiple PI', 'Contact MPI', 'Site PI', 'PI-DDN', 'Pilot', 'Pi Beta', 'P', 'I',
+    'Co-PI/Program Director', 'Site PI/PD', 'Program Director',
+    # A combined role names the owner as PI only beside a directorship; any
+    # other or qualified partner keeps it unresolved (#2157 item 29).
+    'Co-PD/PI', 'Mentor/PI', 'Administrator/PI', 'Co-I/PI', 'PI/Co-PI',
+    'PI/Program Co-Director', 'Sub-PD/PI', 'Multi-PD/PI', 'PD/Co-I', 'PD/', '/',
 ])
 def test_pi_roles_that_are_not_the_owner_as_pi_do_not_auto_fill(role):
     """A whole-role match: a qualifier that makes someone else the PI never fires."""
@@ -2450,6 +2472,12 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
     # test green.
     (f'The major goals of this project are: {_GOAL}\n'
      f'Major Goals: A later, different goal entirely', _GOAL),
+    # A whole-sentence goal keeps its opening determiner (#2157 item 27):
+    # "This major goals ..." rendered from "major", its first word cut.
+    ('Example Grant\tThis major goals of this project to map the corridors',
+     'This major goals of this project to map the corridors'),
+    ('These major goals of the study are to map the corridors',
+     'These major goals of the study are to map the corridors'),
 ])
 def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     assert parse_major_goals(text) == expected

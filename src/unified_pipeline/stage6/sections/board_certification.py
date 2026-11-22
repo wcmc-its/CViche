@@ -160,7 +160,13 @@ def _split_multi(value) -> list[str]:
 # signal: a real single board name contains it once ("American Board of
 # ..."), so a SECOND occurrence is evidence a second board name was packed
 # into the same field, independent of how many commas are in the string.
-_BOARD_WORD_RE = re.compile(r'\bboard\b', re.IGNORECASE)
+# A "Sub-board" (or "Sub board") is a division of the board already named
+# ("American Board of Pediatrics, Sub-board of Neonatal-Perinatal
+# Medicine"), not a second board: counting it sent QNERVB's entry to the
+# text reparse, which wrote the whole line, years and all, into the board
+# cell (#2157 item 28). The hyphen and space are each a word boundary, so
+# the lookbehind has to exclude them explicitly.
+_BOARD_WORD_RE = re.compile(r'(?<!sub-)(?<!sub )\bboard\b', re.IGNORECASE)
 
 
 def _is_fused_certification(fields: dict, cert_numbers: list[str]) -> bool:
@@ -481,11 +487,10 @@ def _backfill_missing_fields_from_structured(
 
     DATA-LOSS GATE, per-FIELD/per-ROW (2026-08-25, adversarial re-gate of
     #625): `_is_fused_certification` still over-triggers on real single
-    certifications -- "Sub-board of the American Board of Psychiatry and
-    Neurology" (real ABPN subspecialty phrasing) and "American Board of X,
-    Board Eligible" (the template's own certificate column reads
-    "Certificate # (indicate if board eligible)") both contain "board"
-    twice. Routed to the text reparse, when it recovers a year but no
+    certifications -- "American Board of X, Board Eligible" (the template's
+    own certificate column reads "Certificate # (indicate if board
+    eligible)") contains "board" twice. ("Sub-board of the American Board
+    of ..." did too until #2157 item 28; see `_BOARD_WORD_RE`.) Routed to the text reparse, when it recovers a year but no
     certificate number for that one row, the whole-entry safety net in
     `_parse_and_add_multiple_certifications` does not fire -- it only
     rescues the case where NOTHING was recovered -- so the row rendered

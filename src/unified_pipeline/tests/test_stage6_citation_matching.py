@@ -455,6 +455,28 @@ _APPEND_ROWS = [
     ('a clause surname with no initials is not a Vancouver person: at the end, as base',
      'Doe J. Chapter. In: Price, Smith J, ed. Pub; 2010.', 'Wilson Andrew Price', '',
      'Doe J. Chapter. In: Price, Smith J, ed. Pub; 2010. Wilson Andrew Price, eds.'),
+    # #2157 item 26: 5d named both editors, stage 4 spelled them out, and
+    # stage 6 printed them a second time after the year. Names invented.
+    ('four initials after the clause surname: present',
+     'Ash A. A chapter. In: Lowe ABCD, ed. Book. Nova; 2016.',
+     'Anna Beatriz Clara Dora Lowe', '',
+     'Ash A. A chapter. In: Lowe ABCD, ed. Book. Nova; 2016.'),
+    ('a clause surname with a particle, the stage-4 name ending in both words: present',
+     'Ash A. A chapter. In: da Costa ME, ed. Book. Nova; 2016.',
+     'Maria Elena da Costa', '',
+     'Ash A. A chapter. In: da Costa ME, ed. Book. Nova; 2016.'),
+    ('two editors, one with four initials and a particle surname: present',
+     'Ash A. A chapter. In: Lowe AB, da Costa MEPB, eds. Book. Nova; 2016.',
+     'Anna Beatriz Lowe; Maria Elena Paula Brito da Costa', '',
+     'Ash A. A chapter. In: Lowe AB, da Costa MEPB, eds. Book. Nova; 2016.'),
+    ('a clause particle the stage-4 name does not carry: at the end, as base',
+     'Ash A. A chapter. In: da Costa M, ed. Book. Nova; 2016.',
+     'Maria Isabel Costa', '',
+     'Ash A. A chapter. In: da Costa M, ed. Book. Nova; 2016. Maria Isabel Costa, eds.'),
+    ('five capitals after a clause word are not initials: at the end, as base',
+     'Ash A. A chapter. In: Lowe ABCDE, ed. Book. Nova; 2016.',
+     'Anna Beatriz Lowe', '',
+     'Ash A. A chapter. In: Lowe ABCDE, ed. Book. Nova; 2016. Anna Beatriz Lowe, eds.'),
 ]
 
 

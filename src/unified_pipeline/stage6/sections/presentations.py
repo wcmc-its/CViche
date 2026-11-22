@@ -257,6 +257,28 @@ def _talk_event_value(fields: Mapping) -> object:
     return _first_value(fields, _TALK_EVENT_KEYS)
 
 
+# The marks that close a clause of a talk title.
+_CLAUSE_MARKS = ',;:|.()-–—'
+
+
+def _title_names_event(title: str, event_name: str) -> bool:
+    """Whether `title` already shows `event_name`, so the venue cell need not
+    repeat it: the name occurs in it, case-insensitively, other than as the
+    subject the talk is about. The title names where the talk was given
+    ("Invited speaker at the Jonas Symposium", "SAGES 2022 keynote: ...");
+    it speaks about the event only where an article opens the title or a
+    clause on the name and a word of the same clause follows ("The FDA
+    Sildenafil Warning for ..." - VYJMXR-18, #2157 item 30), and there the
+    venue cell still owes the reader the meeting."""
+    title = _normalize_space(title).casefold()
+    event = _normalize_space(event_name).casefold()
+    if not event or event not in title:
+        return False
+    marks = re.escape(_CLAUSE_MARKS)
+    subject = re.compile(rf'(?:^|[{marks}]\s*)(?:the|an?)\s+{re.escape(event)}\s+\w')
+    return subject.search(title) is None
+
+
 def _talk_date_cell(fields: dict) -> str:
     """The Dates cell of an R entry: the dates `presentation_date_spans`
     lists (its own date, then each further date stage 4 kept under an
@@ -374,7 +396,8 @@ class PresentationsSection:
                 # 2,194 of 2,956 extracted values across 79 CVs reached no part
                 # of the rendered document.
                 event_name = (_talk_event_value(fields) or '').strip()
-                if event_name and event_name.casefold() not in f"{institution} {title}".casefold():
+                if (event_name and event_name.casefold() not in f"{institution}".casefold()
+                        and not _title_names_event(f"{title}", event_name)):
                     institution = f"{event_name}, {institution}" if institution else event_name
 
                 # The speaker's role ("Visiting Professor") likewise has no

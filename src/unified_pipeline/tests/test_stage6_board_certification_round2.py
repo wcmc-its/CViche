@@ -569,6 +569,35 @@ class TestFusedCertificationPredicateIgnoresBoardNameCommas:
             ("American Board of Internal Medicine, Cardiovascular Disease", "98765", "2015"),
         ]
 
+    @pytest.mark.parametrize("sub_board", ["Sub-board", "Sub board"])
+    def test_sub_board_is_not_a_second_board(self, sub_board):
+        # #2157 item 28: a sub-board of the board already named counted as a
+        # second "board", so the entry went to the text reparse and the
+        # whole line, years included, landed in the Full Name of Board cell.
+        gen = _generator()
+        board = f"American Board of Example Medicine, {sub_board} of Invented Care"
+        entry = {
+            "extracted_fields": {
+                "certifying_board": board,
+                "certificate_number": None,
+                "year_certified": "2003",
+                "recertification_date": "2013",
+                "specialty": "Invented Care",
+            },
+            "text": f"{board}, 2003; renewed 2013",
+        }
+        gen._fill_board_certification([entry], current_year=2026)
+        assert _rows_after_board(gen) == [(board, "", "2003 (recertified 2013)")]
+
+    def test_two_boards_with_a_sub_board_are_still_fused(self):
+        # The lookbehind skips only the sub-board: a second real board in
+        # the same field is still fusion evidence.
+        assert _is_fused_certification(
+            {"certifying_board": "American Board of Example Medicine, "
+                                 "Sub-board of Invented Care, American Board of Other Care"},
+            [],
+        )
+
     def test_genuinely_fused_entry_still_takes_the_multi_cert_path(self):
         # Proof the fix did not just disable the fused-certification
         # feature: more than one certificate number/year is still real
@@ -811,7 +840,9 @@ class TestPerRowBackfillFromStructuredFields:
     """
 
     def test_sub_board_phrase_backfills_certificate_number_from_structured_fields(self):
-        # (a) Real ABPN subspecialty phrasing containing "board" twice.
+        # (a) Real ABPN subspecialty phrasing containing "board" twice. Since
+        # #2157 item 28 a sub-board is not fusion evidence, so this now takes
+        # the structured row directly; the outcome asserted is unchanged.
         gen = _generator()
         entry = {
             "extracted_fields": {
@@ -916,11 +947,11 @@ class TestSingleRowBackfillIsLogged:
         records = self._run(
             caplog,
             {
-                "certifying_board": "Sub-board of the American Board of Zed",
+                "certifying_board": "American Board of Zed, Board Eligible",
                 "certificate_number": self._SECRET_NUM,
                 "year_certified": "2015",
             },
-            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+            "Zed Medicine, American Board of Zed, Board Eligible\n2015",
         )
         assert [r.levelno for r in records] == [logging.INFO]
         assert "certificate_number" in records[0].getMessage()
@@ -931,11 +962,11 @@ class TestSingleRowBackfillIsLogged:
         records = self._run(
             caplog,
             {
-                "certifying_board": "Sub-board of the American Board of Zed",
+                "certifying_board": "American Board of Zed, Board Eligible",
                 "certificate_number": "ZQ-1, ZQ-2",
                 "year_certified": "2015",
             },
-            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+            "Zed Medicine, American Board of Zed, Board Eligible\n2015",
         )
         assert [r.levelno for r in records] == [logging.WARNING]
         assert "certificate_number" in records[0].getMessage()
@@ -946,11 +977,11 @@ class TestSingleRowBackfillIsLogged:
         records = self._run(
             caplog,
             {
-                "certifying_board": "Sub-board of the American Board of Zed",
+                "certifying_board": "American Board of Zed, Board Eligible",
                 "certificate_number": "555",
                 "year_certified": "2015",
             },
-            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+            "Zed Medicine, American Board of Zed, Board Eligible | 555",
         )
         assert [r.levelno for r in records] == [logging.INFO]
         assert "year_certified" in records[0].getMessage()
@@ -961,11 +992,11 @@ class TestSingleRowBackfillIsLogged:
         records = self._run(
             caplog,
             {
-                "certifying_board": "Sub-board of the American Board of Zed",
+                "certifying_board": "American Board of Zed, Board Eligible",
                 "certificate_number": "555",
                 "year_certified": "2015, 2016",
             },
-            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+            "Zed Medicine, American Board of Zed, Board Eligible | 555",
         )
         assert [r.levelno for r in records] == [logging.WARNING]
         assert "year_certified" in records[0].getMessage()
@@ -976,10 +1007,10 @@ class TestSingleRowBackfillIsLogged:
         records = self._run(
             caplog,
             {
-                "certifying_board": "Sub-board of the American Board of Zed",
+                "certifying_board": "American Board of Zed, Board Eligible",
                 "year_certified": "2015",
             },
-            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+            "Zed Medicine, American Board of Zed, Board Eligible\n2015",
         )
         assert records == []
 
@@ -987,10 +1018,10 @@ class TestSingleRowBackfillIsLogged:
         records = self._run(
             caplog,
             {
-                "certifying_board": "Sub-board of the American Board of Zed",
+                "certifying_board": "American Board of Zed, Board Eligible",
                 "certificate_number": "555",
             },
-            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+            "Zed Medicine, American Board of Zed, Board Eligible | 555",
         )
         assert records == []
 
@@ -998,7 +1029,7 @@ class TestSingleRowBackfillIsLogged:
         records = self._run(
             caplog,
             {
-                "certifying_board": "Sub-board of the American Board of Zed",
+                "certifying_board": "American Board of Zed, Board Eligible",
                 "certificate_number": "555",
                 "year_certified": "2015",
             },
