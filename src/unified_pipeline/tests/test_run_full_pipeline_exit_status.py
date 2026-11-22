@@ -152,9 +152,18 @@ def test_any_stage_error_is_reported_not_just_stage_6(tmp_path):
     """The class fix: all eleven wrappers share the swallow-and-continue shape."""
     docx = _real_docx(tmp_path)
     for stage in ('stage_1b', 'stage_2', 'stage_3a', 'stage_3b', 'stage_4',
-                  'stage_4.5', 'stage_5', 'stage_5b', 'stage_5c', 'stage_5d'):
+                  'stage_5', 'stage_5b', 'stage_5c', 'stage_5d'):
         assert failed_stages({stage: _result(stage, error='boom'),
                               'stage_6': _result('6', output_file=docx)}) == [stage]
+
+
+def test_a_best_effort_stage_error_is_not_a_run_failure(tmp_path):
+    """Stage 4.5 is best-effort, as in the orchestrator (#1174): a web run whose
+    only failure is 4.5 ends "complete". Asked for alone, it is not best-effort."""
+    results = {'stage_4.5': _result('4.5', error='boom'),
+               'stage_6': _result('6', output_file=_real_docx(tmp_path))}
+    assert failed_stages(results) == []
+    assert failed_stages(results, best_effort=frozenset()) == ['stage_4.5']
 
 
 def test_stage_skipped_for_a_missing_prerequisite_is_a_failure():
@@ -513,9 +522,12 @@ def test_entrypoint_propagates_the_return_value_to_the_exit_status():
 # `if not ctx.keep_going` block) from run_pipeline.
 
 _RUNNER_STAGES = [s for s in run_full_pipeline.get_stage_order() if s != '3']
+# Stage 4.5 is best-effort in the orchestrator (RESEARCH_SUMMARY_STAGE_ID, #1174),
+# so it never stops the run; test_a_stage_4_5_failure_does_not_stop_the_run pins it.
+_STOPPING_STAGES = [s for s in _RUNNER_STAGES if s != '4.5']
 
 
-@pytest.mark.parametrize('failing', _RUNNER_STAGES)
+@pytest.mark.parametrize('failing', _STOPPING_STAGES)
 def test_a_failed_stage_stops_the_run_by_default(failing, tmp_path, monkeypatch, capsys):
     calls = _Calls()
     run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={failing}, calls=calls)
@@ -528,6 +540,41 @@ def test_a_failed_stage_stops_the_run_by_default(failing, tmp_path, monkeypatch,
     listed = [line for line in run.out.splitlines() if line.startswith('  stage_')]
     assert listed == [f"  stage_{failing}: RuntimeError: simulated {failing} failure"]
     assert "Continuing with remaining stages" not in run.err
+
+
+def test_a_stage_4_5_failure_does_not_stop_the_run(tmp_path, monkeypatch, capsys):
+    """Stage 4.5 is best-effort in both drivers. The web run records the
+    failure non-fatal, runs 5..6 and ends "complete"
+    (test_error_policy_driver_contract.py::
+    test_a_stage_4_5_exception_lets_the_run_continue_and_records_it_non_fatal),
+    so the CLI runs every stage, exits 0, and still names the failure.
+
+    Mutants that kill this: drop the best-effort `continue` from run_pipeline
+    (the run stops after 4.5), or the best_effort exclusion from failed_stages
+    (rc 1), or `fatal=` from run_stage (the record says fatal).
+    """
+    from unified_pipeline.stage_errors import StageError, read_stage_errors
+    calls = _Calls()
+    run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={'4.5'}, calls=calls)
+    assert calls.order == _RUNNER_STAGES, f"the run stopped at 4.5: {calls.order}"
+    assert run.rc == 0
+    assert "PIPELINE COMPLETE WITH ERRORS" not in run.out
+    assert "Failed stages:" not in run.out
+    assert ("Best-effort stages that failed (the run continued without them):\n"
+            "  stage_4.5: RuntimeError: simulated 4.5 failure") in run.out
+    assert "Stage 4.5 is best-effort, as in the web run: continuing without it" in run.err
+    assert "Stopping:" not in run.err
+    assert read_stage_errors(tmp_path / _STAGE_ERRORS) == [
+        StageError('4.5', 'RuntimeError', 'simulated 4.5 failure', fatal=False)]
+
+
+def test_a_standalone_stage_4_5_failure_still_exits_non_zero(tmp_path, monkeypatch, capsys):
+    """`--stage 4.5` asks for nothing else, so its failure is the run's (§5.2)."""
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'4.5'},
+                        setup=lambda: _write(_FILES['4']),
+                        argv=['run_full_pipeline.py', UID, '--stage', '4.5'])
+    assert rc == 1
+    assert "Failed stages:\n  stage_4.5: RuntimeError: simulated 4.5 failure" in out
 
 
 def test_the_stop_names_the_stages_that_did_not_run(tmp_path, monkeypatch, capsys):

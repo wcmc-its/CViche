@@ -183,6 +183,9 @@ column -t -s$'\t' <results_dir>/summary.tsv     # scan exit codes + entry counts
 A failed run stops at its first failed stage, as a web run does (#2177): its log names the
 stage and the ones that did not run, and its metric columns are blank from that stage on. To
 replay one CV through every stage regardless, run `python3 run_full_pipeline.py <cv> --keep-going`.
+Stage 4.5 (research summary) is the exception, as it is on the web: a 4.5 failure is listed
+under "Best-effort stages that failed", the run still writes a `_wcm.docx` (with no research
+summary), and it exits 0, so its row reads as a success.
 Spot-check a few `_wcm.docx` outputs in Word. Compare `entries` vs `classified` for large
 drops (but note: headers/boilerplate aren't meant to classify, so <100% coverage isn't loss
 by itself). For deeper diagnosis of a single run, use the `run-autopsy` skill on its uid.
