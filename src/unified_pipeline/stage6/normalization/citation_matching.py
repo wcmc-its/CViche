@@ -123,11 +123,18 @@ _EDITORS_CLAUSE_RE = re.compile(
     r"(?:,\s*|\s*\((?!EDS?\)|EDITORS?\)))(?i:eds?\b|editors?\b)")
 #: What separates two people in a stage-4 editors value.
 _EDITOR_SEPARATOR_RE = re.compile(r"\s*(?:[;,&]|\band\b)\s*")
+#: The most capital initials 5d writes after one editor's surname. Four,
+#: not three: an editor with four given names reads "da Costa MEPB"
+#: (#2157 item 26), the same ceiling
+#: `normalization.authors` puts on an author's initials.
+_MAX_VANCOUVER_INITIALS = 4
 #: One person in 5d's editors clause, in Vancouver shape: a surname, then
-#: one to three capital initials closing the name ("Diler RS", "van Gogh V",
-#: "Garcia-Lopez M"). Anything else in the clause ("Maria Garcia", a title
-#: word such as "Price of Care") names no editor the person-wise test trusts.
-_VANCOUVER_PERSON_RE = re.compile(r"(?P<surname>\S.*?)\s+[A-Z]{1,3}")
+#: one to `_MAX_VANCOUVER_INITIALS` capital initials closing the name
+#: ("Diler RS", "van Gogh V", "Garcia-Lopez M"). Anything else in the clause
+#: ("Maria Garcia", a title word such as "Price of Care") names no editor
+#: the person-wise test trusts.
+_VANCOUVER_PERSON_RE = re.compile(
+    rf"(?P<surname>\S.*?)\s+[A-Z]{{1,{_MAX_VANCOUVER_INITIALS}}}")
 #: A word of a stage-4 editor's name; hyphenated surnames stay one word.
 _NAME_TOKEN_RE = re.compile(r"[^\W\d_](?:[\w'-]*\w)?")
 #: A book trailer with no publisher: the year (and pages) alone after a
@@ -176,15 +183,24 @@ def _editors_referenced(editors: str, citation: str) -> bool:
     if not clause:
         return False
     people = [p for p in _EDITOR_SEPARATOR_RE.split(editors) if _significant_tokens(p)]
-    wanted = Counter(_stage4_surname(p) for p in people)
-    return bool(people) and not wanted - _clause_surnames(clause.group('names'))
+    printed = _clause_surnames(clause.group('names'))
+    wanted = Counter(_stage4_surname(p, printed) for p in people)
+    return bool(people) and not wanted - printed
 
 
-def _stage4_surname(person: str) -> str:
-    """The folded last word of one stage-4 editor ("Rasim Somer Diler" ->
-    "diler"), or '' when it has none, which no clause surname equals."""
-    words = _NAME_TOKEN_RE.findall(person)
-    return _fold_surname(words[-1]) if words else ''
+def _stage4_surname(person: str, printed: Counter[str]) -> str:
+    """The folded surname of one stage-4 editor: the longest clause surname
+    that the name ends with, word for word ("Maria Elena da Costa" ->
+    "da costa" when 5d printed "da Costa ME"),
+    else its last word ("Rasim Somer Diler" -> "diler"), or '' when it has
+    none, which no clause surname equals. The clause surname has to be the
+    name's whole tail, so a shared particle ("van Gogh V" for "Ludwig van
+    Beethoven") still matches nothing (#2157 item 26)."""
+    words = [_fold_surname(w) for w in _NAME_TOKEN_RE.findall(person)]
+    if not words:
+        return ''
+    tails = [s for s in printed if words[-len(s.split()):] == s.split()]
+    return max(tails, key=len) if tails else words[-1]
 
 
 def _fold_surname(surname: str) -> str:
