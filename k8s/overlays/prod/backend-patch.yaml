@@ -75,4 +75,4 @@ spec:
         - name: certs-volume
           secret:
             secretName: cviche-saml-certs
-            defaultMode: 0440 # octal: owner + group (fsGroup above) read, no world    
+            defaultMode: 0440 # octal: owner + group (fsGroup above) read, no world
