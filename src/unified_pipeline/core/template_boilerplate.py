@@ -189,7 +189,7 @@ def _pipe_row_verdict(text: str) -> bool | None:
     return None
 
 
-def is_template_instruction(text: str) -> bool:
+def is_template_instruction(text: str, *, whole_text_only: bool = False) -> bool:
     """Return True if *text* is WCM-template instruction boilerplate.
 
     PRECISION-BIASED: when unsure, return False — real CV content must never be
@@ -207,6 +207,11 @@ def is_template_instruction(text: str) -> bool:
       c. containment: a known instruction of length >= _CONTAINMENT_MIN_LEN is
          contained in the normalized entry (catches a template sentence left in
          with extra faculty text appended).
+         With *whole_text_only*, only when the text holds nothing else
+         (`_is_only_template_text`): stage 2 filters whole entries, and one
+         whose first line is the template's own heading, followed by the
+         faculty member's own text under it, is a filled section, not
+         boilerplate (#2193).
 
     Protected terms (top-level section headers + bibliography category labels)
     are never dropped, even when they collide with a template field label.
@@ -235,9 +240,10 @@ def is_template_instruction(text: str) -> bool:
 
     # Rule (c): containment of a long known instruction inside the entry
     # (a template sentence left in with extra faculty text appended).
-    for known in _INSTRUCTION_SET:
-        if len(known) >= _CONTAINMENT_MIN_LEN and known in normalized:
-            return True
+    if any(len(known) >= _CONTAINMENT_MIN_LEN and known in normalized
+           for known in _INSTRUCTION_SET) and (
+            not whole_text_only or _is_only_template_text(normalized)):
+        return True
 
     # Rule (d): reverse containment — the entry is a long (>= _CONTAINMENT_MIN_LEN)
     # verbatim fragment of an even longer template instruction paragraph (faculty
@@ -278,6 +284,34 @@ _UNANSWERED_PIECE_RE = re.compile(
 def _is_unanswered(piece: str) -> bool:
     """True if a `_normalize`d *piece* is nothing but `_UNANSWERED` values."""
     return _UNANSWERED_PIECE_RE.fullmatch(piece) is not None
+
+
+# #2193: what `_is_only_template_text` cuts out of a text before asking
+# whether anything is left. A phrase or an `_UNANSWERED` value is cut only as
+# whole words, so "na" never eats into "national".
+_WORD_START = r"(?<![a-z0-9])"
+_WORD_END = r"(?![a-z0-9])"
+_UNANSWERED_WORD_RE = re.compile(_WORD_START + "(?:%s)" % "|".join(
+    re.escape(value) for value in sorted(_UNANSWERED, key=len, reverse=True)) + _WORD_END)
+# A list number between template lines: "(1)", "2.", "3)".
+_LIST_NUMBER_RE = re.compile(_WORD_START + r"\d{1,2}[.)]")
+_ALPHANUMERIC_RE = re.compile(r"[^\W_]")
+
+
+def _is_only_template_text(normalized: str) -> bool:
+    """True if no letter or digit is left of a `_normalize`d text once every
+    known instruction and protected term (longest first), every
+    `_UNANSWERED` value and every list number is cut out: the text IS
+    template text, however many template lines it joins (two directives in
+    one paragraph, an unfilled table answered "N/A"). Any word of the CV's
+    own -- a narrative under the template's heading, an answer after the
+    template's label -- is left over and keeps it.
+    """
+    residue = normalized
+    for phrase in sorted(_INSTRUCTION_SET | _PROTECTED, key=len, reverse=True):
+        residue = re.sub(_WORD_START + re.escape(phrase) + _WORD_END, " ", residue)
+    residue = _LIST_NUMBER_RE.sub(" ", _UNANSWERED_WORD_RE.sub(" ", residue))
+    return _ALPHANUMERIC_RE.search(residue) is None
 
 
 def is_near_template_instruction(text: str) -> bool:

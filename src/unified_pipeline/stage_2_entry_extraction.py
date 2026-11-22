@@ -2128,10 +2128,15 @@ def _drop_template_instructions(entries: list[dict]) -> list[dict]:
     instruction; left in, the licensure note ("...must have a New York State
     license...") was classified as a license and rendered one the faculty
     member does not hold (#829).
+
+    An entry is dropped only when it IS template text, never for merely
+    containing a template phrase: a CV whose own heading is the template's,
+    with the faculty member's text under it in the same entry, lost both
+    (#2193).
     """
     kept = [
         e for e in entries
-        if not (is_template_instruction(e.get("text", ""))
+        if not (is_template_instruction(e.get("text", ""), whole_text_only=True)
                 or is_near_template_instruction(e.get("text", "")))
     ]
     kept = _drop_foreign_template_instructions(kept)

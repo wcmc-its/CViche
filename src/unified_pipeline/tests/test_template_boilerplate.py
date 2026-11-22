@@ -157,6 +157,38 @@ def test_an_unfilled_row_with_a_long_template_label_still_drops(row):
     assert is_template_instruction(row) is True
 
 
+# --- #2193: whole_text_only -- a long template phrase plus the CV's own text ---
+
+@pytest.mark.parametrize("text", [
+    # the template's own heading, then the faculty member's narrative under it
+    "Weill Cornell Activity (Current or Anticipated)\tI chaired an example working "
+    "group on sample review workflows, 2001-2004.",
+    "Award Source (funding agency, type of grant): Example Foundation",
+    # whole words only: "Nana" is a name, not the unanswered "na" twice, and
+    # neither word below is the labels "Books" and "Name" run together
+    "Award Source (funding agency, type of grant): Nana",
+    "Award Source (funding agency, type of grant): Namebooks",
+    "Award Source (funding agency, type of grant): Booksname",
+    # a list number is one or two digits, never a year
+    "Award Source (funding agency, type of grant) (2019)",
+])
+def test_whole_text_only_keeps_a_template_phrase_beside_the_cvs_own_text(text):
+    assert is_template_instruction(text) is True  # default: rule (c) unchanged
+    assert is_template_instruction(text, whole_text_only=True) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Didactic teaching (lectures, seminars, tutorials,)\tPlease complete if relevant or DELETE entirely.",
+    # a short label, a list number and an "N/A" answer are template text too
+    "If no license:\n2) Award Source (funding agency, type of grant): N/A\n"
+    "3. Duration of support (mm/yyyy-mm/yyyy)",
+    # a protected section heading joined to a directive is still template
+    "Honors and Awards\nPlease complete if relevant or DELETE entirely.",
+])
+def test_whole_text_only_drops_text_that_is_nothing_but_template(text):
+    assert is_template_instruction(text, whole_text_only=True) is True
+
+
 # --- #829: another template revision's wording of a long instruction ---
 # Each is the tracked Oct-2022 phrase with the edit an older revision made
 # (A5IZ6Q): the exact and containment rules above all miss it.
