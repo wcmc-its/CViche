@@ -351,6 +351,17 @@ _FORMATTED_CITATION_KEY = 'formatted_citation'
 # What 5d writes beside the citation (`apply_formatted_fields`); the
 # publication resolver trusts a citation only with this provenance.
 _CITATION_KEYS = (_FORMATTED_CITATION_KEY, 'formatting_source')
+# #2157 item 24: what 5d fills from its reply onto the entry where the entry
+# has none (`apply_formatted_fields`) describes the record its citation
+# names. When that is an earlier record, the last record -- whose scalars the
+# entry's are -- printed the cited record's pages as its own (two abstracts
+# of one paragraph, the second with the first one's pages). Only the pages:
+# they locate one item, while a journal, volume and issue name a venue the
+# records of one paragraph often share (`_without_cited_pages`). The value's
+# source is not checked: the only other writer of an entry's pages, PubMed
+# (`enriched_fields`), marks the entry 'enriched', and 5d cites only an entry
+# that is not, so an entry with a 5d citation holds no PubMed pages.
+_CITATION_FILLED_ITEM_KEYS = frozenset({'pages'})
 # A publication record's title: `title`, or S4's `chapter_title`.
 _TITLE_KEYS = ('title', 'chapter_title')
 
@@ -1526,7 +1537,9 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     stays only on the child of the record whose title it writes
     (`_citation_record`); every other child, the last included, renders
     from its own fields. A citation that writes no single record's title
-    declines the split, as every citation did before.
+    declines the split, as every citation did before. When it names an
+    earlier record, the last child drops the pages 5d filled from it
+    (`_without_cited_pages`, #2157 item 24).
 
     #1445: a record keeps no dates its own line does not give it
     (`_unsourced_date_records`), and an earlier record whose row a later one
@@ -1569,6 +1582,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     last_cited = cited == len(records) - 1
     last['extracted_fields'] = {key: value for key, value in last['extracted_fields'].items()
                                 if key != records_key and (last_cited or key not in _CITATION_KEYS)}
+    if cited is not None and not last_cited:
+        last['extracted_fields'] = _without_cited_pages(last['extracted_fields'], records[-1], texts[-1])
     if len(records) - 1 in unsourced:
         last['extracted_fields'] = _without_dates(last['extracted_fields'])
     last[LAST_STAGE4_RECORD] = {'key': records_key, 'index': len(records) - 1,
@@ -1581,6 +1596,20 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     for mentee in mentee_folds:
         _fold_mentee_into(rows[mentee.members[-1]], records, texts, mentee)
     return [*earlier.values(), last]
+
+
+def _without_cited_pages(fields: Mapping[str, Any], record: Mapping[str, Any],
+                         own_line: str) -> dict[str, Any]:
+    """`fields`, the last stage-4 `record`'s as the entry holds them, less
+    the pages (`_CITATION_FILLED_ITEM_KEYS`) that, under a 5d citation of an
+    earlier record, came from that citation: a value `record` itself does not
+    hold (5d also fills a field stage 4 wrote as 'NONE'), kept only when every
+    word of it is in the record's `own_line`. Where the value came from is not
+    checked; the constant's comment says why no PubMed value reaches here."""
+    own = _tokens(own_line)
+    return {key: value for key, value in fields.items()
+            if key not in _CITATION_FILLED_ITEM_KEYS or value == record.get(key)
+            or not _tokens(_leaf_text(value)) - own}
 
 
 def _title_words(text: object) -> str:
