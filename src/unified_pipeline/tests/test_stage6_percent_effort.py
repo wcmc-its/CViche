@@ -37,7 +37,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
+from unified_pipeline.stage6.sections import passthrough  # noqa: E402
 from unified_pipeline.stage6.sections.passthrough import (
     PassthroughSection,  # noqa: E402
 )
@@ -412,6 +414,122 @@ def test_real_four_cell_header_row_consumed_regardless_of_cell_count(tmp_path):
     for row in table.rows[1:]:
         if row.cells[0].text.strip() != "Total":
             assert row.cells[1].text == ""
+
+
+def _j_table_entry(text: str, records: list, idx: int) -> dict:
+    """A whole source table under one J entry, as stage 4 leaves it: the
+    text stage 2 joined, and the records stage 4 split it into (#2192)."""
+    return {
+        "text": text, "taxonomy_code": "J", "hierarchy": _HIERARCHY,
+        "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records},
+        "element_idx_start": idx,
+    }
+
+
+def _j_record(activity: str, percent, trainees) -> dict:
+    return {"activity": activity, "percent_effort": percent, "involves_trainees": trainees}
+
+
+def test_records_key_spelling_matches_stage4():
+    """`passthrough` spells stage 4's records key out (no stage4 import under
+    stage6/); the two spellings must not drift."""
+    assert passthrough._STAGE4_RECORDS_KEY == STAGE4_RECORDS_KEY
+
+
+def test_pipe_free_tab_joined_table_fills_from_its_stage4_records(tmp_path):
+    """#2192 shape 1: rows tab-joined, cells space-joined, no pipe anywhere --
+    no row the text parser reads. The stage-4 records (integer percents,
+    boolean trainees) fill every row, and the entry leaves the Appendix."""
+    text = ("AREA SHARE LEARNERS? (Yes/No)\tTEACHING 15 Yes\tCLINICAL 60 No"
+            "\tADMINISTRATIVE 5 No\tRESEARCH 20 Yes\tTOTAL 100%")
+    records = [_j_record("TEACHING", 15, True), _j_record("CLINICAL", 60, False),
+               _j_record("ADMINISTRATIVE", 5, False), _j_record("RESEARCH", 20, True),
+               _j_record("TOTAL", 100, None)]
+    doc = _render(tmp_path, [_OWNER_ENTRY, _j_table_entry(text, records, 1)])
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "15%", "Yes"]
+    assert rows["Clinical"] == ["Clinical", "60%", "No"]
+    assert rows["Administrative"] == ["Administrative", "5%", "No"]
+    assert rows["Research"] == ["Research", "20%", "Yes"]
+    assert rows["Total"] == ["Total", "100%", ""]
+    assert "CLINICAL 60 No" not in _appendix_text(doc)
+
+
+def test_pipe_free_table_led_by_its_header_row_fills_from_its_stage4_records(tmp_path):
+    """#2192 shape 2: the text opens with the table's own column-header row
+    (split across a tab) and its percents are strings, "0" among them."""
+    text = ("Area (now or Share (%) Has\tplanned) learners? (Yes/No)"
+            "\tTeaching 30% Yes\tClinical 0 No\tAdministrative 0 No\tResearch 70% Yes\tTotal 100%")
+    records = [_j_record("Teaching", "30%", "Yes"), _j_record("Clinical", "0", "No"),
+               _j_record("Administrative", "0", "No"), _j_record("Research", "70%", "Yes"),
+               _j_record("Total", "100%", None)]
+    doc = _render(tmp_path, [_OWNER_ENTRY, _j_table_entry(text, records, 1)])
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "30%", "Yes"]
+    assert rows["Clinical"] == ["Clinical", "0%", "No"]
+    assert rows["Administrative"] == ["Administrative", "0%", "No"]
+    assert rows["Research"] == ["Research", "70%", "Yes"]
+    assert "Research 70% Yes" not in _appendix_text(doc)
+
+
+def test_pipe_free_table_with_an_unfilled_record_stays_appendix_bound(tmp_path):
+    """A record with no percent (a blank form row) is not placed, so the
+    entry stays in the Appendix whole, as every unplaced row's entry does."""
+    text = "AREA SHARE TEACHING CLINICAL\tTOTAL 100%"
+    records = [_j_record("TEACHING", None, None), _j_record("CLINICAL", None, None),
+               _j_record("TOTAL", 100, None)]
+    doc = _render(tmp_path, [_OWNER_ENTRY, _j_table_entry(text, records, 1)])
+    rows = _j_rows_by_label(doc)
+
+    assert "TOTAL 100%" in _appendix_text(doc)
+    assert rows["Teaching"] == ["Teaching", "", ""]
+    assert rows["Clinical"] == ["Clinical", "", ""]
+
+
+def test_piped_text_is_read_from_its_text_not_its_records(tmp_path):
+    """A text the parser reads keeps being read from its text: records that
+    disagree with it are not consulted (entries that render today are
+    unchanged)."""
+    text = "Teaching | 10% | Yes\nResearch | 85% | No"
+    records = [_j_record("Teaching", "40%", "No"), _j_record("Research", "60%", "Yes")]
+    doc = _render(tmp_path, [_OWNER_ENTRY, _j_table_entry(text, records, 1)])
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "10%", "Yes"]
+    assert rows["Research"] == ["Research", "85%", "No"]
+
+
+def test_records_that_are_not_all_records_fall_back_to_the_text():
+    """A records list holding a non-dict is not read; the pipe-free text's
+    one line is, which the writer never places."""
+    entry = _j_table_entry("Teaching 10 Yes", [_j_record("Teaching", 10, True)], 1)
+    entry["extracted_fields"][STAGE4_RECORDS_KEY] = [_j_record("Teaching", 10, True), "Teaching 10 Yes"]
+
+    assert passthrough._percent_effort_rows(entry) == ["Teaching 10 Yes"]
+
+
+def test_pipe_free_text_without_a_records_list_falls_back_to_the_text():
+    """No records list (absent, or not a list) reads the text's own lines,
+    as before #2192, rather than failing the whole section."""
+    absent = {"text": "Teaching 10 Yes", "extracted_fields": {}}
+    not_a_list = {"text": "Teaching 10 Yes",
+                  "extracted_fields": {STAGE4_RECORDS_KEY: _j_record("Teaching", 10, True)}}
+
+    assert passthrough._percent_effort_rows(absent) == ["Teaching 10 Yes"]
+    assert passthrough._percent_effort_rows(not_a_list) == ["Teaching 10 Yes"]
+
+
+def test_pipe_free_text_without_extracted_fields_falls_back_to_the_text():
+    """`extracted_fields` missing or None reads the text's own lines. Stage 6
+    normalises the field before the J fill, so only a direct caller meets
+    either shape; it gets the text path, not an AttributeError."""
+    no_key = {"text": "Teaching 10 Yes"}
+    none = {"text": "Teaching 10 Yes", "extracted_fields": None}
+
+    assert passthrough._percent_effort_rows(no_key) == ["Teaching 10 Yes"]
+    assert passthrough._percent_effort_rows(none) == ["Teaching 10 Yes"]
 
 
 class _StubGenerator(PassthroughSection):

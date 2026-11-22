@@ -58,7 +58,8 @@ stage 3b as ordinary T-coded rows sharing the same hierarchy, column-header
 row included, so `_fill_percent_effort` parses every candidate row itself
 rather than trusting its taxonomy code; see the function's own docstring for
 the parse/match rules and the header-row and `Total | 100% |` traps a coarser
-filter fell into.
+filter fell into. A table whose text has no pipe at all is read from its
+stage-4 records instead (#2192, `_percent_effort_rows`).
 
 None of the three has a taxonomy code of its own that `generate()`'s
 RENDER_ROUTED_CODES dispatch can key on, so each writer here reports back
@@ -276,6 +277,22 @@ _PERCENT_EFFORT_MIN_HEADER_PIPES = 2
 # (uid 1FRABQ) -- see `_percent_effort_row_has_extra_cells`.
 _PERCENT_EFFORT_MAX_ROW_CELLS = 3
 
+# The separator between a source row's cells, as stage 2 joins a table row.
+# A candidate whose text has none holds no row the text parser can read, and
+# is read from its stage-4 records instead (#2192, `_percent_effort_rows`).
+_PERCENT_EFFORT_CELL_SEPARATOR = '|'
+
+# Where stage 4 keeps an entry's 2+ records (`stage4.schemas.STAGE4_RECORDS_KEY`).
+# Spelled out, not imported: nothing under `stage6/` may import `stage4`
+# (`test_stage6_normalization_import_direction.py`), nor a section its peer
+# `teaching.py`, which spells it the same way; the percent-effort tests pin
+# this spelling equal to stage 4's.
+_STAGE4_RECORDS_KEY = 'stage4_records'
+
+# A J record's fields (`config/field_schemas_v1.1.json`), in the source
+# table's column order: activity, percent, involves-trainees.
+_PERCENT_EFFORT_RECORD_FIELDS = ('activity', 'percent_effort', 'involves_trainees')
+
 
 class PercentEffortRow(NamedTuple):
     """One parsed J-table source row, before activity-name mapping.
@@ -312,6 +329,36 @@ def _percent_effort_lines(text: str) -> list[str]:
     under one entry, #2028); parsed whole it would read as one row with a
     corrupted third cell ("Yes\\nClinical") and the later rows vanishing."""
     return [line.strip() for line in text.split('\n') if line.strip()]
+
+
+def _percent_effort_record_cell(value: object) -> str:
+    """One stage-4 J record value as the cell text a source row would hold:
+    a bool as Yes/No (stage 4 returns `involves_trainees` either way), None
+    as an empty cell, anything else as its own text -- so a 0 stays "0"."""
+    if isinstance(value, bool):
+        return 'Yes' if value else 'No'
+    return '' if value is None else str(value)
+
+
+def _percent_effort_rows(entry: dict) -> list[str]:
+    """The source rows `entry` holds, each one pipe-joined line.
+
+    Its text's own lines (`_percent_effort_lines`) when the text has a cell
+    separator. A text with none is one table stage 2 joined by spaces and
+    tabs (#2192: rows tab-joined, the column-header row first), where no
+    row the parser reads exists -- every line parses as one cell, which
+    is never written and never consumed. Its rows are then the records stage
+    4 already split it into, each joined back into the row shape the text
+    path reads, so a record meets every guard a source row meets.
+    """
+    text = entry.get('text', '')
+    records = (entry.get('extracted_fields') or {}).get(_STAGE4_RECORDS_KEY)
+    if (_PERCENT_EFFORT_CELL_SEPARATOR in text or not isinstance(records, list)
+            or not all(isinstance(record, dict) for record in records)):
+        return _percent_effort_lines(text)
+    return [f' {_PERCENT_EFFORT_CELL_SEPARATOR} '.join(
+                _percent_effort_record_cell(record.get(key)) for key in _PERCENT_EFFORT_RECORD_FIELDS)
+            for record in records]
 
 
 def _percent_effort_row_has_extra_cells(text: str) -> bool:
@@ -890,7 +937,8 @@ class PassthroughSection:
         Selects candidates by hierarchy OR `taxonomy_code == 'J'` (dedup can
         leave only a mis-hierarchied copy, #260/9TUVGW; see the module
         docstring). A multi-line candidate is split into its rows
-        (`_percent_effort_lines`), each placed on its own
+        (`_percent_effort_rows`: its text's lines, or its stage-4 records
+        when the text has no cell separator, #2192), each placed on its own
         (`_place_percent_effort_row`), and the entry is consumed only when
         every row is. Each row is parsed and activity-mapped FIRST: an unmapped activity may still be
         the source table's own header row (`_is_percent_effort_header_row`,
@@ -934,7 +982,7 @@ class PassthroughSection:
         consumed = []
         written: dict[str, PercentEffortRow] = {}
         for entry in candidates:
-            lines = _percent_effort_lines(entry.get('text', ''))
+            lines = _percent_effort_rows(entry)
             placed = [self._place_percent_effort_row(table, row_index, written, line) for line in lines]
             if placed and all(placed):
                 consumed.append(entry)
