@@ -1297,6 +1297,13 @@ _AWARD_CLAUSE_WORD_RE = re.compile(
 # A role a person holds, never the last word of an institution's name.
 _ORG_ROLE_WORDS = frozenset(['representative', 'fellow', 'member'])
 
+# What introduces an award's RECIPIENT, matched against the text just before
+# the candidate: "<name> Award to the <group> at the <center>" names who got
+# it, not who gave it (#2157 item 31). Only an award word or a giving verb
+# before "to" -- "Elected to the <academy>" names the body that elects.
+_RECIPIENT_LEAD_RE = re.compile(
+    r'\b(?:award(?:ed)?|prize|presented|given)\s+to\s+$', re.IGNORECASE)
+
 
 def _is_fabricated_organization(org: str, text: str) -> bool:
     """Is `org` the award's own name (or part of a role), not a grantor?
@@ -1304,11 +1311,12 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
     Strategies 3/4 of `_organization_candidate` anchor on `College` /
     `University` and build outward, so an award named after a college
     ("College of Education 2015 Outstanding Thesis Award") became its own
-    organization (#887). Five tells, each independent: the candidate is the
+    organization (#887). Six tells, each independent: the candidate is the
     whole award name minus its trailing award word; it carries a digit (a
     year belongs to the date column); it ends in a role word; it is the
     award's own first comma clause, in award words and naming no
-    institution; it ends in an award noun and names no institution.
+    institution; it ends in an award noun and names no institution; the
+    text introduces it as the award's recipient.
 
     The fourth is Strategy 2's short-proper-noun fallback taking the
     clause a name opens with -- "<rank>, <competition>" rendered the rank as
@@ -1323,8 +1331,14 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
     institution is the award's own wording wherever it sits; one that names
     an institution ("<univ> Award, Forum for ...") is left to the keyword
     passes, as for #1412.
+
+    The sixth is Strategy 4's backward walk stopping at the "to" of
+    "<award> to the <group> at the <center>": what it built is the
+    recipient, not the grantor (#2157 item 31).
     """
     stripped = text.strip().rstrip('.,;')
+    if _is_recipient_clause(org, stripped):
+        return True
     if _AWARD_NAME_TAIL_RE.sub('', stripped).strip().lower() == org.lower() \
             and _AWARD_NAME_TAIL_RE.search(stripped):
         return True
@@ -1337,6 +1351,13 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
             and not re.search(_ORG_KEYWORDS, org, re.IGNORECASE):
         return True
     return last_word in _ORG_ROLE_WORDS
+
+
+def _is_recipient_clause(org: str, text: str) -> bool:
+    """Does `text` introduce `org` as whom the award went to ("Award to
+    <org>"), rather than who gave it?"""
+    start = text.lower().find(org.lower())
+    return start > 0 and bool(_RECIPIENT_LEAD_RE.search(text[:start]))
 
 
 def _ends_in_award_noun(last_word: str) -> bool:
