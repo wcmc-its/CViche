@@ -10,6 +10,9 @@ metadata:
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
     alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=500
     alb.ingress.kubernetes.io/ssl-redirect: '443'
+    # TLS 1.2/1.3 only (#692). Unset, the controller default is
+    # ELBSecurityPolicy-2016-08, which still negotiates TLS 1.0 and 1.1.
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
     # Routes traffic directly to Pod IPs (more efficient)                                                     
     alb.ingress.kubernetes.io/target-type: ip
     # Health check path for your FastAPI backend

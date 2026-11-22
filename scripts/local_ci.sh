@@ -11,6 +11,10 @@
 #                 $LOCAL_CI_DIR/tools/trufflehog.
 #   NODE20_BIN    directory containing a node 20 binary (ci.yml pins node 20).
 #                 Default: /opt/homebrew/opt/node@20/bin.
+#   KUSTOMIZE, KUBECONFORM  paths to the k8s-manifests job's tools (ci.yml
+#                 pins kustomize v5.8.3, kubeconform v0.8.0). Default: each
+#                 name on PATH; if missing, that job fails, the others still run.
+#                 Its policy check also needs python3 with PyYAML 6.0.3.
 set -uo pipefail
 HEAD_SHA=$1; LABEL=$2
 
@@ -87,6 +91,7 @@ for c in test_check_function_size check_standards test_check_standards; do
   printf '%-28s rc=%s  %s\n' "function-size:$c" "$rc" "$(grep -v '^\s*$' "$OUT/fs-$c.log" | tail -1 | cut -c1-110)" | tee -a "$OUT/summary.txt"
 done
 run type-check mypy --config-file mypy.ini
+run k8s-manifests bash scripts/check_k8s_manifests.sh
 # frontend: node 20 as in CI; npm ci into the merge worktree
 run frontend-typecheck bash -c "export PATH=$NODE20:\$PATH; cd web_interface/frontend && node --version && npm ci --no-audit --no-fund >/dev/null && npx tsc --noEmit && npm run build 2>&1 | tail -3"
 MB=$(git -C "$WT" merge-base "$DEV" "$HEAD_SHA"); git -C "$WT" branch -f "ci-$LABEL-head" "$HEAD_SHA"
