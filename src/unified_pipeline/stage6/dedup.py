@@ -311,6 +311,23 @@ def _numbers_apart(dropped_text: str, kept_text: str) -> bool:
     return bool(kept) and not dropped <= kept
 
 
+
+# #666 (XNAVXT, PSEHEK, LFFKVV): a course-evaluation table's rows read the
+# same item with another rating ("The course helped me improve my writing 9"
+# beside "... 10"). `_lone_numbers` reads one digit after a word only, so it
+# misses "10", and "course? 9". Two texts the same but for a different bare
+# number at the end are two rows.
+_TRAILING_NUMBER_RE = re.compile(r'^(.*\S)\s+(\d{1,3})$', re.DOTALL)
+
+
+def _trailing_number_apart(dropped_text: str, kept_text: str) -> bool:
+    """True when both texts end in a bare number (`_TRAILING_NUMBER_RE`), the
+    numbers differ, and the words before them are the same."""
+    dropped = _TRAILING_NUMBER_RE.match(dropped_text.strip())
+    kept = _TRAILING_NUMBER_RE.match(kept_text.strip())
+    return bool(dropped and kept) and dropped[2] != kept[2] and (
+        re.findall(r'\w+', dropped[1].lower()) == re.findall(r'\w+', kept[1].lower()))
+
 # A Roman numeral standing on its own tells two records of one series apart
 # ("Example Seminar II" beside "Example Seminar III", "Sample Course I"
 # beside "Sample Course II") where no "Part" or "Phase" word precedes it, so
@@ -1687,7 +1704,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     rows (`_listed_in_two_rosters`).
 
     #666 (BRAQDE): a one-digit number both texts name and that differs is
-    another record (`_numbers_apart`)."""
+    another record (`_numbers_apart`), and so is a text that differs only by
+    the bare number it ends in (`_trailing_number_apart`)."""
     if _listed_in_two_rosters(dropped_entry, kept_entry, code):
         return False  # #2154: one student on two committee rosters is two rows
     dropped_text = dropped_entry.get('text') or ''
@@ -1740,6 +1758,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #666: a different hours or student count is another occasion
     if _numbers_apart(dropped_text, kept_text):
         return False  # #666: "Year 1" beside "Year 2" is another record
+    if _trailing_number_apart(dropped_text, kept_text):
+        return False  # #666: one evaluation item rated 9 and 10 is two rows
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)
