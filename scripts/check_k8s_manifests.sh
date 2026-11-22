@@ -17,6 +17,10 @@ set -euo pipefail
 # describe-cluster --name reciter` read 1.37 on 2026-11-22. Bump it with the
 # cluster, so a field the cluster dropped is caught here and not at apply.
 K8S_VERSION=1.37.0
+# kubeconform's default schema source is that repo's master branch. Pinning a
+# commit means the same manifests always get the same verdict.
+SCHEMA_COMMIT=e0c72a1bc5f409d1685c0e1323460c8a98cd7459  # 2026-10-31
+SCHEMA_LOCATION="https://raw.githubusercontent.com/yannh/kubernetes-json-schema/$SCHEMA_COMMIT/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
 OVERLAYS=(k8s/overlays/dev k8s/overlays/prod)
 
 KUSTOMIZE="${KUSTOMIZE:-kustomize}"
@@ -40,7 +44,7 @@ for overlay in "${OVERLAYS[@]}"; do
   # when the first fails, so one run reports every broken overlay.
   if ! "$KUSTOMIZE" build "$overlay" \
       | "$KUBECONFORM" -strict -ignore-missing-schemas -summary \
-          -kubernetes-version "$K8S_VERSION" -; then
+          -kubernetes-version "$K8S_VERSION" -schema-location "$SCHEMA_LOCATION" -; then
     echo "FAILED: $overlay" >&2
     failed=1
   fi
