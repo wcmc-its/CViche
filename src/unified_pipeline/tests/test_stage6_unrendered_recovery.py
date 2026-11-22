@@ -446,9 +446,35 @@ def test_short_record_line_outside_tabs_stays_unverifiable():
     ("COMMITTEES 1993-1994", None),
     ("students 2013-2014: 12", None),
     ("July 1992 - October 1994", None),
+    # #2157 item 25: a label naming the part's dates goes whole, not just its last word.
+    ("Project period: 2014 – 2017", None),
+    ("Funding dates: 2014-2017 Quokka Trust", {"quokka", "trust"}),
 ])
 def test_short_tab_part_words(part, words):
     assert short_tab_part_words(part) == words
+
+
+def test_dated_label_part_of_a_rendered_grant_is_not_recovered():
+    # #2157 item 25: the grant row prints the title and, in a row of its own,
+    # the years without the source's "Project period:" label; the part is
+    # that record's dates, not a lost line after the funding tables.
+    gen = _generator()
+    grant = {
+        "taxonomy_code": "M2B",
+        "text": ("QTF 551204/2015-7 - Burrow depth of the southern quokka colony.\t"
+                 "Project period: 2015 – 2018\tRole: PI"),
+        "extracted_fields": {"grant_number": "QTF 551204/2015-7", "agency": "QTF",
+                             "title": "Burrow depth of the southern quokka colony.",
+                             "start_date": "2015", "end_date": "2018", "pi_role": "PI"},
+    }
+    gen.doc.add_paragraph("Project title: Burrow depth of the southern quokka colony.")
+    gen.doc.add_paragraph("Duration of support: 2015-2018")
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"M2B": [grant]})
+
+    assert len(gen.doc.paragraphs) == before
+    assert gen.stats["unrendered_records_recovered"] == 0
 
 
 def test_short_tab_part_rendered_needs_its_years_on_the_line():
