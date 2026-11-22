@@ -2407,6 +2407,37 @@ class PubMedEnricher:
             fields['pages'] = pubmed_record['pages']
             entry.setdefault('enriched_fields', []).append('pages')
 
+        # #2156 (EGHJRK-03, 32 records; OXCCQM-19): a paper the CV cites ahead
+        # of print has no volume, so the record's volume and pages come in
+        # above beside the CV's earlier year, a pair that does not exist. When
+        # the record's volume or pages were taken and its year is a little
+        # later (`_print_year_after`), its year goes with them; the CV's year
+        # is kept under `cv_year` and the review comment lists `year` as
+        # updated. One the CV calls in press is `_resolve_in_press`'s.
+        if ({'volume', 'pages'} & set(entry.get('enriched_fields') or ())
+                and _print_year_after(fields.get('year'), pubmed_record.get('year'))
+                and not listed_in_press(entry)):
+            entry['enrichment_data']['cv_year'] = fields['year']
+            fields['year'] = str(pubmed_record['year'])
+            entry['enriched_fields'].append('year')
+
+
+# #2156: an article's final record follows its online-first year by 1 to 3
+# years (EGHJRK-03: 31 one year on, 1 three). A record that is earlier, or
+# further on, is more likely another paper PubMed matched (farm: -90, -37,
+# +10, +18), and a CV date in the record's own year ("2024-12") is no epub
+# year at all.
+EPUB_TO_PRINT_MAX_YEARS = 3
+_LEADING_YEAR_RE = re.compile(r'^\s*((?:19|20)\d{2})(?!\d)')
+
+
+def _print_year_after(cv_year: object, record_year: object) -> bool:
+    """True when the record's year is 1 to `EPUB_TO_PRINT_MAX_YEARS` after
+    the year the CV's date starts with."""
+    cv = _LEADING_YEAR_RE.match(str(cv_year or ''))
+    record = _LEADING_YEAR_RE.match(str(record_year or ''))
+    return bool(cv and record) and 1 <= int(record[1]) - int(cv[1]) <= EPUB_TO_PRINT_MAX_YEARS
+
 
 def run_stage5(stage4_path: str, output_path: str | None = None, verbose: bool = True) -> dict[str, Any]:
     """

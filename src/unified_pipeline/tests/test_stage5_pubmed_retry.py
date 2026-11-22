@@ -2313,6 +2313,43 @@ def test_reply_marker_inside_the_title_is_not_a_reply():
     assert not stage5.cites_a_reply('Quill JA. Dose-Response in cognition. 2020.')
 
 
+
+# ------------------- #2156: an ahead-of-print citation takes the record's year with its volume
+
+@pytest.mark.parametrize('cv_fields, record, year, cv_year', [
+    # EGHJRK-03: the CV's epub year beside the final record's volume and pages
+    ({'year': '2019'}, {'year': 2020, 'volume': '12', 'pages': '1-9'}, '2020', '2019'),
+    ({'year': '2019'}, {'year': 2020, 'pages': 'e123'}, '2020', '2019'),
+    # the CV gave its own volume: nothing taken, its year stays
+    ({'year': '2019', 'volume': '11'}, {'year': 2020, 'volume': '12'}, '2019', None),
+    # same year: nothing to change
+    ({'year': '2020'}, {'year': 2020, 'volume': '12'}, '2020', None),
+    # no record year: the CV's stays
+    ({'year': '2019'}, {'volume': '12'}, '2019', None),
+    # three years on still is; an earlier or far later record is another paper
+    ({'year': '2019'}, {'year': 2022, 'volume': '12'}, '2022', '2019'),
+    ({'year': '2019'}, {'year': 2023, 'volume': '12'}, '2019', None),
+    ({'year': '2019'}, {'year': 2018, 'volume': '12'}, '2019', None),
+    # a CV date in the record's own year is no epub year
+    ({'year': '2024-12'}, {'year': 2024, 'pages': '1-9'}, '2024-12', None),
+])
+def test_epub_citation_takes_the_record_year_with_its_volume(monkeypatch, cv_fields, record, year, cv_year):
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = {'taxonomy_code': 'S1', 'extracted_fields': {'title': 'Whimbrel counts', **cv_fields}}
+    enricher._merge_pubmed_data(entry, {'pmid': PMID, **record})
+    assert entry['extracted_fields']['year'] == year
+    assert entry['enrichment_data'].get('cv_year') == cv_year
+    assert ('year' in entry.get('enriched_fields', [])) is (cv_year is not None)
+
+
+def test_in_press_citation_year_is_left_to_resolve_in_press(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = {'taxonomy_code': 'S1', 'text': 'Quill JA. Whimbrel counts. J Birds. 2019. In press.',
+             'extracted_fields': {'title': 'Whimbrel counts', 'year': '2019'}}
+    assert stage5.listed_in_press(entry)
+    enricher._merge_pubmed_data(entry, {'pmid': PMID, 'year': 2020, 'volume': '12'})
+    assert entry['extracted_fields']['year'] == '2019'
+
 # ------------------- #1219: PubMed's year for a yearless CV line; a copied doi:
 
 def _yearless_entry(year=None):
@@ -2329,7 +2366,7 @@ def test_yearless_cv_article_takes_pubmeds_year(monkeypatch, cv_year):
 
 
 @pytest.mark.parametrize('cv_year, record_year, kept', [
-    ('2019', 2024, '2019'),  # the CV's own year is never overwritten
+    ('2019', 2024, '2019'),  # the CV's own year stays when no volume or pages come in
     (None, None, None),      # PubMed gave no year either
 ])
 def test_cv_year_or_missing_pubmed_year_leaves_year_alone(monkeypatch, cv_year, record_year, kept):
