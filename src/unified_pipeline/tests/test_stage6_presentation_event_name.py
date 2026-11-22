@@ -68,6 +68,29 @@ def test_event_name_already_in_the_title_is_not_repeated():
                   institution="Denver, CO", event_name="SAGES 2022") == "Denver, CO"
 
 
+def test_event_name_closing_the_title_is_not_repeated():
+    assert _venue(title="Invited speaker at the Quillfern Symposium",
+                  institution="Larchmere, ZZ", event_name="Quillfern Symposium") == \
+        "Larchmere, ZZ"
+
+
+def test_event_name_inside_a_title_clause_still_leads_the_venue():
+    # #2157 item 30: the event's name was a word of the talk's subject, so the
+    # substring check dropped the meeting from the venue cell. Invented values.
+    assert _venue(title="The QRX Zorblax Advisory for Pediatric Fernosis",
+                  institution="Larchmere, ZZ", event_name="QRX") == "QRX, Larchmere, ZZ"
+
+
+def test_event_name_after_a_clause_mark_in_the_title_is_not_repeated():
+    assert _venue(title="Zorblax Methods; QRX webinar on Fernosis",
+                  institution="Larchmere, ZZ", event_name="QRX") == "Larchmere, ZZ"
+
+
+def test_an_empty_event_name_is_never_shown_by_the_title():
+    from unified_pipeline.stage6.sections.presentations import _title_names_event
+    assert not _title_names_event("Zorblax Methods", "")
+
+
 def test_an_s8_conference_name_is_read_as_the_event():
     # #1570: an S8 abstract a hierarchy mismatch moved to R keeps its meeting
     # (YUYVIG SQMWHM 1047 rendered "Orlando, FL" alone). Invented values.

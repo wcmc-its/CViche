@@ -257,6 +257,26 @@ def _talk_event_value(fields: Mapping) -> object:
     return _first_value(fields, _TALK_EVENT_KEYS)
 
 
+# The marks that close a clause of a talk title. An event name the title
+# holds at a clause edge ("SAGES 2022 keynote: ...", "Invited speaker at the
+# Jonas Symposium") names where the talk was given; one held inside a clause
+# ("The FDA Sildenafil Warning for ...") is the talk's subject, and the venue
+# cell still owes the reader the meeting (VYJMXR-18, #2157 item 30).
+_CLAUSE_MARKS = ',;:|.()-–—'
+
+
+def _title_names_event(title: str, event_name: str) -> bool:
+    """Whether `title` already shows `event_name` as its venue: the name
+    occurs, case-insensitively, against the title's start or end or a
+    `_CLAUSE_MARKS` mark on at least one side."""
+    if not event_name:
+        return False
+    marks = re.escape(_CLAUSE_MARKS)
+    event = re.escape(_normalize_space(event_name).casefold())
+    clause_edge = re.compile(rf'(?:^|[{marks}]\s*){event}|{event}(?:\s*[{marks}]|$)')
+    return clause_edge.search(_normalize_space(title).casefold()) is not None
+
+
 def _talk_date_cell(fields: dict) -> str:
     """The Dates cell of an R entry: the dates `presentation_date_spans`
     lists (its own date, then each further date stage 4 kept under an
@@ -374,7 +394,8 @@ class PresentationsSection:
                 # 2,194 of 2,956 extracted values across 79 CVs reached no part
                 # of the rendered document.
                 event_name = (_talk_event_value(fields) or '').strip()
-                if event_name and event_name.casefold() not in f"{institution} {title}".casefold():
+                if (event_name and event_name.casefold() not in f"{institution}".casefold()
+                        and not _title_names_event(f"{title}", event_name)):
                     institution = f"{event_name}, {institution}" if institution else event_name
 
                 # The speaker's role ("Visiting Professor") likewise has no
