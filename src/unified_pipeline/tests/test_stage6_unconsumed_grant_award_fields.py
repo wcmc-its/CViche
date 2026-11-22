@@ -343,7 +343,8 @@ def test_a_level_word_inside_another_word_infers_nothing(site_position):
     assert _inferred_supervision(site_position=site_position) == ""
 
 
-@pytest.mark.parametrize("mentee_level", ["MS1", "MS3", "MS1-4", "Freshman", "Undergraduate major"])
+@pytest.mark.parametrize("mentee_level", ["MS1", "MS3", "MS1-4", "MS-4", "ms-2 student", "MA-3",
+                                          "Freshman", "Undergraduate major"])
 def test_a_medical_student_year_or_a_major_is_not_a_masters_degree(mentee_level):
     assert _inferred_supervision(mentee_level) == ""
 
@@ -361,6 +362,7 @@ def test_a_medical_student_year_or_a_major_is_not_a_masters_degree(mentee_level)
     ("MSc candidate", "Research"),
     ("MSPH", "Research"),
     ("MSW", "Research"),
+    ("MS-Epidemiology", "Research"),       # only a hyphen and a DIGIT is a student year (#2194)
     ("Masters student", "Research"),
 ])
 def test_level_words_infer_the_supervision_type(mentee_level, expected):

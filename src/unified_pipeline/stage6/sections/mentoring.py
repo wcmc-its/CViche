@@ -1100,14 +1100,15 @@ def _source_supervision_type(text: str) -> str:
 #: whose source states no level at all (OXCCQM: 4 records). The forms that
 #: reached Research only by that accident -- "MSc", "MSPH", "MSW", "MSTP",
 #: "Predoctoral" -- are named. "MS1".."MS4" is a medical student's year, not
-#: a master's degree, so a digit ends no match.
+#: a master's degree, so a digit, or a hyphen and a digit ("MS-4", #2194),
+#: ends no match.
 _RESEARCH_DEGREE_RE = re.compile(
     r'(?<![a-z])(?:phd|thesis|dissertation|(?:pre)?doctoral|mstp(?![a-z]))', re.I)
 _SUPERVISION_LEVEL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (_RESEARCH_DEGREE_RE, 'Research'),
     (re.compile(r'(?<![a-z])(?:postdoc|fellow)', re.I), 'Research'),
     (re.compile(r'(?<![a-z])(?:resident|clinical)', re.I), 'Clinical'),
-    (re.compile(r'(?<![a-z])(?:master|m[sa](?:c|ph|w)?(?![a-z0-9]))', re.I), 'Research'),
+    (re.compile(r'(?<![a-z])(?:master|m[sa](?:c|ph|w)?(?![a-z0-9]|-\d))', re.I), 'Research'),
 )
 
 #: The rules read on Site/Position when there is no level (#2066): there a

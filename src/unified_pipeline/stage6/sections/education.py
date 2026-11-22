@@ -438,8 +438,10 @@ class EducationSection:
 
             # A degree that is still in progress ("expected May 2026", a future
             # award year, etc.) must NOT be presented as a conferred year. Mark it
-            # as anticipated so the reader can tell it has not been awarded yet.
-            if year_awarded and self._degree_is_in_progress(raw_text, year_awarded):
+            # as anticipated so the reader can tell it has not been awarded yet
+            # -- unless the value already says so ("2030 (expected)", #2194).
+            if (year_awarded and self._degree_is_in_progress(raw_text, year_awarded)
+                    and not self._IN_PROGRESS_DEGREE_PATTERN.search(year_awarded)):
                 year_awarded = f"Expected {year_awarded}"
 
             # Build cell contents with mixed normal/track-change content

@@ -729,6 +729,31 @@ class TestFutureYearSignalAlone:
         assert row.cells[3].text == f"Expected {future_year}"
 
 
+class TestExpectedIsNotDoubled:
+    """#2194: a Year Awarded value that already says the degree is not yet
+    conferred ("2030 (Expected completion)") must not gain a second
+    "Expected" prefix; a bare year still does."""
+
+    @staticmethod
+    def _year_cell(year, text):
+        gen = _generator()
+        gen._fill_education([{
+            "text": text,
+            "extracted_fields": {"degree": "MS", "institution": "Fictional University",
+                                 "year": year},
+        }])
+        return _first_data_row(gen).cells[3].text
+
+    @pytest.mark.parametrize("year", [
+        "2020 (Expected completion)", "anticipated 2020", "2020 (in progress)",
+    ])
+    def test_a_year_that_already_says_expected_is_not_prefixed(self, year):
+        assert self._year_cell(year, f"MS, Fictional University, {year}") == year
+
+    def test_a_bare_year_on_an_expected_degree_is_still_prefixed(self):
+        assert self._year_cell("2020", "MS, Fictional University, expected 2020") == "Expected 2020"
+
+
 class TestMalformedEducationEntries:
     """#659 (review thread 3914946593): stage 4 emits an explicit ``None``
     for a missing degree/institution rather than omitting the key -- real on

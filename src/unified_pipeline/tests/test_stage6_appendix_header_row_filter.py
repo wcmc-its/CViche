@@ -1794,6 +1794,28 @@ def test_two_digit_year_and_day_first_date_stamps_are_dropped(text, sentence):
     assert _sig(text, _confirmed(sentence)) == DROP_DATE_STAMP
 
 
+@pytest.mark.parametrize("text, sentence", [
+    ("3/4/19 rev", "Revision date marker."),
+    ("3/4/19 rev.", "Date stamp."),
+    ("*3/4/19 rev", "Revision date marker."),  # leading asterisk footnote mark
+    ("(03/04/2019 revised)", "Revision date stamp."),
+    ("June 2019, updated", "Date line only."),
+    ("March 4, 2019 last updated", "Timestamp for the CV version."),
+])
+def test_a_stamp_word_after_the_date_is_a_date_stamp_2194(text, sentence):
+    assert _sig(text, _confirmed(sentence)) == DROP_DATE_STAMP
+
+
+@pytest.mark.parametrize("text, reasoning", [
+    ("3/4/19 rev", _confirmed("Orphaned conference fragment.")),  # no stamp verdict
+    ("3/4/19 reviewer", _confirmed("Revision date marker.")),
+    ("3/4/19 revised protocol", _confirmed("Revision date marker.")),
+    ("Sample Award 2019 updated", _confirmed("Revision date marker.")),
+])
+def test_a_trailing_stamp_word_needs_both_signals_and_nothing_else_2194(text, reasoning):
+    assert _sig(text, reasoning) is None
+
+
 @pytest.mark.parametrize("text", [
     "7-16-18",  # hyphens with a two-digit year read as a range
     "7/16/18 Sample Annual Meeting",
