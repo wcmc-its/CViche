@@ -1649,6 +1649,32 @@ def _undated_split_record_absorbs_date(dropped_entry: dict, kept_entry: dict,
     return not _dates_compatible(dropped_dates, family_text)
 
 
+def _start_months_apart(dropped_entry: dict, kept_entry: dict) -> bool:
+    """True when the two rows stand in one source list (the same hierarchy),
+    both entries' fields state a start date to the month
+    (`_get_entry_date_range`, `_parse_date_components`), and the two months
+    differ: "3/2029", "March 2029" and "2029-03" are one month.
+
+    #666 (YJQBML KEHRLI 257): two memberships of one organization begun in
+    another month ("3/29 - present" beside "4/29 - present") reduce to the
+    same text, and the text date test cannot read a month written with a
+    two-digit year; stage 4 stored both start months. Only the start month:
+    over the stored runs, rows whose end dates alone differed, or whose
+    overlapping spans differed only by the year, were one record listed
+    twice ("2029" beside "2029-2030"), and so was one appointment listed
+    under two headings a month apart (YOXXOH 68). Disjoint spans are
+    `_record_would_be_lost`'s to judge, against the copies elsewhere.
+    `_drop_is_safe` asks before its verbatim branch: an award row whose
+    date stage 2 split into the next element sits verbatim inside the same
+    award's row of another month (PQASUT H 1046)."""
+    hierarchy = dropped_entry.get('hierarchy')
+    if not hierarchy or kept_entry.get('hierarchy') != hierarchy:
+        return False
+    starts = [_parse_date_components(_get_entry_date_range(entry)[0])[:2]
+              for entry in (dropped_entry, kept_entry)]
+    return all(month is not None for _year, month in starts) and starts[0] != starts[1]
+
+
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
                   code: str | None = None,
                   document: list[dict] | None = None,
@@ -1705,7 +1731,10 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
 
     #666 (BRAQDE): a one-digit number both texts name and that differs is
     another record (`_numbers_apart`), and so is a text that differs only by
-    the bare number it ends in (`_trailing_number_apart`)."""
+    the bare number it ends in (`_trailing_number_apart`).
+
+    #666 (YJQBML): two rows whose fields start in another month are two
+    records (`_start_months_apart`)."""
     if _listed_in_two_rosters(dropped_entry, kept_entry, code):
         return False  # #2154: one student on two committee rosters is two rows
     dropped_text = dropped_entry.get('text') or ''
@@ -1737,6 +1766,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #666: an undated split record does not vouch for a date
     if _shorter_journal_than_kept(dropped_entry, kept_entry, code):
         return False  # #666: a shorter journal name is another journal
+    if _start_months_apart(dropped_entry, kept_entry):
+        return False  # #666: begun in another month, so another record
     if verbatim:
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, True, dropped_ids or set())
