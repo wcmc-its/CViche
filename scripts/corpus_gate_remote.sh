@@ -34,6 +34,10 @@ done
 head_sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)
 base_ref=$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq .baseRefName)
 base_sha=$(gh api "repos/$repo/compare/$base_ref...$head_sha" --jq .merge_base_commit.sha)
+for sha in "$head_sha" "$base_sha"; do
+    # Both go into AWS CLI shorthand below, where a comma would inject keys.
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Not a commit SHA: '$sha'" >&2; exit 2; }
+done
 
 echo "PR #$pr: head $head_sha, merge base $base_sha (on $base_ref). Files changed:"
 gh pr diff "$pr" --repo "$repo" --name-only | sed 's/^/  /'
@@ -82,3 +86,6 @@ if [ -n "$comment" ]; then
         "${build_id#*:}" "${head_sha:0:8}" "${base_sha:0:8}" "$report" |
         gh pr comment "$pr" --repo "$repo" --body-file -
 fi
+# Exit with the gate's own code; an unreadable one is no evidence.
+[[ "$gate_exit" =~ ^[0-2]$ ]] || gate_exit=2
+exit "$gate_exit"

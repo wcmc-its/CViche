@@ -795,7 +795,7 @@ def _row(out, control):
 
 def test_controls_end_to_end_prints_and_summarises_only_masked_uids():
     """The whole run, with a uid that carries a name: every control passes,
-    head differs from base, and neither stdout nor the step summary carries
+    head differs from base, and neither stdout nor the --summary file carries
     the name -- while the subprocess log, which does, stays in --work."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -805,7 +805,7 @@ def test_controls_end_to_end_prints_and_summarises_only_masked_uids():
                                               ["--manifest", str(manifest)])
         assert rc == rgctl.EXIT_DIFFERS, out
         assert out == summary
-        _assert_no_name(out, "stdout / $GITHUB_STEP_SUMMARY")
+        _assert_no_name(out, "stdout / --summary file")
         assert "7QZXJV" not in out, out
         for control in ("determinism", "crash guard", "real-CV rendering", "mutation"):
             assert _row(out, control).endswith("| PASS |"), _row(out, control)
@@ -841,7 +841,7 @@ def test_controls_fail_when_the_mutation_anchor_is_gone():
 def test_controls_any_crash_prints_only_the_exception_class():
     """An exception of any class, raised in a render or in format_report
     itself, can carry a full uid in its text. Its message and traceback go to
-    a log under --work; stdout, stderr and the step summary name its class
+    a log under --work; stdout, stderr and the --summary file name its class
     only, and the run exits 2."""
     def raising_runner(script, arm_root, args, log):
         raise TypeError(f"cannot render {_NAMED_UID}_fields.json")
@@ -853,7 +853,7 @@ def test_controls_any_crash_prints_only_the_exception_class():
         root = Path(tmp)
         rc, out, summary = _run_controls_main(root, raising_runner)
         assert rc == rgctl.EXIT_NO_EVIDENCE, out
-        _assert_no_name(out + summary, "stdout / stderr / $GITHUB_STEP_SUMMARY after a crash")
+        _assert_no_name(out + summary, "stdout / stderr / --summary file after a crash")
         assert "Traceback" not in out and "7QZXJV" not in out, out
         assert "the run stopped on TypeError" in out and out == summary, out
         assert _NAMED_UID in (root / "work" / rgctl.CRASH_LOG).read_text()
@@ -867,7 +867,7 @@ def test_controls_any_crash_prints_only_the_exception_class():
     finally:
         rgctl.format_report = real_format
     assert rc == rgctl.EXIT_NO_EVIDENCE, out
-    _assert_no_name(out + summary, "stdout / stderr / $GITHUB_STEP_SUMMARY after format_report")
+    _assert_no_name(out + summary, "stdout / stderr / --summary file after format_report")
     assert "Traceback" not in out and "the run stopped on TypeError" in out, out
 
 
