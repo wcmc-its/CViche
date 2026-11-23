@@ -1396,9 +1396,10 @@ PAPER_PMID, NOTICE_PMID = '23456789', '34567890'
 
 
 def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',), year=2025,
-             volume=None, vernacular=None, pages=None):
+             volume=None, vernacular=None, pages=None, journal='Heart Journal', iso=None):
     """One PubmedArticle; `title` is raw XML, so it may hold inline markup."""
     volume_xml = f'<Volume>{volume}</Volume>' if volume else ''
+    iso_xml = f'<ISOAbbreviation>{iso}</ISOAbbreviation>' if iso else ''
     pages_xml = f'<Pagination><MedlinePgn>{pages}</MedlinePgn></Pagination>' if pages else ''
     vernacular_xml = f'<VernacularTitle>{vernacular}</VernacularTitle>' if vernacular else ''
     names = ''.join(f'<Author><LastName>{a.rsplit(" ", 1)[0]}</LastName>'
@@ -1406,7 +1407,7 @@ def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',), 
     types = ''.join(f'<PublicationType>{t}</PublicationType>' for t in pubtypes)
     return (f'<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article>'
             f'<Journal><JournalIssue>{volume_xml}<PubDate><Year>{year}</Year></PubDate></JournalIssue>'
-            f'<Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>{pages_xml}{vernacular_xml}'
+            f'<Title>{journal}</Title>{iso_xml}</Journal><ArticleTitle>{title}</ArticleTitle>{pages_xml}{vernacular_xml}'
             f'<AuthorList>{names}</AuthorList><PublicationTypeList>{types}</PublicationTypeList>'
             f'</Article></MedlineCitation></PubmedArticle>')
 
@@ -3250,3 +3251,133 @@ def test_titles_each_add_a_word_ignores_spelling_variants(a, b, each_adds):
 def test_within_two_edits(a, b, within):
     assert stage5._within_two_edits(a, b) is within
     assert stage5._within_two_edits(b, a) is within
+
+
+# ---- #2191: a title-search hit that is a sibling paper by the CV's own group,
+# in another journal. The BQTFQZ e214/e292 shape, synthetic: the same year, a
+# shared author and 6 of the 7 words of the shorter title (0.75 against the
+# longer, so not `_same_title`), in another journal, volume and pages.
+SIBLING_TITLE = 'Heron migration along the northern coast: wintering colonies'
+
+
+def _journal_entry(journal='J Coast Birds', volume='12', pages='100-9', title_key='title'):
+    entry = _article_entry(10, journal=journal, volume=volume, pages=pages)
+    entry['extracted_fields'][title_key] = entry['extracted_fields'].pop('title')
+    return entry
+
+
+def _journal_record(journal='Marsh Ecology', iso='Marsh Ecol', volume='30', pages='400-9', title=SIBLING_TITLE):
+    return _article(PAPER_PMID, title, volume=volume, pages=pages, journal=journal, iso=iso)
+
+
+@pytest.mark.parametrize('entry, record', [
+    (_journal_entry(), _journal_record()),
+    (_journal_entry(pages='400-9'), _journal_record()),
+    (_journal_entry(volume=None), _journal_record()),
+    (_journal_entry(volume='30'), _journal_record()),
+    (_journal_entry(journal='Nesting'),
+     _journal_record(journal='Proceedings of the Heron Society (Northport, N.P.)', iso='Proc Heron Soc')),
+    (_journal_entry(journal='J Coast Birds;'), _journal_record()),
+    (_journal_entry(journal='J Coast Birds; The'), _journal_record()),
+], ids=['another-volume-and-page', 'another-volume', 'no-cv-volume-another-page',
+        'same-volume-another-page-and-title', 'place-in-parentheses-is-not-the-name',
+        'trailing-separator-is-no-name', 'skipped-words-after-a-separator-are-no-name'])
+def test_title_hit_in_another_journal_is_refused(tmp_path, monkeypatch, entry, record):
+    assert title_word_overlap(SHARED_TITLE, [SIBLING_TITLE]) >= stage5.MIN_TITLE_SEARCH_OVERLAP
+    assert not stage5._same_title(SHARED_TITLE, SIBLING_TITLE)
+    cited = dict(entry['extracted_fields'])
+    [result], _, enricher = _run_entries(tmp_path, monkeypatch, [entry], [
+        _hits(PAPER_PMID), _article_set(record)])
+    assert result['enrichment_status'] == 'no_identifier'  # the CV's citation, as written
+    assert 'enrichment_data' not in result
+    assert result['extracted_fields'] == cited
+    assert enricher.stats['enriched'] == 0
+
+
+@pytest.mark.parametrize('entry, record', [
+    (_journal_entry(journal='Marsh Ecol'), _journal_record()),
+    (_journal_entry(journal='Marsh Ecol Rep'),
+     _journal_record(journal='Marsh ecology : bulletin of the Wetland Society', iso='Marsh Ecol')),
+    (_journal_entry(journal='Mrsh Ecolog'), _journal_record()),
+    (_journal_entry(journal='Marsh Ecloogy'), _journal_record()),
+    (_journal_entry(journal='Ecology of Marsh'), _journal_record(iso=None)),
+    (_journal_entry(journal='Journal of Marsh and Shore Ecology'),
+     _journal_record(journal='The Journal of Marsh &amp; Shore Ecology', iso=None)),
+    (_journal_entry(journal='JMSE'), _journal_record(journal='Journal of Marsh and Shore Ecology', iso=None)),
+    (_journal_entry(journal='MSER'),
+     _journal_record(journal='Marsh and Shore Ecology Reports of the Northern Region', iso=None)),
+    (_journal_entry(journal='Shore Notes, Marsh Ecol'),
+     _journal_record(journal='Marsh Ecology and Conservation', iso='Marsh Ecol Conserv')),
+    (_journal_entry(journal='Shore Notes - Marsh Ecol'),
+     _journal_record(journal='Marsh Ecology and Conservation', iso='Marsh Ecol Conserv')),
+    (_journal_entry(journal='Shore Notes; Marsh Ecol'),
+     _journal_record(journal='Marsh Ecology and Conservation', iso='Marsh Ecol Conserv')),
+    (_journal_entry(journal='Marsh Ecol'), _journal_record(journal='marsh ecology', iso=None)),
+    (_journal_entry(journal=None), _journal_record()),
+    (_journal_entry(), _journal_record(journal='', iso=None)),
+    (_journal_entry(volume=None, pages=None), _journal_record()),
+    (_journal_entry(), _journal_record(volume=None, pages=None)),
+    (_journal_entry(volume='30', pages='400-12'), _journal_record()),
+    (_journal_entry(volume='30', pages='400-9, 500-2'), _journal_record()),
+    (_journal_entry(volume='30', pages='410-9'), _journal_record(title=SHARED_TITLE)),
+    (_journal_entry(volume=None, pages='410-9'), _journal_record(title=SHARED_TITLE)),
+    (_journal_entry(volume=None, pages='410-9', title_key='chapter_title'), _journal_record(title=SHARED_TITLE)),
+    (_journal_entry(volume=None, pages='410-9'),
+     _article(PAPER_PMID, SIBLING_TITLE, pages='400-9', journal='Marsh Ecology', vernacular=SHARED_TITLE)),
+], ids=['iso-abbreviation', 'iso-without-the-full-names-subtitle', 'abbreviated-otherwise', 'misspelt-word', 'reordered-words', 'the-and-ampersand',
+        'acronym', 'acronym-opening-the-initials', 'two-names-in-the-field', 'two-names-joined-by-a-dash',
+        'two-names-joined-by-a-semicolon', 'case-only-without-an-iso', 'no-cv-journal', 'no-record-journal',
+        'no-cv-volume-or-pages', 'no-record-volume-or-pages', 'renamed-journal-same-volume-and-first-page', 'first-page-of-several-ranges',
+        'same-title-same-volume-another-page', 'same-title-no-volume-another-page',
+        'same-chapter-title-no-volume-another-page', 'same-vernacular-title-another-page'])
+def test_title_hit_is_kept_unless_journal_and_volume_or_page_both_say_another_journal(
+        tmp_path, monkeypatch, entry, record):
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [entry], [_hits(PAPER_PMID), _article_set(record)])
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+
+
+def test_pubmed_record_of_crossrefs_doi_in_another_journal_is_refused(tmp_path, monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [_hits(), _hits(PAPER_PMID), _article_set(_journal_record())],
+                           crossref=[_crossref_items(_crossref_hit(title=SIBLING_TITLE))])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_journal_entry()]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    assert result['enrichment_status'] == 'no_identifier'
+    assert 'enrichment_data' not in result
+
+
+@pytest.mark.parametrize('cv_journal, kept', [('J Coast Birds', False), ('Marsh Ecol', True)])
+def test_crossref_record_pubmed_does_not_index_in_another_journal_is_not_kept(
+        tmp_path, monkeypatch, cv_journal, kept):
+    work = {**_crossref_work(title=SIBLING_TITLE, volume='30'), 'container-title': ['Marsh Ecology'],
+            'page': '400-409'}
+    enricher, _, _ = _make(monkeypatch, [_hits(), _hits()], crossref=[_crossref_items(work)])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_journal_entry(journal=cv_journal)]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    assert (stage5.CROSSREF_MATCH_KEY in result) is kept
+
+
+@pytest.mark.parametrize('name, other, agree', [
+    ('Marsh Ecol', 'Marsh Ecology', True),
+    ('Natl Marsh Rev', 'National Marsh Review', True),
+    ('The Journal of Marsh & Shore Ecology', 'J Marsh Shore Ecol', True),
+    ('JMSE', 'Journal of Marsh and Shore Ecology', True),
+    ('MSER', 'Marsh and Shore Ecology Reports of the Northern Region', True),
+    ('Marsh Ecology', 'Marsh Ecology Letters', True),
+    ('Marsh Ecology', 'Shore Ecology', False),
+    ('Marsh Rev', 'Marine Reviews', False),
+    ('Nesting', 'Heron Society (Northport, N.P.)', False),
+    ('Soil Res', 'Silo Research', False),
+    ('Ear Notes', 'Bear Notes', False),
+    ('J Coast Birds', 'Journal of Marsh Ecology', False),
+    ('Marsh Ecol', 'marsh ecology', True),
+    ('(Online)', 'Widget Research', True),
+], ids=['iso-abbreviation', 'abbreviation-dropping-a-letter', 'the-ampersand-and-of', 'acronym',
+        'acronym-opening-the-initials', 'fewer-words-all-held', 'another-word', 'another-word-same-first-letter', 'parenthetical-place',
+        'same-letters-another-order', 'letters-inside-a-word-of-another-first-letter',
+        'several-words-opening-the-initials-is-no-acronym', 'case-only',
+        'a-name-with-no-words-agrees-with-any'])
+def test_journal_names_agree(name, other, agree):
+    assert stage5.journal_names_agree(name, other) is agree
+    assert stage5.journal_names_agree(other, name) is agree
