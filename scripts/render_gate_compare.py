@@ -64,6 +64,7 @@ import json
 import re
 import sys
 import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from lxml import etree
@@ -183,63 +184,102 @@ def _read_artifact(func, path: Path):
         raise ValueError(f"{path}: unreadable/corrupt DOCX ({type(e).__name__}: {e})") from e
 
 
+@dataclass(frozen=True)
+class ParagraphDelta:
+    """One CV whose paragraph text differs between the arms. `added` and
+    `removed` hold CV text: main() prints them for a human at a terminal,
+    render_gate_controls.py reads only their lengths (#2176)."""
+    name: str
+    paragraphs_a: int
+    paragraphs_b: int
+    added: list[str]
+    removed: list[str]
+
+
+@dataclass(frozen=True)
+class RenderComparison:
+    """Everything one A/B compare found. `guard_problems` non-empty means
+    nothing else was computed: the arms were refused, not compared."""
+    guard_problems: list[str] = field(default_factory=list)
+    common: list[str] = field(default_factory=list)
+    paragraph_changed: list[ParagraphDelta] = field(default_factory=list)
+    fingerprint_changed: list[str] = field(default_factory=list)
+    only_a: list[str] = field(default_factory=list)
+    only_b: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """PASS: compared something, and nothing differs."""
+        return (not self.guard_problems and bool(self.common) and not self.paragraph_changed
+                and not self.fingerprint_changed and not self.only_a and not self.only_b)
+
+
+def compare_dirs(a_dir: Path, b_dir: Path) -> RenderComparison:
+    """Both checks over every docx the two arms share, behind the
+    crashed-render guard. Raises ValueError on a corrupt docx (see
+    _read_artifact). main() prints this; render_gate_controls.py reads it."""
+    problems = _check_render_failures(a_dir, b_dir)
+    if problems:
+        return RenderComparison(guard_problems=problems)
+
+    a_files = {p.name for p in a_dir.glob("*.docx")}
+    b_files = {p.name for p in b_dir.glob("*.docx")}
+    paragraph_changed, fingerprint_changed = [], []
+    common = sorted(a_files & b_files)
+    for name in common:
+        pa, pb = _read_artifact(_paras, a_dir / name), _read_artifact(_paras, b_dir / name)
+        fa, fb = _read_artifact(_fingerprint, a_dir / name), _read_artifact(_fingerprint, b_dir / name)
+        if fa != fb:
+            fingerprint_changed.append(name)
+        if pa != pb:
+            paragraph_changed.append(ParagraphDelta(
+                name, len(pa), len(pb),
+                added=[x for x in pb if x not in pa],
+                removed=[x for x in pa if x not in pb]))
+    return RenderComparison(common=common, paragraph_changed=paragraph_changed,
+                            fingerprint_changed=fingerprint_changed,
+                            only_a=sorted(a_files - b_files), only_b=sorted(b_files - a_files))
+
+
 def main(argv=None):
     a_dir, b_dir = Path(sys.argv[1]), Path(sys.argv[2])
 
-    problems = _check_render_failures(a_dir, b_dir)
-    if problems:
+    try:
+        result = compare_dirs(a_dir, b_dir)
+    except ValueError as e:
+        print(f"FAIL - {e}")
+        return 1
+    if result.guard_problems:
         print("RENDER FAILURE GUARD TRIPPED -- refusing to compare:")
-        for p in problems:
+        for p in result.guard_problems:
             print(f"  - {p}")
         print("\nFAIL - fix the failing arm(s) and re-render before comparing")
         return 1
 
-    a_files = {p.name for p in a_dir.glob("*.docx")}
-    b_files = {p.name for p in b_dir.glob("*.docx")}
-    only_a, only_b = sorted(a_files - b_files), sorted(b_files - a_files)
-    common = sorted(a_files & b_files)
-
-    if not common:
+    if not result.common:
         print("FAIL - no comparable rendered CVs")
         return 1
 
-    para_changed, print_changed, fp_a = [], 0, 0
-    for name in common:
-        try:
-            pa, pb = _read_artifact(_paras, a_dir / name), _read_artifact(_paras, b_dir / name)
-            fa, fb = _read_artifact(_fingerprint, a_dir / name), _read_artifact(_fingerprint, b_dir / name)
-        except ValueError as e:
-            print(f"FAIL - {e}")
-            return 1
-        if fa != fb:
-            fp_a += 1
-        if pa != pb:
-            print_changed += 1
-            added = [x for x in pb if x not in pa]
-            removed = [x for x in pa if x not in pb]
-            para_changed.append((name, len(pa), len(pb), added, removed))
-
-    print(f"compared          {len(common)} CVs")
-    print(f"paragraph CHANGED {print_changed}")
-    print(f"fingerprint CHANGED {fp_a} (styles/numPr/borders/tracked-changes -- "
+    print(f"compared          {len(result.common)} CVs")
+    print(f"paragraph CHANGED {len(result.paragraph_changed)}")
+    print(f"fingerprint CHANGED {len(result.fingerprint_changed)} (styles/numPr/borders/tracked-changes -- "
           f"invisible to the paragraph check)")
-    if only_a:
-        print(f"MISSING in B      {len(only_a)}: {' '.join(only_a[:8])}")
-    if only_b:
-        print(f"EXTRA in B        {len(only_b)}: {' '.join(only_b[:8])}")
+    if result.only_a:
+        print(f"MISSING in B      {len(result.only_a)}: {' '.join(result.only_a[:8])}")
+    if result.only_b:
+        print(f"EXTRA in B        {len(result.only_b)}: {' '.join(result.only_b[:8])}")
 
-    for name, na, nb, added, removed in para_changed[:10]:
-        print(f"\n  {name}  paragraphs {na} -> {nb}")
-        for x in removed[:3]:
+    for delta in result.paragraph_changed[:10]:
+        print(f"\n  {delta.name}  paragraphs {delta.paragraphs_a} -> {delta.paragraphs_b}")
+        for x in delta.removed[:3]:
             print(f"    - {x[:150]}")
-        for x in added[:3]:
+        for x in delta.added[:3]:
             print(f"    + {x[:150]}")
-    if len(para_changed) > 10:
-        print(f"\n  ... and {len(para_changed) - 10} more paragraph-changed CVs")
+    if len(result.paragraph_changed) > 10:
+        print(f"\n  ... and {len(result.paragraph_changed) - 10} more paragraph-changed CVs")
 
-    ok = not print_changed and not fp_a and not only_a and not only_b
-    print(f"\n{'PASS - zero unexplained deltas' if ok else 'FAIL - output differs'}")
-    return 0 if ok else 1
+    print(f"\n{'PASS - zero unexplained deltas' if result.ok else 'FAIL - output differs'}")
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":

@@ -53,6 +53,8 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
+from dataclasses import dataclass, field
 
 FAILED_KEY = "_failed"
 
@@ -126,6 +128,58 @@ def _failure_guard_problems(failed_a, failed_b) -> list:
     return problems
 
 
+def _finding_keys(rep) -> Counter:
+    """Each finding as canonical JSON, counted -- a multiset, so a finding
+    that appears twice in one arm and once in the other is one gained."""
+    findings = rep.get("findings", []) if isinstance(rep, dict) else []
+    return Counter(json.dumps(f, sort_keys=True) for f in findings)
+
+
+def findings_delta(rep_a, rep_b) -> tuple[list[dict], list[dict]]:
+    """The findings B has that A does not (gained) and the reverse (lost),
+    for one uid. Reported by render_gate_controls.py as counts and lint
+    names only (#2176): a finding's message can quote CV text."""
+    keys_a, keys_b = _finding_keys(rep_a), _finding_keys(rep_b)
+    gained = [json.loads(k) for k in (keys_b - keys_a).elements()]
+    lost = [json.loads(k) for k in (keys_a - keys_b).elements()]
+    return gained, lost
+
+
+@dataclass(frozen=True)
+class DoctorComparison:
+    """Everything one doctor A/B found. `guard_problems` non-empty means the
+    arms were refused, not compared."""
+    guard_problems: list[str] = field(default_factory=list)
+    common: list[str] = field(default_factory=list)
+    changed: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    metrics_by_uid: dict = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return (not self.guard_problems and bool(self.common)
+                and not self.changed and not self.missing)
+
+
+def compare_reports(a: dict, b: dict) -> DoctorComparison:
+    """Compare two loaded doctor_gate.py outputs. Does not mutate either:
+    the "_failed" key is read, not popped. main() prints this;
+    render_gate_controls.py reads it."""
+    problems = _failure_guard_problems(a.get(FAILED_KEY, {}), b.get(FAILED_KEY, {}))
+    if problems:
+        return DoctorComparison(guard_problems=problems)
+    uids_a = {u for u in a if u != FAILED_KEY}
+    uids_b = {u for u in b if u != FAILED_KEY}
+    common = sorted(uids_a & uids_b)
+    # metrics (#816) is reported, never gated -- see module docstring and
+    # _metrics_diff.
+    return DoctorComparison(
+        common=common,
+        changed=[u for u in common if norm(a[u]) != norm(b[u])],
+        missing=sorted(uids_a ^ uids_b),
+        metrics_by_uid={u: c for u in common if (c := _metrics_diff(a[u], b[u]))})
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("a", help="first doctor_gate.py output JSON")
@@ -137,41 +191,35 @@ def main(argv=None):
     with open(args.b, encoding="utf-8") as f:
         b = json.load(f)
 
-    failed_a, failed_b = a.pop(FAILED_KEY, {}), b.pop(FAILED_KEY, {})
-    problems = _failure_guard_problems(failed_a, failed_b)
-    if problems:
+    result = compare_reports(a, b)
+    if result.guard_problems:
         print("DOCTOR-GATE FAILURE GUARD TRIPPED -- refusing to compare:")
-        for p in problems:
+        for p in result.guard_problems:
             print(f"  {p}")
         print("\nFAIL - fix the failing arm(s) and re-run before comparing")
         return 1
 
-    missing = set(a) ^ set(b)
-    common = set(a) & set(b)
-    diff = [u for u in common if norm(a[u]) != norm(b[u])]
+    common, diff = result.common, result.changed
     print(f"compared {len(common)} CVs; identical {len(common) - len(diff)}; CHANGED {len(diff)}")
-    if missing:
-        print(f"UID SET DIFFERS: {sorted(missing)[:10]}")
+    if result.missing:
+        print(f"UID SET DIFFERS: {result.missing[:10]}")
 
-    # metrics (#816) is reported, never gated -- see module docstring and
-    # _metrics_diff. Silent when nothing differs, so a farm with no metrics
-    # block on either side (pre-#816 reports) or with identical metrics
-    # prints exactly what it did before metrics existed.
-    metrics_by_uid = {u: c for u in sorted(common) if (c := _metrics_diff(a[u], b[u]))}
-    if metrics_by_uid:
-        total = sum(len(c) for c in metrics_by_uid.values())
+    # Silent when nothing differs, so a farm with no metrics block on either
+    # side (pre-#816 reports) or with identical metrics prints exactly what it
+    # did before metrics existed.
+    if result.metrics_by_uid:
+        total = sum(len(c) for c in result.metrics_by_uid.values())
         print(f"metrics CHANGED (reported only, never fails the gate): "
-              f"{len(metrics_by_uid)} uid(s), {total} key(s)")
-        for u, changed in metrics_by_uid.items():
+              f"{len(result.metrics_by_uid)} uid(s), {total} key(s)")
+        for u, changed in result.metrics_by_uid.items():
             for key, old, new in changed:
                 print(f"  {u} {key}: {old!r} -> {new!r}")
 
-    ok = not diff and not missing and bool(common)
     if not common:
         print("FAIL - no comparable CVs (empty UID intersection)")
     else:
-        print("PASS - no doctor finding changed" if ok else f"FAIL {diff[:8]}")
-    return 0 if ok else 1
+        print("PASS - no doctor finding changed" if result.ok else f"FAIL {diff[:8]}")
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":

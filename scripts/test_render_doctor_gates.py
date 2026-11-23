@@ -19,11 +19,18 @@ filtering, artifact precedence, the pre-rmtree output-path check, and the
 semantic validation of a rendered docx. What those helpers do when wired
 together is scripts/test_render_gate_integration.py's subject; this file
 pins each in isolation.
+
+It also covers render_gate_controls.py (#783), the script that runs those
+controls, end to end against a fake renderer -- above all that a uid carrying
+an owner's name never reaches what it prints or writes to its --summary
+file (#2176) -- and build_gate_farm.py's selection logic, without S3.
 """
 import contextlib
 import io
 import json
 import os
+import re
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -36,9 +43,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # just to run the (otherwise pipeline-independent) self-tests.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import build_gate_farm as bgf  # noqa: E402
 import doctor_gate_compare as dgc  # noqa: E402
 import render_gate as rg  # noqa: E402
 import render_gate_compare as rgc  # noqa: E402
+import render_gate_controls as rgctl  # noqa: E402
 from docx import Document  # noqa: E402
 
 
@@ -379,7 +388,7 @@ def test_render_gate_source_dir_resolver_pins_an_ambiguous_uid_to_one_docx():
     """Two docx both legitimately owned by the uid -- pin which one wins.
 
     Nothing in the corpus guarantees one file per uid ("... CV.docx" beside
-    "... CV (Updated 1-26-26).docx" is exactly this repo's naming), and an
+    "... CV (Proof 9-9-99).docx" is exactly this repo's naming), and an
     unpinned choice here is a silently non-deterministic gate arm: two runs of
     the same code could recover contact fields from two different documents.
     Today's rule is sorted()[0], and this test is what makes changing it a
@@ -609,6 +618,521 @@ def test_render_gate_rejects_a_non_directory_source_dir():
                     raise AssertionError(f"{why} --source-dir was accepted")
 
 
+# render_gate_controls.py (#783) and the comparison objects it reads (#2176).
+
+# A uid of the shape the corpus really has: the document uid, then the
+# original filename, which carries the owner's name. Invented name.
+_NAMED_UID = "7QZXJV_Xanthe Quorbel CV (Proof 9-9-99)"
+_PLAIN_UID = "QWERTY"
+_NAME_PARTS = ("Xanthe", "Quorbel", "xanthe.quorbel", "Proof")
+_HASHED_RE = re.compile(r"h:[0-9a-f]{8}")
+# Name-shaped tokens a shape test would print: a bare name in uid shape, and
+# the leading tokens of "ZQXVWB_CV" and "Zqxvw7_cv".
+_NAME_TOKENS = ("QX_ZRV", "ZQXVWB_CV", "Zqxvw7_cv", "Zqxvw7")
+
+
+def _assert_no_name(text, where):
+    for part in _NAME_PARTS:
+        assert part not in text, f"{part!r} from a name-bearing uid or CV text reached {where}"
+
+
+def _masked_named():
+    return rgctl.mask_uid(_NAMED_UID, frozenset())
+
+
+def test_controls_mask_uid_prints_only_allowlisted_generated_uids():
+    # A manifest that lists two real ids, a bare 7QZXJV, and "QX_ZRV".
+    allowed = frozenset({"QZKMRT", "AB12CD", "7QZXJV", "QX_ZRV"})
+    assert rgctl.mask_uid("QZKMRT", allowed) == "QZKMRT"
+    assert rgctl.mask_uid("AB12CD", allowed) == "AB12CD"
+    # Not in the manifest: hashed, though it has the generated shape.
+    assert _HASHED_RE.fullmatch(rgctl.mask_uid("QZKMRT", frozenset()))
+    for named in (*_NAME_TOKENS, _NAMED_UID, "ZQXVWB", "web08", "2003_Dr_Xanthe_Quorbel"):
+        masked = rgctl.mask_uid(named, allowed)
+        assert _HASHED_RE.fullmatch(masked), (named, masked)
+    # "QX_ZRV" stays hashed even when a manifest lists it: not the generated shape.
+    assert rgctl.mask_uid("ZQXVWB_CV", allowed) != "ZQXVWB"
+    assert rgctl.mask_uid("Zqxvw7_cv", allowed) != "Zqxvw7"
+    # Stable, and distinct per uid.
+    assert rgctl.mask_uid("Qzxv_CV", allowed) == rgctl.mask_uid("Qzxv_CV", frozenset())
+    assert rgctl.mask_uid("Qzxv_CV", allowed) != rgctl.mask_uid("Vxqz_CV", allowed)
+
+
+def test_controls_load_allowed_uids_keeps_only_generated_shapes():
+    with tempfile.TemporaryDirectory() as tmp:
+        man = Path(tmp) / "manifest.json"
+        man.write_text(json.dumps({rgctl.MANIFEST_UIDS_KEY: ["QZKMRT", "QX_ZRV", "Zqxvw7", 7]}))
+        assert rgctl.load_allowed_uids(man) == frozenset({"QZKMRT"})
+        man.write_text(json.dumps({"codes_by_uid": {"QZKMRT": []}}))
+        try:
+            rgctl.load_allowed_uids(man)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a manifest with no document_uids list was accepted")
+    assert rgctl.load_allowed_uids(None) == frozenset()
+
+
+def test_controls_report_never_carries_a_name_bearing_uid_or_cv_text():
+    """format_report is the only thing printed and written to the step
+    summary; feed it full uids and CV text everywhere a uid or text can sit."""
+    docx_name = _NAMED_UID + rgctl.DOCX_SUFFIX
+    report = rgctl.GateReport(2, True, ("base", "head"))
+    report.controls.append(rgctl.ControlRow("determinism", "ok", True))
+    report.render = rgc.RenderComparison(
+        common=[docx_name, _PLAIN_UID + rgctl.DOCX_SUFFIX],
+        paragraph_changed=[rgc.ParagraphDelta(docx_name, 3, 4, ["Xanthe Quorbel, MD"], [])],
+        fingerprint_changed=[docx_name])
+    report.doctor = dgc.DoctorComparison(common=[_NAMED_UID, _PLAIN_UID], changed=[_NAMED_UID])
+    report.doctor_delta = {_NAMED_UID: ([{"lint": "section_lost", "message": "Xanthe Quorbel lost"}], [])}
+    text = rgctl.format_report(report)
+    _assert_no_name(text, "format_report")
+    assert "7QZXJV" not in text, text
+    assert f"| {_masked_named()} | 1 | 0 | yes | 1 | 0 |" in text, text
+    assert "| section_lost | 1 | 0 |" in text, text
+
+
+def _make_rendered_docx(path, work_email, extra_paragraph=None):
+    """A render-shaped docx: the PERSONAL DATA table, its Work email cell
+    filled with `work_email`, and optionally one more paragraph."""
+    doc = Document()
+    doc.add_paragraph("PERSONAL DATA")
+    table = doc.add_table(rows=len(rg.PERSONAL_DATA_LABELS), cols=2)
+    for row, label in zip(table.rows, rg.PERSONAL_DATA_LABELS, strict=True):
+        row.cells[0].text = f"{label.title()}:"
+        if label == rgctl.WORK_EMAIL_LABEL and work_email:
+            row.cells[1].text = work_email
+    if extra_paragraph:
+        doc.add_paragraph(extra_paragraph)
+    doc.save(str(path))
+
+
+def _fake_render(out, label, leave_stale, with_sources):
+    uids = (_NAMED_UID, _PLAIN_UID)
+    if not leave_stale:
+        shutil.rmtree(out)
+        out.mkdir()
+    for uid in uids:
+        email = "xanthe.quorbel@example.org" if uid == _NAMED_UID and label != "arm_mutated" else ""
+        extra = "Xanthe Quorbel, base only" if uid == _NAMED_UID and label == "base" else None
+        _make_rendered_docx(out / f"{uid}{rgctl.DOCX_SUFFIX}", email, extra)
+    index = {u: {"input": "x"} for u in uids}
+    if with_sources:  # the named uid's source is a PDF, so it has no docx
+        for u in uids:
+            index[u]["source_docx"] = "not found" if u == _NAMED_UID else f"{u}.docx"
+    (out / "_render_index.json").write_text(json.dumps(index))
+
+
+def _fake_runner(leave_stale=False, base_doctor="clean", extra_finding=None, extra_arm="base"):
+    """Stands in for the render_gate.py / doctor_gate.py subprocesses. Base
+    differs from head on the named uid in both render and doctor; the mutated
+    copy loses the work email; the log it writes carries the full uid, as the
+    real ones do. `base_doctor` is "clean", "partial" (a "_failed" uid, exit
+    1), "absent" (no report, exit 1), "short" (one uid missing, exit 0) or
+    "not_dict" (one uid's report is a string, exit 0).
+    `extra_finding` is added to the named uid's findings in `extra_arm`'s
+    doctor runs ("base", or "head" for both head runs)."""
+    def run(script, arm_root, args, log):
+        log.write_text(f"[1/2] {_NAMED_UID} OK\n")
+        label = Path(arm_root).name
+        out = Path(args[1])
+        if script == "render_gate.py":
+            _fake_render(out, label, leave_stale, "--source-dir" in map(str, args))
+            return 0
+        findings = [{"lint": "section_lost", "message": "Xanthe Quorbel lost"}] if label == "base" else []
+        if extra_finding is not None and label == extra_arm:
+            findings = [*findings, extra_finding]
+        report = {uid: {"findings": findings if uid == _NAMED_UID else []}
+                  for uid in (_NAMED_UID, _PLAIN_UID)}
+        mode = base_doctor if label == "base" else "clean"
+        if mode == "absent":
+            return 1
+        failed = {}
+        if mode == "partial":
+            failed = {_NAMED_UID: f"Traceback ... {_NAMED_UID}"}
+            del report[_NAMED_UID]
+        elif mode == "short":
+            del report[_NAMED_UID]
+        elif mode == "not_dict":
+            report[_NAMED_UID] = "unreadable"
+        out.write_text(json.dumps({**report, dgc.FAILED_KEY: failed}))
+        return 1 if failed else 0
+    return run
+
+
+def _make_controls_tree(root, anchor=rgctl.MUTATION_ANCHOR):
+    """A farm with both uids, and base/head arms carrying the files the
+    controls check for: stage 6, the template, and the mutation's target."""
+    farm = root / "farm"
+    (farm / "stage_4_field_extraction").mkdir(parents=True)
+    for uid in (_NAMED_UID, _PLAIN_UID):
+        (farm / "stage_4_field_extraction" / f"{uid}_fields.json").write_text("{}")
+    for arm in ("base", "head"):
+        a = root / arm
+        for rel in (rgctl.STAGE6_REL, rgctl.TEMPLATE_REL, rgctl.MUTATION_FILE):
+            (a / rel).parent.mkdir(parents=True, exist_ok=True)
+        (a / rgctl.STAGE6_REL).write_text("# stage 6\n")
+        (a / rgctl.MUTATION_FILE).write_text(f"        {anchor}\n            pass\n")
+        _make_rendered_docx(a / rgctl.TEMPLATE_REL, "")
+    return farm
+
+
+def _run_controls_main(root, runner, extra=()):
+    """main() over a fake tree; returns (rc, stdout + stderr, summary)."""
+    farm = root / "farm" if (root / "farm").exists() else _make_controls_tree(root)
+    summary = root / "summary.md"
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        rc = rgctl.main([str(farm), "--base", str(root / "base"), "--head", str(root / "head"),
+                         "--work", str(root / "work"), "--summary", str(summary), *extra],
+                        runner=runner)
+    return rc, out.getvalue(), summary.read_text() if summary.exists() else ""
+
+
+def _row(out, control):
+    return next(line for line in out.splitlines() if line.startswith(f"| {control}"))
+
+
+def test_controls_end_to_end_prints_and_summarises_only_masked_uids():
+    """The whole run, with a uid that carries a name: every control passes,
+    head differs from base, and neither stdout nor the --summary file carries
+    the name -- while the subprocess log, which does, stays in --work."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = root / "manifest.json"
+        manifest.write_text(json.dumps({rgctl.MANIFEST_UIDS_KEY: [_PLAIN_UID]}))
+        rc, out, summary = _run_controls_main(root, _fake_runner(),
+                                              ["--manifest", str(manifest)])
+        assert rc == rgctl.EXIT_DIFFERS, out
+        assert out == summary
+        _assert_no_name(out, "stdout / --summary file")
+        assert "7QZXJV" not in out, out
+        for control in ("determinism", "crash guard", "real-CV rendering", "mutation"):
+            assert _row(out, control).endswith("| PASS |"), _row(out, control)
+        assert "doctor base 2/2 exit 0" in _row(out, "real-CV rendering"), out
+        assert "predicted 1 (rendered work email); exact match" in out, out
+        assert f"| {_masked_named()} | 0 | 1 | yes | 0 | 1 |" in out, out
+        assert _NAMED_UID in (root / "work" / "logs" / "render_head_a.log").read_text()
+        # The mutation went to a copy; head's own file is untouched.
+        assert rgctl.MUTATION_ANCHOR in (root / "head" / rgctl.MUTATION_FILE).read_text()
+        assert rgctl.MUTATION_REPLACEMENT in (
+            root / "work" / "arm_mutated" / rgctl.MUTATION_FILE).read_text()
+
+
+def test_controls_fail_when_stale_output_survives_a_render():
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, out, _ = _run_controls_main(Path(tmp), _fake_runner(leave_stale=True))
+        assert rc == rgctl.EXIT_NO_EVIDENCE, out
+        row = next(line for line in out.splitlines() if line.startswith("| crash guard"))
+        assert "stale docx wiped in 0/4 arms" in row and row.endswith("| FAIL |"), row
+
+
+def test_controls_fail_when_the_mutation_anchor_is_gone():
+    """A mutation that did not apply proves nothing: no anchor, no PASS."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _make_controls_tree(root, anchor="if work_email:")
+        rc, out, _ = _run_controls_main(root, _fake_runner())
+        assert rc == rgctl.EXIT_NO_EVIDENCE, out
+        row = next(line for line in out.splitlines() if line.startswith("| mutation"))
+        assert "anchor matched 0 times" in row and row.endswith("| FAIL |"), row
+
+
+def test_controls_any_crash_prints_only_the_exception_class():
+    """An exception of any class, raised in a render or in format_report
+    itself, can carry a full uid in its text. Its message and traceback go to
+    a log under --work; stdout, stderr and the --summary file name its class
+    only, and the run exits 2."""
+    def raising_runner(script, arm_root, args, log):
+        raise TypeError(f"cannot render {_NAMED_UID}_fields.json")
+
+    def raising_format(report):
+        raise TypeError(f"bad row for {_NAMED_UID}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rc, out, summary = _run_controls_main(root, raising_runner)
+        assert rc == rgctl.EXIT_NO_EVIDENCE, out
+        _assert_no_name(out + summary, "stdout / stderr / --summary file after a crash")
+        assert "Traceback" not in out and "7QZXJV" not in out, out
+        assert "the run stopped on TypeError" in out and out == summary, out
+        assert _NAMED_UID in (root / "work" / rgctl.CRASH_LOG).read_text()
+
+    real_format = rgctl.format_report
+    rgctl.format_report = raising_format
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc, out, summary = _run_controls_main(root, _fake_runner())
+    finally:
+        rgctl.format_report = real_format
+    assert rc == rgctl.EXIT_NO_EVIDENCE, out
+    _assert_no_name(out + summary, "stdout / stderr / --summary file after format_report")
+    assert "Traceback" not in out and "the run stopped on TypeError" in out, out
+
+
+def test_controls_a_failed_base_doctor_run_is_no_evidence():
+    """Base's doctor run crashing, writing nothing, or skipping a CV is an
+    arm failure, not head differing: exit 2, never 1."""
+    for mode in ("partial", "absent", "short"):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, _ = _run_controls_main(Path(tmp), _fake_runner(base_doctor=mode))
+            assert rc == rgctl.EXIT_NO_EVIDENCE, (mode, out)
+            row = _row(out, "real-CV rendering")
+            assert "doctor base" in row and row.endswith("| FAIL |"), (mode, row)
+            assert "**Controls passed" not in out, (mode, out)
+            _assert_no_name(out, f"stdout with base doctor {mode}")
+
+
+def test_controls_a_per_uid_doctor_report_that_is_not_a_dict_is_no_evidence():
+    """A CV whose doctor report is not a dict was not read; compare_reports
+    would count it as head differing. It fails the real-CV control: exit 2."""
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, out, summary = _run_controls_main(Path(tmp), _fake_runner(base_doctor="not_dict"))
+    assert rc == rgctl.EXIT_NO_EVIDENCE, out
+    row = _row(out, "real-CV rendering")
+    assert "doctor base 2/2 exit 0 report not a dict for 1" in row and row.endswith("| FAIL |"), row
+    assert "**Controls passed" not in out, out
+    _assert_no_name(out + summary, "stdout with a non-dict doctor report")
+    assert not rgctl.DoctorRun("base", 0, {"u": [], dgc.FAILED_KEY: {}}).clean_over(1)
+    assert rgctl.DoctorRun("base", 0, {"u": {"findings": []}, dgc.FAILED_KEY: {}}).clean_over(1)
+
+
+def test_controls_a_runner_systemexit_is_no_evidence_but_argparse_exits_pass_through():
+    """A runner that calls sys.exit() stops the run like any other crash:
+    exit 2 and the class name only. argparse's own SystemExit (a bad flag,
+    --help) is the script's intended exit, raised as it is, with no report."""
+    def exiting_runner(script, arm_root, args, log):
+        sys.exit(f"cannot render {_NAMED_UID}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rc, out, summary = _run_controls_main(root, exiting_runner)
+        assert rc == rgctl.EXIT_NO_EVIDENCE, out
+        assert "the run stopped on SystemExit" in out and out == summary, out
+        _assert_no_name(out + summary, "stdout after a runner's SystemExit")
+        assert _NAMED_UID in (root / "work" / rgctl.CRASH_LOG).read_text()
+
+    for argv, code in ((["--no-such-flag"], 2), (["--help"], 0)):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            try:
+                rgctl.main(argv)
+            except SystemExit as e:
+                assert e.code == code, (argv, e.code)
+            else:
+                raise AssertionError(f"{argv} returned instead of exiting")
+        assert "Render/doctor gate" not in printed.getvalue(), printed.getvalue()
+
+
+def _findings_for_lints_that_did_not_run():
+    """A lint that raised and a lint whose input would not load, as
+    run_doctor itself records them: (crash finding, unreadable finding)."""
+    from unified_pipeline.run_doctor import _ready, _run_lint
+
+    def crashing_rule():
+        raise TypeError(f"bad entry in {_NAMED_UID}")
+
+    findings = []
+    with contextlib.redirect_stderr(io.StringIO()):  # run_doctor logs the crash
+        _run_lint("table_shape", crashing_rule, (), findings)
+    _ready("section_consistency", unreadable={"stage_4": "JSONDecodeError"},
+           findings=findings, stage_4=None)
+    return tuple(findings)
+
+
+def test_controls_a_lint_that_did_not_run_is_no_evidence():
+    """run_doctor records a lint that crashed, or whose input would not
+    load, as a finding, not a "_failed" entry. In either arm that is no
+    evidence (exit 2, the lint named, no uid), never head differing."""
+    crash, unreadable = _findings_for_lints_that_did_not_run()
+    assert rgctl._lint_not_run(crash) and rgctl._lint_not_run(unreadable)
+    for finding, arm in ((crash, "base"), (crash, "head"), (unreadable, "head")):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out, summary = _run_controls_main(
+                Path(tmp), _fake_runner(extra_finding=finding, extra_arm=arm))
+            assert rc == rgctl.EXIT_NO_EVIDENCE, (finding, arm, out)
+            row = _row(out, "real-CV rendering")
+            doctor = "base" if arm == "base" else "head_a"
+            assert (f"doctor {doctor} 2/2 exit 0 lint crashed or input unreadable: "
+                    f"{finding['lint']}") in row, row
+            assert row.endswith("| FAIL |") and "**Controls passed" not in out, out
+            _assert_no_name(out + summary, f"stdout with {finding['lint']} not run in {arm}")
+    # A finding that only mentions another lint's crash is a result, not a lint that did not run.
+    lookalike = {"lint": "section_lost", "severity": "ERROR", "message": "lint table_shape crashed: TypeError",
+                 "evidence": [], "status": "ran", "reason": ""}
+    assert not rgctl._lint_not_run(lookalike)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, out, _ = _run_controls_main(Path(tmp), _fake_runner(extra_finding=lookalike))
+        assert rc == rgctl.EXIT_DIFFERS, out
+
+
+def test_controls_exit_no_evidence_when_a_comparison_refused_an_arm():
+    """Even with every control row passing, a refused or partial comparison
+    is no evidence."""
+    def report(render, doctor):
+        r = rgctl.GateReport(2, False, ("base", "head"))
+        r.controls.append(rgctl.ControlRow("determinism", "ok", True))
+        r.render, r.doctor = render, doctor
+        return r
+
+    both = ["a_wcm.docx", "b_wcm.docx"]
+    good_render = rgc.RenderComparison(common=both)
+    good_doctor = dgc.DoctorComparison(common=["a", "b"])
+    assert rgctl._exit_code(report(good_render, good_doctor)) == rgctl.EXIT_SAME
+    changed = rgc.RenderComparison(common=both, fingerprint_changed=["a_wcm.docx"])
+    assert rgctl._exit_code(report(changed, good_doctor)) == rgctl.EXIT_DIFFERS
+    for render, doctor in (
+            (good_render, dgc.DoctorComparison(guard_problems=["arm A: 1 uid(s)"])),
+            (rgc.RenderComparison(guard_problems=["arm A failed"]), good_doctor),
+            (good_render, dgc.DoctorComparison(common=["a"], missing=["b"])),
+            (rgc.RenderComparison(common=["a_wcm.docx"], only_b=["b_wcm.docx"]), good_doctor)):
+        r = report(render, doctor)
+        assert rgctl._exit_code(r) == rgctl.EXIT_NO_EVIDENCE, (render, doctor)
+        assert "**No evidence**" in rgctl.format_report(r)
+
+
+def test_controls_real_cv_control_fails_on_missing_sources_unless_allowed():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sources = root / "sources"
+        sources.mkdir()
+        rc, out, _ = _run_controls_main(root, _fake_runner(), ["--source-dir", str(sources)])
+        assert rc == rgctl.EXIT_NO_EVIDENCE, out
+        row = _row(out, "real-CV rendering")
+        assert "source docx for 1/2" in row and row.endswith("| FAIL |"), row
+
+        rc, out, _ = _run_controls_main(root, _fake_runner(),
+                                        ["--source-dir", str(sources), "--allow-missing-sources"])
+        assert rc == rgctl.EXIT_DIFFERS, out
+        row = _row(out, "real-CV rendering")
+        assert "source docx for 1/2 (missing allowed)" in row and row.endswith("| PASS |"), row
+
+
+def test_controls_refuse_an_arm_that_is_not_a_whole_checkout():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        farm = _make_controls_tree(root)
+        (root / "head" / rgctl.TEMPLATE_REL).unlink()
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                rgctl._parse_args([str(farm), "--base", str(root / "base"),
+                                   "--head", str(root / "head"), "--work", str(root / "work")])
+            except SystemExit as e:
+                assert e.code == 2
+            else:
+                raise AssertionError("an arm without key_files/ was accepted")
+        assert "key_files" in err.getvalue()
+
+
+def test_controls_render_stage_dir_is_run_doctors():
+    from unified_pipeline.run_doctor import artifact_layout
+    assert artifact_layout(Path(), "u")["stage_6_docx"].parent.name == rgctl.RENDER_STAGE_DIR
+
+
+def test_render_compare_dirs_reports_each_changed_cv():
+    with tempfile.TemporaryDirectory() as tmp:
+        a_dir, b_dir = Path(tmp) / "a", Path(tmp) / "b"
+        for d, extra in ((a_dir, None), (b_dir, "added line")):
+            d.mkdir()
+            _make_rendered_docx(d / "u1_wcm.docx", "", extra)
+            _make_rendered_docx(d / "u2_wcm.docx", "")
+            (d / "_render_index.json").write_text(json.dumps({"u1": {}, "u2": {}}))
+        result = rgc.compare_dirs(a_dir, b_dir)
+        assert not result.ok and result.common == ["u1_wcm.docx", "u2_wcm.docx"]
+        assert [d.name for d in result.paragraph_changed] == ["u1_wcm.docx"]
+        assert result.paragraph_changed[0].added == ["added line"]
+        assert result.fingerprint_changed == ["u1_wcm.docx"]
+        assert rgc.compare_dirs(a_dir, a_dir).ok
+
+
+def test_doctor_findings_delta_counts_a_repeated_finding_once_per_copy():
+    f1, f2 = {"lint": "a", "message": "x"}, {"lint": "b", "message": "y"}
+    gained, lost = dgc.findings_delta({"findings": [f1, f2]}, {"findings": [f1, f1]})
+    assert gained == [f1] and lost == [f2]
+    assert dgc.findings_delta({"findings": [f1]}, {"findings": [f1]}) == ([], [])
+
+
+def test_doctor_compare_reports_does_not_consume_the_failed_key():
+    a = {"u1": {"findings": []}, dgc.FAILED_KEY: {}}
+    result = dgc.compare_reports(a, dict(a))
+    assert result.ok and result.common == ["u1"] and dgc.FAILED_KEY in a
+
+
+# build_gate_farm.py (#2176): the selection and layout logic, no S3.
+
+def test_gate_farm_selection_covers_every_code_before_filling():
+    codes = {"AAAAAA": frozenset({"A1", "B1"}), "BBBBBB": frozenset({"A1"}),
+             "CCCCCC": frozenset({"Z9"}), "DDDDDD": frozenset({"A1", "B1", "C1"}),
+             "EEEEEE": frozenset({"B1"})}
+    picked = bgf.select_runs(codes, 2)
+    assert picked == ["DDDDDD", "CCCCCC"], picked  # the rare Z9 beats more A1/B1
+    picked = bgf.select_runs(codes, 4)
+    assert set().union(*(codes[u] for u in picked)) == {"A1", "B1", "C1", "Z9"}
+    assert len(picked) == 4 and len(set(picked)) == 4
+    assert bgf.select_runs(codes, 4) == picked, "the same store must give the same farm"
+    assert sorted(bgf.select_runs(codes, 99)) == sorted(codes)
+
+
+def test_gate_farm_keeps_the_latest_run_of_each_cv():
+    """Same upload, or same owner, is the same CV; either key alone misses
+    a pair the other catches (two runs of one upload whose stage 4 named the
+    owner differently is a real pair in the store)."""
+    def run(uid, owner, sha, day):
+        return bgf.Candidate(uid, frozenset({"A"}), owner, sha, day, {})
+
+    runs = [run("OLD111", "h1", None, 1), run("NEW222", "h1", None, 2),
+            run("SAME01", "h2", "s1", 3), run("SAME02", "h3", "s1", 4),
+            run("NONE33", None, None, 1), run("NONE44", None, None, 1)]
+    assert [r.uid for r in bgf.distinct_cvs(runs)] == ["NEW222", "NONE33", "NONE44", "SAME02"]
+
+
+def test_gate_farm_owner_key_hashes_the_name_and_ignores_order_and_case():
+    key = bgf.owner_key({"cv_owner": {"name": "Jane A. Doe"}})
+    assert key == bgf.owner_key({"cv_owner": {"name": "doe jane a"}})
+    assert "jane" not in key.lower() and "doe" not in key.lower()
+    assert bgf.owner_key({"cv_owner": None}) is None and bgf.owner_key({}) is None
+    assert bgf.section_codes({"entries": [{"taxonomy_code": "S8"}, {}]}) == {"S8", bgf.NO_CODE}
+
+
+def test_gate_farm_layout_holds_every_render_input_and_no_render_output():
+    layout = bgf.farm_layout()
+    for stage_dir, pattern in rg.PRECEDENCE:
+        assert layout[pattern.format(uid="")] == stage_dir
+    assert layout["_entries.json"] == "stage_2_entry_extraction"
+    assert rgctl.RENDER_STAGE_DIR not in layout.values()
+
+
+def test_gate_farm_takes_only_a_generated_run_id_as_a_uid():
+    assert bgf.gateable_uid("QZKMRT", "QZKMRT") and bgf.gateable_uid("AB12CD", "AB12CD")
+    for run_id, uid in (("QX_ZRV", "QX_ZRV"), ("QZKMRT", "ZQXVWB_CV"), ("QZKMRT", "Zqxvw7_cv"),
+                        ("Zqxvw7", "Zqxvw7"), ("QZKMRT", "ZQXVWB"), ("AB1-CD", "AB1-CD")):
+        assert not bgf.gateable_uid(run_id, uid), (run_id, uid)
+
+
+def test_gate_farm_manifest_lists_the_uids_the_gate_may_print():
+    chosen = [bgf.Candidate(u, frozenset({"A"}), None, None, 1, {}) for u in ("QZKMRT", "AB12CD")]
+    man = bgf.manifest(chosen, {"A", "B"})
+    assert man[rgctl.MANIFEST_UIDS_KEY] == ["AB12CD", "QZKMRT"]
+    assert man["codes_missing"] == ["B"]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "manifest.json"
+        path.write_text(json.dumps(man))
+        assert rgctl.load_allowed_uids(path) == frozenset({"AB12CD", "QZKMRT"})
+
+
+def test_gate_farm_refuses_a_write_flag_it_does_not_mean():
+    for argv in (["--dry-run", "--replace"], ["--write", "--local-out", "x"], [],
+                 ["--dry-run", "--size", "0"]):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                bgf._parse_args(argv)
+            except SystemExit as e:
+                assert e.code == 2, argv
+            else:
+                raise AssertionError(f"{argv} was accepted")
+
+
 if __name__ == "__main__":
     test_fingerprint_masks_render_timestamp_but_not_real_content()
     test_check_render_failures_trips_on_either_arm()
@@ -637,4 +1161,29 @@ if __name__ == "__main__":
     test_doctor_compare_main_passes_when_only_metrics_differ()
     test_doctor_compare_main_silent_on_metrics_when_reports_have_none()
     test_doctor_compare_main_still_fails_on_a_findings_change_regardless_of_metrics()
+    test_controls_mask_uid_prints_only_allowlisted_generated_uids()
+    test_controls_load_allowed_uids_keeps_only_generated_shapes()
+    test_controls_report_never_carries_a_name_bearing_uid_or_cv_text()
+    test_controls_end_to_end_prints_and_summarises_only_masked_uids()
+    test_controls_fail_when_stale_output_survives_a_render()
+    test_controls_fail_when_the_mutation_anchor_is_gone()
+    test_controls_any_crash_prints_only_the_exception_class()
+    test_controls_a_failed_base_doctor_run_is_no_evidence()
+    test_controls_a_per_uid_doctor_report_that_is_not_a_dict_is_no_evidence()
+    test_controls_a_runner_systemexit_is_no_evidence_but_argparse_exits_pass_through()
+    test_controls_a_lint_that_did_not_run_is_no_evidence()
+    test_controls_exit_no_evidence_when_a_comparison_refused_an_arm()
+    test_controls_real_cv_control_fails_on_missing_sources_unless_allowed()
+    test_controls_refuse_an_arm_that_is_not_a_whole_checkout()
+    test_controls_render_stage_dir_is_run_doctors()
+    test_render_compare_dirs_reports_each_changed_cv()
+    test_doctor_findings_delta_counts_a_repeated_finding_once_per_copy()
+    test_doctor_compare_reports_does_not_consume_the_failed_key()
+    test_gate_farm_selection_covers_every_code_before_filling()
+    test_gate_farm_keeps_the_latest_run_of_each_cv()
+    test_gate_farm_owner_key_hashes_the_name_and_ignores_order_and_case()
+    test_gate_farm_layout_holds_every_render_input_and_no_render_output()
+    test_gate_farm_takes_only_a_generated_run_id_as_a_uid()
+    test_gate_farm_manifest_lists_the_uids_the_gate_may_print()
+    test_gate_farm_refuses_a_write_flag_it_does_not_mean()
     print("ok")
