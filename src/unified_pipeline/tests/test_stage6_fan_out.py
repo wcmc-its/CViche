@@ -2619,3 +2619,110 @@ class TestStage5dCitationOfOneTitleSplitByYear:
         citation = f'{_ARCH}; 2009a.'
         assert [child['extracted_fields'].get('formatted_citation') for child in _fan4(_yearly_entry(citation))] == [
             citation, None, None]
+
+
+# --- #2157 item 24: two abstracts of one paragraph, 5d's pages on the second ---
+# Stage 4 split the paragraph into two S8 records with no pages; stage 5d cited
+# the first and filled the entry's empty `pages` from that citation, so the
+# last child, whose scalars the entry's are, printed the first abstract's
+# pages. Invented meeting, titles and pages.
+_LANTERN_ABSTRACT = 'Lantern gradients in the zqorchard model'
+_ARCH_ABSTRACT = 'Copper weathering of the zqnorth arch'
+_FIRST_PAGES = 'Q17:B402'
+
+
+def _abstract(title, number):
+    return {'abstract_number': number, 'authors': 'Zqowner A, Brack T', 'conference_name': 'Zqmeeting',
+            'doi': None, 'location': 'Ashby', 'target_name': 'Zqowner A', 'title': title, 'year': '2016'}
+
+
+def _abstracts_entry(cited_title=_LANTERN_ABSTRACT, pages=_FIRST_PAGES, last_pages=None,
+                     text='Zqowner A, Brack T. Lantern gradients in the zqorchard model; '
+                          'Copper weathering of the zqnorth arch. Zqmeeting, Ashby, 2016.'):
+    records = [_abstract(_LANTERN_ABSTRACT, 'B402'), _abstract(_ARCH_ABSTRACT, 'B577')]
+    if last_pages:
+        records[-1]['pages'] = last_pages
+    entry = _stage4_entry(records, code='S8', text=text)
+    entry['extracted_fields'].update({
+        'formatted_citation': f'Zqowner A, Brack T. {cited_title}. Zqjournal Gamma. 2016;12(3):{pages}.',
+        'formatting_source': 'stage_5d_llm', 'journal': 'Zqjournal Gamma', 'volume': '12', 'issue': '3',
+        'pages': pages})
+    return entry
+
+
+class TestStage5dPagesOfTheCitedRecord:
+    def test_the_last_record_drops_the_pages_of_the_record_the_citation_names(self):
+        first, last = _fan4(_abstracts_entry())
+        assert 'pages' not in last['extracted_fields']
+        assert last['extracted_fields']['title'] == _ARCH_ABSTRACT
+        # The venue stays: the records of one paragraph often share it.
+        assert (last['extracted_fields']['journal'], last['extracted_fields']['volume']) == ('Zqjournal Gamma', '12')
+        assert first['extracted_fields']['formatted_citation'].endswith(f'{_FIRST_PAGES}.')
+
+    def test_a_citation_of_the_middle_record_keeps_its_pages_off_the_last(self):
+        # Three abstracts, 5d citing the middle one: the record the citation
+        # names is not always the first, and the last drops its pages the same.
+        bay = 'Slate tides of the zqeast bay'
+        entry = _abstracts_entry(cited_title=bay, text=(
+            f'Zqowner A, Brack T. {_LANTERN_ABSTRACT}; {bay}; {_ARCH_ABSTRACT}. Zqmeeting, Ashby, 2016.'))
+        entry['extracted_fields'][_RECORDS].insert(1, _abstract(bay, 'B455'))
+        first, middle, last = _fan4(entry)
+        assert 'pages' not in last['extracted_fields']
+        assert middle['extracted_fields']['title'] == bay
+        assert middle['extracted_fields']['formatted_citation'].endswith(f'{_FIRST_PAGES}.')
+        assert not {'pages', 'formatted_citation'} & first['extracted_fields'].keys()
+
+    def test_the_pages_stay_when_the_citation_names_the_last_record(self):
+        _, last = _fan4(_abstracts_entry(cited_title=_ARCH_ABSTRACT))
+        assert last['extracted_fields']['pages'] == _FIRST_PAGES
+
+    def test_the_last_records_own_pages_stay(self):
+        # Stage 4's own value is the record's, even written otherwise than its
+        # line writes it; 5d fills only an empty field.
+        text = ('Zqowner A. Lantern gradients in the zqorchard model. Zqmeeting.'
+                '\tZqowner A. Copper weathering of the zqnorth arch. Zqmeeting. pp. 77-8.')
+        _, last = _fan4(_abstracts_entry(pages='77-78', last_pages='77-78', text=text))
+        assert last['extracted_fields']['pages'] == '77-78'
+
+    def test_pages_5d_wrote_over_a_none_are_dropped(self):
+        _, last = _fan4(_abstracts_entry(last_pages='NONE'))
+        assert 'pages' not in last['extracted_fields']
+
+    def test_pages_the_last_records_own_line_writes_stay(self):
+        # Two tab segments, one per record: the second abstract's own line
+        # writes the pages, so they demonstrably belong to it.
+        text = ('Zqowner A. Lantern gradients in the zqorchard model. Zqmeeting.'
+                '\tZqowner A. Copper weathering of the zqnorth arch. Zqmeeting. Q17:B402.')
+        _, last = _fan4(_abstracts_entry(text=text))
+        assert last['extracted_fields']['pages'] == _FIRST_PAGES
+
+    def test_one_paragraph_writing_the_cited_records_pages_drops_them_on_the_last(self):
+        # The stored shape: one paragraph, no tab, so each record's line is
+        # built from its own values; the paragraph writes the cited record's
+        # pages after its title, which the last record's own line does not.
+        text = ('Zqowner A, Brack T. Lantern gradients in the zqorchard model. Zqmeeting Q17:B402, 2016   '
+                'Zqowner A, Brack T. Copper weathering of the zqnorth arch. Zqmeeting B577, 2016')
+        assert '\t' not in text and _FIRST_PAGES in text
+        first, last = _fan4(_abstracts_entry(text=text))
+        assert 'pages' not in last['extracted_fields']
+        assert first['extracted_fields']['formatted_citation'].endswith(f'{_FIRST_PAGES}.')
+
+    def test_pages_without_a_citation_stay(self):
+        # No 5d citation, so no record they are known to describe.
+        entry = _abstracts_entry()
+        for key in ('formatted_citation', 'formatting_source'):
+            del entry['extracted_fields'][key]
+        assert _fan4(entry)[-1]['extracted_fields']['pages'] == _FIRST_PAGES
+
+    def test_the_first_pages_print_only_in_the_first_abstract(self, tmp_path):
+        from docx import Document
+
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+        source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+        source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [_abstracts_entry()]}))
+        WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+        lines = [p.text for p in Document(str(target)).paragraphs]
+        paged = [line for line in lines if _FIRST_PAGES in line]
+        assert len(paged) == 1 and _LANTERN_ABSTRACT in paged[0]
+        assert any(_ARCH_ABSTRACT in line for line in lines)
