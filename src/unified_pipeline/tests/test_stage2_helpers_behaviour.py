@@ -1329,6 +1329,19 @@ def test_drop_foreign_template_instructions_by_entry_type(capsys):
     assert "Filtered 2 WCM-template instruction entries" in capsys.readouterr().out
 
 
+def test_drop_template_instructions_keeps_a_filled_section_under_a_template_heading():
+    """#2193: an entry whose first line is the template's own heading, with the
+    faculty member's text under it, is kept whole; template text alone, however
+    many lines it joins, still drops."""
+    filled = ("Weill Cornell Activity (Current or Anticipated)\tI chaired an example "
+              "working group on sample review workflows, 2001-2004.")
+    template_only = ("Didactic teaching (lectures, seminars, tutorials,)\t"
+                     "Please complete if relevant or DELETE entirely.")
+    entries = [_fold_entry(3, text=filled), _fold_entry(4, text=template_only),
+               _fold_entry(5, text="Weill Cornell Activity (Current or Anticipated)")]
+    assert [e["text"] for e in stage2._drop_template_instructions(entries)] == [filled]
+
+
 def test_fold_never_folds_foreign_template_instruction_into_a_real_entry():
     parent = "2010-present Society of Example Medicine, member"
     child = "C. Role (include title, dates of service)"
