@@ -81,7 +81,7 @@ but never alone. An entry is dropped only when it is T-coded, stage 3b's
 `_REASONING_LEAD_CHARS` characters (a section header, a document title, a date
 stamp, a table header row), AND the raw text has that kind's positive shape:
 a short digit-free label (`_is_section_label_text`), a "Curriculum Vitae"
-title (`_CV_TITLE_RE`), "Date/As of/Revised <date>" (`_DATE_STAMP_RE`), or a
+title (`_CV_TITLE_RE`), "Date/As of/Revised <date>" or "<date> rev" (`_DATE_STAMP_RE`), or a
 multi-cell digit-free row (`_is_label_only_row`). Either signal alone keeps the
 entry, so hobbies, reference lists, orphaned journal titles and organisation
 names that carry the same confirmation tag survive. It runs last, so no older
@@ -455,8 +455,12 @@ _DAY_FIRST_DATE = rf"\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\.?,?\s*(?:19|20)\d{{2}
 _FULL_DATE = (rf"(?:{_MONTH}\.?,?\s*\d{{1,2}}(?:st|nd|rd|th)?,?\s*(?:19|20)\d{{2}}"
               rf"|{_DAY_FIRST_DATE}|{_NUMERIC_DATE})")
 _STAMP_WORD = r"(?:date|as\s+of|revised|last\s+updated|updated|revision\s+date)"
+# #2194: the stamp word may also FOLLOW the date ("3/4/19 rev", "June 2019,
+# updated"), where a revision stamp is often abbreviated "rev" or "rev.".
+_TRAILING_STAMP_WORD = r"(?:rev(?:ised)?\.?|last\s+updated|updated)"
 _DATE_STAMP_RE = re.compile(
     rf"^\*?\(?\s*{_STAMP_WORD}\s*:?\s*(?:{_MONTH_YEAR}|{_FULL_DATE})\s*\)?$"
+    rf"|^\*?\(?\s*(?:{_MONTH_YEAR}|{_FULL_DATE})\s*,?\s*{_TRAILING_STAMP_WORD}\s*\)?$"
     rf"|^\(?\s*{_FULL_DATE}\s*\)?$",
     re.IGNORECASE,
 )
