@@ -433,6 +433,32 @@ roughly $110 and many hours. Cost is **not** in `summary.tsv` — it comes from 
 stretches. That is normal, not a hang.** Confirm with `lsof -p <pid> -a -i`: an
 ESTABLISHED connection to an AWS host means it is waiting on a model response.
 
+### Paid runs: the budget rule
+
+Decided by Paul (2026-10-02, restated 2026-11-23). Don't reopen it per issue; cite
+this section.
+
+- **No standing or recurring allowance.** Every paid run (a web batch, a CLI batch,
+  a stage replay, an A/B) gets Paul's go-ahead on its own: which CVs, how many, and
+  the expected cost.
+- **No single run in the hundreds of dollars.** A larger set mostly repeats the
+  failure classes a small one already shows.
+- **Free evidence first:** stored runs in S3, `run_full_pipeline.py <uid> --stage N`
+  on stored artifacts, and the render and doctor gates.
+- **When a paid run is needed, make it targeted:** only CVs that have the failure
+  class the change is about, only the stage it changes, and base-arm results reused
+  until that stage's prompt changes on `dev`. #2201 builds this for stage 3b.
+- **Price it before asking,** per CV per pass, from the runs' own logged costs
+  (`prompt_logs/*_RESPONSE.json`, or a script's `estimate` mode). Reference figure:
+  stage 3b alone averages $1.21 per CV per pass (median $1.02, 90th percentile
+  $2.36; 149 stored runs on Sonnet 5, 2026-11-23).
+- If a change can't be shown within a small targeted run, say so in the PR and ask.
+  Don't propose scaling up.
+
+What this rule turned down: the remaining 224 test-set CVs as one batch (about
+$450–700, 2026-10-02), and #2175's standing monthly allowance for a 200-CV stage-3b
+replay (about $970 per prompt fix, $485 with base results reused; 2026-11-23).
+
 ## Data and secrets
 
 - Real CVs are PII. They live in gitignored paths, and `/*.docx` blocks the repo
