@@ -187,7 +187,8 @@ _MAPPED_ATTR_KEYS = frozenset({
 # (#1452). The SP's one IdP is the WCM login proxy, which brokers the partner
 # IdPs and declares only med.cornell.edu in its metadata, so the scope can't
 # be checked against metadata here -- the proxy is the trust boundary.
-CWID_SCOPES = frozenset({"med.cornell.edu"})
+# WCM-Q's users are in the WCM CWID namespace, so its scope is listed (#421).
+CWID_SCOPES = frozenset({"med.cornell.edu", "qatar-med.cornell.edu"})
 
 # Partner domains whose IdP releases no ePPN or uid, only mail: a user there is
 # keyed on the full lowercased address. MSKCC sends mail, displayName, givenName,

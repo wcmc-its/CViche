@@ -157,6 +157,13 @@ class TestExtractUserAttrs:
         assert wcm["cwid"] == "js1234"
         assert partner["cwid"] == "js1234@cornell.edu"
 
+    def test_extract_attrs_wcmq_eppn_keyed_on_cwid(self):
+        """#421: WCM-Q shares the WCM CWID namespace, so either scope is the
+        same person. Only the exact scope counts, not a lookalike."""
+        assert extract_user_attrs({ATTR_EPPN: ["JS1234@Qatar-Med.Cornell.edu"]})["cwid"] == "js1234"
+        for scope in ("evil-qatar-med.cornell.edu", "x.qatar-med.cornell.edu", "qatar-med.cornell.edu.evil.org"):
+            assert extract_user_attrs({ATTR_EPPN: [f"js1234@{scope}"]})["cwid"] == f"js1234@{scope}"
+
     def test_extract_attrs_partner_eppn_with_empty_local_part_is_rejected(self):
         """"@hss.edu" has no local part: no anchor, and the uid is still not
         taken as a CWID."""
