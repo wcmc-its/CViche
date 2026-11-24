@@ -325,6 +325,24 @@ def test_partner_scope_is_decided_without_ed(check_ed, db, ed, replay_cache, par
     check_ed.assert_not_called()
 
 
+@pytest.mark.parametrize("in_group", [True, False])
+@patch("app.services.saml_service.fetch_ed_department", return_value=None)
+@patch("app.services.saml_service.check_ed_membership")
+def test_wcmq_eppn_is_decided_by_ed(check_ed, _department, db, ed, replay_cache, parser, in_group):
+    """#421: a WCM-Q user goes through the access group, never the partner list."""
+    _config(db, ed_partner_scopes="qatar-med.cornell.edu")
+    check_ed.return_value = MembershipResult(in_access_group=in_group, in_admin_group=False)
+    wcmq = {"urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["js1234@qatar-med.cornell.edu"]}
+
+    outcome = _login(db, parser, _authn_response(identity=wcmq))
+
+    assert check_ed.call_args.kwargs["cwid"] == "js1234"
+    if in_group:
+        assert (outcome.user.cwid, outcome.user.role) == ("js1234", "user")
+    else:
+        assert outcome is SamlLoginFailure.NOT_AUTHORIZED
+
+
 @patch("app.services.saml_service.fetch_ed_department")
 def test_ed_off_keeps_the_stored_role_and_reads_no_department(department, db, saml, replay_cache, parser):
     db.add(User(cwid="samluser", email="samluser@med.cornell.edu", display_name="Old",
